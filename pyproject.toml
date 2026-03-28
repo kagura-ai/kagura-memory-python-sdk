@@ -38,10 +38,9 @@ dev = [
 kagura = "kagura_memory.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/kagura-ai/memory-cloud"
-Documentation = "https://github.com/kagura-ai/memory-cloud#readme"
-Repository = "https://github.com/kagura-ai/kagura-memory-sdk"
-Issues = "https://github.com/kagura-ai/kagura-memory-sdk/issues"
+Homepage = "https://github.com/kagura-ai/kagura-memory-python-sdk"
+Repository = "https://github.com/kagura-ai/kagura-memory-python-sdk"
+Issues = "https://github.com/kagura-ai/kagura-memory-python-sdk/issues"
 
 [build-system]
 requires = ["hatchling"]
