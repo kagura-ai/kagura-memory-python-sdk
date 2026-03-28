@@ -15,51 +15,141 @@ MAX_MESSAGES = 20  # Maximum session messages to include
 MAX_ARTIFACTS = 5  # Maximum artifacts to include
 ARTIFACT_PREVIEW_LENGTH = 500  # Artifact content preview length
 
-SYSTEM_PROMPT = """You are a memory extraction expert for Kagura Memory Cloud.
+SYSTEM_PROMPT = """\
+You are a memory extraction expert for Kagura Memory Cloud. \
+Your role is to analyze conversation sessions and output structured JSON \
+that determines what to store (REMEMBER) and search (RECALL).
 
-Your role is to analyze conversation sessions and determine:
-1. What information should be remembered (stored as memories)
-2. What information should be recalled (searched from past memories)
+<guidelines>
+<remember_when>
+- A decision or architectural choice was made
+- A solution, pattern, or best practice was discovered
+- Technical knowledge was shared (code, config, commands)
+- A bug was fixed and the root cause identified
+- The user explicitly asks to remember something
+</remember_when>
 
-Guidelines for REMEMBER:
-- Important decisions or choices made
-- Learned patterns, solutions, or best practices
-- Technical knowledge (code snippets, configurations)
-- Facts to preserve for future reference
-- User explicitly requests "remember this"
+<skip_when>
+- Casual greetings or small talk with no technical content
+- Temporary questions that won't matter later
+- Information already covered in previous memories
+</skip_when>
 
-Guidelines for RECALL:
-- User asks a question that might benefit from past context
-- Problem mentioned that could have been solved before
-- Reference to previous work or discussions
-- Need for background information or examples
+<recall_when>
+- The user asks a question that past memories could answer
+- A problem is mentioned that may have been solved before
+- Context from previous work or discussions would help
+</recall_when>
+</guidelines>
 
-Memory Quality Guidelines:
-- Summary: 100-250 characters, focus on conclusions not process
-- Type: code|note|decision|learning|pattern
-- Importance: 0.9-1.0 (critical), 0.7-0.8 (important), 0.5-0.6 (useful), 0.3-0.4 (reference)
-- Tags: Include domain tags (backend, frontend) and tech tags (fastapi, react, etc.)
+<quality_standards>
+<summary_rules>
+Write the CONCLUSION, not the process. 10-250 characters.
+Use the same language as the conversation (Japanese session = Japanese summary).
+</summary_rules>
 
-Output Format: Return ONLY valid JSON matching this exact schema:
+<types>
+Use one of: code, note, decision, bug-fix, feature, learning
+</types>
+
+<importance_scale>
+0.9-1.0: Security fixes, breaking changes, critical architecture decisions
+0.7-0.8: Reusable patterns, important configurations, key learnings
+0.5-0.6: General notes, minor decisions, useful reference material
+0.3-0.4: Low-priority observations, temporary context
+</importance_scale>
+
+<tags_rules>
+Include domain tags (backend, frontend, infra) and tech tags (fastapi, react, postgresql).
+</tags_rules>
+
+<recall_query_rules>
+Kagura uses Hybrid Search (60% semantic + 40% keyword BM25).
+Write queries that contain both semantic meaning AND specific keywords.
+</recall_query_rules>
+</quality_standards>
+
+<examples>
+<example>
+<input>User learns FastAPI uses Depends() for dependency injection</input>
+<output>
+{
+  "should_remember": true,
+  "memories_to_store": [
+    {
+      "summary": "FastAPI DI: inject via Depends(get_db) in function args",
+      "content": "FastAPI DI pattern: use Depends(factory) to inject services. Override in tests.",
+      "type": "learning",
+      "importance": 0.7,
+      "tags": ["backend", "fastapi", "python", "dependency-injection"]
+    }
+  ],
+  "should_recall": false,
+  "recall_queries": []
+}
+</output>
+</example>
+
+<example>
+<input>User asks about OAuth2 implementation they worked on before</input>
+<output>
+{
+  "should_remember": false,
+  "memories_to_store": [],
+  "should_recall": true,
+  "recall_queries": [
+    {
+      "query": "OAuth2 implementation token refresh authentication",
+      "reason": "User asks about previous OAuth2 work"
+    }
+  ]
+}
+</output>
+</example>
+
+<example>
+<input>Team decided to use PostgreSQL instead of MongoDB for the new service</input>
+<output>
+{
+  "should_remember": true,
+  "memories_to_store": [
+    {
+      "summary": "New service DB: PostgreSQL over MongoDB for consistency",
+      "content": "Chose PostgreSQL for order service. ACID transactions, JOINs, team expertise.",
+      "type": "decision",
+      "importance": 0.8,
+      "tags": ["backend", "database", "postgresql", "architecture"]
+    }
+  ],
+  "should_recall": false,
+  "recall_queries": []
+}
+</output>
+</example>
+</examples>
+
+<output_format>
+Return ONLY valid JSON matching this schema. No markdown, no explanation, no preamble.
 {
   "should_remember": boolean,
   "memories_to_store": [
     {
-      "summary": "string (100-250 chars, reusable conclusion)",
-      "content": "string (full content with context)",
-      "type": "code|note|decision|learning|pattern",
+      "summary": "string (10-250 chars, conclusion in session language)",
+      "content": "string (full context and details in session language)",
+      "type": "code|note|decision|bug-fix|feature|learning",
       "importance": 0.0-1.0,
-      "tags": ["tag1", "tag2", "tag3"]
+      "tags": ["string"]
     }
   ],
   "should_recall": boolean,
   "recall_queries": [
     {
-      "query": "string (semantic search query)",
-      "reason": "why this recall is relevant"
+      "query": "string (semantic + keyword hybrid search query)",
+      "reason": "string"
     }
   ]
-}"""
+}
+</output_format>"""
 
 
 def _format_session_content(session: "Session") -> tuple[str, str]:
@@ -109,50 +199,41 @@ def build_analysis_prompt(session: "Session") -> str:
     """
     messages_text, artifacts_text = _format_session_content(session)
 
-    prompt = f"""Analyze this conversation session and determine what memory operations to perform:
-
-## Conversation:
+    prompt = f"""<conversation>
 {messages_text}
 {artifacts_text}
+</conversation>
 
-## Instructions:
-1. Determine if anything valuable should be REMEMBERED (stored permanently)
-2. Determine if past memories should be RECALLED (searched) to provide context
-3. For memories to store:
-   - Extract the core learning/decision (not just "we discussed X")
-   - Write clear, reusable summaries (100-250 chars)
-   - Assign appropriate type and importance
-   - Add relevant tags for future search
-4. For recall queries:
-   - Write semantic search queries (not just keywords)
-   - Explain why the recall would be helpful
-
+<instructions>
+Analyze the conversation above and determine what memory operations to perform.
 Focus on technical knowledge, patterns, decisions, and solutions.
-Avoid remembering casual conversation, greetings, or temporary information.
-
-Return JSON response only (no markdown, no explanation):"""
+Return JSON response only.
+</instructions>"""
 
     return prompt
 
 
-CONTEXT_SELECTION_PROMPT = """Given these available contexts and a conversation session, \
-select the most appropriate context.
+CONTEXT_SELECTION_PROMPT = """\
+Select the most appropriate context for this conversation.
 
-## Available Contexts:
+<contexts>
 {contexts_json}
+</contexts>
 
-## Conversation Summary:
+<conversation>
 {session_summary}
+</conversation>
 
-## Selection Criteria:
-1. Topic alignment with context summary/name
-2. Recent usage (prefer active contexts)
-3. Workspace vs personal scope
+<criteria>
+1. Topic alignment: match the conversation subject to the context name and summary
+2. Recency: prefer recently active contexts over dormant ones
+3. Scope: prefer specific contexts over general ones
+</criteria>
 
 Return JSON only:
 {{
   "selected_context_id": "uuid-string",
-  "reason": "brief explanation why this context was selected"
+  "reason": "brief explanation"
 }}"""
 
 
@@ -241,33 +322,24 @@ def build_analysis_prompt_with_tools(
     # Reuse session formatting logic (DRY)
     messages_text, artifacts_text = _format_session_content(session)
 
-    prompt = f"""Analyze this conversation session and determine what memory operations to perform.
-
-## Available Kagura Memory Tools:
+    prompt = f"""<available_tools>
 {tools_desc}
+</available_tools>
 
-## Available Contexts:
+<available_contexts>
 {contexts_desc}
+</available_contexts>
 
-## Conversation:
+<conversation>
 {messages_text}
 {artifacts_text}
+</conversation>
 
-## Instructions:
-1. Determine if anything valuable should be REMEMBERED (stored permanently)
-2. Determine if past memories should be RECALLED (searched) to provide context
-3. For memories to store:
-   - Extract the core learning/decision (not just "we discussed X")
-   - Write clear, reusable summaries (100-250 chars)
-   - Assign appropriate type and importance
-   - Add relevant tags for future search
-4. For recall queries:
-   - Write semantic search queries (not just keywords)
-   - Explain why the recall would be helpful
-
+<instructions>
+Analyze the conversation above and determine what memory operations to perform.
+You have access to the tools and contexts listed above.
 Focus on technical knowledge, patterns, decisions, and solutions.
-Avoid remembering casual conversation, greetings, or temporary information.
-
-Return JSON response only (no markdown, no explanation):"""
+Return JSON response only.
+</instructions>"""
 
     return prompt
