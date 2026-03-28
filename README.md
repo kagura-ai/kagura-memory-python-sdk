@@ -43,7 +43,7 @@ Create `.kagura.json` in your project root (or `~/.kagura.json`):
 ```json
 {
   "api_key": "kagura_your_api_key",
-  "mcp_url": "https://memory.kagura-ai.com/mcp/w/{workspace_id}",
+  "mcp_url": "http://localhost:8080/mcp/w/{workspace_id}",
   "model": "gpt-5.4-nano",
   "context_id": "dev"
 }
