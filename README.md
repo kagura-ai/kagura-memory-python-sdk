@@ -155,12 +155,6 @@ kagura process -m "今日の学び：FastAPIのDIはDepends()を使う"
 - ✅ **Intelligent Caching**: 5-minute TTL cache for tool/context definitions
 - ✅ **Automatic Fallback**: Uses static prompts if dynamic fetching fails
 
-### Future Plans
-
-- [ ] Streaming support for long sessions
-- [ ] Cost tracking and budget warnings
-- [ ] Session history management
-
 ## Supported LLM Models
 
 Via [LiteLLM](https://github.com/BerriAI/litellm):
