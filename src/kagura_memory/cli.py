@@ -64,7 +64,7 @@ def _run_client_command(
 
 
 @click.group()
-@click.version_option(version="0.2.2", prog_name="kagura")
+@click.version_option(package_name="kagura-memory", prog_name="kagura")
 def main():
     """Kagura Memory Cloud CLI - AI-driven memory management."""
     pass

@@ -10,7 +10,7 @@ See `.claude/rules/development-workflow.md` for full flow (auto-loaded).
 
 **Key sequence**: Issue → Branch → Implement → `/quality` → `/simplify` → `/self-review` → PR → Merge
 
-## Quality Commands
+## Commands
 
 ```bash
 uv run pytest                    # Tests
@@ -18,6 +18,8 @@ uv run ruff check src/ tests/   # Lint
 uv run ruff format src/ tests/  # Format
 uv run pyright src/              # Type check
 ```
+
+**Slash commands**: `/quality` → `/simplify` → `/self-review` → PR, `/release patch|minor|major` for releases
 
 ## Branch Strategy
 

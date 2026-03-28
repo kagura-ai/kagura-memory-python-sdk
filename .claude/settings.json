@@ -23,7 +23,9 @@
       "Bash(gh pr view *)",
       "Bash(gh pr list *)",
       "Bash(gh pr create *)",
-      "Bash(git tag *)"
+      "Bash(git tag *)",
+      "Bash(gh workflow run *)",
+      "Bash(gh run *)"
     ]
   },
   "hooks": {

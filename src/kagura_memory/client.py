@@ -6,7 +6,11 @@ from typing import Any
 
 import httpx
 
+from importlib.metadata import version as _pkg_version
+
 from .exceptions import KaguraAuthError, KaguraConnectionError
+
+_VERSION = _pkg_version("kagura-memory")
 
 
 class KaguraClient:
@@ -69,7 +73,7 @@ class KaguraClient:
             "params": {
                 "protocolVersion": "2025-03-26",
                 "capabilities": {},
-                "clientInfo": {"name": "kagura-memory-sdk", "version": "0.2.2"},
+                "clientInfo": {"name": "kagura-memory-sdk", "version": _VERSION},
             },
         }
 
