@@ -7,7 +7,31 @@ on:
     branches: [main]
 
 jobs:
-  quality:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: Lint
+        run: uv run ruff check src/ tests/
+
+      - name: Format check
+        run: uv run ruff format --check src/ tests/
+
+      - name: Type check
+        run: uv run pyright src/
+
+  test:
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -24,16 +48,6 @@ jobs:
 
       - name: Install dependencies
         run: uv sync --dev --python ${{ matrix.python-version }}
-
-      - name: Lint
-        run: uv run ruff check src/ tests/
-
-      - name: Format check
-        run: uv run ruff format --check src/ tests/
-
-      - name: Type check
-        if: matrix.python-version == '3.11'
-        run: uv run pyright src/
 
       - name: Test
         run: uv run pytest tests/ -v
