@@ -8,6 +8,7 @@ from .exceptions import (
     KaguraContextError,
     KaguraError,
     KaguraLLMError,
+    KaguraQuotaError,
     KaguraRateLimitError,
 )
 from .models import (
@@ -17,9 +18,19 @@ from .models import (
     Memory,
     MemoryInfo,
     Message,
+    PaginatedResourceTokensResponse,
     ProcessResult,
+    ResourceEventBatchRequest,
+    ResourceEventBatchResponse,
+    ResourceEventRequest,
+    ResourceEventResponse,
+    ResourceTokenCreate,
+    ResourceTokenCreateResponse,
+    ResourceTokenResponse,
+    ResourceTokenUpdate,
     Session,
 )
+from .resource_client import ResourceClient
 
 __version__ = "0.2.3"
 
@@ -27,6 +38,7 @@ __all__ = [
     # Core classes
     "KaguraAgent",
     "KaguraClient",
+    "ResourceClient",
     # Models
     "Session",
     "Message",
@@ -36,11 +48,22 @@ __all__ = [
     "MemoryInfo",
     "ExploredMemory",
     "LLMUsage",
+    # Resource Token models
+    "ResourceTokenCreate",
+    "ResourceTokenUpdate",
+    "ResourceTokenResponse",
+    "ResourceTokenCreateResponse",
+    "PaginatedResourceTokensResponse",
+    "ResourceEventRequest",
+    "ResourceEventResponse",
+    "ResourceEventBatchRequest",
+    "ResourceEventBatchResponse",
     # Exceptions
     "KaguraError",
     "KaguraAuthError",
     "KaguraConnectionError",
     "KaguraRateLimitError",
+    "KaguraQuotaError",
     "KaguraLLMError",
     "KaguraContextError",
 ]

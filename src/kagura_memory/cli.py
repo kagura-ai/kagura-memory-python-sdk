@@ -11,7 +11,8 @@ import click
 from .agent import KaguraAgent
 from .client import KaguraClient
 from .config import load_config
-from .models import Message, Session
+from .models import Message, ResourceEventRequest, Session
+from .resource_client import ResourceClient
 
 # =============================================================================
 # Helper Functions
@@ -269,6 +270,208 @@ def contexts():
         context_id=None,
         needs_context=False,
     )
+
+
+# =============================================================================
+# Resource Token Commands
+# =============================================================================
+
+
+def _get_resource_client() -> ResourceClient:
+    """Load config and create ResourceClient."""
+    config = load_config()
+    if not config.get("api_key"):
+        raise click.ClickException("No API key found. Set KAGURA_API_KEY or create .kagura.json")
+    return ResourceClient.from_mcp_url(
+        api_key=config.get("api_key", ""),
+        mcp_url=config.get("mcp_url", "https://memory.kagura-ai.com/mcp"),
+    )
+
+
+def _run_resource_command(
+    operation: Callable[[ResourceClient], Awaitable[Any]],
+) -> None:
+    """Execute a ResourceClient operation with standard boilerplate."""
+    try:
+        client = _get_resource_client()
+
+        async def _run() -> Any:
+            async with client:
+                return await operation(client)
+
+        result = asyncio.run(_run())
+        if result is not None:
+            click.echo(result)
+    except click.ClickException:
+        raise
+    except Exception as e:
+        raise click.ClickException(f"Error: {e}") from e
+
+
+@main.group()
+def resource():
+    """Manage resource tokens and ingest external data."""
+    pass
+
+
+@resource.group(name="tokens")
+def resource_tokens():
+    """Manage resource tokens (CRUD)."""
+    pass
+
+
+@resource_tokens.command(name="list")
+@click.option("--resource-id", "-r", help="Filter by resource ID")
+@click.option("--limit", "-l", type=int, default=50, help="Results per page (max 100)")
+def tokens_list(resource_id, limit):
+    """
+    List resource tokens.
+
+    Examples:
+      kagura resource tokens list
+      kagura resource tokens list --resource-id products
+    """
+
+    async def op(client: ResourceClient) -> str:
+        result = await client.list_tokens(resource_id=resource_id, limit=limit)
+        return result.model_dump_json(indent=2)
+
+    _run_resource_command(op)
+
+
+@resource_tokens.command(name="create")
+@click.option("--resource-id", "-r", required=True, help="Resource ID to scope token to")
+@click.option("--description", "-d", help="Token description")
+@click.option("--quota", "-q", type=int, default=1000, help="Events per hour (1-10000)")
+def tokens_create(resource_id, description, quota):
+    """
+    Create a new resource token.
+
+    The token is shown ONLY once — save it immediately.
+
+    Examples:
+      kagura resource tokens create -r products
+      kagura resource tokens create -r slack-messages -d "Slack integration" -q 5000
+    """
+
+    async def op(client: ResourceClient) -> str:
+        result = await client.create_token(
+            resource_id=resource_id,
+            description=description,
+            quota_events_per_hour=quota,
+        )
+        return result.model_dump_json(indent=2)
+
+    _run_resource_command(op)
+
+
+@resource_tokens.command(name="update")
+@click.argument("token_id", type=int)
+@click.option("--description", "-d", help="Updated description")
+@click.option("--quota", "-q", type=int, help="Updated events per hour (1-10000)")
+def tokens_update(token_id, description, quota):
+    """
+    Update a resource token.
+
+    Examples:
+      kagura resource tokens update 42 -d "New description"
+      kagura resource tokens update 42 -q 2000
+    """
+    if description is None and quota is None:
+        raise click.ClickException("At least --description or --quota is required")
+
+    async def op(client: ResourceClient) -> str:
+        result = await client.update_token(
+            token_id=token_id,
+            description=description,
+            quota_events_per_hour=quota,
+        )
+        return result.model_dump_json(indent=2)
+
+    _run_resource_command(op)
+
+
+@resource_tokens.command(name="revoke")
+@click.argument("token_id", type=int)
+def tokens_revoke(token_id):
+    """
+    Revoke (soft-delete) a resource token.
+
+    Examples:
+      kagura resource tokens revoke 42
+    """
+
+    async def op(client: ResourceClient) -> str:
+        await client.revoke_token(token_id)
+        return "Token revoked."
+
+    _run_resource_command(op)
+
+
+@resource.command(name="ingest")
+@click.option("--resource-id", "-r", required=True, help="Resource ID")
+@click.option("--api-key", "-k", required=True, help="Resource API key (X-Resource-API-Key)")
+@click.option("--doc-id", required=True, help="Document ID")
+@click.option("--op", type=click.Choice(["upsert", "delete"]), default="upsert", help="Operation")
+@click.option("--version", "-V", type=int, help="Document version (>=1)")
+@click.option("--payload", "-p", help="JSON payload string")
+@click.option("--importance", "-i", type=float, help="Importance 0.0-1.0")
+def ingest(resource_id, api_key, doc_id, op, version, payload, importance):
+    """
+    Ingest a single resource event.
+
+    Examples:
+      kagura resource ingest -r products -k KEY --doc-id SKU-001 -p '{"name":"Widget","price":9.99}'
+      kagura resource ingest -r products -k KEY --doc-id SKU-999 --op delete
+    """
+    try:
+        parsed_payload = json.loads(payload) if payload else None
+    except json.JSONDecodeError as e:
+        raise click.ClickException(f"Invalid JSON payload: {e}") from e
+
+    event = ResourceEventRequest(
+        op=op,
+        doc_id=doc_id,
+        version=version,
+        payload=parsed_payload,
+        importance=importance,
+    )
+
+    async def op_fn(client: ResourceClient) -> str:
+        result = await client.ingest_event(resource_id, api_key, event)
+        return result.model_dump_json(indent=2)
+
+    _run_resource_command(op_fn)
+
+
+@resource.command(name="ingest-batch")
+@click.option("--resource-id", "-r", required=True, help="Resource ID")
+@click.option("--api-key", "-k", required=True, help="Resource API key (X-Resource-API-Key)")
+@click.option("--file", "-f", type=click.File("r"), required=True, help="JSON events array")
+def ingest_batch(resource_id, api_key, file):
+    """
+    Ingest a batch of resource events from a JSON file.
+
+    The file should contain a JSON array of event objects.
+
+    Examples:
+      kagura resource ingest-batch -r products -k KEY -f events.json
+    """
+    try:
+        data = json.load(file)
+    except json.JSONDecodeError as e:
+        raise click.ClickException(f"Invalid JSON file: {e}") from e
+
+    if not isinstance(data, list):
+        raise click.ClickException("JSON file must contain an array of events")
+
+    events = [ResourceEventRequest(**e) for e in data]
+
+    async def op(client: ResourceClient) -> str:
+        result = await client.ingest_events(resource_id, api_key, events)
+        return result.model_dump_json(indent=2)
+
+    _run_resource_command(op)
 
 
 if __name__ == "__main__":

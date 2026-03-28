@@ -2,14 +2,12 @@
 
 import itertools
 import json
-from importlib.metadata import version as _pkg_version
 from typing import Any
 
 import httpx
 
+from ._http import SDK_VERSION, validate_https_url
 from .exceptions import KaguraAuthError, KaguraConnectionError
-
-_VERSION = _pkg_version("kagura-memory")
 
 
 class KaguraClient:
@@ -36,17 +34,9 @@ class KaguraClient:
             mcp_url: MCP server URL
             timeout: Request timeout in seconds
         """
-        # C-3: Enforce HTTPS except for localhost development
         stripped_url = mcp_url.rstrip("/")
-        if stripped_url.startswith("http://") and not any(
-            stripped_url.startswith(f"http://{h}") for h in ("localhost", "127.0.0.1", "[::1]")
-        ):
-            raise ValueError(
-                f"MCP URL must use HTTPS for security (got: {stripped_url}). "
-                "HTTP is only allowed for localhost development."
-            )
+        validate_https_url(stripped_url, label="MCP URL")
 
-        # C-1: Don't store api_key as instance attribute — only in httpx headers
         self.mcp_url = stripped_url
         self.timeout = timeout
         self._client = httpx.AsyncClient(
@@ -72,7 +62,7 @@ class KaguraClient:
             "params": {
                 "protocolVersion": "2025-03-26",
                 "capabilities": {},
-                "clientInfo": {"name": "kagura-memory-sdk", "version": _VERSION},
+                "clientInfo": {"name": "kagura-memory-sdk", "version": SDK_VERSION},
             },
         }
 
