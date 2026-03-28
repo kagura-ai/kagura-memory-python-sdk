@@ -1,13 +1,23 @@
-# Kagura Memory SDK
+<p align="center">
+  <a href="https://github.com/kagura-ai/memory-cloud">
+    <img src="assets/kagura-logo.svg" alt="Kagura Ai" width="300">
+  </a>
+</p>
 
-[![PyPI version](https://img.shields.io/pypi/v/kagura-memory)](https://pypi.org/project/kagura-memory/)
-[![Python versions](https://img.shields.io/pypi/pyversions/kagura-memory)](https://pypi.org/project/kagura-memory/)
-[![CI](https://github.com/kagura-ai/kagura-memory-python-sdk/actions/workflows/ci.yml/badge.svg)](https://github.com/kagura-ai/kagura-memory-python-sdk/actions/workflows/ci.yml)
-[![codecov](https://codecov.io/gh/kagura-ai/kagura-memory-python-sdk/graph/badge.svg)](https://codecov.io/gh/kagura-ai/kagura-memory-python-sdk)
-[![License: MIT](https://img.shields.io/pypi/l/kagura-memory)](https://github.com/kagura-ai/kagura-memory-python-sdk/blob/main/LICENSE)
-[![Checked with pyright](https://microsoft.github.io/pyright/img/pyright_badge.svg)](https://microsoft.github.io/pyright/)
+<h1 align="center">Kagura Memory SDK</h1>
 
-AI-driven memory management for Kagura Memory Cloud.
+<p align="center">
+  Python SDK for <a href="https://github.com/kagura-ai/memory-cloud">Kagura Memory Cloud</a> — AI-driven memory management for LLM applications.
+</p>
+
+<p align="center">
+  <a href="https://pypi.org/project/kagura-memory/"><img src="https://img.shields.io/pypi/v/kagura-memory" alt="PyPI version"></a>
+  <a href="https://pypi.org/project/kagura-memory/"><img src="https://img.shields.io/pypi/pyversions/kagura-memory" alt="Python versions"></a>
+  <a href="https://github.com/kagura-ai/kagura-memory-python-sdk/actions/workflows/ci.yml"><img src="https://github.com/kagura-ai/kagura-memory-python-sdk/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://codecov.io/gh/kagura-ai/kagura-memory-python-sdk"><img src="https://codecov.io/gh/kagura-ai/kagura-memory-python-sdk/graph/badge.svg" alt="codecov"></a>
+  <a href="https://github.com/kagura-ai/kagura-memory-python-sdk/blob/main/LICENSE"><img src="https://img.shields.io/pypi/l/kagura-memory" alt="License: MIT"></a>
+  <a href="https://microsoft.github.io/pyright/"><img src="https://microsoft.github.io/pyright/img/pyright_badge.svg" alt="Checked with pyright"></a>
+</p>
 
 ## Installation
 
