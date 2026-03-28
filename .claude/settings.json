@@ -22,7 +22,8 @@
       "Bash(gh issue list *)",
       "Bash(gh pr view *)",
       "Bash(gh pr list *)",
-      "Bash(gh pr create *)"
+      "Bash(gh pr create *)",
+      "Bash(git tag *)"
     ]
   },
   "hooks": {
@@ -43,7 +44,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "INPUT=$(cat); CMD=$(echo \"$INPUT\" | jq -r '.tool_input.command // empty'); if echo \"$CMD\" | grep -qE 'gh pr (merge|create)'; then echo 'Reminder: Before PR, ensure /quality → /simplify → /self-review have been run.' >&2; exit 0; fi; exit 0"
+            "command": "INPUT=$(cat); CMD=$(echo \"$INPUT\" | jq -r '.tool_input.command // empty'); if echo \"$CMD\" | grep -qE 'gh pr (merge|create)'; then echo 'Reminder: Before PR, ensure /quality → /simplify → /self-review have been run.' >&2; fi; if echo \"$CMD\" | grep -qE 'git tag v'; then echo 'Reminder: Ensure /quality has passed before tagging a release.' >&2; fi; exit 0"
           }
         ]
       }
