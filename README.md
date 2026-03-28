@@ -6,13 +6,16 @@ AI-driven memory management for Kagura Memory Cloud.
 
 ```bash
 pip install kagura-memory
+# or
+uv add kagura-memory
 ```
 
 For development:
 
 ```bash
-cd sdk/python
-pip install -e ".[dev]"
+git clone https://github.com/kagura-ai/kagura-memory-python-sdk.git
+cd kagura-memory-python-sdk
+uv sync --dev
 ```
 
 ## Quick Start
@@ -111,7 +114,14 @@ kagura config show
 
 ### Claude Code Integration
 
-You can use Kagura CLI from Claude Code via Bash:
+You can use Kagura Memory as an MCP server in Claude Code. Copy `.mcp.json.example` to `.mcp.json` and fill in your credentials:
+
+```bash
+cp .mcp.json.example .mcp.json
+# Edit .mcp.json with your workspace ID and API key
+```
+
+Or use the CLI via Bash:
 
 ```bash
 # In Claude Code, use Bash tool:
@@ -174,27 +184,16 @@ agent = KaguraAgent(api_key="...", model="ollama/llama3")
 ### Setup
 
 ```bash
-cd sdk/python
-pip install -e ".[dev]"
+uv sync --dev
 ```
 
-### Type Checking
+### Quality Checks
 
 ```bash
-pyright src/
-```
-
-### Linting
-
-```bash
-ruff check src/
-ruff format src/
-```
-
-### Testing
-
-```bash
-pytest
+uv run ruff check src/ tests/   # Lint
+uv run ruff format src/ tests/  # Format
+uv run pyright src/              # Type check
+uv run pytest tests/ -v          # Test
 ```
 
 ## Links
@@ -202,7 +201,7 @@ pytest
 - [Kagura Memory Cloud](https://memory.kagura-ai.com)
 - [Documentation](https://docs.kagura-ai.com)
 - [GitHub](https://github.com/kagura-ai/memory-cloud)
-- [Issue Tracker](https://github.com/kagura-ai/memory-cloud/issues)
+- [Issue Tracker](https://github.com/kagura-ai/kagura-memory-python-sdk/issues)
 
 ## License
 
