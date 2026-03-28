@@ -192,10 +192,8 @@ uv run pytest tests/ -v          # Test
 
 ## Links
 
-- [Kagura Memory Cloud](https://memory.kagura-ai.com)
-- [Documentation](https://docs.kagura-ai.com)
-- [GitHub](https://github.com/kagura-ai/memory-cloud)
-- [Issue Tracker](https://github.com/kagura-ai/kagura-memory-python-sdk/issues)
+- [Kagura Memory Cloud](https://github.com/kagura-ai/memory-cloud)
+- [SDK Issue Tracker](https://github.com/kagura-ai/kagura-memory-python-sdk/issues)
 
 ## License
 

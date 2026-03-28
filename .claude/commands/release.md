@@ -10,13 +10,16 @@ Release the SDK with a version bump.
 
 ## Prerequisites
 
-Before releasing, ensure `/quality` has been run and passes.
+Before releasing, ensure:
+1. `/quality` has been run and passes
+2. Current branch is `main`
 
 ## Steps
 
-### 1. Validate the bump level
+### 1. Validate preconditions
 
-Argument: `$ARGUMENTS` (must be `patch`, `minor`, or `major`)
+- Argument: `$ARGUMENTS` (must be `patch`, `minor`, or `major`)
+- Verify current branch is `main` (`git branch --show-current`). Abort if not on main.
 
 ### 2. Read current version
 
