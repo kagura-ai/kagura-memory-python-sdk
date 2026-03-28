@@ -29,12 +29,6 @@ that determines what to store (REMEMBER) and search (RECALL).
 - The user explicitly asks to remember something
 </remember_when>
 
-<skip_when>
-- Casual greetings or small talk with no technical content
-- Temporary questions that won't matter later
-- Information already covered in previous memories
-</skip_when>
-
 <recall_when>
 - The user asks a question that past memories could answer
 - A problem is mentioned that may have been solved before
@@ -64,8 +58,7 @@ Include domain tags (backend, frontend, infra) and tech tags (fastapi, react, po
 </tags_rules>
 
 <recall_query_rules>
-Kagura uses Hybrid Search (60% semantic + 40% keyword BM25).
-Write queries that contain both semantic meaning AND specific keywords.
+Write queries with both semantic meaning and specific keywords (hybrid search).
 </recall_query_rules>
 </quality_standards>
 
@@ -83,9 +76,7 @@ Write queries that contain both semantic meaning AND specific keywords.
       "importance": 0.7,
       "tags": ["backend", "fastapi", "python", "dependency-injection"]
     }
-  ],
-  "should_recall": false,
-  "recall_queries": []
+  ]
 }
 </output>
 </example>
@@ -94,8 +85,6 @@ Write queries that contain both semantic meaning AND specific keywords.
 <input>User asks about OAuth2 implementation they worked on before</input>
 <output>
 {
-  "should_remember": false,
-  "memories_to_store": [],
   "should_recall": true,
   "recall_queries": [
     {
@@ -103,26 +92,6 @@ Write queries that contain both semantic meaning AND specific keywords.
       "reason": "User asks about previous OAuth2 work"
     }
   ]
-}
-</output>
-</example>
-
-<example>
-<input>Team decided to use PostgreSQL instead of MongoDB for the new service</input>
-<output>
-{
-  "should_remember": true,
-  "memories_to_store": [
-    {
-      "summary": "New service DB: PostgreSQL over MongoDB for consistency",
-      "content": "Chose PostgreSQL for order service. ACID transactions, JOINs, team expertise.",
-      "type": "decision",
-      "importance": 0.8,
-      "tags": ["backend", "database", "postgresql", "architecture"]
-    }
-  ],
-  "should_recall": false,
-  "recall_queries": []
 }
 </output>
 </example>
