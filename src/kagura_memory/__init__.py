@@ -32,7 +32,7 @@ from .models import (
 )
 from .resource_client import ResourceClient
 
-__version__ = "0.2.3"
+__version__ = "0.3.0"
 
 __all__ = [
     # Core classes
