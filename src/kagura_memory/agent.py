@@ -16,7 +16,9 @@ from .models import (
     LLMUsage,
     Memory,
     MemoryInfo,
+    MemoryToStore,
     ProcessResult,
+    RecallQuery,
     Session,
 )
 from .prompts import (
@@ -338,14 +340,14 @@ class KaguraAgent:
         return result
 
     async def _execute_recalls(
-        self, ctx: str, queries: list[dict], deep: bool, recall_k: int = 5
+        self, ctx: str, queries: list[RecallQuery], deep: bool, recall_k: int = 5
     ) -> tuple[list[Memory], list[ExploredMemory], list[str]]:
         """
         Execute all recall operations.
 
         Args:
             ctx: Context ID
-            queries: List of recall query dicts with "query" and "reason"
+            queries: List of recall queries
             deep: Whether to explore related memories
             recall_k: Number of results per query
 
@@ -357,7 +359,7 @@ class KaguraAgent:
         actions: list[str] = []
 
         for query_info in queries:
-            query = query_info["query"]
+            query = query_info.query
             if self.logger:
                 self.logger.action("Recalling memories", f'query="{query}"')
 
@@ -412,14 +414,14 @@ class KaguraAgent:
         return recalled, explored, actions
 
     async def _execute_remembers(
-        self, ctx: str, memories: list[dict]
+        self, ctx: str, memories: list[MemoryToStore]
     ) -> tuple[list[MemoryInfo], list[str]]:
         """
         Execute all remember operations.
 
         Args:
             ctx: Context ID
-            memories: List of memory dicts to store
+            memories: List of memories to store
 
         Returns:
             Tuple of (remembered_infos, actions)
@@ -427,24 +429,23 @@ class KaguraAgent:
         remembered: list[MemoryInfo] = []
         actions: list[str] = []
 
-        for mem_data in memories:
-            summary = mem_data["summary"]
+        for mem in memories:
             if self.logger:
-                self.logger.action("Storing memory", f'summary="{summary[:50]}..."')
+                self.logger.action("Storing memory", f'summary="{mem.summary[:50]}..."')
 
             try:
                 result = await self.client.remember(
                     context_id=ctx,
-                    summary=summary,
-                    content=mem_data["content"],
-                    type=mem_data.get("type", "note"),
-                    importance=mem_data.get("importance", 0.5),
-                    tags=mem_data.get("tags", []),
+                    summary=mem.summary,
+                    content=mem.content,
+                    type=mem.type,
+                    importance=mem.importance,
+                    tags=mem.tags,
                 )
 
-                remembered.append(MemoryInfo(memory_id=result["memory_id"], summary=summary))
+                remembered.append(MemoryInfo(memory_id=result["memory_id"], summary=mem.summary))
 
-                actions.append(f"remember: {summary[:50]}")
+                actions.append(f"remember: {mem.summary[:50]}")
                 if self.logger:
                     self.logger.success(f"Stored memory: {result['memory_id']}")
 

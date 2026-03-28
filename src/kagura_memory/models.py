@@ -53,13 +53,30 @@ class LLMUsage(BaseModel):
     model: str
 
 
+class MemoryToStore(BaseModel):
+    """A memory to be stored, as determined by LLM analysis."""
+
+    summary: str = Field(..., min_length=1, max_length=250)
+    content: str
+    type: Literal["code", "note", "decision", "bug-fix", "feature", "learning"] = "note"
+    importance: float = Field(default=0.5, ge=0.0, le=1.0)
+    tags: list[str] = Field(default_factory=list)
+
+
+class RecallQuery(BaseModel):
+    """A recall query, as determined by LLM analysis."""
+
+    query: str
+    reason: str = ""
+
+
 class AnalysisResult(BaseModel):
     """Internal model for LLM analysis results."""
 
     should_remember: bool
-    memories_to_store: list[dict] = Field(default_factory=list)
+    memories_to_store: list[MemoryToStore] = Field(default_factory=list)
     should_recall: bool
-    recall_queries: list[dict] = Field(default_factory=list)
+    recall_queries: list[RecallQuery] = Field(default_factory=list)
     llm_usage: "LLMUsage | None" = None
 
 
