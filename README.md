@@ -194,30 +194,13 @@ kagura process -m "今日の学び：FastAPIのDIはDepends()を使う"
 
 ## Features
 
-### Current Version (0.2.2)
+- **KaguraAgent**: LLM-powered session analysis — auto-decides what to remember/recall
+- **KaguraClient**: Direct memory operations (remember, recall, explore, reference, forget)
+- **ResourceClient**: Resource token management + external data ingestion (Slack, CI/CD, CRM)
+- **CLI**: Full command suite for AI-powered and direct operations
+- **Multiple LLM Support**: OpenAI, Claude, Gemini, Ollama via LiteLLM
 
-- ✅ **LLM-Powered Analysis**: Automatically decides what to remember/recall
-- ✅ **Session-Based Input**: Messages + artifacts (code, documents, errors)
-- ✅ **Deep Mode** (`deep=True`): Neural Memory graph exploration
-- ✅ **Verbose Logging** (0-3): Silent to debug with Rich panels
-- ✅ **Context Auto-Selection** (`context_id="auto"`): LLM selects best context
-- ✅ **Multiple LLM Support**: OpenAI, Claude, Gemini, Ollama via LiteLLM
-- ✅ **Type Safety**: Full Pydantic validation
-- ✅ **CLI Commands**: Full suite of commands for AI and direct operations
-- ✅ **Graceful Degradation**: Continues even if LLM fails
-
-### New in v0.2.2 (Phase 3 - CLI)
-
-- ✅ **Direct CLI Commands**: `kagura remember`, `kagura recall`, `kagura forget`, `kagura explore`, `kagura reference`, `kagura contexts`
-- ✅ **No LLM Required**: Direct memory operations without AI analysis
-- ✅ **Flexible Context**: Use `--context-id` or configure in `.kagura.json`
-
-### v0.2.1 (Phase 2.5)
-
-- ✅ **Dynamic Tool Definitions**: Fetches MCP tool specifications via `tools/list`
-- ✅ **Enhanced Prompts**: LLM receives actual parameter schemas and context info
-- ✅ **Intelligent Caching**: 5-minute TTL cache for tool/context definitions
-- ✅ **Automatic Fallback**: Uses static prompts if dynamic fetching fails
+See [Releases](https://github.com/kagura-ai/kagura-memory-python-sdk/releases) for detailed changelogs.
 
 ## Supported LLM Models
 

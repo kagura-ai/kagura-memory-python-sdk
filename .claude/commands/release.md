@@ -64,6 +64,16 @@ git push && git push --tags
 
 This triggers the publish workflow to deploy to PyPI.
 
-### 9. Report
+### 9. Create GitHub Release with notes
 
-Print the new version and link to the GitHub Actions run.
+Generate release notes from commits since the last tag:
+
+```bash
+gh release create vX.Y.Z --generate-notes --title "vX.Y.Z"
+```
+
+Review the auto-generated notes. If needed, edit to add a summary section at the top highlighting the key changes (new features, breaking changes, etc.).
+
+### 10. Report
+
+Print the new version, link to the GitHub Release, and the Actions run.
