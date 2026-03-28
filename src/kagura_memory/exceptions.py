@@ -1,0 +1,29 @@
+"""Custom exceptions for Kagura Memory SDK."""
+
+
+class KaguraError(Exception):
+    """Base exception for Kagura SDK."""
+
+
+class KaguraAuthError(KaguraError):
+    """Authentication failed."""
+
+
+class KaguraConnectionError(KaguraError):
+    """Connection to Kagura server failed."""
+
+
+class KaguraRateLimitError(KaguraError):
+    """Rate limit exceeded."""
+
+    def __init__(self, message: str, retry_after: int | None = None):
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
+class KaguraLLMError(KaguraError):
+    """LLM call failed."""
+
+
+class KaguraContextError(KaguraError):
+    """Context not found or invalid."""
