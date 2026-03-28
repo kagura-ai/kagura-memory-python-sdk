@@ -2,11 +2,10 @@
 
 import itertools
 import json
+from importlib.metadata import version as _pkg_version
 from typing import Any
 
 import httpx
-
-from importlib.metadata import version as _pkg_version
 
 from .exceptions import KaguraAuthError, KaguraConnectionError
 
