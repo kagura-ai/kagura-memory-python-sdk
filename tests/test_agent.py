@@ -1,11 +1,12 @@
 """Tests for KaguraAgent enhanced context and caching."""
 
-import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
 import time
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 from kagura_memory import KaguraAgent
-from kagura_memory.models import Session, Message
+from kagura_memory.models import Message, Session
 
 
 @pytest.mark.asyncio
@@ -81,11 +82,12 @@ async def test_build_enhanced_context():
     mock_tools = [{"name": "remember"}]
     mock_contexts = [{"id": "ctx-1", "name": "test"}]
 
-    with patch.object(
-        agent.client, "get_tool_definitions", new_callable=AsyncMock
-    ) as mock_get_tools, patch.object(
-        agent.client, "list_contexts", new_callable=AsyncMock
-    ) as mock_list_contexts:
+    with (
+        patch.object(
+            agent.client, "get_tool_definitions", new_callable=AsyncMock
+        ) as mock_get_tools,
+        patch.object(agent.client, "list_contexts", new_callable=AsyncMock) as mock_list_contexts,
+    ):
         mock_get_tools.return_value = mock_tools
         mock_list_contexts.return_value = {"contexts": mock_contexts}
 
@@ -108,13 +110,13 @@ async def test_analyze_session_with_enhanced_context():
     mock_tools = [{"name": "remember"}]
     mock_contexts = [{"id": "ctx-1", "name": "test"}]
 
-    with patch.object(
-        agent.client, "get_tool_definitions", new_callable=AsyncMock
-    ) as mock_get_tools, patch.object(
-        agent.client, "list_contexts", new_callable=AsyncMock
-    ) as mock_list_contexts, patch.object(
-        agent, "_call_llm", new_callable=AsyncMock
-    ) as mock_llm:
+    with (
+        patch.object(
+            agent.client, "get_tool_definitions", new_callable=AsyncMock
+        ) as mock_get_tools,
+        patch.object(agent.client, "list_contexts", new_callable=AsyncMock) as mock_list_contexts,
+        patch.object(agent, "_call_llm", new_callable=AsyncMock) as mock_llm,
+    ):
         mock_get_tools.return_value = mock_tools
         mock_list_contexts.return_value = {"contexts": mock_contexts}
         mock_llm.return_value = (
@@ -146,11 +148,12 @@ async def test_independent_cache_timestamps():
     mock_tools = [{"name": "remember"}]
     mock_contexts = [{"id": "ctx-1", "name": "test"}]
 
-    with patch.object(
-        agent.client, "get_tool_definitions", new_callable=AsyncMock
-    ) as mock_get_tools, patch.object(
-        agent.client, "list_contexts", new_callable=AsyncMock
-    ) as mock_list_contexts:
+    with (
+        patch.object(
+            agent.client, "get_tool_definitions", new_callable=AsyncMock
+        ) as mock_get_tools,
+        patch.object(agent.client, "list_contexts", new_callable=AsyncMock) as mock_list_contexts,
+    ):
         mock_get_tools.return_value = mock_tools
         mock_list_contexts.return_value = {"contexts": mock_contexts}
 

@@ -1,12 +1,11 @@
 """Tests for KaguraClient."""
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
+import pytest
 
-from kagura_memory import KaguraClient, KaguraAuthError, KaguraConnectionError
-
+from kagura_memory import KaguraAuthError, KaguraClient, KaguraConnectionError
 
 # ============================================================================
 # HTTPS enforcement (C-3)
