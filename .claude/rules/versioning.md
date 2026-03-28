@@ -41,3 +41,14 @@ Use `/release patch|minor|major` to:
 3. Commit: `chore(release): vX.Y.Z`
 4. Tag: `vX.Y.Z`
 5. Push commit + tag → CI publishes to PyPI
+
+### Test release
+
+Manual trigger via GitHub Actions → `Publish to PyPI` → Run workflow → `testpypi`
+
+## Release Infrastructure (configured)
+
+- **PyPI Trusted Publisher**: `kagura-ai/kagura-memory-python-sdk` / `publish.yml` / environment `pypi`
+- **TestPyPI Trusted Publisher**: same, environment `testpypi`
+- **GitHub Environments**: `pypi` and `testpypi` configured in repo settings
+- No API tokens needed — uses OIDC authentication
