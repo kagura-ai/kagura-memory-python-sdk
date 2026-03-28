@@ -2,12 +2,8 @@
   <a href="https://github.com/kagura-ai/memory-cloud">
     <img src="assets/kagura-logo.svg" alt="Kagura Ai" width="300">
   </a>
-</p>
-
-<h1 align="center">Kagura Memory SDK</h1>
-
-<p align="center">
-  Python SDK for <a href="https://github.com/kagura-ai/memory-cloud">Kagura Memory Cloud</a> — give your AI applications persistent, searchable memory.
+  <br>
+  <strong>Memory SDK</strong> — Python client for <a href="https://github.com/kagura-ai/memory-cloud">Kagura Memory Cloud</a>
 </p>
 
 <p align="center">
