@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from importlib.metadata import version as _pkg_version
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 
+from ._http import SDK_VERSION, validate_https_url
 from .exceptions import (
     KaguraAuthError,
     KaguraConnectionError,
@@ -18,11 +18,11 @@ from .models import (
     ResourceEventBatchResponse,
     ResourceEventRequest,
     ResourceEventResponse,
+    ResourceTokenCreate,
     ResourceTokenCreateResponse,
     ResourceTokenResponse,
+    ResourceTokenUpdate,
 )
-
-_VERSION = _pkg_version("kagura-memory")
 
 
 class ResourceClient:
@@ -52,15 +52,14 @@ class ResourceClient:
             timeout: Request timeout in seconds.
         """
         stripped_url = base_url.rstrip("/")
-        self._validate_url(stripped_url)
+        validate_https_url(stripped_url, label="Base URL")
 
-        # C-1: Don't store api_key as instance attribute — only in httpx headers
         self.base_url = stripped_url
         self._client = httpx.AsyncClient(
             timeout=timeout,
             headers={
                 "Authorization": f"Bearer {api_key}",
-                "User-Agent": f"kagura-memory-sdk/{_VERSION}",
+                "User-Agent": f"kagura-memory-sdk/{SDK_VERSION}",
             },
         )
 
@@ -83,20 +82,9 @@ class ResourceClient:
         base_url = mcp_url.rstrip("/").removesuffix("/mcp")
         return cls(api_key=api_key, base_url=base_url, timeout=timeout)
 
-    @staticmethod
-    def _validate_url(url: str) -> None:
-        """C-3: Enforce HTTPS except for localhost development."""
-        if url.startswith("http://") and not any(
-            url.startswith(f"http://{h}") for h in ("localhost", "127.0.0.1", "[::1]")
-        ):
-            raise ValueError(
-                f"Base URL must use HTTPS for security (got: {url}). "
-                "HTTP is only allowed for localhost development."
-            )
-
     async def _request(
         self,
-        method: str,
+        method: Literal["GET", "POST", "PATCH", "DELETE"],
         path: str,
         *,
         json: dict[str, Any] | None = None,
@@ -176,11 +164,11 @@ class ResourceClient:
         Returns:
             Created token including plaintext token (shown only once).
         """
-        body: dict[str, Any] = {"resource_id": resource_id}
-        if description is not None:
-            body["description"] = description
-        if quota_events_per_hour != 1000:
-            body["quota_events_per_hour"] = quota_events_per_hour
+        body = ResourceTokenCreate(
+            resource_id=resource_id,
+            description=description,
+            quota_events_per_hour=quota_events_per_hour,
+        ).model_dump(exclude_none=True)
 
         response = await self._request("POST", "/api/v1/resource-tokens", json=body)
         return ResourceTokenCreateResponse.model_validate(response.json())
@@ -224,11 +212,10 @@ class ResourceClient:
         Returns:
             Updated token metadata.
         """
-        body: dict[str, Any] = {}
-        if description is not None:
-            body["description"] = description
-        if quota_events_per_hour is not None:
-            body["quota_events_per_hour"] = quota_events_per_hour
+        body = ResourceTokenUpdate(
+            description=description,
+            quota_events_per_hour=quota_events_per_hour,
+        ).model_dump(exclude_none=True)
 
         response = await self._request("PATCH", f"/api/v1/resource-tokens/{token_id}", json=body)
         return ResourceTokenResponse.model_validate(response.json())

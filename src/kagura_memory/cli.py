@@ -277,16 +277,35 @@ def contexts():
 # =============================================================================
 
 
-def _get_resource_client() -> tuple[dict[str, Any], ResourceClient]:
+def _get_resource_client() -> ResourceClient:
     """Load config and create ResourceClient."""
     config = load_config()
     if not config.get("api_key"):
         raise click.ClickException("No API key found. Set KAGURA_API_KEY or create .kagura.json")
-    client = ResourceClient.from_mcp_url(
+    return ResourceClient.from_mcp_url(
         api_key=config.get("api_key", ""),
         mcp_url=config.get("mcp_url", "https://memory.kagura-ai.com/mcp"),
     )
-    return config, client
+
+
+def _run_resource_command(
+    operation: Callable[[ResourceClient], Awaitable[Any]],
+) -> None:
+    """Execute a ResourceClient operation with standard boilerplate."""
+    try:
+        client = _get_resource_client()
+
+        async def _run() -> Any:
+            async with client:
+                return await operation(client)
+
+        result = asyncio.run(_run())
+        if result is not None:
+            click.echo(result)
+    except click.ClickException:
+        raise
+    except Exception as e:
+        raise click.ClickException(f"Error: {e}") from e
 
 
 @main.group()
@@ -312,19 +331,12 @@ def tokens_list(resource_id, limit):
       kagura resource tokens list
       kagura resource tokens list --resource-id products
     """
-    try:
-        _, client = _get_resource_client()
 
-        async def _run() -> str:
-            async with client:
-                result = await client.list_tokens(resource_id=resource_id, limit=limit)
-                return result.model_dump_json(indent=2)
+    async def op(client: ResourceClient) -> str:
+        result = await client.list_tokens(resource_id=resource_id, limit=limit)
+        return result.model_dump_json(indent=2)
 
-        click.echo(asyncio.run(_run()))
-    except click.ClickException:
-        raise
-    except Exception as e:
-        raise click.ClickException(f"Error: {e}") from e
+    _run_resource_command(op)
 
 
 @resource_tokens.command(name="create")
@@ -341,23 +353,16 @@ def tokens_create(resource_id, description, quota):
       kagura resource tokens create -r products
       kagura resource tokens create -r slack-messages -d "Slack integration" -q 5000
     """
-    try:
-        _, client = _get_resource_client()
 
-        async def _run() -> str:
-            async with client:
-                result = await client.create_token(
-                    resource_id=resource_id,
-                    description=description,
-                    quota_events_per_hour=quota,
-                )
-                return result.model_dump_json(indent=2)
+    async def op(client: ResourceClient) -> str:
+        result = await client.create_token(
+            resource_id=resource_id,
+            description=description,
+            quota_events_per_hour=quota,
+        )
+        return result.model_dump_json(indent=2)
 
-        click.echo(asyncio.run(_run()))
-    except click.ClickException:
-        raise
-    except Exception as e:
-        raise click.ClickException(f"Error: {e}") from e
+    _run_resource_command(op)
 
 
 @resource_tokens.command(name="update")
@@ -375,23 +380,15 @@ def tokens_update(token_id, description, quota):
     if description is None and quota is None:
         raise click.ClickException("At least --description or --quota is required")
 
-    try:
-        _, client = _get_resource_client()
+    async def op(client: ResourceClient) -> str:
+        result = await client.update_token(
+            token_id=token_id,
+            description=description,
+            quota_events_per_hour=quota,
+        )
+        return result.model_dump_json(indent=2)
 
-        async def _run() -> str:
-            async with client:
-                result = await client.update_token(
-                    token_id=token_id,
-                    description=description,
-                    quota_events_per_hour=quota,
-                )
-                return result.model_dump_json(indent=2)
-
-        click.echo(asyncio.run(_run()))
-    except click.ClickException:
-        raise
-    except Exception as e:
-        raise click.ClickException(f"Error: {e}") from e
+    _run_resource_command(op)
 
 
 @resource_tokens.command(name="revoke")
@@ -403,19 +400,12 @@ def tokens_revoke(token_id):
     Examples:
       kagura resource tokens revoke 42
     """
-    try:
-        _, client = _get_resource_client()
 
-        async def _run() -> None:
-            async with client:
-                await client.revoke_token(token_id)
+    async def op(client: ResourceClient) -> str:
+        await client.revoke_token(token_id)
+        return "Token revoked."
 
-        asyncio.run(_run())
-        click.echo("Token revoked.")
-    except click.ClickException:
-        raise
-    except Exception as e:
-        raise click.ClickException(f"Error: {e}") from e
+    _run_resource_command(op)
 
 
 @resource.command(name="ingest")
@@ -423,7 +413,7 @@ def tokens_revoke(token_id):
 @click.option("--api-key", "-k", required=True, help="Resource API key (X-Resource-API-Key)")
 @click.option("--doc-id", required=True, help="Document ID")
 @click.option("--op", type=click.Choice(["upsert", "delete"]), default="upsert", help="Operation")
-@click.option("--version", "-v", type=int, help="Document version (>=1)")
+@click.option("--version", "-V", type=int, help="Document version (>=1)")
 @click.option("--payload", "-p", help="JSON payload string")
 @click.option("--importance", "-i", type=float, help="Importance 0.0-1.0")
 def ingest(resource_id, api_key, doc_id, op, version, payload, importance):
@@ -436,28 +426,22 @@ def ingest(resource_id, api_key, doc_id, op, version, payload, importance):
     """
     try:
         parsed_payload = json.loads(payload) if payload else None
-        event = ResourceEventRequest(
-            op=op,
-            doc_id=doc_id,
-            version=version,
-            payload=parsed_payload,
-            importance=importance,
-        )
-
-        _, client = _get_resource_client()
-
-        async def _run() -> str:
-            async with client:
-                result = await client.ingest_event(resource_id, api_key, event)
-                return result.model_dump_json(indent=2)
-
-        click.echo(asyncio.run(_run()))
     except json.JSONDecodeError as e:
         raise click.ClickException(f"Invalid JSON payload: {e}") from e
-    except click.ClickException:
-        raise
-    except Exception as e:
-        raise click.ClickException(f"Error: {e}") from e
+
+    event = ResourceEventRequest(
+        op=op,
+        doc_id=doc_id,
+        version=version,
+        payload=parsed_payload,
+        importance=importance,
+    )
+
+    async def op_fn(client: ResourceClient) -> str:
+        result = await client.ingest_event(resource_id, api_key, event)
+        return result.model_dump_json(indent=2)
+
+    _run_resource_command(op_fn)
 
 
 @resource.command(name="ingest-batch")
@@ -475,25 +459,19 @@ def ingest_batch(resource_id, api_key, file):
     """
     try:
         data = json.load(file)
-        if not isinstance(data, list):
-            raise click.ClickException("JSON file must contain an array of events")
-
-        events = [ResourceEventRequest(**e) for e in data]
-
-        _, client = _get_resource_client()
-
-        async def _run() -> str:
-            async with client:
-                result = await client.ingest_events(resource_id, api_key, events)
-                return result.model_dump_json(indent=2)
-
-        click.echo(asyncio.run(_run()))
     except json.JSONDecodeError as e:
         raise click.ClickException(f"Invalid JSON file: {e}") from e
-    except click.ClickException:
-        raise
-    except Exception as e:
-        raise click.ClickException(f"Error: {e}") from e
+
+    if not isinstance(data, list):
+        raise click.ClickException("JSON file must contain an array of events")
+
+    events = [ResourceEventRequest(**e) for e in data]
+
+    async def op(client: ResourceClient) -> str:
+        result = await client.ingest_events(resource_id, api_key, events)
+        return result.model_dump_json(indent=2)
+
+    _run_resource_command(op)
 
 
 if __name__ == "__main__":
