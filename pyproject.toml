@@ -30,6 +30,7 @@ dependencies = [
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.24.0",
+    "pytest-cov>=6.0.0",
     "ruff>=0.8.0",
     "pyright>=1.1.0",
 ]
@@ -56,6 +57,7 @@ packages = ["src/kagura_memory"]
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.24.0",
+    "pytest-cov>=6.0.0",
     "ruff>=0.8.0",
     "pyright>=1.1.0",
 ]
