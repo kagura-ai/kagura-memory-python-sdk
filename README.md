@@ -1,5 +1,12 @@
 # Kagura Memory SDK
 
+[![PyPI version](https://img.shields.io/pypi/v/kagura-memory)](https://pypi.org/project/kagura-memory/)
+[![Python versions](https://img.shields.io/pypi/pyversions/kagura-memory)](https://pypi.org/project/kagura-memory/)
+[![CI](https://github.com/kagura-ai/kagura-memory-python-sdk/actions/workflows/ci.yml/badge.svg)](https://github.com/kagura-ai/kagura-memory-python-sdk/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/kagura-ai/kagura-memory-python-sdk/graph/badge.svg)](https://codecov.io/gh/kagura-ai/kagura-memory-python-sdk)
+[![License: MIT](https://img.shields.io/pypi/l/kagura-memory)](https://github.com/kagura-ai/kagura-memory-python-sdk/blob/main/LICENSE)
+[![Checked with pyright](https://microsoft.github.io/pyright/img/pyright_badge.svg)](https://microsoft.github.io/pyright/)
+
 AI-driven memory management for Kagura Memory Cloud.
 
 ## Installation
