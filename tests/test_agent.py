@@ -8,7 +8,7 @@ import pytest
 
 from kagura_memory import KaguraAgent, KaguraAuthError
 from kagura_memory.exceptions import KaguraLLMError
-from kagura_memory.models import Message, Session
+from kagura_memory.models import MemoryToStore, Message, RecallQuery, Session
 
 
 @pytest.mark.asyncio
@@ -296,7 +296,7 @@ async def test_execute_remembers_success():
     with patch.object(agent.client, "remember", new_callable=AsyncMock) as mock_rem:
         mock_rem.return_value = {"memory_id": "mem-1"}
 
-        memories = [{"summary": "Test", "content": "Full content"}]
+        memories = [MemoryToStore(summary="Test memory", content="Full content")]
         remembered, actions = await agent._execute_remembers("ctx", memories)
 
         assert len(remembered) == 1
@@ -315,7 +315,9 @@ async def test_execute_remembers_auth_error():
         mock_rem.side_effect = KaguraAuthError("bad key")
 
         with pytest.raises(KaguraAuthError):
-            await agent._execute_remembers("ctx", [{"summary": "s", "content": "c"}])
+            await agent._execute_remembers(
+                "ctx", [MemoryToStore(summary="test summary", content="c")]
+            )
 
     await agent.close()
 
@@ -360,9 +362,9 @@ async def test_process_full_flow():
 
         mock_analyze.return_value = AnalysisResult(
             should_remember=True,
-            memories_to_store=[{"summary": "s", "content": "c"}],
+            memories_to_store=[MemoryToStore(summary="test summary", content="c")],
             should_recall=True,
-            recall_queries=[{"query": "test"}],
+            recall_queries=[RecallQuery(query="test")],
         )
         mock_recalls.return_value = ([], [], ["recall: test"])
         mock_remembers.return_value = ([], ["remember: s"])
