@@ -172,3 +172,176 @@ def test_request_id_increments():
     ids = [client._next_request_id() for _ in range(100)]
     assert ids == list(range(1, 101))
     assert len(set(ids)) == 100  # All unique
+
+
+# ============================================================================
+# Tool method tests
+# ============================================================================
+
+
+def _make_initialized_client():
+    """Create a client with session already initialized."""
+    client = KaguraClient(api_key="test", mcp_url="https://test.com/mcp")
+    client._session_id = "pre-set-session"
+    return client
+
+
+@pytest.mark.asyncio
+async def test_remember_with_tags():
+    """remember() should include tags in arguments."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {"memory_id": "abc"}
+        await client.remember(
+            context_id="ctx", summary="s", content="c", tags=["python", "fastapi"]
+        )
+        args = mock.call_args[0][1]
+        assert args["tags"] == ["python", "fastapi"]
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_recall_with_rerank():
+    """recall() should pass use_rerank when True."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {"results": []}
+        await client.recall(context_id="ctx", query="test", use_rerank=True)
+        args = mock.call_args[0][1]
+        assert args["use_rerank"] is True
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_recall_with_filters():
+    """recall() should pass filters dict."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {"results": []}
+        await client.recall(context_id="ctx", query="test", filters={"type": "code"})
+        args = mock.call_args[0][1]
+        assert args["filters"] == {"type": "code"}
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_forget_by_memory_id():
+    """forget() with memory_id should pass it in arguments."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {"deleted": 1}
+        await client.forget(context_id="ctx", memory_id="uuid-123")
+        args = mock.call_args[0][1]
+        assert args["memory_id"] == "uuid-123"
+        assert "query" not in args
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_forget_by_query():
+    """forget() with query should pass query and k in arguments."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {"deleted": 3}
+        await client.forget(context_id="ctx", query="old data", k=5)
+        args = mock.call_args[0][1]
+        assert args["query"] == "old data"
+        assert args["k"] == 5
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_explore_calls_tool():
+    """explore() should assemble correct arguments."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {"memories": []}
+        await client.explore(context_id="ctx", memory_id="seed", depth=3, min_weight=0.1)
+        args = mock.call_args[0][1]
+        assert args["memory_id"] == "seed"
+        assert args["depth"] == 3
+        assert args["min_weight"] == 0.1
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_reference_calls_tool():
+    """reference() should pass context_id and memory_id."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {"summary": "test"}
+        await client.reference(context_id="ctx", memory_id="mem-1")
+        args = mock.call_args[0][1]
+        assert args["context_id"] == "ctx"
+        assert args["memory_id"] == "mem-1"
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_call_tool_invalid_json():
+    """_call_tool should raise KaguraConnectionError on invalid JSON response."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_make_jsonrpc_request", new_callable=AsyncMock) as mock:
+        mock.return_value = {"content": [{"type": "text", "text": "not json{"}]}
+
+        with pytest.raises(KaguraConnectionError, match="Invalid response"):
+            await client._call_tool("remember", {})
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_jsonrpc_mcp_error():
+    """_make_jsonrpc_request should raise on MCP error in response."""
+    client = _make_initialized_client()
+
+    mock_response = MagicMock()
+    mock_response.json.return_value = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "error": {"message": "Tool not found"},
+    }
+    mock_response.raise_for_status = MagicMock()
+    mock_response.headers = {"mcp-session-id": "test-session"}
+
+    with patch.object(client._client, "post", new_callable=AsyncMock) as mock_post:
+        mock_post.return_value = mock_response
+
+        with pytest.raises(KaguraConnectionError, match="MCP error"):
+            await client._make_jsonrpc_request("tools/call", {"name": "bad"})
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_session_already_initialized():
+    """_initialize_session should skip if session already set."""
+    client = _make_initialized_client()
+
+    with patch.object(client._client, "post", new_callable=AsyncMock) as mock_post:
+        await client._initialize_session()
+        mock_post.assert_not_called()
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_context_manager():
+    """async with should return client and close on exit."""
+    async with KaguraClient(api_key="test", mcp_url="https://test.com/mcp") as client:
+        assert isinstance(client, KaguraClient)
