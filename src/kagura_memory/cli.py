@@ -281,9 +281,7 @@ def _get_resource_client() -> tuple[dict[str, Any], ResourceClient]:
     """Load config and create ResourceClient."""
     config = load_config()
     if not config.get("api_key"):
-        raise click.ClickException(
-            "No API key found. Set KAGURA_API_KEY or create .kagura.json"
-        )
+        raise click.ClickException("No API key found. Set KAGURA_API_KEY or create .kagura.json")
     client = ResourceClient.from_mcp_url(
         api_key=config.get("api_key", ""),
         mcp_url=config.get("mcp_url", "https://memory.kagura-ai.com/mcp"),

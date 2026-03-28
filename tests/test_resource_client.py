@@ -60,9 +60,7 @@ def test_api_key_not_on_instance():
 
 def test_from_mcp_url_strips_mcp_suffix():
     """from_mcp_url should strip /mcp suffix."""
-    client = ResourceClient.from_mcp_url(
-        api_key="test", mcp_url="https://memory.kagura-ai.com/mcp"
-    )
+    client = ResourceClient.from_mcp_url(api_key="test", mcp_url="https://memory.kagura-ai.com/mcp")
     assert client.base_url == "https://memory.kagura-ai.com"
 
 
@@ -76,17 +74,13 @@ def test_from_mcp_url_strips_trailing_slash():
 
 def test_from_mcp_url_no_mcp_suffix():
     """from_mcp_url should work even without /mcp suffix."""
-    client = ResourceClient.from_mcp_url(
-        api_key="test", mcp_url="https://custom.server.com"
-    )
+    client = ResourceClient.from_mcp_url(api_key="test", mcp_url="https://custom.server.com")
     assert client.base_url == "https://custom.server.com"
 
 
 def test_from_mcp_url_localhost():
     """from_mcp_url should allow localhost."""
-    client = ResourceClient.from_mcp_url(
-        api_key="test", mcp_url="http://localhost:8080/mcp"
-    )
+    client = ResourceClient.from_mcp_url(api_key="test", mcp_url="http://localhost:8080/mcp")
     assert client.base_url == "http://localhost:8080"
 
 

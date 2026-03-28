@@ -230,9 +230,7 @@ class ResourceClient:
         if quota_events_per_hour is not None:
             body["quota_events_per_hour"] = quota_events_per_hour
 
-        response = await self._request(
-            "PATCH", f"/api/v1/resource-tokens/{token_id}", json=body
-        )
+        response = await self._request("PATCH", f"/api/v1/resource-tokens/{token_id}", json=body)
         return ResourceTokenResponse.model_validate(response.json())
 
     async def revoke_token(self, token_id: int) -> None:
