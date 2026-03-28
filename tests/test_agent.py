@@ -137,7 +137,7 @@ async def test_analyze_session_with_enhanced_context():
         assert mock_llm.called
         call_args = mock_llm.call_args
         user_content = call_args[0][0][1]["content"]
-        assert "Available Kagura Memory Tools:" in user_content
+        assert "<available_tools>" in user_content
 
     await agent.close()
 
