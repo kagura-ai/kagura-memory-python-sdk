@@ -237,6 +237,27 @@ uv run pyright src/              # Type check
 uv run pytest tests/ -v          # Test
 ```
 
+### Development with Claude Code
+
+This project is developed with [Claude Code](https://claude.com/claude-code). Slash commands are available for the full development workflow:
+
+```
+/workflow        # Check current state and next step
+/quality         # Run all quality checks (lint, format, type check, tests)
+/simplify        # Review changed code for reuse, quality, and efficiency
+/self-review     # Pre-PR self-review with severity ratings
+/release <level> # Bump version, tag, push, create GitHub Release
+/kagura-guide    # SDK usage reference (clients, models, CLI)
+```
+
+**Typical flow:**
+
+1. `gh issue view <N>` — understand the task
+2. `git checkout -b <N>-<type>/<desc> main` — create branch
+3. Implement changes
+4. `/quality` → `/simplify` → `/self-review` — validate
+5. Create PR → merge → `/release patch|minor|major`
+
 ## Links
 
 - [Kagura Memory Cloud](https://github.com/kagura-ai/memory-cloud)
