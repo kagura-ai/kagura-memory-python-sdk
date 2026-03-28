@@ -224,7 +224,7 @@ class KaguraAgent:
 
                 return data, response
 
-            except litellm.RateLimitError as e:
+            except litellm.RateLimitError as e:  # pyright: ignore[reportPrivateImportUsage]
                 if attempt == self.max_retries - 1:
                     raise KaguraRateLimitError(
                         f"Rate limit exceeded after {self.max_retries} retries"
@@ -234,13 +234,13 @@ class KaguraAgent:
                     self.logger.warning(f"Rate limited, retrying in {wait_time}s...")
                 await asyncio.sleep(wait_time)
 
-            except litellm.AuthenticationError as e:
+            except litellm.AuthenticationError as e:  # pyright: ignore[reportPrivateImportUsage]
                 raise KaguraLLMError(f"LLM authentication failed: {e}") from e
 
             except json.JSONDecodeError as e:
                 raise KaguraLLMError(f"Invalid JSON response from LLM: {e}") from e
 
-            except litellm.APIError as e:
+            except litellm.APIError as e:  # pyright: ignore[reportPrivateImportUsage]
                 if attempt == self.max_retries - 1:
                     raise KaguraLLMError(
                         f"LLM call failed after {self.max_retries} retries: {e}"
