@@ -112,6 +112,63 @@ kagura contexts
 kagura config show
 ```
 
+### Resource Tokens (External Data Ingestion)
+
+Resource Tokens allow external systems to push data into Kagura Memory Cloud, making it searchable by AI assistants.
+
+```python
+from kagura_memory import ResourceClient, ResourceEventRequest
+
+# Create client (derives REST URL from MCP URL)
+client = ResourceClient.from_mcp_url(api_key="kagura_your_api_key")
+
+async with client:
+    # Create a resource token (scoped to a resource ID)
+    token = await client.create_token(
+        resource_id="products",
+        description="Product catalog sync",
+        quota_events_per_hour=1000,
+    )
+    print(f"Save this token: {token.token}")  # Shown only once!
+
+    # Ingest an event using the resource token
+    event = ResourceEventRequest(
+        op="upsert",
+        doc_id="SKU-001",
+        version=1,
+        payload={"name": "Wireless Headphones", "price": 79.99},
+    )
+    result = await client.ingest_event("products", token.token, event)
+
+    # Batch ingest (up to 100 events)
+    events = [
+        ResourceEventRequest(op="upsert", doc_id=f"SKU-{i}", version=1, payload={"name": f"Product {i}"})
+        for i in range(10)
+    ]
+    batch_result = await client.ingest_events("products", token.token, events)
+    print(f"Created: {batch_result.created_count}, Failed: {batch_result.failed_count}")
+
+    # List and manage tokens
+    tokens = await client.list_tokens(resource_id="products")
+    await client.update_token(token.id, quota_events_per_hour=2000)
+    await client.revoke_token(token.id)
+```
+
+#### Resource Token CLI
+
+```bash
+# Token management
+kagura resource tokens list
+kagura resource tokens create -r products -d "Product sync" -q 5000
+kagura resource tokens update 42 -q 2000
+kagura resource tokens revoke 42
+
+# Event ingestion
+kagura resource ingest -r products -k RESOURCE_TOKEN --doc-id SKU-001 -p '{"name":"Widget","price":9.99}'
+kagura resource ingest -r products -k RESOURCE_TOKEN --doc-id SKU-999 --op delete
+kagura resource ingest-batch -r products -k RESOURCE_TOKEN -f events.json
+```
+
 ### Claude Code Integration
 
 You can use Kagura Memory as an MCP server in Claude Code. Copy `.mcp.json.example` to `.mcp.json` and fill in your credentials:
