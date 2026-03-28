@@ -251,9 +251,7 @@ def forget(context_id, memory_id, query, k):
         raise click.ClickException("Either --memory-id or --query is required")
 
     _run_client_command(
-        lambda client, ctx: client.forget(
-            context_id=ctx, memory_id=memory_id, query=query, k=k
-        ),
+        lambda client, ctx: client.forget(context_id=ctx, memory_id=memory_id, query=query, k=k),
         context_id,
     )
 
