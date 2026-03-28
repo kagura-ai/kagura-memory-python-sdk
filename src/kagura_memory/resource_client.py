@@ -72,14 +72,17 @@ class ResourceClient:
     ) -> ResourceClient:
         """Create ResourceClient by deriving base URL from MCP URL.
 
-        Strips ``/mcp`` suffix to get the REST API base URL.
+        Strips ``/mcp`` and everything after it to get the REST API base URL.
+        Handles both ``/mcp`` and ``/mcp/w/{workspace_id}`` formats.
 
         Args:
             api_key: Kagura API key.
             mcp_url: MCP server URL (e.g. ``https://memory.kagura-ai.com/mcp``).
             timeout: Request timeout in seconds.
         """
-        base_url = mcp_url.rstrip("/").removesuffix("/mcp")
+        url = mcp_url.rstrip("/")
+        mcp_idx = url.find("/mcp")
+        base_url = url[:mcp_idx] if mcp_idx != -1 else url
         return cls(api_key=api_key, base_url=base_url, timeout=timeout)
 
     async def _request(

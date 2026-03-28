@@ -84,6 +84,15 @@ def test_from_mcp_url_localhost():
     assert client.base_url == "http://localhost:8080"
 
 
+def test_from_mcp_url_with_workspace_id():
+    """from_mcp_url should strip /mcp/w/{workspace_id} path."""
+    client = ResourceClient.from_mcp_url(
+        api_key="test",
+        mcp_url="http://localhost:8080/mcp/w/81dfe87f-29db-4569-b9a0-3cd308827e1e",
+    )
+    assert client.base_url == "http://localhost:8080"
+
+
 # ============================================================================
 # Token CRUD
 # ============================================================================
