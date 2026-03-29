@@ -301,6 +301,18 @@ async def test_ollama_model_detection():
 
 
 @pytest.mark.asyncio
+async def test_ollama_base_url_configurable():
+    """Agent should accept custom ollama_base_url."""
+    agent = KaguraAgent(
+        api_key="test",
+        model="ollama/qwen3:30b",
+        ollama_base_url="http://gpu-server:11434",
+    )
+    assert agent._ollama_base_url == "http://gpu-server:11434"
+    await agent.close()
+
+
+@pytest.mark.asyncio
 async def test_call_ollama_success():
     """_call_ollama should parse JSON from Ollama API response."""
     agent = KaguraAgent(api_key="test", model="ollama/qwen3:30b")
@@ -315,17 +327,14 @@ async def test_call_ollama_success():
         "eval_count": 50,
     }
 
-    with patch("kagura_memory.agent.httpx.AsyncClient") as mock_cls:
-        mock_client = AsyncMock()
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = ollama_response
-        mock_resp.raise_for_status = MagicMock()
-        mock_client.post.return_value = mock_resp
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=None)
-        mock_cls.return_value = mock_client
+    mock_client = AsyncMock()
+    mock_resp = MagicMock()
+    mock_resp.json.return_value = ollama_response
+    mock_resp.raise_for_status = MagicMock()
+    mock_client.post.return_value = mock_resp
+    agent._ollama_client = mock_client
 
-        data, resp = await agent._call_llm([{"role": "user", "content": "test"}])
+    data, resp = await agent._call_llm([{"role": "user", "content": "test"}])
 
     assert data["should_remember"] is True
     assert resp == ollama_response
@@ -358,15 +367,12 @@ async def test_call_ollama_connection_error():
 
     agent = KaguraAgent(api_key="test", model="ollama/qwen3:30b")
 
-    with patch("kagura_memory.agent.httpx.AsyncClient") as mock_cls:
-        mock_client = AsyncMock()
-        mock_client.post.side_effect = httpx.ConnectError("Connection refused")
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=None)
-        mock_cls.return_value = mock_client
+    mock_client = AsyncMock()
+    mock_client.post.side_effect = httpx.ConnectError("Connection refused")
+    agent._ollama_client = mock_client
 
-        with pytest.raises(KaguraLLMError, match="Ollama connection failed"):
-            await agent._call_llm([{"role": "user", "content": "test"}])
+    with pytest.raises(KaguraLLMError, match="Ollama connection failed"):
+        await agent._call_llm([{"role": "user", "content": "test"}])
 
     await agent.close()
 

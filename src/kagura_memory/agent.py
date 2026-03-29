@@ -44,6 +44,7 @@ class KaguraAgent:
         timeout: float = 30.0,
         max_retries: int = 3,
         llm_api_key: str | None = None,
+        ollama_base_url: str = "http://localhost:11434",
     ):
         """
         Initialize Kagura Agent.
@@ -56,13 +57,15 @@ class KaguraAgent:
             timeout: Request timeout in seconds
             max_retries: Maximum LLM retry attempts
             llm_api_key: LLM provider API key (passed explicitly, not via env var)
+            ollama_base_url: Ollama API base URL (only used with ollama/ models)
         """
         self.model = model
         self.context_id = context_id
         self.max_retries = max_retries
         self._llm_api_key = llm_api_key
         self._is_ollama = model.startswith("ollama/")
-        self._ollama_base_url = "http://localhost:11434"
+        self._ollama_base_url = ollama_base_url
+        self._ollama_client: httpx.AsyncClient | None = None
         self.client = KaguraClient(api_key, mcp_url, timeout)
         self.logger: VerboseLogger | None = None
 
@@ -344,8 +347,16 @@ class KaguraAgent:
 
                 return data, response
 
-            except (KaguraLLMError, KaguraRateLimitError):
+            except KaguraLLMError:
                 raise
+
+            except KaguraRateLimitError:
+                if attempt == self.max_retries - 1:
+                    raise
+                wait_time = 2**attempt
+                if self.logger:
+                    self.logger.warning(f"Rate limited, retrying in {wait_time}s...")
+                await asyncio.sleep(wait_time)
 
             except json.JSONDecodeError as e:
                 raise KaguraLLMError(f"Invalid JSON response from LLM: {e}") from e
@@ -384,31 +395,37 @@ class KaguraAgent:
         data = json.loads(content or "{}")
         return data, response
 
+    def _get_ollama_client(self) -> httpx.AsyncClient:
+        """Get or create persistent Ollama HTTP client."""
+        if self._ollama_client is None:
+            self._ollama_client = httpx.AsyncClient(timeout=120.0)
+        return self._ollama_client
+
     async def _call_ollama(self, messages: list[dict], temperature: float) -> tuple[dict, Any]:
         """Call LLM via Ollama API directly (local models with thinking support)."""
         model_name = self.model.removeprefix("ollama/")
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            try:
-                resp = await client.post(
-                    f"{self._ollama_base_url}/api/chat",
-                    json={
-                        "model": model_name,
-                        "messages": messages,
-                        "format": "json",
-                        "stream": False,
-                        "options": {"temperature": temperature},
-                    },
-                )
-                resp.raise_for_status()
-            except httpx.HTTPStatusError as e:
-                raise KaguraLLMError(f"Ollama API error: HTTP {e.response.status_code}") from e
-            except httpx.RequestError as e:
-                raise KaguraLLMError(f"Ollama connection failed: {e}") from e
+        client = self._get_ollama_client()
+        try:
+            resp = await client.post(
+                f"{self._ollama_base_url}/api/chat",
+                json={
+                    "model": model_name,
+                    "messages": messages,
+                    "format": "json",
+                    "stream": False,
+                    "options": {"temperature": temperature},
+                },
+            )
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            raise KaguraLLMError(f"Ollama API error: HTTP {e.response.status_code}") from e
+        except httpx.RequestError as e:
+            raise KaguraLLMError(f"Ollama connection failed: {e}") from e
 
-            body = resp.json()
-            content = body.get("message", {}).get("content", "")
-            data = json.loads(content or "{}")
-            return data, body
+        body = resp.json()
+        content = body.get("message", {}).get("content", "")
+        data = json.loads(content or "{}")
+        return data, body
 
     async def _analyze_session(
         self, session: Session, use_enhanced_context: bool = True
@@ -766,7 +783,10 @@ class KaguraAgent:
         return result
 
     async def close(self):
-        """Close underlying client."""
+        """Close underlying client and Ollama HTTP client."""
+        if self._ollama_client:
+            await self._ollama_client.aclose()
+            self._ollama_client = None
         await self.client.close()
 
     async def __aenter__(self):
