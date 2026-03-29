@@ -328,6 +328,70 @@ class KaguraClient:
             arguments["k"] = k
         return await self._call_tool("forget", arguments)
 
+    async def create_context(
+        self,
+        name: str,
+        display_name: str | None = None,
+        description: str | None = None,
+        summary: str | None = None,
+        usage_guide: str | None = None,
+        is_private: bool = True,
+    ) -> dict[str, Any]:
+        """Create a new context in the current workspace.
+
+        Args:
+            name: Context name (lowercase alphanumeric + hyphen/underscore).
+            display_name: Human-readable display name.
+            description: Context description.
+            summary: LLM-oriented summary (200-500 chars).
+            usage_guide: LLM-oriented memory usage guidelines.
+            is_private: Privacy flag (default: True).
+
+        Returns:
+            Created context dict with id, name, and metadata.
+        """
+        arguments: dict[str, Any] = {"name": name, "is_private": is_private}
+        if display_name is not None:
+            arguments["display_name"] = display_name
+        if description is not None:
+            arguments["description"] = description
+        if summary is not None:
+            arguments["summary"] = summary
+        if usage_guide is not None:
+            arguments["usage_guide"] = usage_guide
+        return await self._call_tool("create_context", arguments)
+
+    async def update_context(
+        self,
+        context_id: str,
+        display_name: str | None = None,
+        description: str | None = None,
+        summary: str | None = None,
+        usage_guide: str | None = None,
+    ) -> dict[str, Any]:
+        """Update an existing context's settings.
+
+        Args:
+            context_id: Context UUID to update.
+            display_name: Updated human-readable display name.
+            description: Updated context description.
+            summary: Updated LLM-oriented summary (max 500 chars).
+            usage_guide: Updated LLM-oriented usage guidelines (max 2000 chars).
+
+        Returns:
+            Updated context dict.
+        """
+        arguments: dict[str, Any] = {"context_id": context_id}
+        if display_name is not None:
+            arguments["display_name"] = display_name
+        if description is not None:
+            arguments["description"] = description
+        if summary is not None:
+            arguments["summary"] = summary
+        if usage_guide is not None:
+            arguments["usage_guide"] = usage_guide
+        return await self._call_tool("update_context", arguments)
+
     async def close(self) -> None:
         """Close the HTTP client."""
         await self._client.aclose()
