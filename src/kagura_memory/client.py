@@ -424,9 +424,9 @@ class KaguraClient:
 
         Args:
             context_id: Context UUID.
-            semantic_weight: Semantic search weight (0.0-1.0, default 0.6).
-            bm25_weight: BM25 keyword search weight (0.0-1.0, default 0.4).
-            fetch_factor: Candidate fetch multiplier (1-10, default 3).
+            semantic_weight: Semantic search weight (0.0-1.0, server default 0.6).
+            bm25_weight: BM25 keyword search weight (0.0-1.0, server default 0.4).
+            fetch_factor: Candidate fetch multiplier (1-10, server default 3).
             use_rerank: Enable AI reranking.
             reranker_provider: Reranker provider ("voyage" or "cohere").
             reranker_model: Reranker model name.

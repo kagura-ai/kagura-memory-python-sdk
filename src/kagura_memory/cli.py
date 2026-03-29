@@ -344,11 +344,11 @@ def context_update(context_id, display_name, description, summary, usage_guide):
 
 @context.command(name="search-config")
 @click.argument("context_id")
-@click.option("--semantic", type=float, help="Semantic weight (0.0-1.0)")
-@click.option("--bm25", type=float, help="BM25 weight (0.0-1.0)")
-@click.option("--fetch-factor", type=int, help="Fetch multiplier (1-10)")
+@click.option("--semantic", type=click.FloatRange(0.0, 1.0), help="Semantic weight (0.0-1.0)")
+@click.option("--bm25", type=click.FloatRange(0.0, 1.0), help="BM25 weight (0.0-1.0)")
+@click.option("--fetch-factor", type=click.IntRange(1, 10), help="Fetch multiplier (1-10)")
 @click.option("--rerank/--no-rerank", default=None, help="Enable/disable reranking")
-@click.option("--reranker", help="Reranker provider (voyage or cohere)")
+@click.option("--reranker", type=click.Choice(["voyage", "cohere"]), help="Reranker provider")
 @click.option("--reranker-model", help="Reranker model name")
 def context_search_config(
     context_id, semantic, bm25, fetch_factor, rerank, reranker, reranker_model
@@ -364,6 +364,11 @@ def context_search_config(
     """
     if all(v is None for v in (semantic, bm25, fetch_factor, rerank, reranker, reranker_model)):
         raise click.ClickException("At least one option is required")
+
+    if semantic is not None and bm25 is not None and abs(semantic + bm25 - 1.0) > 0.01:
+        raise click.ClickException(
+            f"Weights must sum to 1.0 (got {semantic} + {bm25} = {semantic + bm25})"
+        )
 
     _run_client_command(
         lambda client, _: client.update_search_config(
