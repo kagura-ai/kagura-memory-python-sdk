@@ -2,7 +2,10 @@
 
 ## Overview
 
-Python SDK for Kagura Memory Cloud. Provides `KaguraClient` (low-level MCP client) and `KaguraAgent` (LLM-powered memory management).
+Python SDK for Kagura Memory Cloud. Three clients:
+- `KaguraClient` — MCP client for memory and context operations
+- `KaguraAgent` — LLM-powered session analysis with hooks/skills API
+- `ResourceClient` — REST client for resource token management and data ingestion
 
 ## Development Workflow
 

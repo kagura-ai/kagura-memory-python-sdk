@@ -23,6 +23,13 @@
       "Bash(gh pr view *)",
       "Bash(gh pr list *)",
       "Bash(gh pr create *)",
+      "Bash(gh pr merge *)",
+      "Bash(gh pr close *)",
+      "Bash(gh pr diff *)",
+      "Bash(gh issue create *)",
+      "Bash(gh issue edit *)",
+      "Bash(gh release *)",
+      "Bash(gh api *)",
       "Bash(git tag *)",
       "Bash(gh workflow run *)",
       "Bash(gh run *)"

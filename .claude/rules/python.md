@@ -27,7 +27,13 @@ paths:
 - Never write secrets to `os.environ`
 - Enforce HTTPS on MCP URLs (allow localhost for dev)
 
+## Hooks & Skills
+- Hooks/skills accept both sync and async callables (`iscoroutine` check)
+- Hook failures must not crash the caller — catch and log as warning
+- Use `getattr(fn, "__name__", repr(fn))` for safe hook name in error messages
+
 ## Testing
 - Use `pytest-asyncio` for async tests
 - Mock `httpx.AsyncClient.post` with `AsyncMock`
 - Test error paths (401, network failure, missing session)
+- Always close agents/clients in tests (use `try/finally` or `async with`)

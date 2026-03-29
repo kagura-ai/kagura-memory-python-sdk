@@ -35,8 +35,10 @@ async with KaguraClient(api_key="kagura_...", mcp_url="https://memory.kagura-ai.
     # Delete (soft, 30-day recovery)
     await client.forget(context_id="dev", memory_id="uuid-here")
 
-    # List contexts
+    # Context management
     contexts = await client.list_contexts()
+    await client.create_context(name="new-ctx", summary="My context")
+    await client.update_context(context_id="uuid", summary="Updated")
 ```
 
 ## KaguraAgent — AI-Powered Analysis
@@ -52,8 +54,34 @@ session = Session(messages=[
 ])
 
 # AI auto-decides what to remember/recall
-result = await agent.process(session, deep=True, verbose=2)
-# result.remembered, result.recalled, result.explored, result.llm_usage
+async with agent:
+    result = await agent.process(session, deep=True, verbose=2)
+    # result.remembered, result.recalled, result.explored, result.llm_usage
+```
+
+### Hooks & Skills
+
+```python
+agent = KaguraAgent(api_key="kagura_...", model="gpt-5.4-nano")
+
+# Hooks — auto-triggered during process()
+@agent.hook("before_process")
+async def on_start(session, context_id):
+    print(f"Processing {context_id}")
+
+@agent.hook("on_remember")
+def on_store(remembered):  # sync callables also work
+    print(f"Stored {len(remembered)} memories")
+
+# Events: before_process, after_process, on_remember, on_recall
+
+# Skills — explicit invocation
+@agent.skill("summarize")
+async def summarize(context_id):
+    return await agent.client.recall(context_id, "summary", k=50)
+
+result = await agent.run_skill(skill_name="summarize", context_id="dev")
+agent.list_skills()  # ["summarize"]
 ```
 
 ## ResourceClient — External Data Ingestion
@@ -93,7 +121,11 @@ kagura recall "search query" -k 10
 kagura explore -m memory-uuid --depth 3
 kagura reference -m memory-uuid
 kagura forget -m memory-uuid
-kagura contexts
+
+# Context management
+kagura context list
+kagura context create -n my-project -s "Project context"
+kagura context update CTX_UUID -s "Updated summary"
 
 # Resource tokens
 kagura resource tokens list
