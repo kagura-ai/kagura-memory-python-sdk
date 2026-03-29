@@ -8,6 +8,7 @@ import pytest
 from kagura_memory import (
     KaguraAuthError,
     KaguraConnectionError,
+    KaguraNotFoundError,
     KaguraQuotaError,
     ResourceClient,
     ResourceEventRequest,
@@ -441,6 +442,27 @@ async def test_get_resource_schema_returns_none_on_404():
 # ============================================================================
 # Error handling
 # ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_not_found_error_on_404():
+    """404 response should raise KaguraNotFoundError."""
+    client = ResourceClient(api_key="test", base_url="https://test.com")
+
+    mock_response = MagicMock()
+    mock_response.status_code = 404
+    mock_response.json.return_value = {"detail": "Resource not found"}
+    mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
+        "404", request=MagicMock(), response=mock_response
+    )
+
+    with patch.object(client._client, "request", new_callable=AsyncMock) as mock_req:
+        mock_req.return_value = mock_response
+
+        with pytest.raises(KaguraNotFoundError, match="Resource not found"):
+            await client.list_tokens()
+
+    await client.close()
 
 
 @pytest.mark.asyncio
