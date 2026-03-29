@@ -19,6 +19,7 @@ from .models import (
     ResourceEventBatchResponse,
     ResourceEventRequest,
     ResourceEventResponse,
+    ResourceImpactResponse,
     ResourceTokenCreate,
     ResourceTokenCreateResponse,
     ResourceTokenResponse,
@@ -289,6 +290,25 @@ class ResourceClient:
             description=description,
             quota_events_per_hour=quota_events_per_hour,
         )
+
+    # -------------------------------------------------------------------
+    # Resource Stats (Bearer auth)
+    # -------------------------------------------------------------------
+
+    async def get_resource_impact(
+        self,
+        resource_id: str,
+    ) -> ResourceImpactResponse:
+        """Get impact statistics for a resource.
+
+        Args:
+            resource_id: Resource identifier.
+
+        Returns:
+            Resource impact stats (token_count, memory_count, schema version).
+        """
+        response = await self._request("GET", f"/api/v1/resources/{resource_id}/impact")
+        return ResourceImpactResponse.model_validate(response.json())
 
     # -------------------------------------------------------------------
     # Event Ingestion (X-Resource-API-Key auth)
