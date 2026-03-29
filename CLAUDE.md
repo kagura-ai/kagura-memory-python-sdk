@@ -29,8 +29,10 @@ uv run pyright src/              # Type check
 - Context management: `create_context`, `update_context` (with `resource_id`, `is_public`)
 - Search tuning: `update_search_config` (semantic/bm25 weights, reranking)
 - Resource ingestion: `setup_resource`, `ingest_event`, `ingest_events`
+- Resource stats/schema: `get_resource_impact`, `get_resource_schema`
 - Agent hooks/skills: `@agent.hook("before_process")`, `@agent.skill("name")`
-- CLI: `kagura resource setup/import`, `kagura context search-config`
+- Ollama support: `model="ollama/qwen3:30b"` for local LLMs
+- CLI: `kagura resource setup/import/stats/schema`, `kagura context search-config`
 
 ## Branch Strategy
 
