@@ -262,8 +262,9 @@ def test_resource_stats(mock_rc_cls, mock_config):
     mock_config.return_value = {"api_key": "key", "mcp_url": "https://test.com/mcp"}
 
     mock_rc = AsyncMock()
+    json_out = '{"token_count": 2, "memory_count": 50}'
     mock_rc.get_resource_impact.return_value = MagicMock(
-        model_dump_json=lambda indent=None: '{"token_count": 2, "memory_count": 50, "current_schema_version": 1}'
+        model_dump_json=lambda indent=None: json_out
     )
     mock_rc.__aenter__ = AsyncMock(return_value=mock_rc)
     mock_rc.__aexit__ = AsyncMock(return_value=None)
