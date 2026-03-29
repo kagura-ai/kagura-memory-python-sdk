@@ -630,7 +630,7 @@ def resource_setup(resource_id, summary, description, quota):
 @click.option("--file", "-f", "input_file", type=click.File("r"), default="-")
 @click.option(
     "--format", "fmt", type=click.Choice(["auto", "csv", "json", "jsonl"]), default="auto"
-)  # noqa: E501
+)
 @click.option("--id-column", help="Column name to use as doc_id (default: row number)")
 @click.option("--version", "-V", type=int, default=1, help="Version for all events")
 def resource_import(resource_id, api_key, input_file, fmt, id_column, version):
@@ -695,7 +695,7 @@ def resource_import(resource_id, api_key, input_file, fmt, id_column, version):
     # Build events
     events = []
     for i, row in enumerate(rows):
-        doc_id = str(row.pop(id_column)) if id_column and id_column in row else str(i + 1)
+        doc_id = str(row[id_column]) if id_column and id_column in row else str(i + 1)
         events.append(
             ResourceEventRequest(
                 op="upsert",
