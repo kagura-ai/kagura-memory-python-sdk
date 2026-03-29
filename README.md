@@ -80,7 +80,12 @@ async with agent:
     print(f"Remembered: {len(result.remembered)}, Recalled: {len(result.recalled)}")
 ```
 
-Supports OpenAI, Claude, Gemini, Ollama via [LiteLLM](https://github.com/BerriAI/litellm).
+Supports OpenAI, Claude, Gemini via [LiteLLM](https://github.com/BerriAI/litellm), and **Ollama** for local models:
+
+```python
+# Local LLM via Ollama (no cloud API key needed)
+agent = KaguraAgent(api_key="kagura_...", model="ollama/qwen3:30b")
+```
 
 ### KaguraClient — Direct Memory Operations
 
