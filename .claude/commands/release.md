@@ -12,7 +12,8 @@ Release the SDK with a version bump.
 
 Before releasing, ensure:
 1. `/quality` has been run and passes
-2. Current branch is `main`
+2. `/self-maint` has been run (no stale .claude/ config)
+3. Current branch is `main`
 
 ## Steps
 
