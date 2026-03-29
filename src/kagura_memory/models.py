@@ -77,7 +77,7 @@ class AnalysisResult(BaseModel):
     memories_to_store: list[MemoryToStore] = Field(default_factory=list)
     should_recall: bool
     recall_queries: list[RecallQuery] = Field(default_factory=list)
-    llm_usage: "LLMUsage | None" = None
+    llm_usage: LLMUsage | None = None
 
 
 class ExploredMemory(BaseModel):

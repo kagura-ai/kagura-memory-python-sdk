@@ -141,8 +141,8 @@ class ResourceClient:
             detail = ""
             try:
                 body = e.response.json()
-                detail = body.get("detail", "")
-            except Exception:
+                detail = body.get("detail", "") if isinstance(body, dict) else ""
+            except (ValueError, UnicodeDecodeError):
                 pass
             msg = f"HTTP {status}"
             if detail:

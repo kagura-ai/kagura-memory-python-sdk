@@ -17,9 +17,10 @@ If no diff, review `git diff HEAD~1`.
 1. **Correctness** — bugs, edge cases, broken logic, unreachable code
 2. **Security** — API key leaks, secrets in logs, unsafe defaults, injection risks
 3. **Error handling** — exceptions swallowed, except blocks that can raise, auth errors not surfacing, hooks/callbacks missing on early-return paths
-4. **Performance** — unnecessary work, N+1 patterns, blocking calls in async context
-5. **Consistency** — patterns used differently across files, naming inconsistencies with existing code
-6. **Resource cleanup** — unclosed clients/connections in all code paths including error paths (use try/finally)
+4. **Test coverage** — every changed/added code path must have a test. Check: new branches, error paths, edge cases. codecov/patch WILL fail if you skip this.
+5. **Performance** — unnecessary work, N+1 patterns, blocking calls in async context
+6. **Consistency** — patterns used differently across files, naming inconsistencies with existing code
+7. **Resource cleanup** — unclosed clients/connections in all code paths including error paths (use try/finally)
 
 ## Rules
 

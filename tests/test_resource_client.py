@@ -393,6 +393,27 @@ async def test_connection_error_on_409():
     await client.close()
 
 
+@pytest.mark.asyncio
+async def test_connection_error_non_json_body():
+    """Non-JSON error response should still raise KaguraConnectionError."""
+    client = ResourceClient(api_key="test", base_url="https://test.com")
+
+    mock_response = MagicMock()
+    mock_response.status_code = 500
+    mock_response.json.side_effect = ValueError("not json")
+    mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
+        "500", request=MagicMock(), response=mock_response
+    )
+
+    with patch.object(client._client, "request", new_callable=AsyncMock) as mock_req:
+        mock_req.return_value = mock_response
+
+        with pytest.raises(KaguraConnectionError, match="HTTP 500"):
+            await client.list_tokens()
+
+    await client.close()
+
+
 # ============================================================================
 # Context manager
 # ============================================================================
