@@ -331,3 +331,15 @@ def test_resource_import_no_format_stdin():
     )
     assert result.exit_code != 0
     assert "Cannot detect format" in result.output
+
+
+def test_resource_import_bad_id_column():
+    """resource import with nonexistent --id-column should error."""
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        ["resource", "import", "-r", "res", "-k", "KEY", "--format", "csv", "--id-column", "nope"],
+        input="name,price\nWidget,9.99",
+    )
+    assert result.exit_code != 0
+    assert "not found" in result.output

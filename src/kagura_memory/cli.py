@@ -692,10 +692,16 @@ def resource_import(resource_id, api_key, input_file, fmt, id_column, version):
     if not rows:
         raise click.ClickException("No data found in input")
 
+    # Validate id_column exists in data
+    if id_column and rows and id_column not in rows[0]:
+        raise click.ClickException(
+            f"Column '{id_column}' not found. Available: {list(rows[0].keys())}"
+        )
+
     # Build events
     events = []
     for i, row in enumerate(rows):
-        doc_id = str(row[id_column]) if id_column and id_column in row else str(i + 1)
+        doc_id = str(row[id_column]) if id_column else str(i + 1)
         events.append(
             ResourceEventRequest(
                 op="upsert",
