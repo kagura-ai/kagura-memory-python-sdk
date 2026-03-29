@@ -64,7 +64,7 @@ class KaguraAgent:
         self.max_retries = max_retries
         self._llm_api_key = llm_api_key
         self._is_ollama = model.startswith("ollama/")
-        self._ollama_base_url = ollama_base_url
+        self._ollama_base_url = ollama_base_url.rstrip("/")
         self._ollama_client: httpx.AsyncClient | None = None
         self.client = KaguraClient(api_key, mcp_url, timeout)
         self.logger: VerboseLogger | None = None
@@ -303,8 +303,10 @@ class KaguraAgent:
             LLMUsage object or None if usage not available
         """
         if self._is_ollama and isinstance(response, dict):
-            prompt_tokens = response.get("prompt_eval_count", 0)
-            completion_tokens = response.get("eval_count", 0)
+            prompt_tokens = response.get("prompt_eval_count", 0) or 0
+            completion_tokens = response.get("eval_count", 0) or 0
+            if prompt_tokens == 0 and completion_tokens == 0:
+                return None
             return LLMUsage(
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
@@ -347,7 +349,7 @@ class KaguraAgent:
 
                 return data, response
 
-            except KaguraLLMError:
+            except KaguraAuthError:
                 raise
 
             except KaguraRateLimitError:
@@ -383,11 +385,9 @@ class KaguraAgent:
         try:
             response = await litellm.acompletion(**kwargs)
         except litellm.RateLimitError as e:  # pyright: ignore[reportPrivateImportUsage]
-            raise KaguraRateLimitError(
-                f"Rate limit exceeded after {self.max_retries} retries"
-            ) from e
+            raise KaguraRateLimitError("Rate limit exceeded") from e
         except litellm.AuthenticationError as e:  # pyright: ignore[reportPrivateImportUsage]
-            raise KaguraLLMError(f"LLM authentication failed: {e}") from e
+            raise KaguraAuthError(f"LLM authentication failed: {e}") from e
         except litellm.APIError as e:  # pyright: ignore[reportPrivateImportUsage]
             raise KaguraLLMError(f"LLM API error: {e}") from e
 
@@ -418,6 +418,8 @@ class KaguraAgent:
             )
             resp.raise_for_status()
         except httpx.HTTPStatusError as e:
+            if e.response.status_code == 429:
+                raise KaguraRateLimitError("Ollama rate limit exceeded") from e
             raise KaguraLLMError(f"Ollama API error: HTTP {e.response.status_code}") from e
         except httpx.RequestError as e:
             raise KaguraLLMError(f"Ollama connection failed: {e}") from e
