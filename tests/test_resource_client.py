@@ -460,9 +460,7 @@ async def test_setup_resource_requires_mcp_url():
 
 def test_from_mcp_url_stores_mcp_url():
     """from_mcp_url should store mcp_url for setup_resource."""
-    client = ResourceClient.from_mcp_url(
-        api_key="test", mcp_url="http://localhost:8080/mcp/w/abc"
-    )
+    client = ResourceClient.from_mcp_url(api_key="test", mcp_url="http://localhost:8080/mcp/w/abc")
     assert client._mcp_url == "http://localhost:8080/mcp/w/abc"
 
 

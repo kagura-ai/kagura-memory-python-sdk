@@ -389,9 +389,7 @@ async def test_update_context_with_resource_id_and_is_public():
 
     with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
         mock.return_value = {"id": "uuid-1", "status": "success"}
-        await client.update_context(
-            context_id="uuid-1", resource_id="res-id", is_public=True
-        )
+        await client.update_context(context_id="uuid-1", resource_id="res-id", is_public=True)
         args = mock.call_args[0][1]
         assert args["resource_id"] == "res-id"
         assert args["is_public"] is True
