@@ -406,3 +406,281 @@ async def test_process_context_required():
         await agent.process(Session(messages=[Message(role="user", content="hi")]))
 
     await agent.close()
+
+
+# ============================================================================
+# Hooks API tests
+# ============================================================================
+
+
+def test_hook_registers_callable():
+    """hook() decorator should append function to _hooks."""
+    agent = KaguraAgent(api_key="test", model="gpt-test")
+
+    @agent.hook("before_response")
+    async def my_hook(session):
+        pass
+
+    assert "before_response" in agent._hooks
+    assert my_hook in agent._hooks["before_response"]
+
+
+def test_hook_invalid_event_raises():
+    """hook() should raise ValueError for unknown events."""
+    agent = KaguraAgent(api_key="test", model="gpt-test")
+
+    with pytest.raises(ValueError, match="Unknown hook event"):
+        agent.hook("not_a_real_event")
+
+
+def test_hook_registers_multiple_for_same_event():
+    """Multiple hooks for the same event should all be registered."""
+    agent = KaguraAgent(api_key="test", model="gpt-test")
+
+    @agent.hook("after_session")
+    async def hook_a(session, result):
+        pass
+
+    @agent.hook("after_session")
+    async def hook_b(session, result):
+        pass
+
+    assert len(agent._hooks["after_session"]) == 2
+
+
+def test_hook_returns_original_function():
+    """hook() decorator should return the original function unchanged."""
+    agent = KaguraAgent(api_key="test", model="gpt-test")
+
+    async def my_hook(session):
+        return "value"
+
+    result = agent.hook("before_response")(my_hook)
+    assert result is my_hook
+
+
+@pytest.mark.asyncio
+async def test_fire_hooks_calls_async_hook():
+    """_fire_hooks should await async hook callables."""
+    agent = KaguraAgent(api_key="test", model="gpt-test")
+    called_with = []
+
+    @agent.hook("before_response")
+    async def capture(session):
+        called_with.append(session)
+
+    session = Session(messages=[Message(role="user", content="hi")])
+    await agent._fire_hooks("before_response", session)
+
+    assert called_with == [session]
+    await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_fire_hooks_calls_sync_hook():
+    """_fire_hooks should support plain (sync) callables as hooks."""
+    agent = KaguraAgent(api_key="test", model="gpt-test")
+    called_with = []
+
+    @agent.hook("before_response")
+    def capture(session):
+        called_with.append(session)
+
+    session = Session(messages=[Message(role="user", content="hi")])
+    await agent._fire_hooks("before_response", session)
+
+    assert called_with == [session]
+    await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_fire_hooks_no_hooks_is_noop():
+    """_fire_hooks should not raise when no hooks are registered."""
+    agent = KaguraAgent(api_key="test", model="gpt-test")
+    # Should complete without error
+    await agent._fire_hooks("before_response", None)
+    await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_process_fires_hooks():
+    """process() should fire before_response, on_recall, on_remember, after_session hooks."""
+    agent = KaguraAgent(api_key="test", model="gpt-test", context_id="ctx")
+
+    fired = []
+
+    @agent.hook("before_response")
+    async def h_before(session):
+        fired.append("before_response")
+
+    @agent.hook("on_recall")
+    async def h_recall(recalled):
+        fired.append("on_recall")
+
+    @agent.hook("on_remember")
+    async def h_remember(remembered):
+        fired.append("on_remember")
+
+    @agent.hook("after_session")
+    async def h_after(session, result):
+        fired.append("after_session")
+
+    with (
+        patch.object(agent, "_analyze_session", new_callable=AsyncMock) as mock_analyze,
+        patch.object(agent, "_execute_recalls", new_callable=AsyncMock) as mock_recalls,
+        patch.object(agent, "_execute_remembers", new_callable=AsyncMock) as mock_remembers,
+    ):
+        from kagura_memory.models import AnalysisResult
+
+        mock_analyze.return_value = AnalysisResult(
+            should_remember=True,
+            memories_to_store=[MemoryToStore(summary="s", content="c")],
+            should_recall=True,
+            recall_queries=[RecallQuery(query="q")],
+        )
+        mock_recalls.return_value = ([], [], [])
+        mock_remembers.return_value = ([], [])
+
+        session = Session(messages=[Message(role="user", content="hello")])
+        await agent.process(session)
+
+    assert fired == ["before_response", "on_recall", "on_remember", "after_session"]
+    await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_process_after_session_receives_result():
+    """after_session hook should receive the correct ProcessResult."""
+    agent = KaguraAgent(api_key="test", model="gpt-test", context_id="ctx")
+    received = []
+
+    @agent.hook("after_session")
+    async def capture(session, result):
+        received.append(result)
+
+    with (
+        patch.object(agent, "_analyze_session", new_callable=AsyncMock) as mock_analyze,
+        patch.object(agent, "_execute_recalls", new_callable=AsyncMock),
+        patch.object(agent, "_execute_remembers", new_callable=AsyncMock),
+    ):
+        from kagura_memory.models import AnalysisResult
+
+        mock_analyze.return_value = AnalysisResult(
+            should_remember=False,
+            should_recall=False,
+        )
+
+        session = Session(messages=[Message(role="user", content="hello")])
+        result = await agent.process(session)
+
+    assert len(received) == 1
+    assert received[0] is result
+    assert received[0].context_used == "ctx"
+    await agent.close()
+
+
+# ============================================================================
+# Skills API tests
+# ============================================================================
+
+
+def test_skill_registers_callable():
+    """skill() decorator should store function in _skills."""
+    agent = KaguraAgent(api_key="test", model="gpt-test")
+
+    @agent.skill("summarize")
+    async def summarize(context_id):
+        return "summary"
+
+    assert "summarize" in agent._skills
+    assert agent._skills["summarize"] is summarize
+
+
+def test_skill_returns_original_function():
+    """skill() decorator should return the original function unchanged."""
+    agent = KaguraAgent(api_key="test", model="gpt-test")
+
+    async def my_skill():
+        pass
+
+    result = agent.skill("my_skill")(my_skill)
+    assert result is my_skill
+
+
+def test_list_skills_empty():
+    """list_skills() should return empty list when no skills registered."""
+    agent = KaguraAgent(api_key="test", model="gpt-test")
+    assert agent.list_skills() == []
+
+
+def test_list_skills_sorted():
+    """list_skills() should return skill names in sorted order."""
+    agent = KaguraAgent(api_key="test", model="gpt-test")
+
+    @agent.skill("zebra")
+    async def z():
+        pass
+
+    @agent.skill("apple")
+    async def a():
+        pass
+
+    @agent.skill("mango")
+    async def m():
+        pass
+
+    assert agent.list_skills() == ["apple", "mango", "zebra"]
+
+
+@pytest.mark.asyncio
+async def test_run_skill_async():
+    """run_skill() should await async skills and return their result."""
+    agent = KaguraAgent(api_key="test", model="gpt-test")
+
+    @agent.skill("greet")
+    async def greet(name):
+        return f"Hello, {name}!"
+
+    result = await agent.run_skill("greet", name="World")
+    assert result == "Hello, World!"
+    await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_run_skill_sync():
+    """run_skill() should support plain (sync) skills."""
+    agent = KaguraAgent(api_key="test", model="gpt-test")
+
+    @agent.skill("double")
+    def double(n):
+        return n * 2
+
+    result = await agent.run_skill("double", n=5)
+    assert result == 10
+    await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_run_skill_not_found():
+    """run_skill() should raise ValueError for unknown skill names."""
+    agent = KaguraAgent(api_key="test", model="gpt-test")
+
+    with pytest.raises(ValueError, match="Skill 'unknown' not found"):
+        await agent.run_skill("unknown")
+
+    await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_run_skill_not_found_lists_available():
+    """run_skill() error message should include available skill names."""
+    agent = KaguraAgent(api_key="test", model="gpt-test")
+
+    @agent.skill("alpha")
+    async def alpha():
+        pass
+
+    with pytest.raises(ValueError, match="alpha"):
+        await agent.run_skill("beta")
+
+    await agent.close()

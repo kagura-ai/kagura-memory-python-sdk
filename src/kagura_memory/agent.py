@@ -3,6 +3,7 @@
 import asyncio
 import json
 import time
+from collections.abc import Callable
 from typing import Any
 
 import litellm
@@ -26,6 +27,10 @@ from .prompts import (
     SYSTEM_PROMPT,
     build_analysis_prompt,
     build_analysis_prompt_with_tools,
+)
+
+_VALID_HOOK_EVENTS: frozenset[str] = frozenset(
+    {"before_response", "after_session", "on_remember", "on_recall"}
 )
 
 
@@ -64,6 +69,11 @@ class KaguraAgent:
         # Generic cache system with individual timestamps (5 minutes TTL)
         self._cache: dict[str, tuple[Any, float]] = {}
         self._cache_ttl: float = 300.0  # 5 minutes
+
+        # Hooks: event name → list of callables
+        self._hooks: dict[str, list[Callable[..., Any]]] = {}
+        # Skills: skill name → callable
+        self._skills: dict[str, Callable[..., Any]] = {}
 
     def _is_cache_expired(self, timestamp: float) -> bool:
         """
@@ -551,6 +561,9 @@ class KaguraAgent:
 
         self.logger.action("Processing session", f"context={ctx}")
 
+        # Fire before_response hook
+        await self._fire_hooks("before_response", session)
+
         # Analyze session with LLM
         try:
             analysis = await self._analyze_session(session)
@@ -573,12 +586,14 @@ class KaguraAgent:
             recalled, explored, recall_actions = await self._execute_recalls(
                 ctx, analysis.recall_queries, deep, recall_k
             )
+            await self._fire_hooks("on_recall", recalled)
 
         remembered, remember_actions = [], []
         if analysis.should_remember:
             remembered, remember_actions = await self._execute_remembers(
                 ctx, analysis.memories_to_store
             )
+            await self._fire_hooks("on_remember", remembered)
 
         actions = recall_actions + remember_actions
 
@@ -587,7 +602,7 @@ class KaguraAgent:
             f"{len(recalled)} recalled, {len(explored)} explored"
         )
 
-        return ProcessResult(
+        result = ProcessResult(
             remembered=remembered,
             recalled=recalled,
             explored=explored,
@@ -595,6 +610,116 @@ class KaguraAgent:
             actions=actions,
             llm_usage=analysis.llm_usage,
         )
+
+        # Fire after_session hook
+        await self._fire_hooks("after_session", session, result)
+
+        return result
+
+    # ------------------------------------------------------------------
+    # Hooks API
+    # ------------------------------------------------------------------
+
+    def hook(self, event: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+        """
+        Register a hook for a lifecycle event.
+
+        Supported events:
+        - ``before_response`` — called before LLM analysis, receives ``(session,)``
+        - ``after_session``   — called after process() completes, receives ``(session, result)``
+        - ``on_remember``     — called after memories are stored, receives ``(remembered,)``
+        - ``on_recall``       — called after memories are retrieved, receives ``(recalled,)``
+
+        Args:
+            event: Lifecycle event name.
+
+        Returns:
+            Decorator that registers the function as a hook.
+
+        Raises:
+            ValueError: If *event* is not a recognised hook event.
+
+        Example::
+
+            @agent.hook("before_response")
+            async def auto_recall(session):
+                return await agent.client.recall(query=session.messages[-1].content)
+        """
+        if event not in _VALID_HOOK_EVENTS:
+            raise ValueError(
+                f"Unknown hook event '{event}'. Valid events: {sorted(_VALID_HOOK_EVENTS)}"
+            )
+
+        def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
+            self._hooks.setdefault(event, []).append(fn)
+            return fn
+
+        return decorator
+
+    async def _fire_hooks(self, event: str, *args: Any, **kwargs: Any) -> None:
+        """
+        Invoke all hooks registered for *event* sequentially.
+
+        Both coroutine functions and plain callables are supported.
+        """
+        for fn in self._hooks.get(event, []):
+            result = fn(*args, **kwargs)
+            if asyncio.iscoroutine(result):
+                await result
+
+    # ------------------------------------------------------------------
+    # Skills API
+    # ------------------------------------------------------------------
+
+    def skill(self, name: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+        """
+        Register a named skill.
+
+        Args:
+            name: Skill name used to invoke it later.
+
+        Returns:
+            Decorator that registers the function as a skill.
+
+        Example::
+
+            @agent.skill("summarize")
+            async def summarize_context(context_id):
+                memories = await agent.client.recall(query="*", context_id=context_id)
+                return memories
+        """
+
+        def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
+            self._skills[name] = fn
+            return fn
+
+        return decorator
+
+    async def run_skill(self, skill_name: str, **kwargs: Any) -> Any:
+        """
+        Invoke a registered skill by name.
+
+        Args:
+            skill_name: Skill name to run.
+            **kwargs: Keyword arguments forwarded to the skill function.
+
+        Returns:
+            Whatever the skill function returns.
+
+        Raises:
+            ValueError: If no skill with *skill_name* is registered.
+        """
+        if skill_name not in self._skills:
+            available = sorted(self._skills)
+            raise ValueError(f"Skill '{skill_name}' not found. Available skills: {available}")
+        result = self._skills[skill_name](**kwargs)
+        if asyncio.iscoroutine(result):
+            return await result
+        return result
+
+    def list_skills(self) -> list[str]:
+        """Return a sorted list of registered skill names."""
+        return sorted(self._skills)
 
     async def close(self):
         """Close underlying client."""
