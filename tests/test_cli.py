@@ -253,3 +253,81 @@ def test_remember_with_empty_tags(mock_client_cls, mock_config):
     # tags should be None (filtered out), not ['', '', '']
     call_kwargs = mock_client.remember.call_args
     assert call_kwargs[1].get("tags") is None or call_kwargs[1].get("tags") == []
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.ResourceClient")
+def test_resource_setup(mock_rc_cls, mock_config):
+    """resource setup should call setup_resource."""
+    mock_config.return_value = {"api_key": "key", "mcp_url": "https://test.com/mcp"}
+
+    mock_rc = AsyncMock()
+    mock_rc.setup_resource.return_value = MagicMock(
+        model_dump_json=lambda indent=None: '{"token": "kagura_resource_abc", "id": 1}'
+    )
+    mock_rc.__aenter__ = AsyncMock(return_value=mock_rc)
+    mock_rc.__aexit__ = AsyncMock(return_value=None)
+    mock_rc_cls.from_mcp_url.return_value = mock_rc
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["resource", "setup", "-r", "products", "-s", "catalog"])
+    assert result.exit_code == 0
+    assert "kagura_resource_abc" in result.output
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.ResourceClient")
+def test_resource_import_csv(mock_rc_cls, mock_config):
+    """resource import should parse CSV and batch ingest."""
+    mock_config.return_value = {"api_key": "key", "mcp_url": "https://test.com/mcp"}
+
+    mock_rc = AsyncMock()
+    mock_rc.ingest_events.return_value = MagicMock(created_count=3, failed_count=0)
+    mock_rc.__aenter__ = AsyncMock(return_value=mock_rc)
+    mock_rc.__aexit__ = AsyncMock(return_value=None)
+    mock_rc_cls.from_mcp_url.return_value = mock_rc
+
+    csv_content = "name,price\nWidget,9.99\nGadget,19.99\nThing,29.99"
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        ["resource", "import", "-r", "products", "-k", "TOKEN", "--format", "csv"],
+        input=csv_content,
+    )
+    assert result.exit_code == 0
+    assert '"created": 3' in result.output
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.ResourceClient")
+def test_resource_import_jsonl(mock_rc_cls, mock_config):
+    """resource import should parse JSONL."""
+    mock_config.return_value = {"api_key": "key", "mcp_url": "https://test.com/mcp"}
+
+    mock_rc = AsyncMock()
+    mock_rc.ingest_events.return_value = MagicMock(created_count=2, failed_count=0)
+    mock_rc.__aenter__ = AsyncMock(return_value=mock_rc)
+    mock_rc.__aexit__ = AsyncMock(return_value=None)
+    mock_rc_cls.from_mcp_url.return_value = mock_rc
+
+    jsonl = '{"name":"A"}\n{"name":"B"}'
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        ["resource", "import", "-r", "res", "-k", "KEY", "--format", "jsonl"],
+        input=jsonl,
+    )
+    assert result.exit_code == 0
+    assert '"created": 2' in result.output
+
+
+def test_resource_import_no_format_stdin():
+    """resource import from stdin without --format should error."""
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        ["resource", "import", "-r", "res", "-k", "KEY"],
+        input="some data",
+    )
+    assert result.exit_code != 0
+    assert "Cannot detect format" in result.output
