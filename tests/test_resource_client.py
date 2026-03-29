@@ -376,6 +376,7 @@ async def test_get_resource_schema():
 
         result = await client.get_resource_schema("products")
 
+        assert result is not None
         assert result.resource_id == "products"
         assert result.schema_version == 2
         assert len(result.field_definitions) == 2
@@ -407,9 +408,32 @@ async def test_get_resource_schema_with_version():
 
         result = await client.get_resource_schema("products", schema_version=1)
 
+        assert result is not None
         assert result.schema_version == 1
         call_kwargs = mock_req.call_args[1]
         assert call_kwargs["params"] == {"schema_version": 1}
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_get_resource_schema_returns_none_on_404():
+    """get_resource_schema should return None when schema is not registered."""
+    client = ResourceClient(api_key="test", base_url="https://test.com")
+
+    mock_response = MagicMock()
+    mock_response.status_code = 404
+    mock_response.json.return_value = {"detail": "Not found"}
+    mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
+        "404", request=MagicMock(), response=mock_response
+    )
+
+    with patch.object(client._client, "request", new_callable=AsyncMock) as mock_req:
+        mock_req.return_value = mock_response
+
+        result = await client.get_resource_schema("no-schema")
+
+        assert result is None
 
     await client.close()
 

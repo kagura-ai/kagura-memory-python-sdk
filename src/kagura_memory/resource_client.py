@@ -315,7 +315,7 @@ class ResourceClient:
         self,
         resource_id: str,
         schema_version: int | None = None,
-    ) -> ResourceSchemaResponse:
+    ) -> ResourceSchemaResponse | None:
         """Get field definitions for a resource.
 
         Args:
@@ -324,14 +324,20 @@ class ResourceClient:
                 Omit for latest version.
 
         Returns:
-            Resource schema with field definitions.
+            Resource schema with field definitions, or None if no schema
+            is registered for the resource.
         """
         params: dict[str, Any] | None = None
         if schema_version is not None:
             params = {"schema_version": schema_version}
-        response = await self._request(
-            "GET", f"/api/v1/resources/{resource_id}/schema", params=params
-        )
+        try:
+            response = await self._request(
+                "GET", f"/api/v1/resources/{resource_id}/schema", params=params
+            )
+        except KaguraConnectionError as e:
+            if "HTTP 404" in str(e):
+                return None
+            raise
         return ResourceSchemaResponse.model_validate(response.json())
 
     # -------------------------------------------------------------------
