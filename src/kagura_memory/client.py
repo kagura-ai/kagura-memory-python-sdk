@@ -373,6 +373,7 @@ class KaguraClient:
         summary: str | None = None,
         usage_guide: str | None = None,
         resource_id: str | None = None,
+        is_public: bool | None = None,
     ) -> dict[str, Any]:
         """Update an existing context's settings.
 
@@ -383,6 +384,7 @@ class KaguraClient:
             summary: Updated LLM-oriented summary (max 500 chars).
             usage_guide: Updated LLM-oriented usage guidelines (max 2000 chars).
             resource_id: Updated resource identifier for external data ingestion.
+            is_public: Updated public visibility (required for resource tokens).
 
         Returns:
             Updated context dict.
@@ -398,6 +400,8 @@ class KaguraClient:
             arguments["usage_guide"] = usage_guide
         if resource_id is not None:
             arguments["resource_id"] = resource_id
+        if is_public is not None:
+            arguments["is_public"] = is_public
         return await self._call_tool("update_context", arguments)
 
     async def close(self) -> None:
