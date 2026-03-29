@@ -290,7 +290,11 @@ class KaguraClient:
             memory_id: Memory ID to retrieve full details for
 
         Returns:
-            API response with complete memory data
+            API response dict. Memory data is in ``result["memory"]``::
+
+                result = await client.reference(ctx, mem_id)
+                memory = result["memory"]
+                print(memory["summary"], memory["content"])
         """
         arguments = {
             "context_id": context_id,
