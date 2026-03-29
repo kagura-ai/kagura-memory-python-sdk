@@ -369,6 +369,37 @@ async def test_create_context():
 
 
 @pytest.mark.asyncio
+async def test_create_context_with_resource_id():
+    """create_context() should pass resource_id when provided."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {"id": "uuid-1", "name": "res-ctx"}
+        await client.create_context(name="res-ctx", resource_id="my-resource")
+        args = mock.call_args[0][1]
+        assert args["resource_id"] == "my-resource"
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_update_context_with_resource_id_and_is_public():
+    """update_context() should pass resource_id and is_public."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {"id": "uuid-1", "status": "success"}
+        await client.update_context(
+            context_id="uuid-1", resource_id="res-id", is_public=True
+        )
+        args = mock.call_args[0][1]
+        assert args["resource_id"] == "res-id"
+        assert args["is_public"] is True
+
+    await client.close()
+
+
+@pytest.mark.asyncio
 async def test_create_context_minimal():
     """create_context() with only name should not send optional fields."""
     client = _make_initialized_client()

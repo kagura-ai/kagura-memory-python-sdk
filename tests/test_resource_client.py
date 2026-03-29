@@ -398,6 +398,79 @@ async def test_connection_error_on_409():
 # ============================================================================
 
 
+# ============================================================================
+# setup_resource
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_setup_resource():
+    """setup_resource() should create context, set resource_id, and create token."""
+    client = ResourceClient.from_mcp_url(api_key="test", mcp_url="http://localhost:8080/mcp")
+
+    token_response = {
+        "id": 1,
+        "resource_id": "my-res",
+        "quota_events_per_hour": 1000,
+        "created_at": "2026-03-29T00:00:00Z",
+        "is_active": True,
+        "status": "active",
+        "token": "kagura_resource_abc",
+    }
+    mock_resp = _mock_response(201, token_response)
+
+    with (
+        patch("kagura_memory.resource_client.KaguraClient") as mock_mcp_cls,
+        patch.object(client._client, "request", new_callable=AsyncMock) as mock_req,
+    ):
+        mock_mcp = AsyncMock()
+        mock_mcp.create_context.return_value = {"context_id": "ctx-1"}
+        mock_mcp.update_context.return_value = {"status": "success"}
+        mock_mcp.__aenter__ = AsyncMock(return_value=mock_mcp)
+        mock_mcp.__aexit__ = AsyncMock(return_value=None)
+        mock_mcp_cls.return_value = mock_mcp
+        mock_req.return_value = mock_resp
+
+        result = await client.setup_resource(
+            resource_id="my-res",
+            summary="Test setup",
+            description="Setup test token",
+        )
+
+        assert result.token == "kagura_resource_abc"
+        mock_mcp.create_context.assert_called_once()
+        create_kwargs = mock_mcp.create_context.call_args[1]
+        assert create_kwargs["name"] == "my-res"
+        assert create_kwargs["is_private"] is False
+        mock_mcp.update_context.assert_called_once()
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_setup_resource_requires_mcp_url():
+    """setup_resource() should raise RuntimeError without from_mcp_url."""
+    client = ResourceClient(api_key="test", base_url="https://test.com")
+
+    with pytest.raises(RuntimeError, match="MCP URL"):
+        await client.setup_resource(resource_id="test")
+
+    await client.close()
+
+
+def test_from_mcp_url_stores_mcp_url():
+    """from_mcp_url should store mcp_url for setup_resource."""
+    client = ResourceClient.from_mcp_url(
+        api_key="test", mcp_url="http://localhost:8080/mcp/w/abc"
+    )
+    assert client._mcp_url == "http://localhost:8080/mcp/w/abc"
+
+
+# ============================================================================
+# Context manager
+# ============================================================================
+
+
 @pytest.mark.asyncio
 async def test_context_manager():
     """async with should work correctly."""
