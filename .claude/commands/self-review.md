@@ -30,6 +30,8 @@ git diff main...HEAD
 - Auth errors (KaguraAuthError) always surface to caller
 - Rate limit detection uses typed exceptions (not string matching)
 - External HTTP calls have timeouts
+- Code inside `except` blocks does not itself raise (e.g., attribute access on unknown types)
+- Hooks/callbacks run on ALL code paths (including early returns and except branches)
 
 ### 4. Coding standards
 - Type hints on all function signatures
@@ -43,6 +45,7 @@ git diff main...HEAD
 ### 6. Testing
 - New code has tests
 - Existing tests pass: `uv run pytest tests/ -v`
+- All resources (clients, agents, connections) are closed in every test path (including error paths — use try/finally)
 
 ## Output format
 
