@@ -462,8 +462,29 @@ async def test_update_search_config():
         assert args["context_id"] == "uuid-1"
         assert args["semantic_weight"] == 0.5
         assert args["bm25_weight"] == 0.5
-        assert args["fetch_factor"] == 5
         assert "use_rerank" not in args
+        assert "reranker_provider" not in args
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_update_search_config_with_rerank():
+    """update_search_config() should pass rerank params."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {"status": "success"}
+        await client.update_search_config(
+            context_id="uuid-1",
+            use_rerank=True,
+            reranker_provider="voyage",
+            reranker_model="rerank-2",
+        )
+        args = mock.call_args[0][1]
+        assert args["use_rerank"] is True
+        assert args["reranker_provider"] == "voyage"
+        assert args["reranker_model"] == "rerank-2"
 
     await client.close()
 
