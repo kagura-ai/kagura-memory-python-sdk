@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""ResourceClient usage — token management and external data ingestion.
+"""ResourceClient usage — setup, token management, and data ingestion.
 
 Usage:
     export KAGURA_API_KEY="kagura_..."
@@ -17,20 +17,20 @@ from kagura_memory import ResourceClient, ResourceEventRequest
 async def main():
     api_key = os.getenv("KAGURA_API_KEY")
     mcp_url = os.getenv("KAGURA_MCP_URL", "http://localhost:8080/mcp")
-    resource_id = os.getenv("KAGURA_RESOURCE_ID", "sdk-test")
 
     if not api_key:
         print("Error: KAGURA_API_KEY required")
         sys.exit(1)
 
     async with ResourceClient.from_mcp_url(api_key=api_key, mcp_url=mcp_url) as client:
-        # Create token
-        token = await client.create_token(
-            resource_id=resource_id,
+        # One-call setup: create public context + set resource_id + create token
+        token = await client.setup_resource(
+            resource_id="example-products",
+            summary="Example product catalog",
             description="Example script token",
             quota_events_per_hour=100,
         )
-        print(f"Token created: {token.token[:30]}...")
+        print(f"Setup complete! Token: {token.token[:30]}...")
 
         # Ingest single event
         event = ResourceEventRequest(
@@ -39,7 +39,7 @@ async def main():
             version=1,
             payload={"name": "Example Product", "price": 1980},
         )
-        result = await client.ingest_event(resource_id, token.token, event)
+        result = await client.ingest_event("example-products", token.token, event)
         print(f"Ingested: event_id={result.event_id}")
 
         # Batch ingest
@@ -52,11 +52,11 @@ async def main():
             )
             for i in range(2, 6)
         ]
-        batch = await client.ingest_events(resource_id, token.token, events)
+        batch = await client.ingest_events("example-products", token.token, events)
         print(f"Batch: {batch.created_count} created, {batch.failed_count} failed")
 
         # List tokens
-        tokens = await client.list_tokens(resource_id=resource_id)
+        tokens = await client.list_tokens(resource_id="example-products")
         print(f"Tokens: {tokens.total}")
 
         # Cleanup
