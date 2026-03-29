@@ -56,6 +56,7 @@ class ResourceClient:
         validate_https_url(stripped_url, label="Base URL")
 
         self.base_url = stripped_url
+        self._mcp_url: str | None = None  # Set by from_mcp_url for setup_resource
         self._client = httpx.AsyncClient(
             timeout=timeout,
             headers={
@@ -84,7 +85,9 @@ class ResourceClient:
         url = mcp_url.rstrip("/")
         mcp_idx = url.find("/mcp")
         base_url = url[:mcp_idx] if mcp_idx != -1 else url
-        return cls(api_key=api_key, base_url=base_url, timeout=timeout)
+        instance = cls(api_key=api_key, base_url=base_url, timeout=timeout)
+        instance._mcp_url = mcp_url.rstrip("/")
+        return instance
 
     async def _request(
         self,
@@ -238,8 +241,6 @@ class ResourceClient:
 
     async def setup_resource(
         self,
-        api_key: str,
-        mcp_url: str,
         resource_id: str,
         context_name: str | None = None,
         summary: str | None = None,
@@ -248,15 +249,10 @@ class ResourceClient:
     ) -> ResourceTokenCreateResponse:
         """Set up a resource for data ingestion in one call.
 
-        Creates a context, sets its resource_id, and creates a resource token.
-        Combines three API calls into one convenience method:
-        1. create_context (MCP)
-        2. update_context with resource_id (MCP)
-        3. create_token (REST API)
+        Creates a public context, sets its resource_id, and creates a
+        resource token. Requires the client to be created via ``from_mcp_url()``.
 
         Args:
-            api_key: Kagura API key (for MCP client).
-            mcp_url: MCP server URL.
             resource_id: Resource identifier for data ingestion.
             context_name: Context name (defaults to resource_id).
             summary: Context summary.
@@ -265,10 +261,23 @@ class ResourceClient:
 
         Returns:
             ResourceTokenCreateResponse with token (shown only once).
+
+        Raises:
+            RuntimeError: If client was not created via ``from_mcp_url()``.
         """
+        if not self._mcp_url:
+            raise RuntimeError(
+                "setup_resource() requires MCP URL. "
+                "Create client via ResourceClient.from_mcp_url()."
+            )
+
+        # Extract API key from httpx Authorization header
+        auth = self._client.headers.get("authorization", "")
+        api_key = auth.removeprefix("Bearer ")
+
         name = context_name or resource_id
 
-        async with KaguraClient(api_key=api_key, mcp_url=mcp_url) as mcp:
+        async with KaguraClient(api_key=api_key, mcp_url=self._mcp_url) as mcp:
             ctx = await mcp.create_context(name=name, summary=summary, is_private=False)
             ctx_id = ctx["context_id"]
             await mcp.update_context(context_id=ctx_id, resource_id=resource_id)
