@@ -257,6 +257,27 @@ def test_remember_with_empty_tags(mock_client_cls, mock_config):
 
 @patch("kagura_memory.cli.load_config")
 @patch("kagura_memory.cli.ResourceClient")
+def test_resource_stats(mock_rc_cls, mock_config):
+    """resource stats should call get_resource_impact."""
+    mock_config.return_value = {"api_key": "key", "mcp_url": "https://test.com/mcp"}
+
+    mock_rc = AsyncMock()
+    mock_rc.get_resource_impact.return_value = MagicMock(
+        model_dump_json=lambda indent=None: '{"token_count": 2, "memory_count": 50, "current_schema_version": 1}'
+    )
+    mock_rc.__aenter__ = AsyncMock(return_value=mock_rc)
+    mock_rc.__aexit__ = AsyncMock(return_value=None)
+    mock_rc_cls.from_mcp_url.return_value = mock_rc
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["resource", "stats", "-r", "products"])
+    assert result.exit_code == 0
+    assert "token_count" in result.output
+    mock_rc.get_resource_impact.assert_called_once_with("products")
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.ResourceClient")
 def test_resource_setup(mock_rc_cls, mock_config):
     """resource setup should call setup_resource."""
     mock_config.return_value = {"api_key": "key", "mcp_url": "https://test.com/mcp"}
