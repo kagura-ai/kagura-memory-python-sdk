@@ -1,6 +1,6 @@
 <p align="center">
   <a href="https://github.com/kagura-ai/memory-cloud">
-    <img src="assets/kagura-logo.svg" alt="Kagura Ai" width="300">
+    <img src="https://raw.githubusercontent.com/kagura-ai/kagura-memory-python-sdk/main/assets/kagura-logo.svg" alt="Kagura Ai" width="300">
   </a>
   <br>
   <strong>Memory SDK</strong> — Python client for <a href="https://github.com/kagura-ai/memory-cloud">Kagura Memory Cloud</a>
