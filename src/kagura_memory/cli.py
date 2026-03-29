@@ -598,5 +598,145 @@ def ingest_batch(resource_id, api_key, file):
     _run_resource_command(op)
 
 
+@resource.command(name="setup")
+@click.option("--resource-id", "-r", required=True, help="Resource identifier")
+@click.option("--summary", "-s", help="Context summary")
+@click.option("--description", "-d", help="Token description")
+@click.option("--quota", "-q", type=click.IntRange(1, 10000), default=1000, help="Events/hour")
+def resource_setup(resource_id, summary, description, quota):
+    """
+    One-shot resource setup: create context + set resource_id + create token.
+
+    Examples:
+      kagura resource setup -r products -s "Product catalog"
+      kagura resource setup -r slack-messages -d "Slack sync" -q 5000
+    """
+
+    async def op(client: ResourceClient) -> str:
+        token = await client.setup_resource(
+            resource_id=resource_id,
+            summary=summary,
+            description=description,
+            quota_events_per_hour=quota,
+        )
+        return token.model_dump_json(indent=2)
+
+    _run_resource_command(op)
+
+
+@resource.command(name="import")
+@click.option("--resource-id", "-r", required=True, help="Resource ID")
+@click.option("--api-key", "-k", required=True, help="Resource API key")
+@click.option("--file", "-f", "input_file", type=click.File("r"), default="-")
+@click.option(
+    "--format", "fmt", type=click.Choice(["auto", "csv", "json", "jsonl"]), default="auto"
+)
+@click.option("--id-column", help="Column name to use as doc_id (default: row number)")
+@click.option("--version", "-V", type=click.IntRange(1), default=1, help="Version (>=1)")
+def resource_import(resource_id, api_key, input_file, fmt, id_column, version):
+    """
+    Import data from CSV, JSON, or JSONL file.
+
+    Auto-detects format from file extension, or specify --format.
+    Each row/object becomes a resource event with op=upsert.
+
+    Examples:
+      kagura resource import -r products -k TOKEN -f products.csv
+      kagura resource import -r products -k TOKEN -f data.jsonl
+      cat items.json | kagura resource import -r products -k TOKEN --format json
+    """
+    import csv
+    from io import StringIO
+
+    # Detect format
+    if fmt == "auto":
+        name = getattr(input_file, "name", "")
+        if name.endswith(".csv"):
+            fmt = "csv"
+        elif name.endswith(".jsonl"):
+            fmt = "jsonl"
+        elif name.endswith(".json"):
+            fmt = "json"
+        else:
+            raise click.ClickException("Cannot detect format. Use --format csv|json|jsonl")
+
+    # Parse input
+    try:
+        raw = input_file.read()
+    except Exception as e:
+        raise click.ClickException(f"Failed to read input: {e}") from e
+
+    rows: list[dict] = []
+    if fmt == "csv":
+        reader = csv.DictReader(StringIO(raw))
+        rows = list(reader)
+    elif fmt == "json":
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as e:
+            raise click.ClickException(f"Invalid JSON: {e}") from e
+        if not isinstance(data, list):
+            raise click.ClickException("JSON must be an array of objects")
+        for i, item in enumerate(data):
+            if not isinstance(item, dict):
+                raise click.ClickException(f"JSON item {i} is not an object: {type(item).__name__}")
+        rows = data
+    elif fmt == "jsonl":
+        for line_num, line in enumerate(raw.splitlines(), 1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError as e:
+                raise click.ClickException(f"Invalid JSONL at line {line_num}: {e}") from e
+            if not isinstance(obj, dict):
+                raise click.ClickException(f"JSONL line {line_num} is not an object")
+            rows.append(obj)
+
+    if not rows:
+        raise click.ClickException("No data found in input")
+
+    # Build events
+    events = []
+    for i, row in enumerate(rows):
+        if id_column:
+            if id_column not in row:
+                raise click.ClickException(
+                    f"Row {i + 1}: column '{id_column}' not found. Keys: {list(row.keys())}"
+                )
+            doc_id = str(row[id_column])
+        else:
+            doc_id = str(i + 1)
+        events.append(
+            ResourceEventRequest(
+                op="upsert",
+                doc_id=doc_id,
+                version=version,
+                payload=row,
+            )
+        )
+
+    click.echo(f"Importing {len(events)} events...")
+
+    # Batch ingest (100 at a time)
+    async def op(client: ResourceClient) -> str:
+        total_created = 0
+        total_failed = 0
+        all_errors: list[dict] = []
+        for start in range(0, len(events), 100):
+            batch = events[start : start + 100]
+            result = await client.ingest_events(resource_id, api_key, batch)
+            total_created += result.created_count
+            total_failed += result.failed_count
+            all_errors.extend(result.errors[:5])  # Keep first 5 errors per batch
+        output: dict = {"created": total_created, "failed": total_failed, "total": len(events)}
+        if all_errors:
+            output["errors"] = all_errors[:10]  # Show first 10 errors total
+        return json.dumps(output, indent=2)
+
+    _run_resource_command(op)
+
+
 if __name__ == "__main__":
     main()

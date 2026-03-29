@@ -355,7 +355,20 @@ class KaguraClient:
 
         Returns:
             Created context dict with id, name, and metadata.
+
+        Raises:
+            KaguraQuotaError: Context limit reached for this workspace.
         """
+        # Pre-check quota
+        contexts = await self.list_contexts()
+        if not contexts.get("can_create", True):
+            from .exceptions import KaguraQuotaError
+
+            raise KaguraQuotaError(
+                f"Context limit reached ({contexts['count']}/{contexts['limit']}). "
+                "Delete unused contexts or upgrade your plan."
+            )
+
         arguments: dict[str, Any] = {"name": name, "is_private": is_private}
         if display_name is not None:
             arguments["display_name"] = display_name

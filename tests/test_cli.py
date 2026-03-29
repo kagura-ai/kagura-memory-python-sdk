@@ -253,3 +253,190 @@ def test_remember_with_empty_tags(mock_client_cls, mock_config):
     # tags should be None (filtered out), not ['', '', '']
     call_kwargs = mock_client.remember.call_args
     assert call_kwargs[1].get("tags") is None or call_kwargs[1].get("tags") == []
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.ResourceClient")
+def test_resource_setup(mock_rc_cls, mock_config):
+    """resource setup should call setup_resource."""
+    mock_config.return_value = {"api_key": "key", "mcp_url": "https://test.com/mcp"}
+
+    mock_rc = AsyncMock()
+    mock_rc.setup_resource.return_value = MagicMock(
+        model_dump_json=lambda indent=None: '{"token": "kagura_resource_abc", "id": 1}'
+    )
+    mock_rc.__aenter__ = AsyncMock(return_value=mock_rc)
+    mock_rc.__aexit__ = AsyncMock(return_value=None)
+    mock_rc_cls.from_mcp_url.return_value = mock_rc
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["resource", "setup", "-r", "products", "-s", "catalog"])
+    assert result.exit_code == 0
+    assert "kagura_resource_abc" in result.output
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.ResourceClient")
+def test_resource_import_csv(mock_rc_cls, mock_config):
+    """resource import should parse CSV and batch ingest."""
+    mock_config.return_value = {"api_key": "key", "mcp_url": "https://test.com/mcp"}
+
+    mock_rc = AsyncMock()
+    mock_rc.ingest_events.return_value = MagicMock(created_count=3, failed_count=0)
+    mock_rc.__aenter__ = AsyncMock(return_value=mock_rc)
+    mock_rc.__aexit__ = AsyncMock(return_value=None)
+    mock_rc_cls.from_mcp_url.return_value = mock_rc
+
+    csv_content = "name,price\nWidget,9.99\nGadget,19.99\nThing,29.99"
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        ["resource", "import", "-r", "products", "-k", "TOKEN", "--format", "csv"],
+        input=csv_content,
+    )
+    assert result.exit_code == 0
+    assert '"created": 3' in result.output
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.ResourceClient")
+def test_resource_import_jsonl(mock_rc_cls, mock_config):
+    """resource import should parse JSONL."""
+    mock_config.return_value = {"api_key": "key", "mcp_url": "https://test.com/mcp"}
+
+    mock_rc = AsyncMock()
+    mock_rc.ingest_events.return_value = MagicMock(created_count=2, failed_count=0)
+    mock_rc.__aenter__ = AsyncMock(return_value=mock_rc)
+    mock_rc.__aexit__ = AsyncMock(return_value=None)
+    mock_rc_cls.from_mcp_url.return_value = mock_rc
+
+    jsonl = '{"name":"A"}\n{"name":"B"}'
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        ["resource", "import", "-r", "res", "-k", "KEY", "--format", "jsonl"],
+        input=jsonl,
+    )
+    assert result.exit_code == 0
+    assert '"created": 2' in result.output
+
+
+def test_resource_import_no_format_stdin():
+    """resource import from stdin without --format should error."""
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        ["resource", "import", "-r", "res", "-k", "KEY"],
+        input="some data",
+    )
+    assert result.exit_code != 0
+    assert "Cannot detect format" in result.output
+
+
+def test_resource_import_bad_id_column():
+    """resource import with nonexistent --id-column should error."""
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        ["resource", "import", "-r", "res", "-k", "KEY", "--format", "csv", "--id-column", "nope"],
+        input="name,price\nWidget,9.99",
+    )
+    assert result.exit_code != 0
+    assert "not found" in result.output
+
+
+def test_resource_import_json_non_object_items():
+    """resource import should reject JSON array with non-object items."""
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        ["resource", "import", "-r", "res", "-k", "KEY", "--format", "json"],
+        input="[1, 2, 3]",
+    )
+    assert result.exit_code != 0
+    assert "not an object" in result.output
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.ResourceClient")
+def test_resource_import_json(mock_rc_cls, mock_config):
+    """resource import should parse JSON array."""
+    mock_config.return_value = {"api_key": "key", "mcp_url": "https://test.com/mcp"}
+
+    mock_rc = AsyncMock()
+    mock_rc.ingest_events.return_value = MagicMock(created_count=2, failed_count=0)
+    mock_rc.__aenter__ = AsyncMock(return_value=mock_rc)
+    mock_rc.__aexit__ = AsyncMock(return_value=None)
+    mock_rc_cls.from_mcp_url.return_value = mock_rc
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        ["resource", "import", "-r", "res", "-k", "KEY", "--format", "json"],
+        input='[{"name":"A"},{"name":"B"}]',
+    )
+    assert result.exit_code == 0
+    assert '"created": 2' in result.output
+
+
+def test_resource_import_invalid_json():
+    """resource import with invalid JSON should error."""
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        ["resource", "import", "-r", "res", "-k", "KEY", "--format", "json"],
+        input="not json",
+    )
+    assert result.exit_code != 0
+    assert "Invalid JSON" in result.output
+
+
+def test_resource_import_json_not_array():
+    """resource import with JSON object (not array) should error."""
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        ["resource", "import", "-r", "res", "-k", "KEY", "--format", "json"],
+        input='{"not": "array"}',
+    )
+    assert result.exit_code != 0
+    assert "must be an array" in result.output
+
+
+def test_resource_import_invalid_jsonl():
+    """resource import with invalid JSONL line should error."""
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        ["resource", "import", "-r", "res", "-k", "KEY", "--format", "jsonl"],
+        input='{"ok":1}\nnot json\n{"ok":2}',
+    )
+    assert result.exit_code != 0
+    assert "Invalid JSONL at line 2" in result.output
+
+
+def test_resource_import_empty_data():
+    """resource import with empty input should error."""
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        ["resource", "import", "-r", "res", "-k", "KEY", "--format", "jsonl"],
+        input="",
+    )
+    assert result.exit_code != 0
+    assert "No data found" in result.output
+
+
+def test_resource_import_auto_detect_csv(tmp_path):
+    """resource import should auto-detect CSV from extension."""
+    csv_file = tmp_path / "test.csv"
+    csv_file.write_text("name\nWidget")
+
+    runner = CliRunner()
+    # Will fail at ResourceClient but format detection should pass
+    result = runner.invoke(
+        main,
+        ["resource", "import", "-r", "res", "-k", "KEY", "-f", str(csv_file)],
+    )
+    # It gets past format detection (would fail at connection)
+    assert "Cannot detect format" not in (result.output or "")
