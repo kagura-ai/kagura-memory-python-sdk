@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
-from kagura_memory import KaguraAuthError, KaguraClient, KaguraConnectionError
+from kagura_memory import KaguraAuthError, KaguraClient, KaguraConnectionError, KaguraQuotaError
 
 # ============================================================================
 # HTTPS enforcement (C-3)
@@ -351,7 +351,10 @@ async def test_create_context():
     client = _make_initialized_client()
 
     with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
-        mock.return_value = {"id": "uuid-1", "name": "new-ctx"}
+        mock.side_effect = [
+            {"status": "success", "contexts": [], "count": 0, "limit": 20, "can_create": True},
+            {"id": "uuid-1", "name": "new-ctx"},
+        ]
         result = await client.create_context(
             name="new-ctx",
             summary="A test context",
@@ -374,10 +377,34 @@ async def test_create_context_with_resource_id():
     client = _make_initialized_client()
 
     with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
-        mock.return_value = {"id": "uuid-1", "name": "res-ctx"}
+        mock.side_effect = [
+            {"status": "success", "contexts": [], "count": 0, "limit": 20, "can_create": True},
+            {"id": "uuid-1", "name": "res-ctx"},
+        ]
         await client.create_context(name="res-ctx", resource_id="my-resource")
-        args = mock.call_args[0][1]
+        # Second call is create_context tool
+        args = mock.call_args_list[1][0][1]
         assert args["resource_id"] == "my-resource"
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_create_context_quota_exceeded():
+    """create_context() should raise KaguraQuotaError when limit reached."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {
+            "status": "success",
+            "contexts": [],
+            "count": 20,
+            "limit": 20,
+            "can_create": False,
+        }
+
+        with pytest.raises(KaguraQuotaError, match="Context limit reached"):
+            await client.create_context(name="over-limit")
 
     await client.close()
 
@@ -403,9 +430,13 @@ async def test_create_context_minimal():
     client = _make_initialized_client()
 
     with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
-        mock.return_value = {"id": "uuid-1", "name": "minimal"}
+        mock.side_effect = [
+            {"status": "success", "contexts": [], "count": 0, "limit": 20, "can_create": True},
+            {"id": "uuid-1", "name": "minimal"},
+        ]
         await client.create_context(name="minimal")
-        args = mock.call_args[0][1]
+        # Second call is create_context tool
+        args = mock.call_args_list[1][0][1]
         assert args["name"] == "minimal"
         assert args["is_private"] is True
         assert "summary" not in args
