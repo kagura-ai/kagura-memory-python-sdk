@@ -345,6 +345,18 @@ def test_resource_import_bad_id_column():
     assert "not found" in result.output
 
 
+def test_resource_import_json_non_object_items():
+    """resource import should reject JSON array with non-object items."""
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        ["resource", "import", "-r", "res", "-k", "KEY", "--format", "json"],
+        input="[1, 2, 3]",
+    )
+    assert result.exit_code != 0
+    assert "not an object" in result.output
+
+
 @patch("kagura_memory.cli.load_config")
 @patch("kagura_memory.cli.ResourceClient")
 def test_resource_import_json(mock_rc_cls, mock_config):
