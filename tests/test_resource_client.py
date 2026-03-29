@@ -466,6 +466,27 @@ async def test_not_found_error_on_404():
 
 
 @pytest.mark.asyncio
+async def test_not_found_error_non_json_body():
+    """404 with non-JSON body should raise KaguraNotFoundError with default message."""
+    client = ResourceClient(api_key="test", base_url="https://test.com")
+
+    mock_response = MagicMock()
+    mock_response.status_code = 404
+    mock_response.json.side_effect = ValueError("not json")
+    mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
+        "404", request=MagicMock(), response=mock_response
+    )
+
+    with patch.object(client._client, "request", new_callable=AsyncMock) as mock_req:
+        mock_req.return_value = mock_response
+
+        with pytest.raises(KaguraNotFoundError, match="Not found"):
+            await client.list_tokens()
+
+    await client.close()
+
+
+@pytest.mark.asyncio
 async def test_auth_error_on_401():
     """401 response should raise KaguraAuthError."""
     client = ResourceClient(api_key="bad", base_url="https://test.com")

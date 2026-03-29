@@ -38,6 +38,7 @@ class ResourceClient:
 
     All methods may raise:
         KaguraAuthError: Authentication failed (401)
+        KaguraNotFoundError: Resource not found (404)
         KaguraConnectionError: Connection or HTTP error
         KaguraQuotaError: Quota exceeded (429)
     """
