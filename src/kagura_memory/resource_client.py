@@ -7,6 +7,7 @@ from typing import Any, Literal
 import httpx
 
 from ._http import SDK_VERSION, validate_https_url
+from .client import KaguraClient
 from .exceptions import (
     KaguraAuthError,
     KaguraConnectionError,
@@ -230,6 +231,53 @@ class ResourceClient:
             token_id: Token database ID.
         """
         await self._request("DELETE", f"/api/v1/resource-tokens/{token_id}")
+
+    # -------------------------------------------------------------------
+    # Setup helper
+    # -------------------------------------------------------------------
+
+    async def setup_resource(
+        self,
+        api_key: str,
+        mcp_url: str,
+        resource_id: str,
+        context_name: str | None = None,
+        summary: str | None = None,
+        description: str | None = None,
+        quota_events_per_hour: int = 1000,
+    ) -> ResourceTokenCreateResponse:
+        """Set up a resource for data ingestion in one call.
+
+        Creates a context, sets its resource_id, and creates a resource token.
+        Combines three API calls into one convenience method:
+        1. create_context (MCP)
+        2. update_context with resource_id (MCP)
+        3. create_token (REST API)
+
+        Args:
+            api_key: Kagura API key (for MCP client).
+            mcp_url: MCP server URL.
+            resource_id: Resource identifier for data ingestion.
+            context_name: Context name (defaults to resource_id).
+            summary: Context summary.
+            description: Token description.
+            quota_events_per_hour: Token quota (1-10000).
+
+        Returns:
+            ResourceTokenCreateResponse with token (shown only once).
+        """
+        name = context_name or resource_id
+
+        async with KaguraClient(api_key=api_key, mcp_url=mcp_url) as mcp:
+            ctx = await mcp.create_context(name=name, summary=summary, is_private=False)
+            ctx_id = ctx["context_id"]
+            await mcp.update_context(context_id=ctx_id, resource_id=resource_id)
+
+        return await self.create_token(
+            resource_id=resource_id,
+            description=description,
+            quota_events_per_hour=quota_events_per_hour,
+        )
 
     # -------------------------------------------------------------------
     # Event Ingestion (X-Resource-API-Key auth)
