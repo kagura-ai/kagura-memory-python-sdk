@@ -162,6 +162,51 @@ def test_context_update_requires_option():
 
 
 @patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_context_search_config(mock_client_cls, mock_config):
+    """context search-config should call update_search_config."""
+    mock_config.return_value = {"api_key": "key", "mcp_url": "https://test.com/mcp"}
+
+    mock_client = AsyncMock()
+    mock_client.update_search_config.return_value = {"status": "success"}
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    mock_client_cls.return_value = mock_client
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main, ["context", "search-config", "uuid-1", "--semantic", "0.5", "--bm25", "0.5"]
+    )
+    assert result.exit_code == 0
+    assert "success" in result.output
+
+
+def test_context_search_config_requires_option():
+    """context search-config should fail without options."""
+    runner = CliRunner()
+    result = runner.invoke(main, ["context", "search-config", "uuid-1"])
+    assert result.exit_code != 0
+    assert "At least one option" in result.output
+
+
+def test_context_search_config_invalid_weight_sum():
+    """context search-config should reject weights that don't sum to 1.0."""
+    runner = CliRunner()
+    result = runner.invoke(
+        main, ["context", "search-config", "uuid-1", "--semantic", "0.5", "--bm25", "0.3"]
+    )
+    assert result.exit_code != 0
+    assert "must sum to 1.0" in result.output
+
+
+def test_context_search_config_invalid_range():
+    """context search-config should reject out-of-range values."""
+    runner = CliRunner()
+    result = runner.invoke(main, ["context", "search-config", "uuid-1", "--semantic", "1.5"])
+    assert result.exit_code != 0
+
+
+@patch("kagura_memory.cli.load_config")
 @patch("kagura_memory.cli.KaguraAgent")
 def test_process_command(mock_agent_cls, mock_config):
     """process command should use async with and return result."""

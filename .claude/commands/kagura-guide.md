@@ -40,6 +40,9 @@ async with KaguraClient(api_key="kagura_...", mcp_url="https://memory.kagura-ai.
     await client.create_context(name="new-ctx", summary="My context")
     await client.update_context(context_id="uuid", summary="Updated")
     await client.update_context(context_id="uuid", resource_id="my-res", is_public=True)
+
+    # Search config (tune hybrid search weights per context)
+    await client.update_search_config(context_id="uuid", semantic_weight=0.5, bm25_weight=0.5)
 ```
 
 ## KaguraAgent — AI-Powered Analysis
@@ -129,6 +132,7 @@ kagura forget -m memory-uuid
 kagura context list
 kagura context create -n my-project -s "Project context"
 kagura context update CTX_UUID -s "Updated summary"
+kagura context search-config CTX_UUID --semantic 0.5 --bm25 0.5
 
 # Resource tokens
 kagura resource tokens list

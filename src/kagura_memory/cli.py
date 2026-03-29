@@ -342,6 +342,49 @@ def context_update(context_id, display_name, description, summary, usage_guide):
     )
 
 
+@context.command(name="search-config")
+@click.argument("context_id")
+@click.option("--semantic", type=click.FloatRange(0.0, 1.0), help="Semantic weight (0.0-1.0)")
+@click.option("--bm25", type=click.FloatRange(0.0, 1.0), help="BM25 weight (0.0-1.0)")
+@click.option("--fetch-factor", type=click.IntRange(1, 10), help="Fetch multiplier (1-10)")
+@click.option("--rerank/--no-rerank", default=None, help="Enable/disable reranking")
+@click.option("--reranker", type=click.Choice(["voyage", "cohere"]), help="Reranker provider")
+@click.option("--reranker-model", help="Reranker model name")
+def context_search_config(
+    context_id, semantic, bm25, fetch_factor, rerank, reranker, reranker_model
+):
+    """
+    Update search configuration for a context.
+
+    Weights must sum to 1.0.
+
+    Examples:
+      kagura context search-config CTX_UUID --semantic 0.5 --bm25 0.5
+      kagura context search-config CTX_UUID --rerank --reranker voyage
+    """
+    if all(v is None for v in (semantic, bm25, fetch_factor, rerank, reranker, reranker_model)):
+        raise click.ClickException("At least one option is required")
+
+    if semantic is not None and bm25 is not None and abs(semantic + bm25 - 1.0) > 0.01:
+        raise click.ClickException(
+            f"Weights must sum to 1.0 (got {semantic} + {bm25} = {semantic + bm25})"
+        )
+
+    _run_client_command(
+        lambda client, _: client.update_search_config(
+            context_id=context_id,
+            semantic_weight=semantic,
+            bm25_weight=bm25,
+            fetch_factor=fetch_factor,
+            use_rerank=rerank,
+            reranker_provider=reranker,
+            reranker_model=reranker_model,
+        ),
+        context_id=None,
+        needs_context=False,
+    )
+
+
 # Keep backward compat: kagura contexts → kagura context list
 @main.command()
 def contexts():
