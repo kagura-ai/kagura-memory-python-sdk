@@ -14,6 +14,7 @@ from .exceptions import (
 from .models import (
     Artifact,
     ExploredMemory,
+    FieldDefinition,
     LLMUsage,
     Memory,
     MemoryInfo,
@@ -27,6 +28,7 @@ from .models import (
     ResourceEventRequest,
     ResourceEventResponse,
     ResourceImpactResponse,
+    ResourceSchemaResponse,
     ResourceTokenCreate,
     ResourceTokenCreateResponse,
     ResourceTokenResponse,
@@ -64,6 +66,8 @@ __all__ = [
     "ResourceEventBatchRequest",
     "ResourceEventBatchResponse",
     "ResourceImpactResponse",
+    "FieldDefinition",
+    "ResourceSchemaResponse",
     # Exceptions
     "KaguraError",
     "KaguraAuthError",

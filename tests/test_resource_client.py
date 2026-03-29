@@ -341,6 +341,80 @@ async def test_get_resource_impact():
 
 
 # ============================================================================
+# Resource Schema
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_get_resource_schema():
+    """get_resource_schema should GET /api/v1/resources/{id}/schema."""
+    client = ResourceClient(api_key="test", base_url="https://test.com")
+
+    response_data = {
+        "resource_id": "products",
+        "schema_version": 2,
+        "field_definitions": [
+            {
+                "name": "product_name",
+                "type": "text",
+                "description": "Product name",
+                "required": True,
+            },
+            {
+                "name": "price",
+                "type": "number",
+                "description": "Price",
+                "unit": "JPY",
+            },
+        ],
+        "created_at": "2026-03-29T10:00:00",
+    }
+    mock_resp = _mock_response(200, response_data)
+
+    with patch.object(client._client, "request", new_callable=AsyncMock) as mock_req:
+        mock_req.return_value = mock_resp
+
+        result = await client.get_resource_schema("products")
+
+        assert result.resource_id == "products"
+        assert result.schema_version == 2
+        assert len(result.field_definitions) == 2
+        assert result.field_definitions[0].name == "product_name"
+        assert result.field_definitions[0].required is True
+        assert result.field_definitions[1].unit == "JPY"
+        call_args = mock_req.call_args
+        assert call_args[0][0] == "GET"
+        assert "/api/v1/resources/products/schema" in call_args[0][1]
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_get_resource_schema_with_version():
+    """get_resource_schema should pass schema_version as query param."""
+    client = ResourceClient(api_key="test", base_url="https://test.com")
+
+    response_data = {
+        "resource_id": "products",
+        "schema_version": 1,
+        "field_definitions": [],
+        "created_at": "2026-03-29T10:00:00",
+    }
+    mock_resp = _mock_response(200, response_data)
+
+    with patch.object(client._client, "request", new_callable=AsyncMock) as mock_req:
+        mock_req.return_value = mock_resp
+
+        result = await client.get_resource_schema("products", schema_version=1)
+
+        assert result.schema_version == 1
+        call_kwargs = mock_req.call_args[1]
+        assert call_kwargs["params"] == {"schema_version": 1}
+
+    await client.close()
+
+
+# ============================================================================
 # Error handling
 # ============================================================================
 

@@ -20,6 +20,7 @@ from .models import (
     ResourceEventRequest,
     ResourceEventResponse,
     ResourceImpactResponse,
+    ResourceSchemaResponse,
     ResourceTokenCreate,
     ResourceTokenCreateResponse,
     ResourceTokenResponse,
@@ -309,6 +310,29 @@ class ResourceClient:
         """
         response = await self._request("GET", f"/api/v1/resources/{resource_id}/impact")
         return ResourceImpactResponse.model_validate(response.json())
+
+    async def get_resource_schema(
+        self,
+        resource_id: str,
+        schema_version: int | None = None,
+    ) -> ResourceSchemaResponse:
+        """Get field definitions for a resource.
+
+        Args:
+            resource_id: Resource identifier.
+            schema_version: Specific schema version to retrieve.
+                Omit for latest version.
+
+        Returns:
+            Resource schema with field definitions.
+        """
+        params: dict[str, Any] | None = None
+        if schema_version is not None:
+            params = {"schema_version": schema_version}
+        response = await self._request(
+            "GET", f"/api/v1/resources/{resource_id}/schema", params=params
+        )
+        return ResourceSchemaResponse.model_validate(response.json())
 
     # -------------------------------------------------------------------
     # Event Ingestion (X-Resource-API-Key auth)
