@@ -52,7 +52,7 @@ Used by the CLI (`kagura` commands) and `load_config()` in Python code:
   "api_key": "kagura_your_api_key",
   "mcp_url": "http://localhost:8080/mcp/w/{workspace_id}",
   "model": "gpt-5.4-nano",
-  "context_id": "dev"
+  "context_id": "auto"
 }
 ```
 

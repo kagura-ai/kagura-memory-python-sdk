@@ -154,7 +154,7 @@ kagura config show
   "api_key": "kagura_...",
   "mcp_url": "https://memory.kagura-ai.com/mcp",
   "model": "gpt-5.4-nano",
-  "context_id": "dev",
+  "context_id": "auto",
   "llm_api_key": "sk-..."
 }
 ```
@@ -169,3 +169,5 @@ Environment variables: `KAGURA_API_KEY`, `KAGURA_MCP_URL`, `KAGURA_MODEL`, `KAGU
 | Let AI analyze a conversation and auto-manage memories | `KaguraAgent` |
 | Push external data (products, Slack, CI/CD) into Kagura | `ResourceClient` |
 | Quick CLI operations | `kagura` CLI |
+
+**New here?** Run `/onboarding` for interactive setup.

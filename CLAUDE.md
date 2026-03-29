@@ -22,7 +22,15 @@ uv run ruff format src/ tests/  # Format
 uv run pyright src/              # Type check
 ```
 
-**Slash commands**: `/quality` → `/simplify` → `/self-review` → PR, `/release patch|minor|major` for releases
+**Slash commands**: `/quality` → `/simplify` → `/self-review` → PR, `/release patch|minor|major` for releases, `/onboarding` for setup, `/kagura-guide` for reference
+
+## Key SDK Features
+
+- Context management: `create_context`, `update_context` (with `resource_id`, `is_public`)
+- Search tuning: `update_search_config` (semantic/bm25 weights, reranking)
+- Resource ingestion: `setup_resource`, `ingest_event`, `ingest_events`
+- Agent hooks/skills: `@agent.hook("before_process")`, `@agent.skill("name")`
+- CLI: `kagura resource setup/import`, `kagura context search-config`
 
 ## Branch Strategy
 
