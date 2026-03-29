@@ -26,6 +26,7 @@ from .models import (
     ResourceEventBatchResponse,
     ResourceEventRequest,
     ResourceEventResponse,
+    ResourceImpactResponse,
     ResourceTokenCreate,
     ResourceTokenCreateResponse,
     ResourceTokenResponse,
@@ -62,6 +63,7 @@ __all__ = [
     "ResourceEventResponse",
     "ResourceEventBatchRequest",
     "ResourceEventBatchResponse",
+    "ResourceImpactResponse",
     # Exceptions
     "KaguraError",
     "KaguraAuthError",

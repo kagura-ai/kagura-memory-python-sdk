@@ -184,3 +184,11 @@ class ResourceEventBatchResponse(BaseModel):
     failed_count: int = 0
     event_ids: list[int] = Field(default_factory=list)
     errors: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class ResourceImpactResponse(BaseModel):
+    """Resource impact statistics per resource_id."""
+
+    token_count: int
+    memory_count: int
+    current_schema_version: int | None = None

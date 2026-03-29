@@ -598,6 +598,23 @@ def ingest_batch(resource_id, api_key, file):
     _run_resource_command(op)
 
 
+@resource.command(name="stats")
+@click.option("--resource-id", "-r", required=True, help="Resource ID")
+def resource_stats(resource_id):
+    """
+    Show resource impact statistics.
+
+    Examples:
+      kagura resource stats -r products
+    """
+
+    async def op(client: ResourceClient) -> str:
+        result = await client.get_resource_impact(resource_id)
+        return result.model_dump_json(indent=2)
+
+    _run_resource_command(op)
+
+
 @resource.command(name="setup")
 @click.option("--resource-id", "-r", required=True, help="Resource identifier")
 @click.option("--summary", "-s", help="Context summary")

@@ -309,6 +309,38 @@ async def test_ingest_events_batch():
 
 
 # ============================================================================
+# Resource Impact / Stats
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_get_resource_impact():
+    """get_resource_impact should GET /api/v1/resources/{id}/impact."""
+    client = ResourceClient(api_key="test", base_url="https://test.com")
+
+    response_data = {
+        "token_count": 3,
+        "memory_count": 150,
+        "current_schema_version": 2,
+    }
+    mock_resp = _mock_response(200, response_data)
+
+    with patch.object(client._client, "request", new_callable=AsyncMock) as mock_req:
+        mock_req.return_value = mock_resp
+
+        result = await client.get_resource_impact("products")
+
+        assert result.token_count == 3
+        assert result.memory_count == 150
+        assert result.current_schema_version == 2
+        call_args = mock_req.call_args
+        assert call_args[0][0] == "GET"
+        assert "/api/v1/resources/products/impact" in call_args[0][1]
+
+    await client.close()
+
+
+# ============================================================================
 # Error handling
 # ============================================================================
 
