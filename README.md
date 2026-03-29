@@ -138,6 +138,7 @@ kagura resource tokens create -r products -d "Product sync"
 kagura resource ingest -r products -k TOKEN --doc-id SKU-001 -V 1 -p '{"name":"Widget"}'
 kagura resource ingest-batch -r products -k TOKEN -f events.json
 kagura resource stats -r products
+kagura resource schema -r products
 
 # Config
 kagura config show
@@ -168,6 +169,7 @@ kagura process -m "今日の学び：FastAPIのDIはDepends()を使う"
 | Resource Token (create/list/update/revoke) | `ResourceClient` | REST API | API Key |
 | Resource Event ingestion | `ResourceClient` | REST API | Resource Token |
 | Resource Impact (stats) | `ResourceClient` | REST API | API Key |
+| Resource Schema | `ResourceClient` | REST API | API Key |
 
 Context deletion is intentionally Web UI only — destructive operations require session authentication and confirmation.
 

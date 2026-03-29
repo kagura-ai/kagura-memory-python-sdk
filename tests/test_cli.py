@@ -279,6 +279,46 @@ def test_resource_stats(mock_rc_cls, mock_config):
 
 @patch("kagura_memory.cli.load_config")
 @patch("kagura_memory.cli.ResourceClient")
+def test_resource_schema(mock_rc_cls, mock_config):
+    """resource schema should call get_resource_schema."""
+    mock_config.return_value = {"api_key": "key", "mcp_url": "https://test.com/mcp"}
+
+    mock_rc = AsyncMock()
+    json_out = '{"resource_id": "products", "schema_version": 1}'
+    mock_rc.get_resource_schema.return_value = MagicMock(
+        model_dump_json=lambda indent=None: json_out
+    )
+    mock_rc.__aenter__ = AsyncMock(return_value=mock_rc)
+    mock_rc.__aexit__ = AsyncMock(return_value=None)
+    mock_rc_cls.from_mcp_url.return_value = mock_rc
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["resource", "schema", "-r", "products"])
+    assert result.exit_code == 0
+    assert "schema_version" in result.output
+    mock_rc.get_resource_schema.assert_called_once_with("products", schema_version=None)
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.ResourceClient")
+def test_resource_schema_not_registered(mock_rc_cls, mock_config):
+    """resource schema should show message when schema is not registered."""
+    mock_config.return_value = {"api_key": "key", "mcp_url": "https://test.com/mcp"}
+
+    mock_rc = AsyncMock()
+    mock_rc.get_resource_schema.return_value = None
+    mock_rc.__aenter__ = AsyncMock(return_value=mock_rc)
+    mock_rc.__aexit__ = AsyncMock(return_value=None)
+    mock_rc_cls.from_mcp_url.return_value = mock_rc
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["resource", "schema", "-r", "no-schema"])
+    assert result.exit_code == 0
+    assert "No schema registered" in result.output
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.ResourceClient")
 def test_resource_setup(mock_rc_cls, mock_config):
     """resource setup should call setup_resource."""
     mock_config.return_value = {"api_key": "key", "mcp_url": "https://test.com/mcp"}

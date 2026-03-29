@@ -192,3 +192,26 @@ class ResourceImpactResponse(BaseModel):
     token_count: int
     memory_count: int
     current_schema_version: int | None = None
+
+
+class FieldDefinition(BaseModel):
+    """Field metadata definition within a resource schema."""
+
+    name: str
+    type: Literal["text", "number", "boolean", "date", "array", "object"]
+    description: str
+    classification: Literal["public", "internal", "pii", "confidential"] = "public"
+    index_hint: str = ""
+    unit: str | None = None
+    enum_values: list[str] | None = None
+    example: str | None = None
+    required: bool = False
+
+
+class ResourceSchemaResponse(BaseModel):
+    """Resource schema with field definitions (schema registry)."""
+
+    resource_id: str
+    schema_version: int
+    field_definitions: list[FieldDefinition]
+    created_at: datetime

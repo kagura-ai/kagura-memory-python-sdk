@@ -615,6 +615,27 @@ def resource_stats(resource_id):
     _run_resource_command(op)
 
 
+@resource.command(name="schema")
+@click.option("--resource-id", "-r", required=True, help="Resource ID")
+@click.option("--version", "-v", "schema_version", type=int, help="Schema version")
+def resource_schema(resource_id, schema_version):
+    """
+    Show resource field definitions (schema).
+
+    Examples:
+      kagura resource schema -r products
+      kagura resource schema -r products -v 2
+    """
+
+    async def op(client: ResourceClient) -> str:
+        result = await client.get_resource_schema(resource_id, schema_version=schema_version)
+        if result is None:
+            return "No schema registered for this resource."
+        return result.model_dump_json(indent=2)
+
+    _run_resource_command(op)
+
+
 @resource.command(name="setup")
 @click.option("--resource-id", "-r", required=True, help="Resource identifier")
 @click.option("--summary", "-s", help="Context summary")
