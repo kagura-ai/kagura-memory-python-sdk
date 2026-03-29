@@ -365,7 +365,9 @@ class KaguraAgent:
                 await asyncio.sleep(2**attempt)
 
             except Exception as e:
-                raise KaguraLLMError(f"Unexpected LLM error: {e}") from e
+                if attempt == self.max_retries - 1:
+                    raise KaguraLLMError(f"Unexpected LLM error: {e}") from e
+                await asyncio.sleep(2**attempt)
 
         raise KaguraLLMError("Max retries exceeded")
 
@@ -522,6 +524,8 @@ class KaguraAgent:
                     if self.logger:
                         self.logger.detail("Explored memories", len(explored))
 
+                except KaguraAuthError:
+                    raise
                 except Exception as e:
                     if self.logger:
                         self.logger.warning(f"Explore failed: {e}")
