@@ -257,14 +257,90 @@ def forget(context_id, memory_id, query, k):
     )
 
 
-@main.command()
-def contexts():
+@main.group()
+def context():
+    """Manage contexts (list, create, update)."""
+    pass
+
+
+@context.command(name="list")
+def context_list():
     """
     List available contexts.
 
     Examples:
-      kagura contexts
+      kagura context list
     """
+    _run_client_command(
+        lambda client, _: client.list_contexts(),
+        context_id=None,
+        needs_context=False,
+    )
+
+
+@context.command(name="create")
+@click.option("--name", "-n", required=True, help="Context name (lowercase, hyphens, underscores)")
+@click.option("--display-name", help="Human-readable display name")
+@click.option("--description", "-d", help="Context description")
+@click.option("--summary", "-s", help="LLM-oriented summary (200-500 chars)")
+@click.option("--usage-guide", help="LLM-oriented usage guidelines")
+@click.option("--public", is_flag=True, default=False, help="Accessible to workspace members")
+def context_create(name, display_name, description, summary, usage_guide, public):
+    """
+    Create a new context.
+
+    Examples:
+      kagura context create -n my-project
+      kagura context create -n dev -d "Development notes" -s "Project dev context"
+    """
+    _run_client_command(
+        lambda client, _: client.create_context(
+            name=name,
+            display_name=display_name,
+            description=description,
+            summary=summary,
+            usage_guide=usage_guide,
+            is_private=not public,
+        ),
+        context_id=None,
+        needs_context=False,
+    )
+
+
+@context.command(name="update")
+@click.argument("context_id")
+@click.option("--display-name", help="Updated display name")
+@click.option("--description", "-d", help="Updated description")
+@click.option("--summary", "-s", help="Updated LLM-oriented summary")
+@click.option("--usage-guide", help="Updated LLM-oriented usage guidelines")
+def context_update(context_id, display_name, description, summary, usage_guide):
+    """
+    Update a context's settings.
+
+    Examples:
+      kagura context update CTX_UUID -s "Updated summary"
+      kagura context update CTX_UUID --usage-guide "Store only code snippets"
+    """
+    if all(v is None for v in (display_name, description, summary, usage_guide)):
+        raise click.ClickException("At least one update option is required")
+
+    _run_client_command(
+        lambda client, _: client.update_context(
+            context_id=context_id,
+            display_name=display_name,
+            description=description,
+            summary=summary,
+            usage_guide=usage_guide,
+        ),
+        context_id=None,
+        needs_context=False,
+    )
+
+
+# Keep backward compat: kagura contexts → kagura context list
+@main.command()
+def contexts():
+    """List available contexts (alias for 'context list')."""
     _run_client_command(
         lambda client, _: client.list_contexts(),
         context_id=None,

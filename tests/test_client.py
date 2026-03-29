@@ -340,6 +340,75 @@ async def test_session_already_initialized():
     await client.close()
 
 
+# ============================================================================
+# Context management
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_create_context():
+    """create_context() should call tool with correct arguments."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {"id": "uuid-1", "name": "new-ctx"}
+        result = await client.create_context(
+            name="new-ctx",
+            summary="A test context",
+            is_private=False,
+        )
+        assert result["name"] == "new-ctx"
+        tool_name = mock.call_args[0][0]
+        args = mock.call_args[0][1]
+        assert tool_name == "create_context"
+        assert args["name"] == "new-ctx"
+        assert args["summary"] == "A test context"
+        assert args["is_private"] is False
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_create_context_minimal():
+    """create_context() with only name should not send optional fields."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {"id": "uuid-1", "name": "minimal"}
+        await client.create_context(name="minimal")
+        args = mock.call_args[0][1]
+        assert args["name"] == "minimal"
+        assert args["is_private"] is True
+        assert "summary" not in args
+        assert "display_name" not in args
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_update_context():
+    """update_context() should call tool with correct arguments."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {"id": "uuid-1", "summary": "updated"}
+        result = await client.update_context(
+            context_id="uuid-1",
+            summary="updated",
+            usage_guide="Store code only",
+        )
+        assert result["summary"] == "updated"
+        tool_name = mock.call_args[0][0]
+        args = mock.call_args[0][1]
+        assert tool_name == "update_context"
+        assert args["context_id"] == "uuid-1"
+        assert args["summary"] == "updated"
+        assert args["usage_guide"] == "Store code only"
+        assert "display_name" not in args
+
+    await client.close()
+
+
 @pytest.mark.asyncio
 async def test_context_manager():
     """async with should return client and close on exit."""
