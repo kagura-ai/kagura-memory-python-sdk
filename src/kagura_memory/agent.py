@@ -3,6 +3,7 @@
 import asyncio
 import json
 import time
+from collections.abc import Callable, Coroutine
 from typing import Any
 
 import litellm
@@ -64,6 +65,122 @@ class KaguraAgent:
         # Generic cache system with individual timestamps (5 minutes TTL)
         self._cache: dict[str, tuple[Any, float]] = {}
         self._cache_ttl: float = 300.0  # 5 minutes
+
+        # Hooks and skills registries
+        self._hooks: dict[str, list[Callable[..., Coroutine[Any, Any, Any]]]] = {}
+        self._skills: dict[str, Callable[..., Coroutine[Any, Any, Any]]] = {}
+
+    # -------------------------------------------------------------------
+    # Hooks & Skills API
+    # -------------------------------------------------------------------
+
+    # Valid hook event names
+    HOOK_EVENTS = frozenset(
+        {
+            "before_process",
+            "after_process",
+            "on_remember",
+            "on_recall",
+        }
+    )
+
+    def hook(
+        self, event: str
+    ) -> Callable[
+        [Callable[..., Coroutine[Any, Any, Any]]],
+        Callable[..., Coroutine[Any, Any, Any]],
+    ]:
+        """Register a hook for an event.
+
+        Args:
+            event: Event name. One of: before_process, after_process,
+                   on_remember, on_recall.
+
+        Returns:
+            Decorator that registers the function as a hook.
+
+        Example::
+
+            @agent.hook("after_process")
+            async def log_result(session, result):
+                print(f"Processed: {len(result.remembered)} memories")
+        """
+        if event not in self.HOOK_EVENTS:
+            raise ValueError(
+                f"Unknown hook event '{event}'. Valid events: {', '.join(sorted(self.HOOK_EVENTS))}"
+            )
+
+        def decorator(
+            fn: Callable[..., Coroutine[Any, Any, Any]],
+        ) -> Callable[..., Coroutine[Any, Any, Any]]:
+            self._hooks.setdefault(event, []).append(fn)
+            return fn
+
+        return decorator
+
+    async def _run_hooks(self, event: str, **kwargs: Any) -> None:
+        """Run all registered hooks for an event."""
+        for fn in self._hooks.get(event, []):
+            try:
+                await fn(**kwargs)
+            except Exception as e:
+                if self.logger:
+                    self.logger.warning(f"Hook '{fn.__name__}' failed: {e}")
+
+    def skill(
+        self, name: str
+    ) -> Callable[
+        [Callable[..., Coroutine[Any, Any, Any]]],
+        Callable[..., Coroutine[Any, Any, Any]],
+    ]:
+        """Register a skill.
+
+        Args:
+            name: Skill name for invocation.
+
+        Returns:
+            Decorator that registers the function as a skill.
+
+        Example::
+
+            @agent.skill("summarize")
+            async def summarize_context(context_id: str):
+                memories = await agent.client.recall(context_id, "summary", k=50)
+                return memories
+        """
+        if name in self._skills:
+            raise ValueError(f"Skill '{name}' is already registered")
+
+        def decorator(
+            fn: Callable[..., Coroutine[Any, Any, Any]],
+        ) -> Callable[..., Coroutine[Any, Any, Any]]:
+            self._skills[name] = fn
+            return fn
+
+        return decorator
+
+    async def run_skill(self, name: str, **kwargs: Any) -> Any:
+        """Run a registered skill by name.
+
+        Args:
+            name: Skill name.
+            **kwargs: Arguments to pass to the skill function.
+
+        Returns:
+            Skill function return value.
+
+        Raises:
+            KeyError: If skill name is not registered.
+        """
+        if name not in self._skills:
+            raise KeyError(
+                f"Skill '{name}' not found. Available: {', '.join(sorted(self._skills)) or 'none'}"
+            )
+        return await self._skills[name](**kwargs)
+
+    def list_skills(self) -> list[str]:
+        """Return names of all registered skills."""
+        return sorted(self._skills)
 
     def _is_cache_expired(self, timestamp: float) -> bool:
         """
@@ -551,6 +668,9 @@ class KaguraAgent:
 
         self.logger.action("Processing session", f"context={ctx}")
 
+        # Run before_process hooks
+        await self._run_hooks("before_process", session=session, context_id=ctx)
+
         # Analyze session with LLM
         try:
             analysis = await self._analyze_session(session)
@@ -573,21 +693,18 @@ class KaguraAgent:
             recalled, explored, recall_actions = await self._execute_recalls(
                 ctx, analysis.recall_queries, deep, recall_k
             )
+            await self._run_hooks("on_recall", recalled=recalled, explored=explored)
 
         remembered, remember_actions = [], []
         if analysis.should_remember:
             remembered, remember_actions = await self._execute_remembers(
                 ctx, analysis.memories_to_store
             )
+            await self._run_hooks("on_remember", remembered=remembered)
 
         actions = recall_actions + remember_actions
 
-        self.logger.success(
-            f"Processing complete: {len(remembered)} remembered, "
-            f"{len(recalled)} recalled, {len(explored)} explored"
-        )
-
-        return ProcessResult(
+        result = ProcessResult(
             remembered=remembered,
             recalled=recalled,
             explored=explored,
@@ -595,6 +712,16 @@ class KaguraAgent:
             actions=actions,
             llm_usage=analysis.llm_usage,
         )
+
+        self.logger.success(
+            f"Processing complete: {len(remembered)} remembered, "
+            f"{len(recalled)} recalled, {len(explored)} explored"
+        )
+
+        # Run after_process hooks
+        await self._run_hooks("after_process", session=session, result=result)
+
+        return result
 
     async def close(self):
         """Close underlying client."""
