@@ -546,7 +546,7 @@ async def test_skill_registration_and_execution():
     async def greet(who: str) -> str:
         return f"Hello {who}"
 
-    result = await agent.run_skill("greet", who="World")
+    result = await agent.run_skill(skill_name="greet", who="World")
     assert result == "Hello World"
     await agent.close()
 
@@ -574,7 +574,7 @@ async def test_run_skill_not_found():
     agent = KaguraAgent(api_key="test", model="gpt-test")
 
     with pytest.raises(KeyError, match="not found"):
-        await agent.run_skill("nonexistent")
+        await agent.run_skill(skill_name="nonexistent")
 
     await agent.close()
 
@@ -596,3 +596,40 @@ async def test_skill_duplicate_name():
                 pass
     finally:
         await agent.close()
+
+
+# ============================================================================
+# Sync callable support
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_sync_hook():
+    """Sync callables should work as hooks."""
+    agent = KaguraAgent(api_key="test", model="gpt-test", context_id="ctx")
+    called = []
+
+    @agent.hook("before_process")
+    def sync_hook(session, context_id):
+        called.append("sync_before")
+
+    with patch.object(agent, "_analyze_session", new_callable=AsyncMock) as mock:
+        mock.return_value = AnalysisResult(should_remember=False, should_recall=False)
+        await agent.process(Session(messages=[Message(role="user", content="hi")]))
+
+    assert "sync_before" in called
+    await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_sync_skill():
+    """Sync callables should work as skills."""
+    agent = KaguraAgent(api_key="test", model="gpt-test")
+
+    @agent.skill("sync_greet")
+    def greet(who: str) -> str:
+        return f"Hello {who}"
+
+    result = await agent.run_skill(skill_name="sync_greet", who="World")
+    assert result == "Hello World"
+    await agent.close()
