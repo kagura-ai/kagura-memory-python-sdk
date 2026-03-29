@@ -1,6 +1,6 @@
 """Tests for CLI commands."""
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from click.testing import CliRunner
 
@@ -159,3 +159,52 @@ def test_context_update_requires_option():
     result = runner.invoke(main, ["context", "update", "uuid-1"])
     assert result.exit_code != 0
     assert "At least one update option" in result.output
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraAgent")
+def test_process_command(mock_agent_cls, mock_config):
+    """process command should use async with and return result."""
+    mock_config.return_value = {
+        "api_key": "key",
+        "mcp_url": "https://test.com/mcp",
+        "model": "gpt-test",
+        "context_id": "ctx",
+    }
+
+    mock_agent = AsyncMock()
+    mock_agent.process.return_value = MagicMock(
+        model_dump=lambda: {"remembered": [], "recalled": [], "context_used": "ctx"}
+    )
+    mock_agent.__aenter__ = AsyncMock(return_value=mock_agent)
+    mock_agent.__aexit__ = AsyncMock(return_value=None)
+    mock_agent_cls.return_value = mock_agent
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["process", "-m", "test message"])
+    assert result.exit_code == 0
+    assert "ctx" in result.output
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_remember_with_empty_tags(mock_client_cls, mock_config):
+    """remember with empty tags should not pass empty strings."""
+    mock_config.return_value = {
+        "api_key": "key",
+        "mcp_url": "https://test.com/mcp",
+        "context_id": "ctx",
+    }
+
+    mock_client = AsyncMock()
+    mock_client.remember.return_value = {"memory_id": "m1"}
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    mock_client_cls.return_value = mock_client
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["remember", "-s", "test", "--content", "data", "--tags", ",,,"])
+    assert result.exit_code == 0
+    # tags should be None (filtered out), not ['', '', '']
+    call_kwargs = mock_client.remember.call_args
+    assert call_kwargs[1].get("tags") is None or call_kwargs[1].get("tags") == []
