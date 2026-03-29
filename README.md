@@ -112,6 +112,10 @@ async with ResourceClient.from_mcp_url(api_key="kagura_...", mcp_url="http://loc
         payload={"name": "Wireless Headphones", "price": 79.99},
     )
     await client.ingest_event("products", token.token, event)
+
+    # Check ingestion stats
+    stats = await client.get_resource_impact("products")
+    print(f"Memories: {stats.memory_count}, Tokens: {stats.token_count}")
 ```
 
 See [`examples/`](examples/) for complete working examples.
@@ -133,6 +137,7 @@ kagura contexts
 kagura resource tokens create -r products -d "Product sync"
 kagura resource ingest -r products -k TOKEN --doc-id SKU-001 -V 1 -p '{"name":"Widget"}'
 kagura resource ingest-batch -r products -k TOKEN -f events.json
+kagura resource stats -r products
 
 # Config
 kagura config show
@@ -162,6 +167,7 @@ kagura process -m "今日の学び：FastAPIのDIはDepends()を使う"
 | Context delete | — | Web UI only | Session |
 | Resource Token (create/list/update/revoke) | `ResourceClient` | REST API | API Key |
 | Resource Event ingestion | `ResourceClient` | REST API | Resource Token |
+| Resource Impact (stats) | `ResourceClient` | REST API | API Key |
 
 Context deletion is intentionally Web UI only — destructive operations require session authentication and confirmation.
 
