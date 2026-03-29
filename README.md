@@ -185,10 +185,12 @@ uv run pytest tests/ -v          # Test
 This project is developed with [Claude Code](https://claude.com/claude-code):
 
 ```
+/onboarding      # Interactive setup — verify config, test connection
 /workflow        # Check current state and next step
 /quality         # Run all quality checks
 /simplify        # Review for reuse, quality, efficiency
 /self-review     # Pre-PR self-review
+/self-maint      # Audit .claude/ config against codebase
 /release <level> # Bump version, tag, push, create GitHub Release
 /kagura-guide    # SDK usage reference
 ```
