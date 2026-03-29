@@ -145,6 +145,18 @@ Or use the CLI directly:
 kagura process -m "今日の学び：FastAPIのDIはDepends()を使う"
 ```
 
+## API Coverage
+
+| Operation | SDK Client | Protocol | Auth |
+|-----------|-----------|----------|------|
+| Memory (remember/recall/forget/explore/reference) | `KaguraClient` | MCP | API Key |
+| Context (create/update/list/get) | `KaguraClient` | MCP | API Key |
+| Context delete | — | Web UI only | Session |
+| Resource Token (create/list/update/revoke) | `ResourceClient` | REST API | API Key |
+| Resource Event ingestion | `ResourceClient` | REST API | Resource Token |
+
+Context deletion is intentionally Web UI only — destructive operations require session authentication and confirmation.
+
 ## Development
 
 ```bash
