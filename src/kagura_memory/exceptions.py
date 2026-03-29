@@ -13,6 +13,10 @@ class KaguraConnectionError(KaguraError):
     """Connection to Kagura server failed."""
 
 
+class KaguraNotFoundError(KaguraError):
+    """Requested resource not found (HTTP 404)."""
+
+
 class KaguraRateLimitError(KaguraError):
     """Rate limit exceeded."""
 

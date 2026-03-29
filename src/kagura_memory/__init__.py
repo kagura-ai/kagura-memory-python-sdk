@@ -8,6 +8,7 @@ from .exceptions import (
     KaguraContextError,
     KaguraError,
     KaguraLLMError,
+    KaguraNotFoundError,
     KaguraQuotaError,
     KaguraRateLimitError,
 )
@@ -73,6 +74,7 @@ __all__ = [
     "KaguraAuthError",
     "KaguraConnectionError",
     "KaguraRateLimitError",
+    "KaguraNotFoundError",
     "KaguraQuotaError",
     "KaguraLLMError",
     "KaguraContextError",

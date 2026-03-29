@@ -214,4 +214,4 @@ class ResourceSchemaResponse(BaseModel):
     resource_id: str
     schema_version: int
     field_definitions: list[FieldDefinition]
-    created_at: str
+    created_at: datetime

@@ -11,6 +11,7 @@ from .client import KaguraClient
 from .exceptions import (
     KaguraAuthError,
     KaguraConnectionError,
+    KaguraNotFoundError,
     KaguraQuotaError,
 )
 from .models import (
@@ -133,6 +134,14 @@ class ResourceClient:
             status = e.response.status_code
             if status == 401:
                 raise KaguraAuthError("Authentication failed. Check your API key.") from e
+            if status == 404:
+                detail = ""
+                try:
+                    body = e.response.json()
+                    detail = body.get("detail", "") if isinstance(body, dict) else ""
+                except (ValueError, UnicodeDecodeError):
+                    pass
+                raise KaguraNotFoundError(detail or "Not found") from e
             if status == 429:
                 retry_after = e.response.headers.get("Retry-After")
                 raise KaguraQuotaError(
@@ -334,10 +343,8 @@ class ResourceClient:
             response = await self._request(
                 "GET", f"/api/v1/resources/{resource_id}/schema", params=params
             )
-        except KaguraConnectionError as e:
-            if "HTTP 404" in str(e):
-                return None
-            raise
+        except KaguraNotFoundError:
+            return None
         return ResourceSchemaResponse.model_validate(response.json())
 
     # -------------------------------------------------------------------
