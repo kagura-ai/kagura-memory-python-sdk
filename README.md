@@ -38,7 +38,14 @@ uv add kagura-memory
 
 ### Configuration
 
-Create `.kagura.json` in your project root (or `~/.kagura.json`):
+Copy the example and fill in your credentials:
+
+```bash
+cp .kagura.json.example .kagura.json
+# Edit .kagura.json — set api_key and mcp_url
+```
+
+Used by the CLI (`kagura` commands) and `load_config()` in Python code:
 
 ```json
 {
