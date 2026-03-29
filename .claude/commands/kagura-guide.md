@@ -52,6 +52,10 @@ from kagura_memory import KaguraAgent, Session, Message
 
 agent = KaguraAgent(api_key="kagura_...", model="gpt-5.4-nano")
 
+# Or use a local model via Ollama (no cloud LLM API key needed)
+agent = KaguraAgent(api_key="kagura_...", model="ollama/qwen3:30b")
+# Custom Ollama host: ollama_base_url="http://gpu-server:11434"
+
 session = Session(messages=[
     Message(role="user", content="FastAPIでOAuth2を実装したい"),
     Message(role="assistant", content="Authlibがおすすめです..."),
@@ -110,6 +114,12 @@ async with client:
     # Token management
     tokens = await client.list_tokens(resource_id="products")
     await client.revoke_token(token.id)
+
+    # Resource stats (token count, memory count, schema version)
+    stats = await client.get_resource_impact("products")
+
+    # Resource schema (field definitions, returns None if unregistered)
+    schema = await client.get_resource_schema("products", schema_version=2)
 ```
 
 Note: Resource ingestion requires a public context (`is_public=True`) with `resource_id` set. `setup_resource()` handles this automatically.
@@ -141,6 +151,8 @@ kagura resource tokens update TOKEN_ID -q 2000
 kagura resource tokens revoke TOKEN_ID
 kagura resource ingest -r resource_id -k RESOURCE_TOKEN --doc-id DOC -V 1 -p '{"key":"value"}'
 kagura resource ingest-batch -r resource_id -k RESOURCE_TOKEN -f events.json
+kagura resource stats -r resource_id
+kagura resource schema -r resource_id
 
 # Config
 kagura config show

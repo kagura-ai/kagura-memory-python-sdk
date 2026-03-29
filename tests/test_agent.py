@@ -236,7 +236,7 @@ async def test_call_llm_success():
 
 @pytest.mark.asyncio
 async def test_call_llm_auth_error():
-    """_call_llm should raise KaguraLLMError on auth failure."""
+    """_call_llm should raise KaguraAuthError on auth failure (no retry)."""
     import litellm
 
     agent = KaguraAgent(api_key="test", model="gpt-test")
@@ -246,8 +246,10 @@ async def test_call_llm_auth_error():
             message="bad key", llm_provider="openai", model="gpt-test"
         )
 
-        with pytest.raises(KaguraLLMError, match="authentication failed"):
+        with pytest.raises(KaguraAuthError, match="authentication failed"):
             await agent._call_llm([{"role": "user", "content": "test"}])
+
+        assert mock.call_count == 1  # no retry on auth error
 
     await agent.close()
 
@@ -283,6 +285,211 @@ async def test_call_llm_unexpected_error_retries():
                 await agent._call_llm([{"role": "user", "content": "test"}])
 
         assert mock.call_count == 2  # retried once before failing
+
+    await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_call_llm_rate_limit_retries():
+    """_call_llm should retry on rate limit errors with backoff."""
+    import litellm
+
+    agent = KaguraAgent(api_key="test", model="gpt-test", max_retries=3)
+
+    mock_response = MagicMock()
+    mock_response.choices = [MagicMock()]
+    mock_response.choices[0].message.content = '{"ok": true}'
+
+    with patch("kagura_memory.agent.litellm.acompletion", new_callable=AsyncMock) as mock:
+        mock.side_effect = [
+            litellm.RateLimitError(
+                message="rate limited",
+                llm_provider="openai",
+                model="gpt-test",
+            ),
+            mock_response,
+        ]
+
+        with patch("kagura_memory.agent.asyncio.sleep", new_callable=AsyncMock):
+            data, _ = await agent._call_llm([{"role": "user", "content": "test"}])
+
+        assert data["ok"] is True
+        assert mock.call_count == 2
+
+    await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_call_litellm_api_error():
+    """_call_litellm should raise KaguraLLMError on APIError."""
+    import litellm
+
+    agent = KaguraAgent(api_key="test", model="gpt-test")
+
+    with patch("kagura_memory.agent.litellm.acompletion", new_callable=AsyncMock) as mock:
+        mock.side_effect = litellm.APIError(
+            message="server error",
+            llm_provider="openai",
+            model="gpt-test",
+            status_code=500,
+        )
+
+        with pytest.raises(KaguraLLMError, match="LLM API error"):
+            await agent._call_llm([{"role": "user", "content": "test"}])
+
+    await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_call_litellm_passes_api_key():
+    """_call_litellm should pass llm_api_key explicitly."""
+    agent = KaguraAgent(api_key="test", model="gpt-test", llm_api_key="sk-123")
+
+    mock_response = MagicMock()
+    mock_response.choices = [MagicMock()]
+    mock_response.choices[0].message.content = '{"ok": true}'
+
+    with patch("kagura_memory.agent.litellm.acompletion", new_callable=AsyncMock) as mock:
+        mock.return_value = mock_response
+        await agent._call_llm([{"role": "user", "content": "test"}])
+
+        call_kwargs = mock.call_args[1]
+        assert call_kwargs["api_key"] == "sk-123"
+
+    await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_ollama_model_detection():
+    """Agent should detect ollama/ prefix and set _is_ollama flag."""
+    agent = KaguraAgent(api_key="test", model="ollama/qwen3:30b")
+    assert agent._is_ollama is True
+    assert agent._ollama_base_url == "http://localhost:11434"
+    await agent.close()
+
+    agent2 = KaguraAgent(api_key="test", model="gpt-5.4-nano")
+    assert agent2._is_ollama is False
+    await agent2.close()
+
+
+@pytest.mark.asyncio
+async def test_ollama_base_url_configurable():
+    """Agent should accept custom ollama_base_url."""
+    agent = KaguraAgent(
+        api_key="test",
+        model="ollama/qwen3:30b",
+        ollama_base_url="http://gpu-server:11434",
+    )
+    assert agent._ollama_base_url == "http://gpu-server:11434"
+    await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_ollama_base_url_strips_trailing_slash():
+    """Agent should strip trailing slash from ollama_base_url."""
+    agent = KaguraAgent(
+        api_key="test",
+        model="ollama/qwen3:30b",
+        ollama_base_url="http://localhost:11434/",
+    )
+    assert agent._ollama_base_url == "http://localhost:11434"
+    await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_call_ollama_success():
+    """_call_ollama should parse JSON from Ollama API response."""
+    agent = KaguraAgent(api_key="test", model="ollama/qwen3:30b")
+
+    ollama_response = {
+        "message": {
+            "role": "assistant",
+            "content": '{"should_remember": true}',
+            "thinking": "Let me analyze this...",
+        },
+        "prompt_eval_count": 100,
+        "eval_count": 50,
+    }
+
+    mock_client = AsyncMock()
+    mock_resp = MagicMock()
+    mock_resp.json.return_value = ollama_response
+    mock_resp.raise_for_status = MagicMock()
+    mock_client.post.return_value = mock_resp
+    agent._ollama_client = mock_client
+
+    data, resp = await agent._call_llm([{"role": "user", "content": "test"}])
+
+    assert data["should_remember"] is True
+    assert resp == ollama_response
+    await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_ollama_usage_extraction():
+    """_extract_usage should handle Ollama response dict format."""
+    agent = KaguraAgent(api_key="test", model="ollama/qwen3:30b")
+
+    ollama_resp = {
+        "prompt_eval_count": 200,
+        "eval_count": 80,
+    }
+    usage = agent._extract_usage(ollama_resp)
+
+    assert usage is not None
+    assert usage.prompt_tokens == 200
+    assert usage.completion_tokens == 80
+    assert usage.total_tokens == 280
+    assert usage.model == "ollama/qwen3:30b"
+    await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_ollama_usage_returns_none_when_missing():
+    """_extract_usage should return None when Ollama omits token counts."""
+    agent = KaguraAgent(api_key="test", model="ollama/qwen3:30b")
+    assert agent._extract_usage({}) is None
+    assert agent._extract_usage({"prompt_eval_count": 0}) is None
+    await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_call_ollama_429_raises_rate_limit():
+    """_call_ollama should raise KaguraRateLimitError on HTTP 429."""
+    import httpx
+
+    agent = KaguraAgent(api_key="test", model="ollama/qwen3:30b")
+
+    mock_client = AsyncMock()
+    mock_response = MagicMock()
+    mock_response.status_code = 429
+    mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
+        "429", request=MagicMock(), response=mock_response
+    )
+    mock_client.post.return_value = mock_response
+    agent._ollama_client = mock_client
+
+    from kagura_memory.exceptions import KaguraRateLimitError
+
+    with pytest.raises(KaguraRateLimitError, match="rate limit"):
+        await agent._call_ollama([{"role": "user", "content": "test"}], 0.3)
+
+    await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_call_ollama_connection_error():
+    """_call_ollama should raise KaguraLLMError on connection failure."""
+    import httpx
+
+    agent = KaguraAgent(api_key="test", model="ollama/qwen3:30b")
+
+    mock_client = AsyncMock()
+    mock_client.post.side_effect = httpx.ConnectError("Connection refused")
+    agent._ollama_client = mock_client
+
+    with pytest.raises(KaguraLLMError, match="Ollama connection failed"):
+        await agent._call_llm([{"role": "user", "content": "test"}])
 
     await agent.close()
 

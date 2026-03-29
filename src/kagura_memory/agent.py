@@ -7,6 +7,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+import httpx
 import litellm
 
 from .client import KaguraClient
@@ -43,6 +44,7 @@ class KaguraAgent:
         timeout: float = 30.0,
         max_retries: int = 3,
         llm_api_key: str | None = None,
+        ollama_base_url: str = "http://localhost:11434",
     ):
         """
         Initialize Kagura Agent.
@@ -50,16 +52,20 @@ class KaguraAgent:
         Args:
             api_key: Kagura API key
             mcp_url: MCP server URL
-            model: LLM model to use (e.g., "gpt-5.4-nano", "claude-sonnet-4-20250514")
+            model: LLM model to use (e.g., "gpt-5.4-nano", "ollama/qwen3:30b")
             context_id: Default context ID (None or "auto" for auto-selection)
             timeout: Request timeout in seconds
             max_retries: Maximum LLM retry attempts
             llm_api_key: LLM provider API key (passed explicitly, not via env var)
+            ollama_base_url: Ollama API base URL (only used with ollama/ models)
         """
         self.model = model
         self.context_id = context_id
         self.max_retries = max_retries
         self._llm_api_key = llm_api_key
+        self._is_ollama = model.startswith("ollama/")
+        self._ollama_base_url = ollama_base_url.rstrip("/")
+        self._ollama_client: httpx.AsyncClient | None = None
         self.client = KaguraClient(api_key, mcp_url, timeout)
         self.logger: VerboseLogger | None = None
 
@@ -291,11 +297,23 @@ class KaguraAgent:
         Extract LLM usage from response.
 
         Args:
-            response: LiteLLM response object
+            response: LiteLLM or Ollama response object
 
         Returns:
             LLMUsage object or None if usage not available
         """
+        if self._is_ollama and isinstance(response, dict):
+            prompt_tokens = response.get("prompt_eval_count", 0) or 0
+            completion_tokens = response.get("eval_count", 0) or 0
+            if prompt_tokens == 0 and completion_tokens == 0:
+                return None
+            return LLMUsage(
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=prompt_tokens + completion_tokens,
+                model=self.model,
+            )
+
         usage = getattr(response, "usage", None)
         if not usage:
             return None
@@ -324,47 +342,26 @@ class KaguraAgent:
         """
         for attempt in range(self.max_retries):
             try:
-                kwargs: dict[str, Any] = {
-                    "model": self.model,
-                    "messages": messages,
-                    "temperature": temperature,
-                    "response_format": {"type": "json_object"},
-                    "timeout": 30.0,
-                }
-                # C-2: Pass LLM API key explicitly instead of relying on env vars
-                if self._llm_api_key:
-                    kwargs["api_key"] = self._llm_api_key
-
-                response = await litellm.acompletion(**kwargs)
-
-                # Parse response (type: ignore for litellm type issues)
-                content = response.choices[0].message.content  # type: ignore
-                data = json.loads(content or "{}")
+                if self._is_ollama:
+                    data, response = await self._call_ollama(messages, temperature)
+                else:
+                    data, response = await self._call_litellm(messages, temperature)
 
                 return data, response
 
-            except litellm.RateLimitError as e:  # pyright: ignore[reportPrivateImportUsage]
+            except KaguraAuthError:
+                raise
+
+            except KaguraRateLimitError:
                 if attempt == self.max_retries - 1:
-                    raise KaguraRateLimitError(
-                        f"Rate limit exceeded after {self.max_retries} retries"
-                    ) from e
+                    raise
                 wait_time = 2**attempt
                 if self.logger:
                     self.logger.warning(f"Rate limited, retrying in {wait_time}s...")
                 await asyncio.sleep(wait_time)
 
-            except litellm.AuthenticationError as e:  # pyright: ignore[reportPrivateImportUsage]
-                raise KaguraLLMError(f"LLM authentication failed: {e}") from e
-
             except json.JSONDecodeError as e:
                 raise KaguraLLMError(f"Invalid JSON response from LLM: {e}") from e
-
-            except litellm.APIError as e:  # pyright: ignore[reportPrivateImportUsage]
-                if attempt == self.max_retries - 1:
-                    raise KaguraLLMError(
-                        f"LLM call failed after {self.max_retries} retries: {e}"
-                    ) from e
-                await asyncio.sleep(2**attempt)
 
             except Exception as e:
                 if attempt == self.max_retries - 1:
@@ -372,6 +369,65 @@ class KaguraAgent:
                 await asyncio.sleep(2**attempt)
 
         raise KaguraLLMError("Max retries exceeded")
+
+    async def _call_litellm(self, messages: list[dict], temperature: float) -> tuple[dict, Any]:
+        """Call LLM via litellm (cloud providers)."""
+        kwargs: dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": temperature,
+            "response_format": {"type": "json_object"},
+            "timeout": 30.0,
+        }
+        if self._llm_api_key:
+            kwargs["api_key"] = self._llm_api_key
+
+        try:
+            response = await litellm.acompletion(**kwargs)
+        except litellm.RateLimitError as e:  # pyright: ignore[reportPrivateImportUsage]
+            raise KaguraRateLimitError("Rate limit exceeded") from e
+        except litellm.AuthenticationError as e:  # pyright: ignore[reportPrivateImportUsage]
+            raise KaguraAuthError(f"LLM authentication failed: {e}") from e
+        except litellm.APIError as e:  # pyright: ignore[reportPrivateImportUsage]
+            raise KaguraLLMError(f"LLM API error: {e}") from e
+
+        content = response.choices[0].message.content  # type: ignore
+        data = json.loads(content or "{}")
+        return data, response
+
+    def _get_ollama_client(self) -> httpx.AsyncClient:
+        """Get or create persistent Ollama HTTP client."""
+        if self._ollama_client is None:
+            self._ollama_client = httpx.AsyncClient(timeout=120.0)
+        return self._ollama_client
+
+    async def _call_ollama(self, messages: list[dict], temperature: float) -> tuple[dict, Any]:
+        """Call LLM via Ollama API directly (local models with thinking support)."""
+        model_name = self.model.removeprefix("ollama/")
+        client = self._get_ollama_client()
+        try:
+            resp = await client.post(
+                f"{self._ollama_base_url}/api/chat",
+                json={
+                    "model": model_name,
+                    "messages": messages,
+                    "format": "json",
+                    "stream": False,
+                    "options": {"temperature": temperature},
+                },
+            )
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 429:
+                raise KaguraRateLimitError("Ollama rate limit exceeded") from e
+            raise KaguraLLMError(f"Ollama API error: HTTP {e.response.status_code}") from e
+        except httpx.RequestError as e:
+            raise KaguraLLMError(f"Ollama connection failed: {e}") from e
+
+        body = resp.json()
+        content = body.get("message", {}).get("content", "")
+        data = json.loads(content or "{}")
+        return data, body
 
     async def _analyze_session(
         self, session: Session, use_enhanced_context: bool = True
@@ -729,7 +785,10 @@ class KaguraAgent:
         return result
 
     async def close(self):
-        """Close underlying client."""
+        """Close underlying client and Ollama HTTP client."""
+        if self._ollama_client:
+            await self._ollama_client.aclose()
+            self._ollama_client = None
         await self.client.close()
 
     async def __aenter__(self):
