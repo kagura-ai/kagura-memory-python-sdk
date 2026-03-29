@@ -1,66 +1,52 @@
 Perform a pre-PR self-review of all changes.
 
-## Severity scale
+## Role
 
-| Level | Marker | Meaning | Action |
-|-------|--------|---------|--------|
-| Critical | `[C]` | Security hole, data loss, crash | Must fix |
-| Warning | `[W]` | Bug risk, missing guard | Should fix |
-| Info | `[I]` | Style, readability | Fix or justify |
+You are an AI code reviewer. Review only the modified code in the diff. Prioritize high-signal feedback over quantity.
 
-## Mindset
-- Review as if seeing the code for the first time
-- Hunt for problems — don't wait for them to appear
-- If problem found, provide the fix (not just the complaint)
+## Review the diff
 
-## Steps
-
-### 1. Review the diff
 ```bash
 git diff main...HEAD
 ```
 
-### 2. Security
-- No hardcoded API keys, passwords, or tokens
-- HTTPS enforcement on MCP URLs
-- API keys not stored as instance attributes
-- No secrets written to os.environ
+If no diff, review `git diff HEAD~1`.
 
-### 3. Error handling
-- Auth errors (KaguraAuthError) always surface to caller
-- Rate limit detection uses typed exceptions (not string matching)
-- External HTTP calls have timeouts
-- Code inside `except` blocks does not itself raise (e.g., attribute access on unknown types)
-- Hooks/callbacks run on ALL code paths (including early returns and except branches)
+## Review for (in priority order)
 
-### 4. Coding standards
-- Type hints on all function signatures
-- No `print()` (use VerboseLogger)
-- async/await patterns correct
+1. **Correctness** — bugs, edge cases, broken logic, unreachable code
+2. **Security** — API key leaks, secrets in logs, unsafe defaults, injection risks
+3. **Error handling** — exceptions swallowed, except blocks that can raise, auth errors not surfacing, hooks/callbacks missing on early-return paths
+4. **Performance** — unnecessary work, N+1 patterns, blocking calls in async context
+5. **Consistency** — patterns used differently across files, naming inconsistencies with existing code
+6. **Resource cleanup** — unclosed clients/connections in all code paths including error paths (use try/finally)
 
-### 5. Breaking changes
-- New parameters are optional (backward compatible)
-- Return types unchanged
+## Rules
 
-### 6. Testing
-- New code has tests
-- Existing tests pass: `uv run pytest tests/ -v`
-- All resources (clients, agents, connections) are closed in every test path (including error paths — use try/finally)
+- Only comment on lines that were changed in the diff
+- Be specific and actionable — suggest concrete fixes
+- Do not nitpick formatting (ruff handles it)
+- Do not comment on unchanged code unless needed for context
+- Assume linters, type checkers, and formatters are already in place
 
-## Output format
+## Severity
+
+| Marker | Meaning | Action |
+|--------|---------|--------|
+| `[C]` | Bug, security hole, data loss | Must fix before merge |
+| `[W]` | Risk, missing guard, edge case | Should fix |
+| `[I]` | Readability, minor improvement | Fix or justify |
+
+## Output
 
 ```markdown
-## Self-review results
+## Self-review: X files changed
 
-### Files changed: X files
+`[C]` file:line — Description. **Fix:** concrete suggestion.
 
-### Findings
+`[W]` file:line — Description. **Fix:** concrete suggestion.
 
-`[C]` file:line - Description
-  **Fix:** ...
-
-`[W]` file:line - Description
-  **Fix:** ...
-
-### Verdict: Ready for PR / Needs fixes
+### Verdict: Ready / Needs fixes
 ```
+
+If no significant issues: state "Changes look good" with a brief summary.
