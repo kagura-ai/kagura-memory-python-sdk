@@ -408,6 +408,47 @@ class KaguraClient:
             arguments["is_public"] = is_public
         return await self._call_tool("update_context", arguments)
 
+    async def update_search_config(
+        self,
+        context_id: str,
+        semantic_weight: float | None = None,
+        bm25_weight: float | None = None,
+        fetch_factor: int | None = None,
+        use_rerank: bool | None = None,
+        reranker_provider: str | None = None,
+        reranker_model: str | None = None,
+    ) -> dict[str, Any]:
+        """Update hybrid search configuration for a context.
+
+        Weights must sum to 1.0 (±0.01). Requires owner or editor permission.
+
+        Args:
+            context_id: Context UUID.
+            semantic_weight: Semantic search weight (0.0-1.0, default 0.6).
+            bm25_weight: BM25 keyword search weight (0.0-1.0, default 0.4).
+            fetch_factor: Candidate fetch multiplier (1-10, default 3).
+            use_rerank: Enable AI reranking.
+            reranker_provider: Reranker provider ("voyage" or "cohere").
+            reranker_model: Reranker model name.
+
+        Returns:
+            Current search config after update.
+        """
+        arguments: dict[str, Any] = {"context_id": context_id}
+        if semantic_weight is not None:
+            arguments["semantic_weight"] = semantic_weight
+        if bm25_weight is not None:
+            arguments["bm25_weight"] = bm25_weight
+        if fetch_factor is not None:
+            arguments["fetch_factor"] = fetch_factor
+        if use_rerank is not None:
+            arguments["use_rerank"] = use_rerank
+        if reranker_provider is not None:
+            arguments["reranker_provider"] = reranker_provider
+        if reranker_model is not None:
+            arguments["reranker_model"] = reranker_model
+        return await self._call_tool("update_search_config", arguments)
+
     async def close(self) -> None:
         """Close the HTTP client."""
         await self._client.aclose()
