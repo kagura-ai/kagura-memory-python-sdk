@@ -125,7 +125,8 @@ class KaguraAgent:
                 await fn(**kwargs)
             except Exception as e:
                 if self.logger:
-                    self.logger.warning(f"Hook '{fn.__name__}' failed: {e}")
+                    hook_name = getattr(fn, "__name__", repr(fn))
+                    self.logger.warning(f"Hook '{hook_name}' failed: {e}")
 
     def skill(
         self, name: str
@@ -677,8 +678,7 @@ class KaguraAgent:
         except (KaguraLLMError, KaguraRateLimitError) as e:
             self.logger.error(f"LLM analysis failed: {e}")
             self.logger.warning("Proceeding without AI analysis")
-            # Return empty result but don't crash
-            return ProcessResult(
+            result = ProcessResult(
                 remembered=[],
                 recalled=[],
                 explored=[],
@@ -686,6 +686,8 @@ class KaguraAgent:
                 actions=["error: LLM analysis failed"],
                 llm_usage=None,
             )
+            await self._run_hooks("after_process", session=session, result=result)
+            return result
 
         # Execute memory operations
         recalled, explored, recall_actions = [], [], []

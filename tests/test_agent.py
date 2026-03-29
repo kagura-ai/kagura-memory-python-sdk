@@ -499,15 +499,19 @@ async def test_on_recall_hook():
     await agent.close()
 
 
-def test_hook_invalid_event():
+@pytest.mark.asyncio
+async def test_hook_invalid_event():
     """Registering a hook for unknown event should raise ValueError."""
     agent = KaguraAgent(api_key="test", model="gpt-test")
 
-    with pytest.raises(ValueError, match="Unknown hook event"):
+    try:
+        with pytest.raises(ValueError, match="Unknown hook event"):
 
-        @agent.hook("bad_event")
-        async def noop():
-            pass
+            @agent.hook("bad_event")
+            async def noop():
+                pass
+    finally:
+        await agent.close()
 
 
 @pytest.mark.asyncio
@@ -547,7 +551,8 @@ async def test_skill_registration_and_execution():
     await agent.close()
 
 
-def test_list_skills():
+@pytest.mark.asyncio
+async def test_list_skills():
     """list_skills() should return registered skill names."""
     agent = KaguraAgent(api_key="test", model="gpt-test")
 
@@ -560,6 +565,7 @@ def test_list_skills():
         pass
 
     assert agent.list_skills() == ["alpha", "beta"]
+    await agent.close()
 
 
 @pytest.mark.asyncio
@@ -573,7 +579,8 @@ async def test_run_skill_not_found():
     await agent.close()
 
 
-def test_skill_duplicate_name():
+@pytest.mark.asyncio
+async def test_skill_duplicate_name():
     """Registering duplicate skill name should raise ValueError."""
     agent = KaguraAgent(api_key="test", model="gpt-test")
 
@@ -581,8 +588,11 @@ def test_skill_duplicate_name():
     async def first():
         pass
 
-    with pytest.raises(ValueError, match="already registered"):
+    try:
+        with pytest.raises(ValueError, match="already registered"):
 
-        @agent.skill("dup")
-        async def second():
-            pass
+            @agent.skill("dup")
+            async def second():
+                pass
+    finally:
+        await agent.close()
