@@ -112,7 +112,7 @@ class KaguraClient:
             response = await self._client.post(self.mcp_url, json=body, headers=headers)
             response.raise_for_status()
 
-            data = response.json()
+            data = response.json() or {}
             if "error" in data:
                 error = data["error"]
                 raise KaguraConnectionError(f"MCP error: {error.get('message', error)}")

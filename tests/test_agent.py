@@ -251,6 +251,41 @@ async def test_call_llm_json_decode_error():
     await agent.close()
 
 
+@pytest.mark.asyncio
+async def test_call_llm_unexpected_error_retries():
+    """_call_llm should retry on unexpected errors and raise after max retries."""
+    agent = KaguraAgent(api_key="test", model="gpt-test", max_retries=2)
+
+    with patch("kagura_memory.agent.litellm.acompletion", new_callable=AsyncMock) as mock:
+        mock.side_effect = RuntimeError("unexpected")
+
+        with patch("kagura_memory.agent.asyncio.sleep", new_callable=AsyncMock):
+            with pytest.raises(KaguraLLMError, match="Unexpected LLM error"):
+                await agent._call_llm([{"role": "user", "content": "test"}])
+
+        assert mock.call_count == 2  # retried once before failing
+
+    await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_execute_recalls_explore_auth_error():
+    """_execute_recalls should propagate KaguraAuthError from explore."""
+    agent = KaguraAgent(api_key="test", model="gpt-test")
+
+    with (
+        patch.object(agent.client, "recall", new_callable=AsyncMock) as mock_recall,
+        patch.object(agent.client, "explore", new_callable=AsyncMock) as mock_explore,
+    ):
+        mock_recall.return_value = {"results": [{"memory_id": "m1", "summary": "s", "score": 0.9}]}
+        mock_explore.side_effect = KaguraAuthError("bad key")
+
+        with pytest.raises(KaguraAuthError):
+            await agent._execute_recalls("ctx", [RecallQuery(query="test")], deep=True)
+
+    await agent.close()
+
+
 # ============================================================================
 # _analyze_session tests
 # ============================================================================
