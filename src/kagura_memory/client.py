@@ -148,7 +148,7 @@ class KaguraClient:
         # Parse MCP tool response format
         # Result format: {"content": [{"type": "text", "text": "{...}"}]}
         content = result.get("content", [])
-        if content and len(content) > 0:
+        if content:
             try:
                 text = content[0].get("text", "{}")
                 return json.loads(text)
