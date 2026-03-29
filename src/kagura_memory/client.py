@@ -335,6 +335,7 @@ class KaguraClient:
         description: str | None = None,
         summary: str | None = None,
         usage_guide: str | None = None,
+        resource_id: str | None = None,
         is_private: bool = True,
     ) -> dict[str, Any]:
         """Create a new context in the current workspace.
@@ -345,6 +346,7 @@ class KaguraClient:
             description: Context description.
             summary: LLM-oriented summary (200-500 chars).
             usage_guide: LLM-oriented memory usage guidelines.
+            resource_id: Resource identifier for external data ingestion.
             is_private: Privacy flag (default: True).
 
         Returns:
@@ -359,6 +361,8 @@ class KaguraClient:
             arguments["summary"] = summary
         if usage_guide is not None:
             arguments["usage_guide"] = usage_guide
+        if resource_id is not None:
+            arguments["resource_id"] = resource_id
         return await self._call_tool("create_context", arguments)
 
     async def update_context(
@@ -368,6 +372,7 @@ class KaguraClient:
         description: str | None = None,
         summary: str | None = None,
         usage_guide: str | None = None,
+        resource_id: str | None = None,
     ) -> dict[str, Any]:
         """Update an existing context's settings.
 
@@ -377,6 +382,7 @@ class KaguraClient:
             description: Updated context description.
             summary: Updated LLM-oriented summary (max 500 chars).
             usage_guide: Updated LLM-oriented usage guidelines (max 2000 chars).
+            resource_id: Updated resource identifier for external data ingestion.
 
         Returns:
             Updated context dict.
@@ -390,6 +396,8 @@ class KaguraClient:
             arguments["summary"] = summary
         if usage_guide is not None:
             arguments["usage_guide"] = usage_guide
+        if resource_id is not None:
+            arguments["resource_id"] = resource_id
         return await self._call_tool("update_context", arguments)
 
     async def close(self) -> None:
