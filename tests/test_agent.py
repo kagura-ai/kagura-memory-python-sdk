@@ -288,6 +288,76 @@ async def test_call_llm_unexpected_error_retries():
 
 
 @pytest.mark.asyncio
+async def test_call_llm_rate_limit_retries():
+    """_call_llm should retry on rate limit errors with backoff."""
+    import litellm
+
+    agent = KaguraAgent(api_key="test", model="gpt-test", max_retries=3)
+
+    mock_response = MagicMock()
+    mock_response.choices = [MagicMock()]
+    mock_response.choices[0].message.content = '{"ok": true}'
+
+    with patch("kagura_memory.agent.litellm.acompletion", new_callable=AsyncMock) as mock:
+        mock.side_effect = [
+            litellm.RateLimitError(
+                message="rate limited",
+                llm_provider="openai",
+                model="gpt-test",
+            ),
+            mock_response,
+        ]
+
+        with patch("kagura_memory.agent.asyncio.sleep", new_callable=AsyncMock):
+            data, _ = await agent._call_llm([{"role": "user", "content": "test"}])
+
+        assert data["ok"] is True
+        assert mock.call_count == 2
+
+    await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_call_litellm_api_error():
+    """_call_litellm should raise KaguraLLMError on APIError."""
+    import litellm
+
+    agent = KaguraAgent(api_key="test", model="gpt-test")
+
+    with patch("kagura_memory.agent.litellm.acompletion", new_callable=AsyncMock) as mock:
+        mock.side_effect = litellm.APIError(
+            message="server error",
+            llm_provider="openai",
+            model="gpt-test",
+            status_code=500,
+        )
+
+        with pytest.raises(KaguraLLMError, match="LLM API error"):
+            await agent._call_llm([{"role": "user", "content": "test"}])
+
+    await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_call_litellm_passes_api_key():
+    """_call_litellm should pass llm_api_key explicitly."""
+    agent = KaguraAgent(api_key="test", model="gpt-test", llm_api_key="sk-123")
+
+    mock_response = MagicMock()
+    mock_response.choices = [MagicMock()]
+    mock_response.choices[0].message.content = '{"ok": true}'
+
+    with patch("kagura_memory.agent.litellm.acompletion", new_callable=AsyncMock) as mock:
+        mock.return_value = mock_response
+        await agent._call_llm([{"role": "user", "content": "test"}])
+
+        call_kwargs = mock.call_args[1]
+        assert call_kwargs["api_key"] == "sk-123"
+
+    await agent.close()
+
+
+@pytest.mark.asyncio
 async def test_ollama_model_detection():
     """Agent should detect ollama/ prefix and set _is_ollama flag."""
     agent = KaguraAgent(api_key="test", model="ollama/qwen3:30b")
