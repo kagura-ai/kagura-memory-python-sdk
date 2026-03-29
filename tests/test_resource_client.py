@@ -479,6 +479,19 @@ async def test_setup_resource_requires_mcp_url():
     await client.close()
 
 
+@pytest.mark.asyncio
+async def test_setup_resource_validates_auth_header():
+    """setup_resource() should raise ValueError if auth header is malformed."""
+    client = ResourceClient.from_mcp_url(api_key="test", mcp_url="http://localhost:8080/mcp")
+    # Corrupt the Authorization header
+    client._client.headers["authorization"] = "BadFormat"
+
+    with pytest.raises(ValueError, match="Authorization header"):
+        await client.setup_resource(resource_id="test")
+
+    await client.close()
+
+
 def test_from_mcp_url_stores_mcp_url():
     """from_mcp_url should store mcp_url for setup_resource."""
     client = ResourceClient.from_mcp_url(api_key="test", mcp_url="http://localhost:8080/mcp/w/abc")

@@ -1,6 +1,7 @@
 """AI-driven memory management agent."""
 
 import asyncio
+import copy
 import json
 import time
 from collections.abc import Callable
@@ -216,7 +217,7 @@ class KaguraAgent:
         if cache_key in self._cache:
             data, timestamp = self._cache[cache_key]
             if not self._is_cache_expired(timestamp):
-                return data
+                return copy.deepcopy(data)
 
         # Cache miss or expired - fetch new data
         if self.logger:
@@ -261,7 +262,8 @@ class KaguraAgent:
         async def fetch_contexts() -> list[dict[str, Any]]:
             """Wrapper to extract contexts from response."""
             response = await self.client.list_contexts()
-            return response.get("contexts", [])
+            contexts = response.get("contexts")
+            return contexts if isinstance(contexts, list) else []
 
         return await self._get_with_cache(
             cache_key="contexts",

@@ -43,6 +43,11 @@ async def test_agent_caching_tools():
         assert cached_data == mock_tools
         assert cached_timestamp > 0
 
+        # Verify deepcopy: modifying returned data doesn't corrupt cache
+        tools2.append({"name": "mutated"})
+        tools3 = await agent._get_tools_with_cache()
+        assert len(tools3) == 2  # Cache still has original 2 items
+
     await agent.close()
 
 
@@ -98,6 +103,20 @@ async def test_build_enhanced_context():
 
         assert enhanced_ctx["tools"] == mock_tools
         assert enhanced_ctx["contexts"] == mock_contexts
+
+    await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_null_contexts_handled():
+    """_get_contexts_with_cache should handle null contexts from server."""
+    agent = KaguraAgent(api_key="test-key", model="gpt-5.4-nano")
+
+    with patch.object(agent.client, "list_contexts", new_callable=AsyncMock) as mock:
+        mock.return_value = {"contexts": None}
+
+        contexts = await agent._get_contexts_with_cache()
+        assert contexts == []
 
     await agent.close()
 

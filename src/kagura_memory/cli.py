@@ -11,7 +11,7 @@ import click
 from .agent import KaguraAgent
 from .client import KaguraClient
 from .config import load_config
-from .models import Message, ResourceEventRequest, Session
+from .models import Message, ProcessResult, ResourceEventRequest, Session
 from .resource_client import ResourceClient
 
 # =============================================================================
@@ -110,8 +110,12 @@ def process(message, file, deep, verbose):
             agent_kwargs["context_id"] = config["context_id"]
         if config.get("llm_api_key"):
             agent_kwargs["llm_api_key"] = config["llm_api_key"]
-        agent = KaguraAgent(**agent_kwargs)
-        result = asyncio.run(agent.process(session, deep=deep, verbose=verbose))
+
+        async def _run_agent() -> ProcessResult:
+            async with KaguraAgent(**agent_kwargs) as agent:
+                return await agent.process(session, deep=deep, verbose=verbose)
+
+        result = asyncio.run(_run_agent())
         click.echo(json.dumps(result.model_dump(), indent=2))
 
     except click.ClickException:
@@ -160,7 +164,8 @@ def remember(context_id, summary, content, memory_type, importance, tags):
       kagura remember -s "FastAPI DI pattern" --content "Use Depends()..."
       kagura remember -c dev -s "OAuth2 setup" --content "..." --tags "auth,oauth"
     """
-    tag_list = [t.strip() for t in tags.split(",")] if tags else None
+    tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
+    tag_list = tag_list or None
 
     async def op(client: KaguraClient, ctx: str) -> dict[str, Any]:
         return await client.remember(

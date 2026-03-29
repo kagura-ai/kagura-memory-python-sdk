@@ -273,7 +273,9 @@ class ResourceClient:
 
         # Extract API key from httpx Authorization header
         auth = self._client.headers.get("authorization", "")
-        api_key = auth.removeprefix("Bearer ")
+        if not auth.startswith("Bearer "):
+            raise ValueError("Authorization header missing or invalid")
+        api_key = auth[7:]
 
         name = context_name or resource_id
 
