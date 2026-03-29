@@ -39,6 +39,7 @@ async with KaguraClient(api_key="kagura_...", mcp_url="https://memory.kagura-ai.
     contexts = await client.list_contexts()
     await client.create_context(name="new-ctx", summary="My context")
     await client.update_context(context_id="uuid", summary="Updated")
+    await client.update_context(context_id="uuid", resource_id="my-res", is_public=True)
 ```
 
 ## KaguraAgent — AI-Powered Analysis
@@ -89,24 +90,26 @@ agent.list_skills()  # ["summarize"]
 ```python
 from kagura_memory import ResourceClient, ResourceEventRequest
 
-# Create from MCP URL (strips /mcp/... to derive REST base URL)
-client = ResourceClient.from_mcp_url(api_key="kagura_...", mcp_url="https://memory.kagura-ai.com/mcp")
+client = ResourceClient.from_mcp_url(api_key="kagura_...", mcp_url="http://localhost:8080/mcp/w/...")
 
 async with client:
-    # Token CRUD (Bearer auth)
-    token = await client.create_token(resource_id="products", description="Sync", quota_events_per_hour=1000)
-    tokens = await client.list_tokens(resource_id="products")
-    await client.update_token(token.id, quota_events_per_hour=2000)
-    await client.revoke_token(token.id)
+    # One-call setup: create public context + set resource_id + create token
+    token = await client.setup_resource(resource_id="products", summary="Product catalog")
 
-    # Event ingestion (X-Resource-API-Key auth)
-    event = ResourceEventRequest(op="upsert", doc_id="SKU-001", version=1, payload={"name": "Widget", "price": 9.99})
+    # Ingest events
+    event = ResourceEventRequest(op="upsert", doc_id="SKU-001", version=1, payload={"name": "Widget"})
     await client.ingest_event("products", token.token, event)
 
     # Batch (max 100)
     events = [ResourceEventRequest(op="upsert", doc_id=f"SKU-{i}", version=1, payload={"name": f"Item {i}"}) for i in range(10)]
     await client.ingest_events("products", token.token, events)
+
+    # Token management
+    tokens = await client.list_tokens(resource_id="products")
+    await client.revoke_token(token.id)
 ```
+
+Note: Resource ingestion requires a public context (`is_public=True`) with `resource_id` set. `setup_resource()` handles this automatically.
 
 ## CLI Commands
 

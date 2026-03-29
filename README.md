@@ -95,8 +95,9 @@ Push data from external systems into Kagura so AI can search it:
 ```python
 from kagura_memory import ResourceClient, ResourceEventRequest
 
-async with ResourceClient.from_mcp_url(api_key="kagura_...", mcp_url="https://...") as client:
-    token = await client.create_token(resource_id="products", description="Product sync")
+async with ResourceClient.from_mcp_url(api_key="kagura_...", mcp_url="http://localhost:8080/mcp/w/...") as client:
+    # One-call setup: create public context + set resource_id + create token
+    token = await client.setup_resource(resource_id="products", summary="Product catalog")
     print(f"Save this token: {token.token}")  # Shown only once!
 
     event = ResourceEventRequest(
