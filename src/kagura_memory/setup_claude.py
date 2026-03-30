@@ -12,7 +12,7 @@ from .client import KaguraClient
 from .config import load_config
 from .exceptions import KaguraAuthError, KaguraConnectionError
 
-DEFAULT_MCP_URL = "https://memory.kagura-ai.com/mcp"
+DEFAULT_MCP_URL = "http://localhost:8080/mcp"
 
 # Trailing space distinguishes "kagura recall/remember" from "kagura-memory" in MCP config
 KAGURA_HOOK_MARKER = "kagura "
@@ -125,7 +125,7 @@ def _prompt_mcp_url(existing: str | None, non_interactive: bool) -> str:
                 "MCP URL required in non-interactive mode. Use --mcp-url or set KAGURA_MCP_URL"
             )
         return existing
-    click.echo("  (local: http://localhost:8080/mcp/w/{workspace_id})")
+    click.echo("  (format: http://localhost:8080/mcp/w/{workspace_id})")
     value = click.prompt("MCP URL", default=existing or DEFAULT_MCP_URL)
     return _validate_not_empty(value, "MCP URL")
 
