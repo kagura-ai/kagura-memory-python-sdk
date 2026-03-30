@@ -170,7 +170,7 @@ def _select_or_create_context(
 
     if non_interactive:
         result = asyncio.run(_create_context(api_key, mcp_url, default_name, None))
-        ctx_id = result.get("id", "")
+        ctx_id = result.get("context_id") or result.get("id", "")
         click.echo(f"  Created context: {default_name} ({ctx_id[:8]}...)")
         return ctx_id
 
@@ -193,7 +193,7 @@ def _select_or_create_context(
     name = click.prompt("Context name", default=default_name)
     summary = click.prompt("Context summary (optional)", default="", show_default=False)
     result = asyncio.run(_create_context(api_key, mcp_url, name, summary if summary else None))
-    ctx_id = result.get("id", "")
+    ctx_id = result.get("context_id") or result.get("id", "")
     click.echo(f"  Created context: {name} ({ctx_id[:8]}...)")
     return ctx_id
 
