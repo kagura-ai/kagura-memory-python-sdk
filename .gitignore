@@ -30,4 +30,5 @@ Thumbs.db
 
 # Claude Code
 .claude/settings.local.json
+.claude/commands/kagura-*
 .mcp.json
