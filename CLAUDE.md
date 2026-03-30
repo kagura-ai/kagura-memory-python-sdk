@@ -22,7 +22,7 @@ uv run ruff format src/ tests/  # Format
 uv run pyright src/              # Type check
 ```
 
-**Slash commands**: `/quality` → `/simplify` → `/self-review` → PR, `/release patch|minor|major` for releases, `/onboarding` for setup, `/kagura-guide` for reference
+**Slash commands**: `/quality` → `/simplify` → `/self-review` → PR, `/release patch|minor|major` for releases, `/kagura-guide` for reference
 
 ## Key SDK Features
 
@@ -32,7 +32,7 @@ uv run pyright src/              # Type check
 - Resource stats/schema: `get_resource_impact`, `get_resource_schema`
 - Agent hooks/skills: `@agent.hook("before_process")`, `@agent.skill("name")`
 - Ollama support: `model="ollama/qwen3:30b"` for local LLMs
-- CLI: `kagura resource setup/import/stats/schema`, `kagura context search-config`
+- CLI: `kagura setup claude`, `kagura resource setup/import/stats/schema`, `kagura context search-config`
 
 ## Branch Strategy
 

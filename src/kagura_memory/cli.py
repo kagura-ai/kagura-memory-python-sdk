@@ -13,6 +13,7 @@ from .client import KaguraClient
 from .config import load_config
 from .models import Message, ProcessResult, ResourceEventRequest, Session
 from .resource_client import ResourceClient
+from .setup_claude import run_setup_claude
 
 # =============================================================================
 # Helper Functions
@@ -394,6 +395,48 @@ def contexts():
         context_id=None,
         needs_context=False,
     )
+
+
+# =============================================================================
+# Setup Commands
+# =============================================================================
+
+
+@main.group()
+def setup():
+    """Set up Kagura integrations for AI coding tools."""
+    pass
+
+
+@setup.command(name="claude")
+@click.option("--api-key", help="Kagura API key (skip prompt)")
+@click.option("--mcp-url", help="MCP URL (skip prompt)")
+@click.option("--context-id", help="Context ID or name (skip prompt)")
+@click.option("--project-dir", default=".", help="Project directory (default: current)")
+@click.option("--non-interactive", "-y", is_flag=True, help="No prompts, use defaults/flags")
+def setup_claude(api_key, mcp_url, context_id, project_dir, non_interactive):
+    """
+    Set up Kagura Memory integration for Claude Code.
+
+    Configures .kagura.json, .mcp.json, hooks, and skills in the target project.
+
+    Examples:
+      kagura setup claude
+      kagura setup claude --api-key kagura_xxx --mcp-url http://localhost:8080/mcp/w/{workspace_id}
+      kagura setup claude -y --api-key kagura_xxx --context-id my-project
+    """
+    try:
+        run_setup_claude(
+            api_key=api_key,
+            mcp_url=mcp_url,
+            context_id=context_id,
+            project_dir=project_dir,
+            non_interactive=non_interactive,
+        )
+    except click.ClickException:
+        raise
+    except Exception as e:
+        raise click.ClickException(f"Setup failed: {e}") from e
 
 
 # =============================================================================
