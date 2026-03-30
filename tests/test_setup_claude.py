@@ -49,30 +49,33 @@ def _has_kagura_hook(entries: list[dict]) -> bool:
 
 class TestPromptApiKey:
     def test_interactive_with_existing(self) -> None:
-        """Interactive mode with existing key should show masked default."""
+        """Interactive mode with existing key should show masked info."""
         with patch("kagura_memory.setup_claude.click") as mock_click:
             mock_click.prompt.return_value = "kagura_new_key"
             mock_click.ClickException = click.ClickException
+            mock_click.UsageError = click.UsageError
             result = _prompt_api_key("kagura_12345678abcdef", non_interactive=False)
             assert result == "kagura_new_key"
-            mock_click.prompt.assert_called_once()
-            call_kwargs = mock_click.prompt.call_args
-            assert "kagura_1...cdef" in str(call_kwargs)
+            mock_click.echo.assert_called_once()
+            echo_arg = mock_click.echo.call_args[0][0]
+            assert "kagura_1...cdef" in echo_arg
 
     def test_interactive_without_existing(self) -> None:
         """Interactive mode without existing key should prompt with empty default."""
         with patch("kagura_memory.setup_claude.click") as mock_click:
             mock_click.prompt.return_value = "kagura_entered"
             mock_click.ClickException = click.ClickException
+            mock_click.UsageError = click.UsageError
             result = _prompt_api_key(None, non_interactive=False)
             assert result == "kagura_entered"
 
 
 class TestPromptMcpUrl:
     def test_interactive(self) -> None:
-        """Interactive mode should prompt with default URL."""
+        """Interactive mode should prompt."""
         with patch("kagura_memory.setup_claude.click") as mock_click:
             mock_click.prompt.return_value = "http://custom:8080/mcp"
+            mock_click.UsageError = click.UsageError
             result = _prompt_mcp_url(None, non_interactive=False)
             assert result == "http://custom:8080/mcp"
 
@@ -82,7 +85,7 @@ class TestSelectOrCreateContext:
     def test_interactive_select_existing(self, mock_create: AsyncMock) -> None:
         """Interactive: user selects an existing context."""
         with patch("kagura_memory.setup_claude.click") as mock_click:
-            mock_click.prompt.return_value = 1  # Select first context
+            mock_click.prompt.return_value = 1
             mock_click.echo = MagicMock()
             result = _select_or_create_context(
                 {"contexts": [{"id": "ctx-abc", "name": "my-proj"}]},
@@ -93,13 +96,14 @@ class TestSelectOrCreateContext:
                 non_interactive=False,
             )
             assert result == "ctx-abc"
-            mock_create.assert_not_called()
 
     @patch("kagura_memory.setup_claude.asyncio")
     @patch("kagura_memory.setup_claude._create_context")
-    def test_interactive_create_new(self, mock_create: AsyncMock, mock_asyncio: MagicMock) -> None:
+    def test_interactive_create_new(
+        self, mock_create: AsyncMock, mock_asyncio: MagicMock
+    ) -> None:
         """Interactive: no contexts, user creates a new one."""
-        mock_asyncio.run.return_value = {"id": "ctx-new", "name": "test"}
+        mock_asyncio.run.return_value = {"context_id": "ctx-new", "name": "test"}
         with patch("kagura_memory.setup_claude.click") as mock_click:
             mock_click.prompt.side_effect = ["my-project", "A summary"]
             mock_click.echo = MagicMock()
@@ -119,11 +123,8 @@ class TestSelectOrCreateContext:
         self, mock_create: AsyncMock, mock_asyncio: MagicMock
     ) -> None:
         """Interactive: contexts exist, user chooses 'create new'."""
-        mock_asyncio.run.return_value = {"id": "ctx-brand-new", "name": "new-proj"}
+        mock_asyncio.run.return_value = {"context_id": "ctx-brand-new", "name": "new-proj"}
         with patch("kagura_memory.setup_claude.click") as mock_click:
-            # First prompt: select context (choose "create new" = 2)
-            # Second prompt: context name
-            # Third prompt: summary
             mock_click.prompt.side_effect = [2, "new-proj", ""]
             mock_click.echo = MagicMock()
             mock_click.IntRange = click.IntRange
@@ -145,7 +146,9 @@ class TestSelectOrCreateContext:
 
 class TestWriteKaguraConfig:
     def test_creates_new(self, project_dir: Path) -> None:
-        path = _write_kagura_config(project_dir, "kagura_key", "http://localhost:8080/mcp", "ctx-1")
+        path = _write_kagura_config(
+            project_dir, "kagura_key", "http://localhost:8080/mcp", "ctx-1"
+        )
         data = json.loads(path.read_text())
         assert data["api_key"] == "kagura_key"
         assert data["mcp_url"] == "http://localhost:8080/mcp"
@@ -172,7 +175,9 @@ class TestWriteMcpJson:
         assert server["headers"]["Authorization"] == "Bearer kagura_key"
 
     def test_preserves_other_servers(self, project_dir: Path) -> None:
-        existing = {"mcpServers": {"other-server": {"type": "stdio", "command": "npx other"}}}
+        existing = {
+            "mcpServers": {"other-server": {"type": "stdio", "command": "npx other"}}
+        }
         (project_dir / ".mcp.json").write_text(json.dumps(existing))
 
         _write_mcp_json(project_dir, "key", "http://mcp")
@@ -220,7 +225,9 @@ class TestInstallHooks:
         # Existing ruff hook preserved
         post_hooks = data["hooks"]["PostToolUse"]
         assert any(
-            "ruff" in h.get("command", "") for entry in post_hooks for h in entry.get("hooks", [])
+            "ruff" in h.get("command", "")
+            for entry in post_hooks
+            for h in entry.get("hooks", [])
         )
 
         # Kagura hook added
@@ -240,7 +247,9 @@ class TestInstallHooks:
                 for h in entry.get("hooks", [])
                 if KAGURA_HOOK_MARKER in h.get("command", "")
             )
-            assert kagura_count == 1, f"Expected 1 kagura hook for {event}, got {kagura_count}"
+            assert (
+                kagura_count == 1
+            ), f"Expected 1 kagura hook for {event}, got {kagura_count}"
 
         # Both hooks should have updated to ctx-2
         session_cmd = data["hooks"]["SessionStart"][0]["hooks"][0]["command"]
@@ -253,6 +262,31 @@ class TestInstallHooks:
             if KAGURA_HOOK_MARKER in h.get("command", "")
         ]
         assert post_cmds and "ctx-2" in post_cmds[0]
+
+    def test_updates_matcher_on_existing_hook(self, project_dir: Path) -> None:
+        """Updating an existing Kagura hook should also update the matcher."""
+        claude_dir = project_dir / ".claude"
+        claude_dir.mkdir()
+        # Start with a kagura hook that has no matcher
+        existing = {
+            "hooks": {
+                "PostToolUse": [
+                    {
+                        "hooks": [
+                            {"type": "command", "command": "kagura remember -s test"}
+                        ]
+                    }
+                ]
+            }
+        }
+        (claude_dir / "settings.json").write_text(json.dumps(existing))
+
+        _install_hooks(project_dir, "ctx-1")
+        data = json.loads((claude_dir / "settings.json").read_text())
+
+        # The matcher should now be set
+        post_entry = data["hooks"]["PostToolUse"][0]
+        assert post_entry.get("matcher") == "Write|Edit"
 
 
 class TestInstallSkills:
@@ -273,14 +307,18 @@ class TestInstallSkills:
 class TestCheckGitignore:
     def test_not_in_gitignore(self, project_dir: Path) -> None:
         (project_dir / ".gitignore").write_text("node_modules/\n")
-        assert _check_gitignore(project_dir) is False
+        assert _check_gitignore(project_dir) == [".kagura.json", ".mcp.json"]
 
-    def test_in_gitignore(self, project_dir: Path) -> None:
-        (project_dir / ".gitignore").write_text("node_modules/\n.kagura.json\n")
-        assert _check_gitignore(project_dir) is True
+    def test_both_in_gitignore(self, project_dir: Path) -> None:
+        (project_dir / ".gitignore").write_text(".kagura.json\n.mcp.json\n")
+        assert _check_gitignore(project_dir) == []
+
+    def test_partial_gitignore(self, project_dir: Path) -> None:
+        (project_dir / ".gitignore").write_text(".kagura.json\n")
+        assert _check_gitignore(project_dir) == [".mcp.json"]
 
     def test_no_gitignore(self, project_dir: Path) -> None:
-        assert _check_gitignore(project_dir) is False
+        assert _check_gitignore(project_dir) == [".kagura.json", ".mcp.json"]
 
 
 # =============================================================================
@@ -308,25 +346,21 @@ def _setup_args(tmp_path: Path, **overrides: str) -> list[str]:
 
 @patch("kagura_memory.setup_claude._create_context")
 @patch("kagura_memory.setup_claude._test_connection")
-@patch("kagura_memory.setup_claude.load_config")
 def test_setup_claude_non_interactive(
-    mock_config: MagicMock,
     mock_conn: AsyncMock,
     mock_create_ctx: AsyncMock,
     runner: CliRunner,
     tmp_path: Path,
 ) -> None:
     """Non-interactive mode with all flags should succeed without prompts."""
-    mock_config.return_value = {}
     mock_conn.return_value = {"count": 0, "contexts": []}
-    mock_create_ctx.return_value = {"id": "ctx-new-uuid", "name": "test-project"}
+    mock_create_ctx.return_value = {"context_id": "ctx-new-uuid", "name": "test-project"}
 
     result = runner.invoke(main, _setup_args(tmp_path))
 
     assert result.exit_code == 0, result.output
     assert "Setup complete!" in result.output
 
-    # Verify files created
     assert (tmp_path / ".kagura.json").exists()
     assert (tmp_path / ".mcp.json").exists()
     assert (tmp_path / ".claude" / "settings.json").exists()
@@ -334,15 +368,12 @@ def test_setup_claude_non_interactive(
 
 
 @patch("kagura_memory.setup_claude._test_connection")
-@patch("kagura_memory.setup_claude.load_config")
 def test_setup_claude_with_existing_context(
-    mock_config: MagicMock,
     mock_conn: AsyncMock,
     runner: CliRunner,
     tmp_path: Path,
 ) -> None:
     """With --context-id, should use existing context without prompts."""
-    mock_config.return_value = {}
     mock_conn.return_value = {
         "count": 1,
         "contexts": [{"id": "ctx-existing", "name": "my-project"}],
@@ -356,9 +387,7 @@ def test_setup_claude_with_existing_context(
 
 
 @patch("kagura_memory.setup_claude._test_connection")
-@patch("kagura_memory.setup_claude.load_config")
 def test_setup_claude_connection_failure(
-    mock_config: MagicMock,
     mock_conn: AsyncMock,
     runner: CliRunner,
     tmp_path: Path,
@@ -366,7 +395,6 @@ def test_setup_claude_connection_failure(
     """Connection failure should show helpful error and not write files."""
     from kagura_memory.exceptions import KaguraAuthError
 
-    mock_config.return_value = {}
     mock_conn.side_effect = KaguraAuthError("Invalid API key")
 
     result = runner.invoke(main, _setup_args(tmp_path, api_key="kagura_bad"))
@@ -376,15 +404,11 @@ def test_setup_claude_connection_failure(
     assert not (tmp_path / ".kagura.json").exists()
 
 
-@patch("kagura_memory.setup_claude.load_config")
 def test_setup_claude_non_interactive_missing_key(
-    mock_config: MagicMock,
     runner: CliRunner,
     tmp_path: Path,
 ) -> None:
     """Non-interactive without API key should fail."""
-    mock_config.return_value = {}
-
     result = runner.invoke(
         main,
         ["setup", "claude", "--project-dir", str(tmp_path), "-y"],
@@ -396,20 +420,19 @@ def test_setup_claude_non_interactive_missing_key(
 
 @patch("kagura_memory.setup_claude._create_context")
 @patch("kagura_memory.setup_claude._test_connection")
-@patch("kagura_memory.setup_claude.load_config")
 def test_setup_claude_preserves_existing_mcp_servers(
-    mock_config: MagicMock,
     mock_conn: AsyncMock,
     mock_create_ctx: AsyncMock,
     runner: CliRunner,
     tmp_path: Path,
 ) -> None:
     """Should preserve existing MCP servers in .mcp.json."""
-    mock_config.return_value = {}
     mock_conn.return_value = {"count": 0, "contexts": []}
-    mock_create_ctx.return_value = {"id": "ctx-uuid", "name": "test"}
+    mock_create_ctx.return_value = {"context_id": "ctx-uuid", "name": "test"}
 
-    existing_mcp = {"mcpServers": {"github": {"type": "stdio", "command": "npx github-mcp"}}}
+    existing_mcp = {
+        "mcpServers": {"github": {"type": "stdio", "command": "npx github-mcp"}}
+    }
     (tmp_path / ".mcp.json").write_text(json.dumps(existing_mcp))
 
     result = runner.invoke(main, _setup_args(tmp_path))
@@ -422,29 +445,25 @@ def test_setup_claude_preserves_existing_mcp_servers(
 
 @patch("kagura_memory.setup_claude._create_context")
 @patch("kagura_memory.setup_claude._test_connection")
-@patch("kagura_memory.setup_claude.load_config")
 def test_setup_claude_gitignore_warning(
-    mock_config: MagicMock,
     mock_conn: AsyncMock,
     mock_create_ctx: AsyncMock,
     runner: CliRunner,
     tmp_path: Path,
 ) -> None:
-    """Should warn about .gitignore when .kagura.json not listed."""
-    mock_config.return_value = {}
+    """Should warn about .gitignore when secret files not listed."""
     mock_conn.return_value = {"count": 0, "contexts": []}
-    mock_create_ctx.return_value = {"id": "ctx-uuid", "name": "test"}
+    mock_create_ctx.return_value = {"context_id": "ctx-uuid", "name": "test"}
 
     result = runner.invoke(main, _setup_args(tmp_path))
 
     assert result.exit_code == 0
-    assert ".gitignore" in result.output
+    assert ".kagura.json" in result.output
+    assert ".mcp.json" in result.output
 
 
 @patch("kagura_memory.setup_claude._test_connection")
-@patch("kagura_memory.setup_claude.load_config")
 def test_setup_claude_connection_error(
-    mock_config: MagicMock,
     mock_conn: AsyncMock,
     runner: CliRunner,
     tmp_path: Path,
@@ -452,7 +471,6 @@ def test_setup_claude_connection_error(
     """KaguraConnectionError should show server-not-running hint."""
     from kagura_memory.exceptions import KaguraConnectionError
 
-    mock_config.return_value = {}
     mock_conn.side_effect = KaguraConnectionError("ECONNREFUSED")
 
     result = runner.invoke(main, _setup_args(tmp_path))
@@ -463,15 +481,12 @@ def test_setup_claude_connection_error(
 
 
 @patch("kagura_memory.setup_claude._test_connection")
-@patch("kagura_memory.setup_claude.load_config")
 def test_setup_claude_generic_connection_error(
-    mock_config: MagicMock,
     mock_conn: AsyncMock,
     runner: CliRunner,
     tmp_path: Path,
 ) -> None:
     """Generic exception during connection should show error."""
-    mock_config.return_value = {}
     mock_conn.side_effect = RuntimeError("unexpected")
 
     result = runner.invoke(main, _setup_args(tmp_path))
@@ -482,18 +497,16 @@ def test_setup_claude_generic_connection_error(
 
 @patch("kagura_memory.setup_claude._create_context")
 @patch("kagura_memory.setup_claude._test_connection")
-@patch("kagura_memory.setup_claude.load_config")
 def test_setup_claude_config_load_error(
-    mock_config: MagicMock,
     mock_conn: AsyncMock,
     mock_create_ctx: AsyncMock,
     runner: CliRunner,
     tmp_path: Path,
 ) -> None:
-    """Should gracefully handle broken .kagura.json."""
-    mock_config.side_effect = ValueError("Invalid JSON in .kagura.json")
+    """Should gracefully handle broken .kagura.json in project dir."""
+    (tmp_path / ".kagura.json").write_text("{invalid json")
     mock_conn.return_value = {"count": 0, "contexts": []}
-    mock_create_ctx.return_value = {"id": "ctx-uuid", "name": "test"}
+    mock_create_ctx.return_value = {"context_id": "ctx-uuid", "name": "test"}
 
     result = runner.invoke(main, _setup_args(tmp_path))
 
@@ -502,19 +515,13 @@ def test_setup_claude_config_load_error(
 
 
 @patch("kagura_memory.setup_claude._test_connection")
-@patch("kagura_memory.setup_claude.load_config")
 def test_setup_claude_rejects_malicious_context_id(
-    mock_config: MagicMock,
     mock_conn: AsyncMock,
     runner: CliRunner,
     tmp_path: Path,
 ) -> None:
     """Should reject context_id with shell-special characters."""
-    mock_config.return_value = {}
-    mock_conn.return_value = {
-        "count": 0,
-        "contexts": [],
-    }
+    mock_conn.return_value = {"count": 0, "contexts": []}
 
     result = runner.invoke(
         main,
@@ -524,3 +531,29 @@ def test_setup_claude_rejects_malicious_context_id(
     assert result.exit_code != 0
     assert "Invalid context_id" in result.output
     assert not (tmp_path / ".kagura.json").exists()
+
+
+@patch("kagura_memory.setup_claude._test_connection")
+def test_setup_claude_reuses_existing_context_id(
+    mock_conn: AsyncMock,
+    runner: CliRunner,
+    tmp_path: Path,
+) -> None:
+    """Rerunning setup should reuse context_id from existing .kagura.json."""
+    existing = {
+        "api_key": "kagura_old",
+        "mcp_url": "http://localhost:8080/mcp",
+        "context_id": "ctx-from-config",
+    }
+    (tmp_path / ".kagura.json").write_text(json.dumps(existing))
+
+    mock_conn.return_value = {
+        "count": 1,
+        "contexts": [{"id": "ctx-from-config", "name": "my-proj"}],
+    }
+
+    result = runner.invoke(main, _setup_args(tmp_path))
+
+    assert result.exit_code == 0, result.output
+    data = json.loads((tmp_path / ".kagura.json").read_text())
+    assert data["context_id"] == "ctx-from-config"

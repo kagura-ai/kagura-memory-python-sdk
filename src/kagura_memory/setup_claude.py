@@ -9,7 +9,6 @@ from typing import Any
 import click
 
 from .client import KaguraClient
-from .config import load_config
 from .exceptions import KaguraAuthError, KaguraConnectionError
 
 DEFAULT_MCP_URL = "http://localhost:8080/mcp"
@@ -108,12 +107,10 @@ def _prompt_api_key(existing: str | None, non_interactive: bool) -> str:
                 "API key required in non-interactive mode. Use --api-key or set KAGURA_API_KEY"
             )
         return existing
-    display_default = (
-        f"{existing[:8]}...{existing[-4:]}" if existing and len(existing) > 12 else existing
-    )
-    value = click.prompt(
-        "Kagura API Key", default=display_default or "", show_default=bool(existing)
-    )
+    if existing:
+        masked = f"{existing[:8]}...{existing[-4:]}" if len(existing) > 12 else existing
+        click.echo(f"  Existing key: {masked}")
+    value = click.prompt("Kagura API Key", default=existing or "")
     return _validate_not_empty(value, "API Key")
 
 
@@ -267,6 +264,8 @@ def _upsert_hook_entry(
         for i, h in enumerate(entry_hooks):
             if _is_kagura_hook(h):
                 entry_hooks[i] = new_hook
+                if matcher:
+                    entry["matcher"] = matcher
                 return
 
     entry: dict[str, Any] = {"hooks": [new_hook]}
@@ -292,13 +291,14 @@ def _install_skills(project_dir: Path, context_id: str) -> list[Path]:
     return paths
 
 
-def _check_gitignore(project_dir: Path) -> bool:
-    """Check if .kagura.json is in .gitignore. Returns True if protected."""
+def _check_gitignore(project_dir: Path) -> list[str]:
+    """Check which secret files are missing from .gitignore."""
+    secret_files = [".kagura.json", ".mcp.json"]
     try:
         content = (project_dir / ".gitignore").read_text()
-        return ".kagura.json" in content
     except FileNotFoundError:
-        return False
+        return secret_files
+    return [f for f in secret_files if f not in content]
 
 
 def run_setup_claude(
@@ -311,10 +311,14 @@ def run_setup_claude(
     """Run the full setup flow for Claude Code integration."""
     project = Path(project_dir).resolve()
 
-    try:
-        existing_config = load_config()
-    except (ValueError, OSError):
-        existing_config = {}
+    # Load existing config from project dir (not cwd)
+    existing_config: dict[str, Any] = {}
+    project_config = project / ".kagura.json"
+    if project_config.exists():
+        try:
+            existing_config = json.loads(project_config.read_text())
+        except (json.JSONDecodeError, OSError):
+            pass
 
     # 1. API Key
     resolved_api_key = api_key or existing_config.get("api_key")
@@ -344,12 +348,13 @@ def run_setup_claude(
     count = contexts_response.get("count", 0)
     click.echo(f"  Connected! ({count} contexts available)")
 
-    # 4. Context selection
+    # 4. Context selection (reuse existing if not overridden)
+    effective_context_id = context_id or existing_config.get("context_id")
     resolved_context_id = _select_or_create_context(
         contexts_response,
         resolved_api_key,
         resolved_mcp_url,
-        context_id,
+        effective_context_id,
         project,
         non_interactive,
     )
@@ -380,12 +385,11 @@ def run_setup_claude(
         click.echo(f"  Wrote {p.relative_to(project)}")
 
     # 7. Gitignore warning
-    if not _check_gitignore(project):
-        click.echo(
-            "\n  Warning: .kagura.json contains your API key."
-            "\n  Add to .gitignore: .kagura.json"
-            "\n  Add to .gitignore: .mcp.json"
-        )
+    missing = _check_gitignore(project)
+    if missing:
+        click.echo("\n  Warning: these files contain secrets (API key):")
+        for f in missing:
+            click.echo(f"  Add to .gitignore: {f}")
 
     # 8. Summary
     click.echo(

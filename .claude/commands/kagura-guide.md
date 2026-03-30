@@ -127,6 +127,10 @@ Note: Resource ingestion requires a public context (`is_public=True`) with `reso
 ## CLI Commands
 
 ```bash
+# Setup (configures .kagura.json, .mcp.json, hooks, skills)
+kagura setup claude
+kagura setup claude --api-key kagura_xxx --mcp-url http://localhost:8080/mcp/w/{workspace_id}
+
 # AI-powered
 kagura process -m "Remember this: ..."
 kagura process -m "Search for OAuth2" --deep
@@ -182,4 +186,4 @@ Environment variables: `KAGURA_API_KEY`, `KAGURA_MCP_URL`, `KAGURA_MODEL`, `KAGU
 | Push external data (products, Slack, CI/CD) into Kagura | `ResourceClient` |
 | Quick CLI operations | `kagura` CLI |
 
-**New here?** Run `/onboarding` for interactive setup.
+**New here?** Run `kagura setup claude` for interactive setup.
