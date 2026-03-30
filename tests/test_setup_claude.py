@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import click
 import pytest
 from click.testing import CliRunner
 
@@ -13,6 +14,9 @@ from kagura_memory.setup_claude import (
     _check_gitignore,
     _install_hooks,
     _install_skills,
+    _prompt_api_key,
+    _prompt_mcp_url,
+    _select_or_create_context,
     _write_kagura_config,
     _write_mcp_json,
 )
@@ -36,6 +40,104 @@ def _has_kagura_hook(entries: list[dict]) -> bool:
         for entry in entries
         for h in entry.get("hooks", [])
     )
+
+
+# =============================================================================
+# Prompt Unit Tests
+# =============================================================================
+
+
+class TestPromptApiKey:
+    def test_interactive_with_existing(self) -> None:
+        """Interactive mode with existing key should show masked default."""
+        with patch("kagura_memory.setup_claude.click") as mock_click:
+            mock_click.prompt.return_value = "kagura_new_key"
+            mock_click.ClickException = click.ClickException
+            result = _prompt_api_key("kagura_12345678abcdef", non_interactive=False)
+            assert result == "kagura_new_key"
+            mock_click.prompt.assert_called_once()
+            call_kwargs = mock_click.prompt.call_args
+            assert "kagura_1...cdef" in str(call_kwargs)
+
+    def test_interactive_without_existing(self) -> None:
+        """Interactive mode without existing key should prompt with empty default."""
+        with patch("kagura_memory.setup_claude.click") as mock_click:
+            mock_click.prompt.return_value = "kagura_entered"
+            mock_click.ClickException = click.ClickException
+            result = _prompt_api_key(None, non_interactive=False)
+            assert result == "kagura_entered"
+
+
+class TestPromptMcpUrl:
+    def test_interactive(self) -> None:
+        """Interactive mode should prompt with default URL."""
+        with patch("kagura_memory.setup_claude.click") as mock_click:
+            mock_click.prompt.return_value = "http://custom:8080/mcp"
+            result = _prompt_mcp_url(None, non_interactive=False)
+            assert result == "http://custom:8080/mcp"
+
+
+class TestSelectOrCreateContext:
+    @patch("kagura_memory.setup_claude._create_context")
+    def test_interactive_select_existing(self, mock_create: AsyncMock) -> None:
+        """Interactive: user selects an existing context."""
+        with patch("kagura_memory.setup_claude.click") as mock_click:
+            mock_click.prompt.return_value = 1  # Select first context
+            mock_click.echo = MagicMock()
+            result = _select_or_create_context(
+                {"contexts": [{"id": "ctx-abc", "name": "my-proj"}]},
+                "key",
+                "url",
+                None,
+                Path("/tmp/test"),
+                non_interactive=False,
+            )
+            assert result == "ctx-abc"
+            mock_create.assert_not_called()
+
+    @patch("kagura_memory.setup_claude.asyncio")
+    @patch("kagura_memory.setup_claude._create_context")
+    def test_interactive_create_new(
+        self, mock_create: AsyncMock, mock_asyncio: MagicMock
+    ) -> None:
+        """Interactive: no contexts, user creates a new one."""
+        mock_asyncio.run.return_value = {"id": "ctx-new", "name": "test"}
+        with patch("kagura_memory.setup_claude.click") as mock_click:
+            mock_click.prompt.side_effect = ["my-project", "A summary"]
+            mock_click.echo = MagicMock()
+            result = _select_or_create_context(
+                {"contexts": []},
+                "key",
+                "url",
+                None,
+                Path("/tmp/test"),
+                non_interactive=False,
+            )
+            assert result == "ctx-new"
+
+    @patch("kagura_memory.setup_claude.asyncio")
+    @patch("kagura_memory.setup_claude._create_context")
+    def test_interactive_create_new_from_list(
+        self, mock_create: AsyncMock, mock_asyncio: MagicMock
+    ) -> None:
+        """Interactive: contexts exist, user chooses 'create new'."""
+        mock_asyncio.run.return_value = {"id": "ctx-brand-new", "name": "new-proj"}
+        with patch("kagura_memory.setup_claude.click") as mock_click:
+            # First prompt: select context (choose "create new" = 2)
+            # Second prompt: context name
+            # Third prompt: summary
+            mock_click.prompt.side_effect = [2, "new-proj", ""]
+            mock_click.echo = MagicMock()
+            mock_click.IntRange = click.IntRange
+            result = _select_or_create_context(
+                {"contexts": [{"id": "ctx-1", "name": "existing"}]},
+                "key",
+                "url",
+                None,
+                Path("/tmp/test"),
+                non_interactive=False,
+            )
+            assert result == "ctx-brand-new"
 
 
 # =============================================================================
@@ -339,6 +441,66 @@ def test_setup_claude_gitignore_warning(
 
     assert result.exit_code == 0
     assert ".gitignore" in result.output
+
+
+@patch("kagura_memory.setup_claude._test_connection")
+@patch("kagura_memory.setup_claude.load_config")
+def test_setup_claude_connection_error(
+    mock_config: MagicMock,
+    mock_conn: AsyncMock,
+    runner: CliRunner,
+    tmp_path: Path,
+) -> None:
+    """KaguraConnectionError should show server-not-running hint."""
+    from kagura_memory.exceptions import KaguraConnectionError
+
+    mock_config.return_value = {}
+    mock_conn.side_effect = KaguraConnectionError("ECONNREFUSED")
+
+    result = runner.invoke(main, _setup_args(tmp_path))
+
+    assert result.exit_code != 0
+    assert "Cannot connect" in result.output
+    assert "docker compose up" in result.output
+
+
+@patch("kagura_memory.setup_claude._test_connection")
+@patch("kagura_memory.setup_claude.load_config")
+def test_setup_claude_generic_connection_error(
+    mock_config: MagicMock,
+    mock_conn: AsyncMock,
+    runner: CliRunner,
+    tmp_path: Path,
+) -> None:
+    """Generic exception during connection should show error."""
+    mock_config.return_value = {}
+    mock_conn.side_effect = RuntimeError("unexpected")
+
+    result = runner.invoke(main, _setup_args(tmp_path))
+
+    assert result.exit_code != 0
+    assert "Connection failed" in result.output
+
+
+@patch("kagura_memory.setup_claude._create_context")
+@patch("kagura_memory.setup_claude._test_connection")
+@patch("kagura_memory.setup_claude.load_config")
+def test_setup_claude_config_load_error(
+    mock_config: MagicMock,
+    mock_conn: AsyncMock,
+    mock_create_ctx: AsyncMock,
+    runner: CliRunner,
+    tmp_path: Path,
+) -> None:
+    """Should gracefully handle broken .kagura.json."""
+    mock_config.side_effect = ValueError("Invalid JSON in .kagura.json")
+    mock_conn.return_value = {"count": 0, "contexts": []}
+    mock_create_ctx.return_value = {"id": "ctx-uuid", "name": "test"}
+
+    result = runner.invoke(main, _setup_args(tmp_path))
+
+    assert result.exit_code == 0, result.output
+    assert "Setup complete!" in result.output
 
 
 @patch("kagura_memory.setup_claude._test_connection")
