@@ -99,9 +99,7 @@ class TestSelectOrCreateContext:
 
     @patch("kagura_memory.setup_claude.asyncio")
     @patch("kagura_memory.setup_claude._create_context")
-    def test_interactive_create_new(
-        self, mock_create: AsyncMock, mock_asyncio: MagicMock
-    ) -> None:
+    def test_interactive_create_new(self, mock_create: AsyncMock, mock_asyncio: MagicMock) -> None:
         """Interactive: no contexts, user creates a new one."""
         mock_asyncio.run.return_value = {"context_id": "ctx-new", "name": "test"}
         with patch("kagura_memory.setup_claude.click") as mock_click:
@@ -146,9 +144,7 @@ class TestSelectOrCreateContext:
 
 class TestWriteKaguraConfig:
     def test_creates_new(self, project_dir: Path) -> None:
-        path = _write_kagura_config(
-            project_dir, "kagura_key", "http://localhost:8080/mcp", "ctx-1"
-        )
+        path = _write_kagura_config(project_dir, "kagura_key", "http://localhost:8080/mcp", "ctx-1")
         data = json.loads(path.read_text())
         assert data["api_key"] == "kagura_key"
         assert data["mcp_url"] == "http://localhost:8080/mcp"
@@ -175,9 +171,7 @@ class TestWriteMcpJson:
         assert server["headers"]["Authorization"] == "Bearer kagura_key"
 
     def test_preserves_other_servers(self, project_dir: Path) -> None:
-        existing = {
-            "mcpServers": {"other-server": {"type": "stdio", "command": "npx other"}}
-        }
+        existing = {"mcpServers": {"other-server": {"type": "stdio", "command": "npx other"}}}
         (project_dir / ".mcp.json").write_text(json.dumps(existing))
 
         _write_mcp_json(project_dir, "key", "http://mcp")
@@ -225,9 +219,7 @@ class TestInstallHooks:
         # Existing ruff hook preserved
         post_hooks = data["hooks"]["PostToolUse"]
         assert any(
-            "ruff" in h.get("command", "")
-            for entry in post_hooks
-            for h in entry.get("hooks", [])
+            "ruff" in h.get("command", "") for entry in post_hooks for h in entry.get("hooks", [])
         )
 
         # Kagura hook added
@@ -247,9 +239,7 @@ class TestInstallHooks:
                 for h in entry.get("hooks", [])
                 if KAGURA_HOOK_MARKER in h.get("command", "")
             )
-            assert (
-                kagura_count == 1
-            ), f"Expected 1 kagura hook for {event}, got {kagura_count}"
+            assert kagura_count == 1, f"Expected 1 kagura hook for {event}, got {kagura_count}"
 
         # Both hooks should have updated to ctx-2
         session_cmd = data["hooks"]["SessionStart"][0]["hooks"][0]["command"]
@@ -271,11 +261,7 @@ class TestInstallHooks:
         existing = {
             "hooks": {
                 "PostToolUse": [
-                    {
-                        "hooks": [
-                            {"type": "command", "command": "kagura remember -s test"}
-                        ]
-                    }
+                    {"hooks": [{"type": "command", "command": "kagura remember -s test"}]}
                 ]
             }
         }
@@ -430,9 +416,7 @@ def test_setup_claude_preserves_existing_mcp_servers(
     mock_conn.return_value = {"count": 0, "contexts": []}
     mock_create_ctx.return_value = {"context_id": "ctx-uuid", "name": "test"}
 
-    existing_mcp = {
-        "mcpServers": {"github": {"type": "stdio", "command": "npx github-mcp"}}
-    }
+    existing_mcp = {"mcpServers": {"github": {"type": "stdio", "command": "npx github-mcp"}}}
     (tmp_path / ".mcp.json").write_text(json.dumps(existing_mcp))
 
     result = runner.invoke(main, _setup_args(tmp_path))
