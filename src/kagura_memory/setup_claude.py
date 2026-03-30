@@ -92,6 +92,14 @@ def _write_json(path: Path, data: dict[str, Any]) -> None:
     path.write_text(json.dumps(data, indent=2) + "\n")
 
 
+def _validate_not_empty(value: str, name: str) -> str:
+    """Validate that a prompted value is not empty."""
+    value = value.strip()
+    if not value:
+        raise click.UsageError(f"{name} cannot be empty")
+    return value
+
+
 def _prompt_api_key(existing: str | None, non_interactive: bool) -> str:
     """Prompt for API key, or use existing."""
     if non_interactive:
@@ -103,16 +111,22 @@ def _prompt_api_key(existing: str | None, non_interactive: bool) -> str:
     display_default = (
         f"{existing[:8]}...{existing[-4:]}" if existing and len(existing) > 12 else existing
     )
-    return click.prompt(
+    value = click.prompt(
         "Kagura API Key", default=display_default or "", show_default=bool(existing)
     )
+    return _validate_not_empty(value, "API Key")
 
 
 def _prompt_mcp_url(existing: str | None, non_interactive: bool) -> str:
     """Prompt for MCP URL, or use existing/default."""
     if non_interactive:
-        return existing or DEFAULT_MCP_URL
-    return click.prompt("MCP URL", default=existing or DEFAULT_MCP_URL)
+        if not existing:
+            raise click.ClickException(
+                "MCP URL required in non-interactive mode. Use --mcp-url or set KAGURA_MCP_URL"
+            )
+        return existing
+    value = click.prompt("MCP URL", default=existing or DEFAULT_MCP_URL)
+    return _validate_not_empty(value, "MCP URL")
 
 
 async def _test_connection(api_key: str, mcp_url: str) -> dict[str, Any]:
