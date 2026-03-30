@@ -422,7 +422,7 @@ def setup_claude(api_key, mcp_url, context_id, project_dir, non_interactive):
 
     Examples:
       kagura setup claude
-      kagura setup claude --api-key kagura_xxx --mcp-url http://localhost:8080/mcp
+      kagura setup claude --api-key kagura_xxx --mcp-url http://localhost:8080/mcp/w/{workspace_id}
       kagura setup claude -y --api-key kagura_xxx --context-id my-project
     """
     try:
