@@ -125,8 +125,7 @@ def _prompt_mcp_url(existing: str | None, non_interactive: bool) -> str:
                 "MCP URL required in non-interactive mode. Use --mcp-url or set KAGURA_MCP_URL"
             )
         return existing
-    click.echo("  (format: http://localhost:8080/mcp/w/{workspace_id})")
-    value = click.prompt("MCP URL", default=existing or DEFAULT_MCP_URL)
+    value = click.prompt("MCP URL", default=existing or "")
     return _validate_not_empty(value, "MCP URL")
 
 
