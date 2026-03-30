@@ -97,9 +97,7 @@ class TestSelectOrCreateContext:
 
     @patch("kagura_memory.setup_claude.asyncio")
     @patch("kagura_memory.setup_claude._create_context")
-    def test_interactive_create_new(
-        self, mock_create: AsyncMock, mock_asyncio: MagicMock
-    ) -> None:
+    def test_interactive_create_new(self, mock_create: AsyncMock, mock_asyncio: MagicMock) -> None:
         """Interactive: no contexts, user creates a new one."""
         mock_asyncio.run.return_value = {"id": "ctx-new", "name": "test"}
         with patch("kagura_memory.setup_claude.click") as mock_click:
