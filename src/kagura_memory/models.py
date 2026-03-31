@@ -105,6 +105,32 @@ class ProcessResult(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Embedding model metadata
+# ---------------------------------------------------------------------------
+
+
+class EmbeddingModel(BaseModel):
+    """An embedding model available on the server."""
+
+    name: str
+    dimensions: int
+    provider: str
+    available: bool
+
+
+class EmbeddingModelsResponse(BaseModel):
+    """Response from the embedding models endpoint."""
+
+    models: list[EmbeddingModel]
+    default_model: str
+
+
+# ---------------------------------------------------------------------------
+# Resource Token models
+# ---------------------------------------------------------------------------
+
+
 class ResourceTokenCreate(BaseModel):
     """Request model for creating a resource token."""
 

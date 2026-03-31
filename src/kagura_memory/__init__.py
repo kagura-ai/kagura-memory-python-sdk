@@ -14,6 +14,8 @@ from .exceptions import (
 )
 from .models import (
     Artifact,
+    EmbeddingModel,
+    EmbeddingModelsResponse,
     ExploredMemory,
     FieldDefinition,
     LLMUsage,
@@ -45,6 +47,9 @@ __all__ = [
     "KaguraAgent",
     "KaguraClient",
     "ResourceClient",
+    # Embedding models
+    "EmbeddingModel",
+    "EmbeddingModelsResponse",
     # Models
     "Session",
     "Message",

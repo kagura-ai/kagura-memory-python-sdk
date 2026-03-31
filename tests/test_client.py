@@ -534,6 +534,87 @@ async def test_update_search_config_minimal():
     await client.close()
 
 
+# ============================================================================
+# list_embedding_models tests
+# ============================================================================
+
+
+def test_base_url_from_mcp_url():
+    """_base_url should strip /mcp suffix."""
+    client = KaguraClient(api_key="test", mcp_url="https://memory.kagura-ai.com/mcp")
+    assert client._base_url == "https://memory.kagura-ai.com"
+
+
+def test_base_url_from_mcp_url_with_workspace():
+    """_base_url should strip /mcp/w/{workspace_id}."""
+    client = KaguraClient(api_key="test", mcp_url="https://memory.kagura-ai.com/mcp/w/ws-1")
+    assert client._base_url == "https://memory.kagura-ai.com"
+
+
+@pytest.mark.asyncio
+async def test_list_embedding_models():
+    """list_embedding_models() should return parsed EmbeddingModelsResponse."""
+    client = _make_initialized_client()
+
+    response_data = {
+        "models": [
+            {
+                "name": "text-embedding-3-small",
+                "dimensions": 512,
+                "provider": "openai",
+                "available": True,
+            },
+            {
+                "name": "qwen3-embedding:8b",
+                "dimensions": 4096,
+                "provider": "ollama",
+                "available": False,
+            },
+        ],
+        "default_model": "text-embedding-3-small",
+    }
+
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = response_data
+    mock_response.raise_for_status = MagicMock()
+
+    with patch.object(client._client, "get", new_callable=AsyncMock) as mock_get:
+        mock_get.return_value = mock_response
+        result = await client.list_embedding_models()
+
+        assert result.default_model == "text-embedding-3-small"
+        assert len(result.models) == 2
+        assert result.models[0].name == "text-embedding-3-small"
+        assert result.models[0].dimensions == 512
+        assert result.models[0].provider == "openai"
+        assert result.models[0].available is True
+        assert result.models[1].available is False
+
+        mock_get.assert_called_once_with("https://test.com/api/v1/system/embedding/models")
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_list_embedding_models_auth_error():
+    """list_embedding_models() should raise KaguraAuthError on 401."""
+    client = _make_initialized_client()
+
+    mock_response = MagicMock(spec=httpx.Response)
+    mock_response.status_code = 401
+
+    with patch.object(client._client, "get", new_callable=AsyncMock) as mock_get:
+        mock_get.return_value = mock_response
+        mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "401", request=MagicMock(), response=mock_response
+        )
+        with pytest.raises(KaguraAuthError):
+            await client.list_embedding_models()
+
+    await client.close()
+
+
 @pytest.mark.asyncio
 async def test_context_manager():
     """async with should return client and close on exit."""
