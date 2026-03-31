@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from importlib.metadata import version as _pkg_version
 
 SDK_VERSION: str = _pkg_version("kagura-memory")
@@ -19,8 +20,8 @@ def base_url_from_mcp(mcp_url: str) -> str:
     Returns:
         Base URL suitable for REST API calls.
     """
-    idx = mcp_url.find("/mcp")
-    return mcp_url[:idx] if idx != -1 else mcp_url
+    m = re.search(r"/mcp(?=/|$)", mcp_url)
+    return mcp_url[: m.start()] if m else mcp_url
 
 
 def validate_https_url(url: str, *, label: str = "URL") -> None:

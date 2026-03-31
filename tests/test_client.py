@@ -539,16 +539,20 @@ async def test_update_search_config_minimal():
 # ============================================================================
 
 
-def test_base_url_from_mcp_url():
+@pytest.mark.asyncio
+async def test_base_url_from_mcp_url():
     """_base_url should strip /mcp suffix."""
-    client = KaguraClient(api_key="test", mcp_url="https://memory.kagura-ai.com/mcp")
-    assert client._base_url == "https://memory.kagura-ai.com"
+    async with KaguraClient(api_key="test", mcp_url="https://memory.kagura-ai.com/mcp") as client:
+        assert client._base_url == "https://memory.kagura-ai.com"
 
 
-def test_base_url_from_mcp_url_with_workspace():
+@pytest.mark.asyncio
+async def test_base_url_from_mcp_url_with_workspace():
     """_base_url should strip /mcp/w/{workspace_id}."""
-    client = KaguraClient(api_key="test", mcp_url="https://memory.kagura-ai.com/mcp/w/ws-1")
-    assert client._base_url == "https://memory.kagura-ai.com"
+    async with KaguraClient(
+        api_key="test", mcp_url="https://memory.kagura-ai.com/mcp/w/ws-1"
+    ) as client:
+        assert client._base_url == "https://memory.kagura-ai.com"
 
 
 @pytest.mark.asyncio
@@ -629,6 +633,24 @@ async def test_list_embedding_models_http_error():
             "500", request=MagicMock(), response=mock_response
         )
         with pytest.raises(KaguraConnectionError, match="HTTP 500"):
+            await client.list_embedding_models()
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_list_embedding_models_invalid_response():
+    """list_embedding_models() should raise KaguraConnectionError on invalid JSON schema."""
+    client = _make_initialized_client()
+
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = {"unexpected": "schema"}
+    mock_response.raise_for_status = MagicMock()
+
+    with patch.object(client._client, "get", new_callable=AsyncMock) as mock_get:
+        mock_get.return_value = mock_response
+        with pytest.raises(KaguraConnectionError, match="Invalid response format"):
             await client.list_embedding_models()
 
     await client.close()

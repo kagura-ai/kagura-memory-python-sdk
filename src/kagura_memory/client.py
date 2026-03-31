@@ -488,6 +488,8 @@ class KaguraClient:
             raise KaguraConnectionError(f"HTTP {e.response.status_code}") from e
         except httpx.RequestError as e:
             raise KaguraConnectionError(f"Connection failed: {e}") from e
+        except (ValueError, TypeError) as e:
+            raise KaguraConnectionError(f"Invalid response format: {e}") from e
 
     async def close(self) -> None:
         """Close the HTTP client."""
