@@ -894,3 +894,46 @@ async def test_sync_skill():
     result = await agent.run_skill(skill_name="sync_greet", who="World")
     assert result == "Hello World"
     await agent.close()
+
+
+# ============================================================================
+# Prompt formatting
+# ============================================================================
+
+
+def test_format_tool_for_prompt_full():
+    """_format_tool_for_prompt should include full description and required params."""
+    from kagura_memory.prompts import _format_tool_for_prompt
+
+    tool = {
+        "name": "remember",
+        "description": "Store important information.\nLine 2 detail.",
+        "inputSchema": {
+            "properties": {
+                "summary": {"type": "string", "description": "Memory summary"},
+                "content": {"type": "string", "description": "Full content"},
+                "tags": {"type": "array", "description": "Tags"},
+            },
+            "required": ["summary", "content"],
+        },
+    }
+    result = _format_tool_for_prompt(tool)
+    assert "### remember" in result
+    assert "Store important information." in result
+    assert "Line 2 detail." in result  # full description, not truncated
+    assert "summary (string): Memory summary" in result
+    assert "content (string): Full content" in result
+
+
+def test_format_tool_for_prompt_no_required():
+    """_format_tool_for_prompt with no required params omits Required section."""
+    from kagura_memory.prompts import _format_tool_for_prompt
+
+    tool = {
+        "name": "list_contexts",
+        "description": "List contexts.",
+        "inputSchema": {"properties": {}, "required": []},
+    }
+    result = _format_tool_for_prompt(tool)
+    assert "### list_contexts" in result
+    assert "Required:" not in result
