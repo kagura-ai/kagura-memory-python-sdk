@@ -6,7 +6,7 @@ from typing import Any
 
 import httpx
 
-from ._http import SDK_VERSION, validate_https_url
+from ._http import SDK_VERSION, base_url_from_mcp, validate_https_url
 from .exceptions import KaguraAuthError, KaguraConnectionError
 from .models import EmbeddingModelsResponse
 
@@ -39,6 +39,7 @@ class KaguraClient:
         validate_https_url(stripped_url, label="MCP URL")
 
         self.mcp_url = stripped_url
+        self._base_url = base_url_from_mcp(stripped_url)
         self.timeout = timeout
         self._client = httpx.AsyncClient(
             timeout=timeout,
@@ -462,15 +463,6 @@ class KaguraClient:
         if reranker_model is not None:
             arguments["reranker_model"] = reranker_model
         return await self._call_tool("update_search_config", arguments)
-
-    @property
-    def _base_url(self) -> str:
-        """Derive REST API base URL from MCP URL.
-
-        Strips ``/mcp`` and everything after it.
-        """
-        idx = self.mcp_url.find("/mcp")
-        return self.mcp_url[:idx] if idx != -1 else self.mcp_url
 
     async def list_embedding_models(self) -> EmbeddingModelsResponse:
         """List available embedding models.
