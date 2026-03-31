@@ -408,7 +408,7 @@ class KaguraAgent:
         return self._ollama_client
 
     async def _call_ollama(self, messages: list[dict], temperature: float) -> tuple[dict, Any]:
-        """Call LLM via Ollama API directly."""
+        """Call LLM via Ollama API directly (local models, thinking disabled for speed)."""
         model_name = self.model.removeprefix("ollama/")
         client = self._get_ollama_client()
         try:
@@ -545,7 +545,7 @@ class KaguraAgent:
             if self.logger:
                 self.logger.action("Recalling memories", f'query="{query}"')
 
-            result = await self.client.recall(ctx, query, k=recall_k)
+            result = await self.client.recall(ctx, query, k=recall_k, filters=query_info.filters)
 
             for mem in result.get("results", []):
                 recalled.append(

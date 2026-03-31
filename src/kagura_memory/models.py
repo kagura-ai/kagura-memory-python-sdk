@@ -68,6 +68,7 @@ class RecallQuery(BaseModel):
 
     query: str
     reason: str = ""
+    filters: dict[str, Any] | None = None
 
 
 class AnalysisResult(BaseModel):
