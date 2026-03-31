@@ -343,6 +343,7 @@ class KaguraClient:
         usage_guide: str | None = None,
         resource_id: str | None = None,
         is_private: bool = True,
+        embedding_model: str | None = None,
     ) -> dict[str, Any]:
         """Create a new context in the current workspace.
 
@@ -354,6 +355,8 @@ class KaguraClient:
             usage_guide: LLM-oriented memory usage guidelines.
             resource_id: Resource identifier for external data ingestion.
             is_private: Privacy flag (default: True).
+            embedding_model: Embedding model for this context (immutable after creation).
+                Use ``list_embedding_models()`` to discover available options.
 
         Returns:
             Created context dict with id, name, and metadata.
@@ -382,6 +385,8 @@ class KaguraClient:
             arguments["usage_guide"] = usage_guide
         if resource_id is not None:
             arguments["resource_id"] = resource_id
+        if embedding_model is not None:
+            arguments["embedding_model"] = embedding_model
         return await self._call_tool("create_context", arguments)
 
     async def update_context(

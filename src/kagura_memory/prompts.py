@@ -30,9 +30,10 @@ that determines what to store (REMEMBER) and search (RECALL).
 </remember_when>
 
 <recall_when>
-- The user asks a question that past memories could answer
+- The user asks a question or mentions a topic — ALWAYS recall to check for relevant memories
 - A problem is mentioned that may have been solved before
 - Context from previous work or discussions would help
+- When in doubt, set should_recall to true — searching is cheap, missing context is costly
 </recall_when>
 </guidelines>
 

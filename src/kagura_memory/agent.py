@@ -45,6 +45,8 @@ class KaguraAgent:
         max_retries: int = 3,
         llm_api_key: str | None = None,
         ollama_base_url: str = "http://localhost:11434",
+        ollama_think: bool = False,
+        ollama_stream: bool = False,
     ):
         """
         Initialize Kagura Agent.
@@ -58,6 +60,8 @@ class KaguraAgent:
             max_retries: Maximum LLM retry attempts
             llm_api_key: LLM provider API key (passed explicitly, not via env var)
             ollama_base_url: Ollama API base URL (only used with ollama/ models)
+            ollama_think: Enable thinking mode for Ollama models (default: False)
+            ollama_stream: Enable streaming for Ollama models (default: False)
         """
         self.model = model
         self.context_id = context_id
@@ -65,6 +69,8 @@ class KaguraAgent:
         self._llm_api_key = llm_api_key
         self._is_ollama = model.startswith("ollama/")
         self._ollama_base_url = ollama_base_url.rstrip("/")
+        self._ollama_think = ollama_think
+        self._ollama_stream = ollama_stream
         self._ollama_client: httpx.AsyncClient | None = None
         self.client = KaguraClient(api_key, mcp_url, timeout)
         self.logger: VerboseLogger | None = None
@@ -402,7 +408,7 @@ class KaguraAgent:
         return self._ollama_client
 
     async def _call_ollama(self, messages: list[dict], temperature: float) -> tuple[dict, Any]:
-        """Call LLM via Ollama API directly (local models with thinking support)."""
+        """Call LLM via Ollama API directly."""
         model_name = self.model.removeprefix("ollama/")
         client = self._get_ollama_client()
         try:
@@ -412,7 +418,8 @@ class KaguraAgent:
                     "model": model_name,
                     "messages": messages,
                     "format": "json",
-                    "stream": False,
+                    "stream": self._ollama_stream,
+                    "think": self._ollama_think,
                     "options": {"temperature": temperature},
                 },
             )
