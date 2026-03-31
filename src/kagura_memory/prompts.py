@@ -30,9 +30,10 @@ that determines what to store (REMEMBER) and search (RECALL).
 </remember_when>
 
 <recall_when>
-- The user asks a question that past memories could answer
+- The user asks a question or mentions a topic — ALWAYS recall to check for relevant memories
 - A problem is mentioned that may have been solved before
 - Context from previous work or discussions would help
+- When in doubt, set should_recall to true — searching is cheap, missing context is costly
 </recall_when>
 </guidelines>
 
@@ -54,7 +55,12 @@ Use one of: code, note, decision, bug-fix, feature, learning
 </importance_scale>
 
 <tags_rules>
-Include domain tags (backend, frontend, infra) and tech tags (fastapi, react, postgresql).
+Include category tags and entity tags for searchability.
+- Category: "category:{domain}" (e.g., "category:料理", "category:backend")
+- Entity: key terms with writing variations for recall
+- Japanese: include kanji, katakana, hiragana (e.g., ["鯖", "サバ", "さば"])
+- Okurigana variants (e.g., ["引越し", "引っ越し", "ひっこし"])
+- Tech: abbreviated and full forms (e.g., ["DB", "データベース", "database"])
 </tags_rules>
 
 <recall_query_rules>
