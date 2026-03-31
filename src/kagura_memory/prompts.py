@@ -9,8 +9,6 @@ if TYPE_CHECKING:
 MAX_CONTEXTS_DISPLAY = 5  # Maximum contexts to show in prompt
 CONTEXT_ID_DISPLAY_LENGTH = 8  # Context ID prefix length for readability
 MAX_SUMMARY_LENGTH = 100  # Maximum context summary display length
-MAX_DESCRIPTION_LENGTH = 200  # Maximum tool description length
-MAX_OPTIONAL_PARAMS = 3  # Maximum optional parameters to display
 MAX_MESSAGES = 20  # Maximum session messages to include
 MAX_ARTIFACTS = 5  # Maximum artifacts to include
 ARTIFACT_PREVIEW_LENGTH = 500  # Artifact content preview length
@@ -212,57 +210,35 @@ Return JSON only:
 }}"""
 
 
-def _format_tool_parameter(name: str, schema: dict[str, Any]) -> str:
+def _format_tool_for_prompt(tool: dict[str, Any]) -> str:
     """
-    Format a tool parameter for display in prompt.
+    Format full tool schema for LLM prompt.
 
-    Args:
-        name: Parameter name
-        schema: Parameter schema dict with type and description
-
-    Returns:
-        Formatted parameter string
-    """
-    param_type = schema.get("type", "any")
-    description = schema.get("description", "")
-    return f"    - {name} ({param_type}): {description}"
-
-
-def _summarize_tool_schema(tool: dict[str, Any]) -> str:
-    """
-    Summarize tool schema for prompt (reduce token usage).
+    Passes complete MCP tool descriptions to the LLM without truncation,
+    so the LLM receives the same guidance that direct MCP clients get
+    (e.g., search optimization hints, good/bad examples).
 
     Args:
         tool: Tool definition dict with name, description, inputSchema
 
     Returns:
-        Summarized tool description string
+        Formatted tool description string
     """
     name = tool.get("name", "unknown")
-    # First line only, truncate to max length
-    description = tool.get("description", "").split("\n")[0][:MAX_DESCRIPTION_LENGTH]
+    description = tool.get("description", "")
     input_schema = tool.get("inputSchema", {})
     properties = input_schema.get("properties", {})
     required = input_schema.get("required", [])
 
-    # Format required parameters
-    required_params = []
-    for param_name in required:
-        if param_name in properties:
-            required_params.append(_format_tool_parameter(param_name, properties[param_name]))
+    required_params = "\n".join(
+        f"    - {p} ({properties[p].get('type', 'any')}): {properties[p].get('description', '')}"
+        for p in required
+        if p in properties
+    )
 
-    # Format optional parameters (limit to most important ones)
-    optional_params = []
-    for param_name, param_schema in list(properties.items())[:MAX_OPTIONAL_PARAMS]:
-        if param_name not in required:
-            optional_params.append(_format_tool_parameter(param_name, param_schema))
-
-    result = f"• {name}: {description}\n"
+    result = f"### {name}\n{description}\n"
     if required_params:
-        result += "  Required:\n" + "\n".join(required_params) + "\n"
-    if optional_params:
-        result += "  Optional:\n" + "\n".join(optional_params) + "\n"
-
+        result += f"\n  Required:\n{required_params}\n"
     return result
 
 
@@ -284,7 +260,7 @@ def build_analysis_prompt_with_tools(
         Formatted prompt string with tool definitions
     """
     # Format available tools
-    tools_desc = "".join([_summarize_tool_schema(tool) for tool in tools])
+    tools_desc = "".join([_format_tool_for_prompt(tool) for tool in tools])
 
     # Format available contexts (limit to most recent)
     contexts_desc = ""
