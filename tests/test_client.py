@@ -616,6 +616,19 @@ async def test_list_embedding_models_auth_error():
 
 
 @pytest.mark.asyncio
+async def test_list_embedding_models_connection_error():
+    """list_embedding_models() should raise KaguraConnectionError on network failure."""
+    client = _make_initialized_client()
+
+    with patch.object(client._client, "get", new_callable=AsyncMock) as mock_get:
+        mock_get.side_effect = httpx.ConnectError("Connection refused")
+        with pytest.raises(KaguraConnectionError, match="Connection failed"):
+            await client.list_embedding_models()
+
+    await client.close()
+
+
+@pytest.mark.asyncio
 async def test_context_manager():
     """async with should return client and close on exit."""
     async with KaguraClient(api_key="test", mcp_url="https://test.com/mcp") as client:
