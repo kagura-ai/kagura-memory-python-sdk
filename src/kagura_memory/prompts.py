@@ -59,6 +59,8 @@ Include domain tags (backend, frontend, infra) and tech tags (fastapi, react, po
 
 <recall_query_rules>
 Write queries with both semantic meaning and specific keywords (hybrid search).
+Use filters.tags to narrow results when specific topics are mentioned.
+Example: query="認証エラーの対処法", filters={"tags": ["auth"]}
 </recall_query_rules>
 </quality_standards>
 
@@ -114,7 +116,8 @@ Return ONLY valid JSON matching this schema. No markdown, no explanation, no pre
   "recall_queries": [
     {
       "query": "string (semantic + keyword hybrid search query)",
-      "reason": "string"
+      "reason": "string",
+      "filters": {"tags": ["string"]} or null
     }
   ]
 }
