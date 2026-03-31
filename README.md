@@ -87,6 +87,17 @@ Supports OpenAI, Claude, Gemini via [LiteLLM](https://github.com/BerriAI/litellm
 agent = KaguraAgent(api_key="kagura_...", model="ollama/qwen3:30b")
 ```
 
+#### Ollama Local Model Requirements
+
+| Model | Size | Context | Min VRAM | Recommended GPU |
+|-------|------|---------|----------|-----------------|
+| `qwen3:30b` (recommended) | 19 GB | 256K | 24 GB | RTX 4090 or equivalent |
+| `qwen3:14b` | 9.3 GB | 40K | 16 GB | RTX 4080 or equivalent |
+
+**Recommended minimum**: `qwen3:30b` on an RTX 4090 (24 GB VRAM) or equivalent.
+
+Smaller models (< 30B parameters) may produce lower quality memory analysis — summaries may lack searchable keywords, and recall query generation may be less precise.
+
 ### KaguraClient — Direct Memory Operations
 
 For programmatic control without LLM:
