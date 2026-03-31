@@ -390,6 +390,23 @@ async def test_create_context_with_resource_id():
 
 
 @pytest.mark.asyncio
+async def test_create_context_with_embedding_model():
+    """create_context() should pass embedding_model when provided."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.side_effect = [
+            {"status": "success", "contexts": [], "count": 0, "limit": 20, "can_create": True},
+            {"id": "uuid-1", "name": "emb-ctx"},
+        ]
+        await client.create_context(name="emb-ctx", embedding_model="qwen3-embedding:8b")
+        args = mock.call_args_list[1][0][1]
+        assert args["embedding_model"] == "qwen3-embedding:8b"
+
+    await client.close()
+
+
+@pytest.mark.asyncio
 async def test_create_context_quota_exceeded():
     """create_context() should raise KaguraQuotaError when limit reached."""
     client = _make_initialized_client()
