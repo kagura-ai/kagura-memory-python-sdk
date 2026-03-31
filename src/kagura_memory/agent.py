@@ -539,9 +539,7 @@ class KaguraAgent:
             if self.logger:
                 self.logger.action("Recalling memories", f'query="{query}"')
 
-            result = await self.client.recall(
-                ctx, query, k=recall_k, filters=query_info.filters
-            )
+            result = await self.client.recall(ctx, query, k=recall_k, filters=query_info.filters)
 
             for mem in result.get("results", []):
                 recalled.append(
