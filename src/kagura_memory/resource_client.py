@@ -6,7 +6,7 @@ from typing import Any, Literal
 
 import httpx
 
-from ._http import SDK_VERSION, validate_https_url
+from ._http import SDK_VERSION, base_url_from_mcp, validate_https_url
 from .client import KaguraClient
 from .exceptions import (
     KaguraAuthError,
@@ -87,8 +87,7 @@ class ResourceClient:
             timeout: Request timeout in seconds.
         """
         url = mcp_url.rstrip("/")
-        mcp_idx = url.find("/mcp")
-        base_url = url[:mcp_idx] if mcp_idx != -1 else url
+        base_url = base_url_from_mcp(url)
         instance = cls(api_key=api_key, base_url=base_url, timeout=timeout)
         instance._mcp_url = mcp_url.rstrip("/")
         return instance

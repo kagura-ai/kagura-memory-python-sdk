@@ -6,8 +6,9 @@ from typing import Any
 
 import httpx
 
-from ._http import SDK_VERSION, validate_https_url
+from ._http import SDK_VERSION, base_url_from_mcp, validate_https_url
 from .exceptions import KaguraAuthError, KaguraConnectionError
+from .models import EmbeddingModelsResponse
 
 
 class KaguraClient:
@@ -38,6 +39,7 @@ class KaguraClient:
         validate_https_url(stripped_url, label="MCP URL")
 
         self.mcp_url = stripped_url
+        self._base_url = base_url_from_mcp(stripped_url)
         self.timeout = timeout
         self._client = httpx.AsyncClient(
             timeout=timeout,
@@ -461,6 +463,33 @@ class KaguraClient:
         if reranker_model is not None:
             arguments["reranker_model"] = reranker_model
         return await self._call_tool("update_search_config", arguments)
+
+    async def list_embedding_models(self) -> EmbeddingModelsResponse:
+        """List available embedding models.
+
+        Calls ``GET /api/v1/system/embedding/models`` to retrieve
+        server-supported embedding models with provider info and availability.
+
+        Returns:
+            EmbeddingModelsResponse with models list and default_model.
+
+        Raises:
+            KaguraAuthError: Authentication failed.
+            KaguraConnectionError: Connection to server failed.
+        """
+        url = f"{self._base_url}/api/v1/system/embedding/models"
+        try:
+            response = await self._client.get(url)
+            response.raise_for_status()
+            return EmbeddingModelsResponse.model_validate(response.json())
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 401:
+                raise KaguraAuthError("Authentication failed. Check your API key.") from e
+            raise KaguraConnectionError(f"HTTP {e.response.status_code}") from e
+        except httpx.RequestError as e:
+            raise KaguraConnectionError(f"Connection failed: {e}") from e
+        except (ValueError, TypeError) as e:
+            raise KaguraConnectionError(f"Invalid response format: {e}") from e
 
     async def close(self) -> None:
         """Close the HTTP client."""
