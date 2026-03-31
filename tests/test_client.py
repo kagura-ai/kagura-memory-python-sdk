@@ -616,6 +616,25 @@ async def test_list_embedding_models_auth_error():
 
 
 @pytest.mark.asyncio
+async def test_list_embedding_models_http_error():
+    """list_embedding_models() should raise KaguraConnectionError on non-401 HTTP error."""
+    client = _make_initialized_client()
+
+    mock_response = MagicMock(spec=httpx.Response)
+    mock_response.status_code = 500
+
+    with patch.object(client._client, "get", new_callable=AsyncMock) as mock_get:
+        mock_get.return_value = mock_response
+        mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "500", request=MagicMock(), response=mock_response
+        )
+        with pytest.raises(KaguraConnectionError, match="HTTP 500"):
+            await client.list_embedding_models()
+
+    await client.close()
+
+
+@pytest.mark.asyncio
 async def test_list_embedding_models_connection_error():
     """list_embedding_models() should raise KaguraConnectionError on network failure."""
     client = _make_initialized_client()
