@@ -58,6 +58,7 @@ Include category tags and entity tags for searchability.
 - Entity: key terms with writing variations for recall
 - Japanese: include kanji, katakana, hiragana (e.g., ["鯖", "サバ", "さば"])
 - Okurigana variants (e.g., ["引越し", "引っ越し", "ひっこし"])
+- Wago: include hiragana for kanji terms (e.g., ["働き方", "はたらき方"])
 - Tech: abbreviated and full forms (e.g., ["DB", "データベース", "database"])
 </tags_rules>
 
