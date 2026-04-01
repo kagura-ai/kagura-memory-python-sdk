@@ -390,15 +390,17 @@ def context_delete(context_id, yes):
 @click.option("--description", "-d", help="Updated description")
 @click.option("--summary", "-s", help="Updated LLM-oriented summary")
 @click.option("--usage-guide", help="Updated LLM-oriented usage guidelines")
-def context_update(context_id, display_name, description, summary, usage_guide):
+@click.option("--lock/--unlock", default=None, help="Lock or unlock the context")
+def context_update(context_id, display_name, description, summary, usage_guide, lock):
     """
     Update a context's settings.
 
     Examples:
       kagura context update CTX_UUID -s "Updated summary"
-      kagura context update CTX_UUID --usage-guide "Store only code snippets"
+      kagura context update CTX_UUID --lock
+      kagura context update CTX_UUID --unlock
     """
-    if all(v is None for v in (display_name, description, summary, usage_guide)):
+    if all(v is None for v in (display_name, description, summary, usage_guide, lock)):
         raise click.ClickException("At least one update option is required")
 
     _run_client_command(
@@ -408,6 +410,7 @@ def context_update(context_id, display_name, description, summary, usage_guide):
             description=description,
             summary=summary,
             usage_guide=usage_guide,
+            is_locked=lock,
         ),
         context_id=None,
         needs_context=False,

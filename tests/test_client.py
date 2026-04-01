@@ -608,6 +608,24 @@ async def test_update_context():
     await client.close()
 
 
+@pytest.mark.asyncio
+async def test_update_context_is_locked():
+    """update_context() should pass is_locked when specified."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {"id": "uuid-1", "is_locked": True}
+        await client.update_context(context_id="uuid-1", is_locked=True)
+        args = mock.call_args[0][1]
+        assert args["is_locked"] is True
+
+        await client.update_context(context_id="uuid-1", is_locked=False)
+        args = mock.call_args[0][1]
+        assert args["is_locked"] is False
+
+    await client.close()
+
+
 # ============================================================================
 # Search config
 # ============================================================================
