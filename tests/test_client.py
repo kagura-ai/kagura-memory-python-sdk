@@ -231,6 +231,45 @@ async def test_recall_with_filters():
 
 
 @pytest.mark.asyncio
+async def test_recall_with_search_mode():
+    """recall() should pass search_mode when specified."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {"results": []}
+        await client.recall(context_id="ctx", query="test", search_mode="keyword")
+        args = mock.call_args[0][1]
+        assert args["search_mode"] == "keyword"
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_recall_search_mode_not_sent_when_none():
+    """recall() should not send search_mode when None."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {"results": []}
+        await client.recall(context_id="ctx", query="test")
+        args = mock.call_args[0][1]
+        assert "search_mode" not in args
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_recall_search_mode_invalid():
+    """recall() should raise ValueError for invalid search_mode."""
+    client = _make_initialized_client()
+
+    with pytest.raises(ValueError, match="Invalid search_mode"):
+        await client.recall(context_id="ctx", query="test", search_mode="invalid")
+
+    await client.close()
+
+
+@pytest.mark.asyncio
 async def test_forget_by_memory_id():
     """forget() with memory_id should pass it in arguments."""
     client = _make_initialized_client()
