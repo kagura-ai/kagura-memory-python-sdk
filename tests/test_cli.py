@@ -204,9 +204,7 @@ def test_update_memory_requires_id():
 def test_update_memory_rejects_both_ids():
     """update-memory with both --memory-id and --external-id should fail."""
     runner = CliRunner()
-    result = runner.invoke(
-        main, ["update-memory", "-m", "mem-1", "--external-id", "ext-1"]
-    )
+    result = runner.invoke(main, ["update-memory", "-m", "mem-1", "--external-id", "ext-1"])
     assert result.exit_code != 0
     assert "only one" in result.output.lower()
 
