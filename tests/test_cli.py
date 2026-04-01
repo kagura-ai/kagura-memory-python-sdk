@@ -4,7 +4,17 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from click.testing import CliRunner
 
-from kagura_memory.cli import main
+from kagura_memory.cli import _parse_tags, main
+
+
+def test_parse_tags():
+    """_parse_tags should handle various inputs."""
+    assert _parse_tags(None) is None
+    assert _parse_tags("") is None
+    assert _parse_tags(",,,") is None
+    assert _parse_tags("a, b, c") == ["a", "b", "c"]
+    assert _parse_tags("single") == ["single"]
+    assert _parse_tags(" spaced , tags ") == ["spaced", "tags"]
 
 
 @patch("kagura_memory.cli.load_config")
@@ -159,6 +169,44 @@ def test_context_update_requires_option():
     result = runner.invoke(main, ["context", "update", "uuid-1"])
     assert result.exit_code != 0
     assert "At least one update option" in result.output
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_update_memory_by_id(mock_client_cls, mock_config):
+    """update-memory with --memory-id should call update_memory."""
+    mock_config.return_value = {
+        "api_key": "key",
+        "mcp_url": "https://test.com/mcp",
+        "context_id": "ctx",
+    }
+
+    mock_client = AsyncMock()
+    mock_client.update_memory.return_value = {"status": "success"}
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    mock_client_cls.return_value = mock_client
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["update-memory", "-m", "mem-1", "-s", "updated summary"])
+    assert result.exit_code == 0
+    mock_client.update_memory.assert_called_once()
+
+
+def test_update_memory_requires_id():
+    """update-memory without --memory-id or --external-id should fail."""
+    runner = CliRunner()
+    result = runner.invoke(main, ["update-memory", "-s", "test"])
+    assert result.exit_code != 0
+    assert "Either --memory-id or --external-id" in result.output
+
+
+def test_update_memory_rejects_both_ids():
+    """update-memory with both --memory-id and --external-id should fail."""
+    runner = CliRunner()
+    result = runner.invoke(main, ["update-memory", "-m", "mem-1", "--external-id", "ext-1"])
+    assert result.exit_code != 0
+    assert "only one" in result.output.lower()
 
 
 @patch("kagura_memory.cli.load_config")

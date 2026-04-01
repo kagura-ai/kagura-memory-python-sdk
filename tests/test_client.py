@@ -502,6 +502,70 @@ async def test_create_context_minimal():
 
 
 @pytest.mark.asyncio
+async def test_update_memory_by_id():
+    """update_memory() with memory_id should pass correct arguments."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {"status": "success", "memory_id": "mem-1"}
+        result = await client.update_memory(
+            context_id="ctx",
+            memory_id="mem-1",
+            summary="updated",
+            importance=0.9,
+            tags=["new-tag"],
+            context_summary="why this matters",
+        )
+        args = mock.call_args[0][1]
+        assert args["context_id"] == "ctx"
+        assert args["memory_id"] == "mem-1"
+        assert args["summary"] == "updated"
+        assert args["importance"] == 0.9
+        assert args["tags"] == ["new-tag"]
+        assert args["context_summary"] == "why this matters"
+        assert "external_id" not in args
+        assert result["status"] == "success"
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_update_memory_upsert():
+    """update_memory() with external_id should pass correct arguments."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {"status": "success", "memory_id": "mem-new"}
+        await client.update_memory(
+            context_id="ctx",
+            external_id="ext-key",
+            summary="upserted",
+            content="content",
+            type="note",
+        )
+        args = mock.call_args[0][1]
+        assert args["external_id"] == "ext-key"
+        assert args["summary"] == "upserted"
+        assert "memory_id" not in args
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_update_memory_requires_one_id():
+    """update_memory() should reject when neither or both IDs provided."""
+    client = _make_initialized_client()
+
+    with pytest.raises(ValueError, match="exactly one"):
+        await client.update_memory(context_id="ctx")
+
+    with pytest.raises(ValueError, match="exactly one"):
+        await client.update_memory(context_id="ctx", memory_id="m1", external_id="e1")
+
+    await client.close()
+
+
+@pytest.mark.asyncio
 async def test_delete_context():
     """delete_context() should call tool with context_id."""
     client = _make_initialized_client()

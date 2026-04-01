@@ -20,6 +20,14 @@ from .setup_claude import run_setup_claude
 # =============================================================================
 
 
+def _parse_tags(tags: str | None) -> list[str] | None:
+    """Parse comma-separated tags string into a list, or None if empty."""
+    if not tags:
+        return None
+    parsed = [t.strip() for t in tags.split(",") if t.strip()]
+    return parsed or None
+
+
 def _run_client_command(
     operation: Callable[[KaguraClient, str], Awaitable[dict[str, Any]]],
     context_id: str | None,
@@ -165,8 +173,7 @@ def remember(context_id, summary, content, memory_type, importance, tags):
       kagura remember -s "FastAPI DI pattern" --content "Use Depends()..."
       kagura remember -c dev -s "OAuth2 setup" --content "..." --tags "auth,oauth"
     """
-    tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
-    tag_list = tag_list or None
+    tag_list = _parse_tags(tags)
 
     async def op(client: KaguraClient, ctx: str) -> dict[str, Any]:
         return await client.remember(
@@ -234,6 +241,49 @@ def reference(context_id, memory_id):
     """
     _run_client_command(
         lambda client, ctx: client.reference(context_id=ctx, memory_id=memory_id),
+        context_id,
+    )
+
+
+@main.command(name="update-memory")
+@click.option("--context-id", "-c", help="Context ID (or set in .kagura.json)")
+@click.option("--memory-id", "-m", help="Memory UUID to update in-place")
+@click.option("--external-id", help="External ID for upsert lookup")
+@click.option("--summary", "-s", help="Updated summary")
+@click.option("--content", help="Updated content")
+@click.option("--type", "-t", "memory_type", help="Updated memory type")
+@click.option("--importance", "-i", type=float, help="Updated importance 0.0-1.0")
+@click.option("--tags", help="Comma-separated tags")
+def update_memory(
+    context_id, memory_id, external_id, summary, content, memory_type, importance, tags
+):
+    """
+    Update an existing memory or upsert by external ID.
+
+    Use --memory-id for in-place update, or --external-id for upsert.
+
+    Examples:
+      kagura update-memory -m MEM_UUID -s "updated summary"
+      kagura update-memory --external-id ext-key -s "summary" --content "..." -t note
+    """
+    if not memory_id and not external_id:
+        raise click.ClickException("Either --memory-id or --external-id is required")
+    if memory_id and external_id:
+        raise click.ClickException("Provide only one of --memory-id or --external-id")
+
+    tag_list = _parse_tags(tags)
+
+    _run_client_command(
+        lambda client, ctx: client.update_memory(
+            context_id=ctx,
+            memory_id=memory_id,
+            external_id=external_id,
+            summary=summary,
+            content=content,
+            type=memory_type,
+            importance=importance,
+            tags=tag_list,
+        ),
         context_id,
     )
 
