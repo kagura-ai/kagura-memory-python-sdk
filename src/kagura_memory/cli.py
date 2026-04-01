@@ -238,6 +238,50 @@ def reference(context_id, memory_id):
     )
 
 
+@main.command(name="update-memory")
+@click.option("--context-id", "-c", help="Context ID (or set in .kagura.json)")
+@click.option("--memory-id", "-m", help="Memory UUID to update in-place")
+@click.option("--external-id", help="External ID for upsert lookup")
+@click.option("--summary", "-s", help="Updated summary")
+@click.option("--content", help="Updated content")
+@click.option("--type", "-t", "memory_type", help="Updated memory type")
+@click.option("--importance", "-i", type=float, help="Updated importance 0.0-1.0")
+@click.option("--tags", help="Comma-separated tags")
+def update_memory(
+    context_id, memory_id, external_id, summary, content, memory_type, importance, tags
+):
+    """
+    Update an existing memory or upsert by external ID.
+
+    Use --memory-id for in-place update, or --external-id for upsert.
+
+    Examples:
+      kagura update-memory -m MEM_UUID -s "updated summary"
+      kagura update-memory --external-id ext-key -s "summary" --content "..." -t note
+    """
+    if not memory_id and not external_id:
+        raise click.ClickException("Either --memory-id or --external-id is required")
+    if memory_id and external_id:
+        raise click.ClickException("Provide only one of --memory-id or --external-id")
+
+    tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
+    tag_list = tag_list or None
+
+    _run_client_command(
+        lambda client, ctx: client.update_memory(
+            context_id=ctx,
+            memory_id=memory_id,
+            external_id=external_id,
+            summary=summary,
+            content=content,
+            type=memory_type,
+            importance=importance,
+            tags=tag_list,
+        ),
+        context_id,
+    )
+
+
 @main.command()
 @click.option("--context-id", "-c", help="Context ID (or set in .kagura.json)")
 @click.option("--memory-id", "-m", help="Memory ID to delete (specific deletion)")

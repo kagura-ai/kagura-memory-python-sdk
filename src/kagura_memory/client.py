@@ -310,6 +310,66 @@ class KaguraClient:
         }
         return await self._call_tool("reference", arguments)
 
+    async def update_memory(
+        self,
+        context_id: str,
+        memory_id: str | None = None,
+        external_id: str | None = None,
+        summary: str | None = None,
+        content: str | None = None,
+        type: str | None = None,
+        importance: float | None = None,
+        tags: list[str] | None = None,
+        context_summary: str | None = None,
+    ) -> dict[str, Any]:
+        """Update an existing memory in-place or upsert by external ID.
+
+        Two modes (provide exactly one of memory_id or external_id):
+
+        1. In-place update (memory_id): Modifies specific fields while
+           preserving memory ID, graph edges, and creation timestamp.
+        2. Upsert (external_id): Finds by external resource ID within context.
+           If found, replaces. If not found, creates new.
+           Requires summary, content, and type.
+
+        Args:
+            context_id: Context UUID.
+            memory_id: UUID of memory to update in-place.
+            external_id: External resource ID for upsert lookup.
+            summary: Updated summary (10-500 chars).
+            content: Updated content.
+            type: Updated memory type.
+            importance: Updated importance (0.0-1.0).
+            tags: Updated tags.
+            context_summary: Updated context summary (max 2000 chars).
+
+        Returns:
+            API response with updated memory info.
+        """
+        if not memory_id and not external_id:
+            raise ValueError("Provide exactly one of memory_id or external_id")
+        if memory_id and external_id:
+            raise ValueError("Provide exactly one of memory_id or external_id")
+
+        arguments: dict[str, Any] = {"context_id": context_id}
+        if memory_id is not None:
+            arguments["memory_id"] = memory_id
+        if external_id is not None:
+            arguments["external_id"] = external_id
+        if summary is not None:
+            arguments["summary"] = summary
+        if content is not None:
+            arguments["content"] = content
+        if type is not None:
+            arguments["type"] = type
+        if importance is not None:
+            arguments["importance"] = importance
+        if tags is not None:
+            arguments["tags"] = tags
+        if context_summary is not None:
+            arguments["context_summary"] = context_summary
+        return await self._call_tool("update_memory", arguments)
+
     async def forget(
         self,
         context_id: str,

@@ -163,6 +163,36 @@ def test_context_update_requires_option():
 
 @patch("kagura_memory.cli.load_config")
 @patch("kagura_memory.cli.KaguraClient")
+def test_update_memory_by_id(mock_client_cls, mock_config):
+    """update-memory with --memory-id should call update_memory."""
+    mock_config.return_value = {
+        "api_key": "key",
+        "mcp_url": "https://test.com/mcp",
+        "context_id": "ctx",
+    }
+
+    mock_client = AsyncMock()
+    mock_client.update_memory.return_value = {"status": "success"}
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    mock_client_cls.return_value = mock_client
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["update-memory", "-m", "mem-1", "-s", "updated summary"])
+    assert result.exit_code == 0
+    mock_client.update_memory.assert_called_once()
+
+
+def test_update_memory_requires_id():
+    """update-memory without --memory-id or --external-id should fail."""
+    runner = CliRunner()
+    result = runner.invoke(main, ["update-memory", "-s", "test"])
+    assert result.exit_code != 0
+    assert "Either --memory-id or --external-id" in result.output
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
 def test_context_delete(mock_client_cls, mock_config):
     """context delete should call delete_context with -y flag."""
     mock_config.return_value = {"api_key": "key", "mcp_url": "https://test.com/mcp"}
