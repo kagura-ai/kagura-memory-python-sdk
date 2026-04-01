@@ -9,6 +9,7 @@ Usage:
     uv run python benchmarks/search_quality/run.py --fresh      # forget all + re-seed + run
     uv run python benchmarks/search_quality/run.py --update-baseline  # save current as baseline
     uv run python benchmarks/search_quality/run.py --cleanup    # forget all memories
+    uv run python benchmarks/search_quality/run.py --search-mode keyword  # BM25 only
 """
 
 import asyncio
@@ -384,6 +385,7 @@ async def run_benchmark(
     fresh: bool = False,
     cleanup: bool = False,
     update_baseline: bool = False,
+    search_mode: str = "hybrid",
 ) -> None:
     config = load_config()
     api_key = config.get("api_key", "")
@@ -482,7 +484,10 @@ async def run_benchmark(
         for q in queries:
             t0 = time.monotonic()
             results = await client.recall(
-                context_id=context_id, query=q["query"], k=5
+                context_id=context_id,
+                query=q["query"],
+                k=5,
+                search_mode=search_mode if search_mode != "hybrid" else None,
             )
             latency = (time.monotonic() - t0) * 1000
             hits = results.get("results", [])
@@ -552,7 +557,8 @@ async def run_benchmark(
                 )
 
         # Category summary
-        console.rule("[bold]Category Summary[/bold]")
+        mode_label = f" (search_mode={search_mode})" if search_mode != "hybrid" else ""
+        console.rule(f"[bold]Category Summary{mode_label}[/bold]")
         categories = _build_category_stats(all_results)
         _print_category_table(all_results, categories)
         _print_failures(all_results)
@@ -578,10 +584,16 @@ async def run_benchmark(
 
 if __name__ == "__main__":
     args = sys.argv[1:]
+    mode = "hybrid"
+    if "--search-mode" in args:
+        idx = args.index("--search-mode")
+        if idx + 1 < len(args):
+            mode = args[idx + 1]
     asyncio.run(
         run_benchmark(
             fresh="--fresh" in args,
             cleanup="--cleanup" in args,
             update_baseline="--update-baseline" in args,
+            search_mode=mode,
         )
     )

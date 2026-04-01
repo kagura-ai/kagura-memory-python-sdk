@@ -201,6 +201,7 @@ class KaguraClient:
         k: int = 5,
         use_rerank: bool = False,
         filters: dict[str, Any] | None = None,
+        search_mode: str | None = None,
     ) -> dict[str, Any]:
         """
         Call recall MCP tool.
@@ -211,6 +212,7 @@ class KaguraClient:
             k: Number of results
             use_rerank: Enable AI reranking for higher quality results
             filters: Optional filters (e.g., {"type": "code"}, {"tags": ["python"]})
+            search_mode: Search strategy — "hybrid" (default), "semantic", or "keyword"
 
         Returns:
             API response with results list
@@ -224,6 +226,8 @@ class KaguraClient:
             arguments["use_rerank"] = True
         if filters:
             arguments["filters"] = filters
+        if search_mode:
+            arguments["search_mode"] = search_mode
         return await self._call_tool("recall", arguments)
 
     async def list_contexts(self) -> dict[str, Any]:
