@@ -42,7 +42,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "file_path=$(cat | jq -r '.tool_input.file_path // empty'); [ -z \"$file_path\" ] && exit 0; case \"$file_path\" in *.py) uv run ruff format --quiet \"$file_path\" 2>/dev/null; exit 0;; *) exit 0;; esac"
+            "command": "file_path=$(cat | jq -r '.tool_input.file_path // empty'); [ -z \"$file_path\" ] && exit 0; case \"$file_path\" in *.py) uv run ruff format --quiet \"$file_path\" 2>/dev/null;; esac; case \"$file_path\" in */memory/*.md) echo 'Memory updated. Consider /session-wrap to sync with Kagura Memory.' >&2;; esac; exit 0"
           }
         ]
       }

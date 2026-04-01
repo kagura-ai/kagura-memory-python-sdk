@@ -1,0 +1,272 @@
+{
+  "version": "2026-04-01",
+  "embedding_model": "qwen3-embedding:8b",
+  "total": {
+    "p_at_1": 100,
+    "hit_at_3": 107,
+    "hit_at_5": 108,
+    "queries": 113
+  },
+  "categories": {
+    "kanji-kana": {
+      "p_at_1": 3,
+      "hit_at_3": 4,
+      "hit_at_5": 4,
+      "total": 4,
+      "queries": 4
+    },
+    "homonym": {
+      "p_at_1": 10,
+      "hit_at_3": 10,
+      "hit_at_5": 10,
+      "total": 10,
+      "queries": 10
+    },
+    "conjugation": {
+      "p_at_1": 5,
+      "hit_at_3": 5,
+      "hit_at_5": 5,
+      "total": 5,
+      "queries": 5
+    },
+    "okurigana": {
+      "p_at_1": 5,
+      "hit_at_3": 5,
+      "hit_at_5": 5,
+      "total": 5,
+      "queries": 5
+    },
+    "long-vowel": {
+      "p_at_1": 3,
+      "hit_at_3": 3,
+      "hit_at_5": 3,
+      "total": 3,
+      "queries": 3
+    },
+    "homograph": {
+      "p_at_1": 3,
+      "hit_at_3": 3,
+      "hit_at_5": 3,
+      "total": 3,
+      "queries": 3
+    },
+    "noise": {
+      "p_at_1": 0,
+      "hit_at_3": 1,
+      "hit_at_5": 2,
+      "total": 5,
+      "queries": 6
+    },
+    "number": {
+      "p_at_1": 3,
+      "hit_at_3": 3,
+      "hit_at_5": 3,
+      "total": 3,
+      "queries": 3
+    },
+    "katakana-typo": {
+      "p_at_1": 2,
+      "hit_at_3": 2,
+      "hit_at_5": 2,
+      "total": 2,
+      "queries": 2
+    },
+    "old-kanji": {
+      "p_at_1": 3,
+      "hit_at_3": 3,
+      "hit_at_5": 3,
+      "total": 3,
+      "queries": 3
+    },
+    "abbreviation": {
+      "p_at_1": 3,
+      "hit_at_3": 3,
+      "hit_at_5": 3,
+      "total": 3,
+      "queries": 3
+    },
+    "honorific": {
+      "p_at_1": 3,
+      "hit_at_3": 3,
+      "hit_at_5": 3,
+      "total": 3,
+      "queries": 3
+    },
+    "wago-kango": {
+      "p_at_1": 3,
+      "hit_at_3": 4,
+      "hit_at_5": 4,
+      "total": 4,
+      "queries": 4
+    },
+    "dialect": {
+      "p_at_1": 3,
+      "hit_at_3": 3,
+      "hit_at_5": 3,
+      "total": 3,
+      "queries": 3
+    },
+    "voice": {
+      "p_at_1": 3,
+      "hit_at_3": 3,
+      "hit_at_5": 3,
+      "total": 3,
+      "queries": 3
+    },
+    "keigo": {
+      "p_at_1": 3,
+      "hit_at_3": 3,
+      "hit_at_5": 3,
+      "total": 3,
+      "queries": 3
+    },
+    "polysemy": {
+      "p_at_1": 2,
+      "hit_at_3": 2,
+      "hit_at_5": 2,
+      "total": 2,
+      "queries": 3
+    },
+    "cross-domain": {
+      "p_at_1": 0,
+      "hit_at_3": 0,
+      "hit_at_5": 0,
+      "total": 0,
+      "queries": 7
+    },
+    "ultra-short": {
+      "p_at_1": 3,
+      "hit_at_3": 4,
+      "hit_at_5": 4,
+      "total": 4,
+      "queries": 5
+    },
+    "long-query": {
+      "p_at_1": 3,
+      "hit_at_3": 3,
+      "hit_at_5": 3,
+      "total": 3,
+      "queries": 3
+    },
+    "mixed-lang": {
+      "p_at_1": 0,
+      "hit_at_3": 1,
+      "hit_at_5": 1,
+      "total": 1,
+      "queries": 4
+    },
+    "typo": {
+      "p_at_1": 2,
+      "hit_at_3": 2,
+      "hit_at_5": 2,
+      "total": 3,
+      "queries": 3
+    },
+    "negation": {
+      "p_at_1": 0,
+      "hit_at_3": 0,
+      "hit_at_5": 0,
+      "total": 0,
+      "queries": 2
+    },
+    "comparison": {
+      "p_at_1": 2,
+      "hit_at_3": 2,
+      "hit_at_5": 2,
+      "total": 2,
+      "queries": 3
+    },
+    "temporal": {
+      "p_at_1": 2,
+      "hit_at_3": 2,
+      "hit_at_5": 2,
+      "total": 2,
+      "queries": 2
+    },
+    "contextual": {
+      "p_at_1": 1,
+      "hit_at_3": 2,
+      "hit_at_5": 2,
+      "total": 2,
+      "queries": 3
+    },
+    "date-format": {
+      "p_at_1": 3,
+      "hit_at_3": 3,
+      "hit_at_5": 3,
+      "total": 3,
+      "queries": 3
+    },
+    "counter": {
+      "p_at_1": 3,
+      "hit_at_3": 3,
+      "hit_at_5": 3,
+      "total": 3,
+      "queries": 3
+    },
+    "onomatopoeia": {
+      "p_at_1": 3,
+      "hit_at_3": 3,
+      "hit_at_5": 3,
+      "total": 3,
+      "queries": 3
+    },
+    "place-name": {
+      "p_at_1": 3,
+      "hit_at_3": 3,
+      "hit_at_5": 3,
+      "total": 3,
+      "queries": 3
+    },
+    "near-duplicate": {
+      "p_at_1": 3,
+      "hit_at_3": 3,
+      "hit_at_5": 3,
+      "total": 3,
+      "queries": 3
+    },
+    "person-name": {
+      "p_at_1": 4,
+      "hit_at_3": 4,
+      "hit_at_5": 4,
+      "total": 4,
+      "queries": 4
+    },
+    "company-name": {
+      "p_at_1": 4,
+      "hit_at_3": 4,
+      "hit_at_5": 4,
+      "total": 4,
+      "queries": 4
+    },
+    "product-name": {
+      "p_at_1": 4,
+      "hit_at_3": 4,
+      "hit_at_5": 4,
+      "total": 4,
+      "queries": 4
+    },
+    "hiragana-kanji": {
+      "p_at_1": 3,
+      "hit_at_3": 4,
+      "hit_at_5": 4,
+      "total": 5,
+      "queries": 5
+    }
+  },
+  "known_failures": [
+    "サバ DHA EPA",
+    "味噌を使った料理",
+    "魚料理のおすすめ",
+    "ランニングの始め方",
+    "蜘蛛の対策方法",
+    "子供の教育と習い事",
+    "労働時間の規制",
+    "敬語",
+    "DHA EPAが豊富な魚",
+    "ひっこし みつもり",
+    "部下への指導で敬語の使い方を教えたいんだけど参考になるものある？",
+    "ひっこしのひよう",
+    "けいごのつかいかた"
+  ]
+}
