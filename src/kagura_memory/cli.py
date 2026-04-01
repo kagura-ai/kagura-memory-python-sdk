@@ -313,6 +313,27 @@ def context_create(name, display_name, description, summary, usage_guide, public
     )
 
 
+@context.command(name="delete")
+@click.argument("context_id")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
+def context_delete(context_id, yes):
+    """
+    Soft-delete a context and all its memories.
+
+    Examples:
+      kagura context delete CTX_UUID
+      kagura context delete CTX_UUID -y
+    """
+    if not yes:
+        click.confirm(f"Delete context {context_id}? This is a soft-delete.", abort=True)
+
+    _run_client_command(
+        lambda client, _: client.delete_context(context_id=context_id),
+        context_id=None,
+        needs_context=False,
+    )
+
+
 @context.command(name="update")
 @click.argument("context_id")
 @click.option("--display-name", help="Updated display name")

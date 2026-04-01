@@ -502,6 +502,25 @@ async def test_create_context_minimal():
 
 
 @pytest.mark.asyncio
+async def test_delete_context():
+    """delete_context() should call tool with context_id."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {
+            "status": "success",
+            "message": "Context 'test' has been soft-deleted.",
+            "context_id": "ctx-123",
+            "context_name": "test",
+        }
+        result = await client.delete_context(context_id="ctx-123")
+        mock.assert_called_once_with("delete_context", {"context_id": "ctx-123"})
+        assert result["status"] == "success"
+
+    await client.close()
+
+
+@pytest.mark.asyncio
 async def test_update_context():
     """update_context() should call tool with correct arguments."""
     client = _make_initialized_client()

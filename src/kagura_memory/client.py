@@ -395,6 +395,17 @@ class KaguraClient:
             arguments["embedding_model"] = embedding_model
         return await self._call_tool("create_context", arguments)
 
+    async def delete_context(self, context_id: str) -> dict[str, Any]:
+        """Soft-delete a context and all its memories.
+
+        Args:
+            context_id: Context UUID to delete.
+
+        Returns:
+            API response with deletion confirmation.
+        """
+        return await self._call_tool("delete_context", {"context_id": context_id})
+
     async def update_context(
         self,
         context_id: str,

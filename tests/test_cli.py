@@ -163,6 +163,38 @@ def test_context_update_requires_option():
 
 @patch("kagura_memory.cli.load_config")
 @patch("kagura_memory.cli.KaguraClient")
+def test_context_delete(mock_client_cls, mock_config):
+    """context delete should call delete_context with -y flag."""
+    mock_config.return_value = {"api_key": "key", "mcp_url": "https://test.com/mcp"}
+
+    mock_client = AsyncMock()
+    mock_client.delete_context.return_value = {
+        "status": "success",
+        "message": "Context 'test' has been soft-deleted.",
+        "context_id": "uuid-1",
+        "context_name": "test",
+    }
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    mock_client_cls.return_value = mock_client
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["context", "delete", "uuid-1", "-y"])
+    assert result.exit_code == 0
+    mock_client.delete_context.assert_called_once_with(context_id="uuid-1")
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_context_delete_prompts_confirmation(mock_client_cls, mock_config):
+    """context delete without -y should prompt for confirmation."""
+    runner = CliRunner()
+    result = runner.invoke(main, ["context", "delete", "uuid-1"], input="n\n")
+    assert result.exit_code != 0
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
 def test_context_search_config(mock_client_cls, mock_config):
     """context search-config should call update_search_config."""
     mock_config.return_value = {"api_key": "key", "mcp_url": "https://test.com/mcp"}
