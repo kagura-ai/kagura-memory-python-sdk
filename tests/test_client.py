@@ -514,6 +514,7 @@ async def test_update_memory_by_id():
             summary="updated",
             importance=0.9,
             tags=["new-tag"],
+            context_summary="why this matters",
         )
         args = mock.call_args[0][1]
         assert args["context_id"] == "ctx"
@@ -521,6 +522,7 @@ async def test_update_memory_by_id():
         assert args["summary"] == "updated"
         assert args["importance"] == 0.9
         assert args["tags"] == ["new-tag"]
+        assert args["context_summary"] == "why this matters"
         assert "external_id" not in args
         assert result["status"] == "success"
 

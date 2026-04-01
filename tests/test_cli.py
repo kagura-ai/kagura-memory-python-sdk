@@ -201,6 +201,16 @@ def test_update_memory_requires_id():
     assert "Either --memory-id or --external-id" in result.output
 
 
+def test_update_memory_rejects_both_ids():
+    """update-memory with both --memory-id and --external-id should fail."""
+    runner = CliRunner()
+    result = runner.invoke(
+        main, ["update-memory", "-m", "mem-1", "--external-id", "ext-1"]
+    )
+    assert result.exit_code != 0
+    assert "only one" in result.output.lower()
+
+
 @patch("kagura_memory.cli.load_config")
 @patch("kagura_memory.cli.KaguraClient")
 def test_context_delete(mock_client_cls, mock_config):
