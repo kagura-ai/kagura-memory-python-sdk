@@ -4,7 +4,17 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from click.testing import CliRunner
 
-from kagura_memory.cli import main
+from kagura_memory.cli import _parse_tags, main
+
+
+def test_parse_tags():
+    """_parse_tags should handle various inputs."""
+    assert _parse_tags(None) is None
+    assert _parse_tags("") is None
+    assert _parse_tags(",,,") is None
+    assert _parse_tags("a, b, c") == ["a", "b", "c"]
+    assert _parse_tags("single") == ["single"]
+    assert _parse_tags(" spaced , tags ") == ["spaced", "tags"]
 
 
 @patch("kagura_memory.cli.load_config")
