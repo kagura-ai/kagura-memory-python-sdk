@@ -32,3 +32,8 @@ Thumbs.db
 .claude/settings.local.json
 .claude/commands/kagura-*
 .mcp.json
+
+# Benchmark reports (legacy, generated at repo root)
+benchmark_report.md
+benchmark_results.json
+japanese_search_report.md

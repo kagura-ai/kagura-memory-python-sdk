@@ -1,0 +1,782 @@
+[
+  {
+    "query": "サバの味噌煮の作り方",
+    "target_idx": 0,
+    "category": "kanji-kana",
+    "note": "カタカナ→漢字 summary"
+  },
+  {
+    "query": "さばの下処理方法",
+    "target_idx": 0,
+    "category": "kanji-kana",
+    "note": "ひらがな→漢字 summary"
+  },
+  {
+    "query": "鯖の調理法",
+    "target_idx": 0,
+    "category": "kanji-kana",
+    "note": "漢字一致、別の言い回し"
+  },
+  {
+    "query": "サバ DHA EPA",
+    "target_idx": 0,
+    "category": "kanji-kana",
+    "note": "カタカナ+英字キーワード→content内"
+  },
+  {
+    "query": "はしの専門店",
+    "target_idx": 1,
+    "category": "homonym",
+    "note": "文脈なし「はし」→箸?橋?端?"
+  },
+  {
+    "query": "日本橋の箸屋",
+    "target_idx": 1,
+    "category": "homonym",
+    "note": "橋(地名)+箸(商品)の組合せ"
+  },
+  {
+    "query": "橋のたもとの店",
+    "target_idx": 1,
+    "category": "homonym",
+    "note": "「橋」で橋善(ノイズ)と競合するか"
+  },
+  {
+    "query": "端の席を予約",
+    "target_idx": 1,
+    "category": "homonym",
+    "note": "「端」のみで特定できるか"
+  },
+  {
+    "query": "あめの日のイベント",
+    "target_idx": 5,
+    "category": "homonym",
+    "note": "雨?飴? 文脈で判断"
+  },
+  {
+    "query": "飴を配るキャンペーン",
+    "target_idx": 5,
+    "category": "homonym",
+    "note": "「飴」漢字指定"
+  },
+  {
+    "query": "雨天時の販促施策",
+    "target_idx": 5,
+    "category": "homonym",
+    "note": "雨+マーケティング文脈"
+  },
+  {
+    "query": "くもの巣の対処法",
+    "target_idx": 6,
+    "category": "homonym",
+    "note": "蜘蛛?雲? ノイズに蜘蛛対策あり"
+  },
+  {
+    "query": "蜘蛛の忌避スプレー",
+    "target_idx": 6,
+    "category": "homonym",
+    "note": "漢字指定、ノイズ蜘蛛メモリと競合"
+  },
+  {
+    "query": "雲の種類と分類",
+    "target_idx": 6,
+    "category": "homonym",
+    "note": "「雲」で同じメモリの別側面"
+  },
+  {
+    "query": "走った後のケア",
+    "target_idx": 2,
+    "category": "conjugation",
+    "note": "過去形→辞書形 summary"
+  },
+  {
+    "query": "走り方を改善したい",
+    "target_idx": 2,
+    "category": "conjugation",
+    "note": "連用形+たい→summary"
+  },
+  {
+    "query": "走れる距離を伸ばす方法",
+    "target_idx": 2,
+    "category": "conjugation",
+    "note": "可能形→content内"
+  },
+  {
+    "query": "食べたラーメンの感想",
+    "target_idx": 7,
+    "category": "conjugation",
+    "note": "過去形→ノイズ築地海鮮丼と競合？"
+  },
+  {
+    "query": "二郎系の食べ方",
+    "target_idx": 7,
+    "category": "conjugation",
+    "note": "連用形、ラーメン特定"
+  },
+  {
+    "query": "ひっこしの費用",
+    "target_idx": 3,
+    "category": "okurigana",
+    "note": "ひらがな表記ゆれ"
+  },
+  {
+    "query": "引っ越し 見積もり",
+    "target_idx": 3,
+    "category": "okurigana",
+    "note": "正規表記+ノイズ引越しネット回線と競合"
+  },
+  {
+    "query": "引越の準備",
+    "target_idx": 3,
+    "category": "okurigana",
+    "note": "送り仮名省略形"
+  },
+  {
+    "query": "サーバとサーバーの違い",
+    "target_idx": 4,
+    "category": "long-vowel",
+    "note": "長音符あり/なし混在"
+  },
+  {
+    "query": "コンピュータの表記ルール",
+    "target_idx": 4,
+    "category": "long-vowel",
+    "note": "長音符なし→content内"
+  },
+  {
+    "query": "ユーザーとユーザどっちが正しい",
+    "target_idx": 4,
+    "category": "long-vowel",
+    "note": "summary にない例で content 内を検索"
+  },
+  {
+    "query": "子供がかいた絵",
+    "target_idx": 8,
+    "category": "homograph",
+    "note": "「かいた」→描いた?書いた?"
+  },
+  {
+    "query": "描くと書くの使い分け",
+    "target_idx": 8,
+    "category": "homograph",
+    "note": "両方の漢字を含むクエリ"
+  },
+  {
+    "query": "えをかく練習",
+    "target_idx": 8,
+    "category": "homograph",
+    "note": "全ひらがな、文脈で判断"
+  },
+  {
+    "query": "お問合せフォーム",
+    "target_idx": 9,
+    "category": "okurigana",
+    "note": "送り仮名省略+カタカナ混在"
+  },
+  {
+    "query": "問い合わせページの表記",
+    "target_idx": 9,
+    "category": "okurigana",
+    "note": "「お」なし形"
+  },
+  {
+    "query": "味噌を使った料理",
+    "target_idx": 0,
+    "category": "noise",
+    "note": "ノイズ鶏味噌漬けと競合"
+  },
+  {
+    "query": "魚料理のおすすめ",
+    "target_idx": 0,
+    "category": "noise",
+    "note": "ノイズ築地海鮮丼と競合"
+  },
+  {
+    "query": "ランニングの始め方",
+    "target_idx": 2,
+    "category": "noise",
+    "note": "ノイズジョギング初心者と競合"
+  },
+  {
+    "query": "蜘蛛の対策方法",
+    "target_idx": 6,
+    "category": "noise",
+    "note": "ノイズ蜘蛛対策メモリと競合 ★最難関"
+  },
+  {
+    "query": "子供の教育と習い事",
+    "target_idx": 8,
+    "category": "noise",
+    "note": "ノイズプログラミング教室と競合"
+  },
+  {
+    "query": "引っ越し後のネット環境",
+    "target_idx": null,
+    "category": "noise",
+    "note": "target=引越し費用?ネット回線? 曖昧"
+  },
+  {
+    "query": "30分でできるカレー",
+    "target_idx": 10,
+    "category": "number",
+    "note": "アラビア数字→summaryに30分あり"
+  },
+  {
+    "query": "三十分レシピ",
+    "target_idx": 10,
+    "category": "number",
+    "note": "漢数字→summaryに三十分あり"
+  },
+  {
+    "query": "時短料理 圧力鍋",
+    "target_idx": 10,
+    "category": "number",
+    "note": "キーワード一致、数字なし"
+  },
+  {
+    "query": "コミニュケーション力を上げたい",
+    "target_idx": 11,
+    "category": "katakana-typo",
+    "note": "よくある誤記「コミニュケーション」"
+  },
+  {
+    "query": "コミュニケーション研修の内容",
+    "target_idx": 11,
+    "category": "katakana-typo",
+    "note": "正しい表記"
+  },
+  {
+    "query": "東京大学の歴史",
+    "target_idx": 12,
+    "category": "old-kanji",
+    "note": "新字体→旧字体summaryにも一致"
+  },
+  {
+    "query": "東京大學の正門",
+    "target_idx": 12,
+    "category": "old-kanji",
+    "note": "旧字体で検索"
+  },
+  {
+    "query": "大学の学部再編",
+    "target_idx": 12,
+    "category": "old-kanji",
+    "note": "一般的なクエリ、ノイズ京大と競合"
+  },
+  {
+    "query": "スマホの買い替え時期",
+    "target_idx": 13,
+    "category": "abbreviation",
+    "note": "略語「スマホ」"
+  },
+  {
+    "query": "スマートフォンのバッテリー劣化",
+    "target_idx": 13,
+    "category": "abbreviation",
+    "note": "正式名称"
+  },
+  {
+    "query": "携帯の電池がすぐ減る",
+    "target_idx": 13,
+    "category": "abbreviation",
+    "note": "口語+別の略称「携帯」「電池」"
+  },
+  {
+    "query": "お客様からいただいた意見の分析",
+    "target_idx": 14,
+    "category": "honorific",
+    "note": "敬語表現そのまま"
+  },
+  {
+    "query": "もらったフィードバックの活かし方",
+    "target_idx": 14,
+    "category": "honorific",
+    "note": "カジュアル表現"
+  },
+  {
+    "query": "顧客の声を製品に反映する方法",
+    "target_idx": 14,
+    "category": "honorific",
+    "note": "ビジネス用語に言い換え"
+  },
+  {
+    "query": "はたらき方の改革",
+    "target_idx": 15,
+    "category": "wago-kango",
+    "note": "和語「はたらき」→漢語「働き方」"
+  },
+  {
+    "query": "労働時間の規制",
+    "target_idx": 15,
+    "category": "wago-kango",
+    "note": "漢語「労働」"
+  },
+  {
+    "query": "ワークライフバランスの実現",
+    "target_idx": 15,
+    "category": "wago-kango",
+    "note": "外来語「ワーク」"
+  },
+  {
+    "query": "リモートワークの導入率",
+    "target_idx": 15,
+    "category": "wago-kango",
+    "note": "外来語別表記。ノイズ在宅ワークと競合"
+  },
+  {
+    "query": "めっちゃうまいたこ焼き",
+    "target_idx": 16,
+    "category": "dialect",
+    "note": "方言「めっちゃ」"
+  },
+  {
+    "query": "非常においしいたこ焼き屋",
+    "target_idx": 16,
+    "category": "dialect",
+    "note": "硬い表現「非常に」"
+  },
+  {
+    "query": "大阪のおすすめ食べ歩き",
+    "target_idx": 16,
+    "category": "dialect",
+    "note": "ノイズ東京食べ歩きと競合"
+  },
+  {
+    "query": "プログラミングを教える方法",
+    "target_idx": 17,
+    "category": "voice",
+    "note": "能動態"
+  },
+  {
+    "query": "プログラミングを教わるコツ",
+    "target_idx": 17,
+    "category": "voice",
+    "note": "受身「教わる」→content内"
+  },
+  {
+    "query": "ペアプロでの学習効果",
+    "target_idx": 17,
+    "category": "voice",
+    "note": "名詞化+略語。ノイズ教育系と競合"
+  },
+  {
+    "query": "いらっしゃいませの正しい使い方",
+    "target_idx": 18,
+    "category": "keigo",
+    "note": "尊敬語そのまま"
+  },
+  {
+    "query": "おりますと言うべき場面",
+    "target_idx": 18,
+    "category": "keigo",
+    "note": "謙譲語「おる」"
+  },
+  {
+    "query": "接客の敬語マニュアル",
+    "target_idx": 18,
+    "category": "keigo",
+    "note": "概念検索。ノイズ面接敬語と競合"
+  },
+  {
+    "query": "クラウドサービスの比較",
+    "target_idx": 19,
+    "category": "polysemy",
+    "note": "IT意味のクラウド。ノイズAWS資格と競合"
+  },
+  {
+    "query": "AWSとGCPどっちがいい？",
+    "target_idx": 19,
+    "category": "polysemy",
+    "note": "具体的なサービス名"
+  },
+  {
+    "query": "マウスの選び方",
+    "target_idx": null,
+    "category": "polysemy",
+    "note": "PCマウス?猫のおもちゃ? 曖昧 → ノイズ2つと競合"
+  },
+  {
+    "query": "ゼロトラストセキュリティの導入方法",
+    "target_idx": null,
+    "category": "cross-domain",
+    "note": "cybersecurityノイズにヒットすべき"
+  },
+  {
+    "query": "介護認定に不服がある場合",
+    "target_idx": null,
+    "category": "cross-domain",
+    "note": "welfareノイズにヒットすべき"
+  },
+  {
+    "query": "ドローンで農薬散布",
+    "target_idx": null,
+    "category": "cross-domain",
+    "note": "agricultureノイズにヒットすべき"
+  },
+  {
+    "query": "RTX4090の消費電力",
+    "target_idx": null,
+    "category": "cross-domain",
+    "note": "PCパーツノイズにヒットすべき"
+  },
+  {
+    "query": "mRNAワクチンの安全性",
+    "target_idx": null,
+    "category": "cross-domain",
+    "note": "biotechノイズにヒットすべき"
+  },
+  {
+    "query": "BIM活用の段階的導入",
+    "target_idx": null,
+    "category": "cross-domain",
+    "note": "constructionノイズにヒットすべき"
+  },
+  {
+    "query": "ガバメントクラウドの移行",
+    "target_idx": null,
+    "category": "cross-domain",
+    "note": "governmentノイズ + polysemyターゲットと競合"
+  },
+  {
+    "query": "鯖",
+    "target_idx": 0,
+    "category": "ultra-short",
+    "note": "漢字1文字で特定できるか"
+  },
+  {
+    "query": "引越し",
+    "target_idx": 3,
+    "category": "ultra-short",
+    "note": "1語、ノイズ引越し系3件と競合"
+  },
+  {
+    "query": "敗血症",
+    "target_idx": null,
+    "category": "ultra-short",
+    "note": "医療用語1語→ノイズqSOFAにヒットすべき"
+  },
+  {
+    "query": "カレー",
+    "target_idx": 10,
+    "category": "ultra-short",
+    "note": "1語で時短カレーを見つけられるか"
+  },
+  {
+    "query": "敬語",
+    "target_idx": 18,
+    "category": "ultra-short",
+    "note": "1語、ノイズ面接敬語・ビジネスメールと競合"
+  },
+  {
+    "query": "先週食べたラーメン屋の名前を忘れたんだけど、二郎系で野菜マシマシにした店ってどこだっけ",
+    "target_idx": 7,
+    "category": "long-query",
+    "note": "口語で長い質問"
+  },
+  {
+    "query": "子供が小学校の図工の時間に絵を描いたんだけど、その時の評価方法について以前調べたことがあったはず",
+    "target_idx": 8,
+    "category": "long-query",
+    "note": "記憶を探す自然な文"
+  },
+  {
+    "query": "確か引っ越しの費用を安くする方法をメモしたはずなんだけど、繁忙期を避けるとか業者を比較するとかの話",
+    "target_idx": 3,
+    "category": "long-query",
+    "note": "キーワード複数含む長文"
+  },
+  {
+    "query": "OAuth2のimplementation方法",
+    "target_idx": null,
+    "category": "mixed-lang",
+    "note": "日英混在、ノイズなし（該当メモリなし）"
+  },
+  {
+    "query": "BM25のscoring algorithm",
+    "target_idx": null,
+    "category": "mixed-lang",
+    "note": "技術用語の日英混在"
+  },
+  {
+    "query": "Reactのserver componentって何",
+    "target_idx": null,
+    "category": "mixed-lang",
+    "note": "ノイズReact SCにヒットすべき"
+  },
+  {
+    "query": "DHA EPAが豊富な魚",
+    "target_idx": 0,
+    "category": "mixed-lang",
+    "note": "英字略語+日本語"
+  },
+  {
+    "query": "さばのみそに",
+    "target_idx": 0,
+    "category": "typo",
+    "note": "全ひらがな変換ミス"
+  },
+  {
+    "query": "ひっこし みつもり",
+    "target_idx": 3,
+    "category": "typo",
+    "note": "全ひらがなスペース区切り"
+  },
+  {
+    "query": "くもの巣のそうじ",
+    "target_idx": 6,
+    "category": "typo",
+    "note": "全ひらがな（漢字変換せず）"
+  },
+  {
+    "query": "味噌煮だけど鯖じゃない魚のレシピ",
+    "target_idx": null,
+    "category": "negation",
+    "note": "否定を含む。鮭味噌漬けにヒットすべき"
+  },
+  {
+    "query": "引越しの手続きで費用以外のこと",
+    "target_idx": null,
+    "category": "negation",
+    "note": "除外条件。住所変更にヒットすべき"
+  },
+  {
+    "query": "AWSとGCPとAzureの違い",
+    "target_idx": 19,
+    "category": "comparison",
+    "note": "3つの比較。ノイズAWSコスト/AWS資格と競合"
+  },
+  {
+    "query": "DDR4とDDR5の違い",
+    "target_idx": null,
+    "category": "comparison",
+    "note": "PCパーツ比較。ノイズDDR5メモリにヒットすべき"
+  },
+  {
+    "query": "鯖缶と生鯖の栄養比較",
+    "target_idx": 0,
+    "category": "comparison",
+    "note": "ターゲット+ノイズ両方に関連"
+  },
+  {
+    "query": "以前調べた蜘蛛の対策",
+    "target_idx": 6,
+    "category": "temporal",
+    "note": "「以前調べた」付き。ターゲットorノイズ"
+  },
+  {
+    "query": "最近の働き方改革の動向",
+    "target_idx": 15,
+    "category": "temporal",
+    "note": "「最近の」は検索に影響するか"
+  },
+  {
+    "query": "来月大阪に出張するんだけどおすすめのグルメある？",
+    "target_idx": 16,
+    "category": "contextual",
+    "note": "前提情報+質問。たこ焼きにヒットすべき"
+  },
+  {
+    "query": "部下への指導で敬語の使い方を教えたいんだけど参考になるものある？",
+    "target_idx": 18,
+    "category": "contextual",
+    "note": "状況説明+質問。接客マニュアルにヒットすべき"
+  },
+  {
+    "query": "新しいPC組みたいんだけどGPUは何がいい？",
+    "target_idx": null,
+    "category": "contextual",
+    "note": "目的+質問。RTX4090ノイズにヒットすべき"
+  },
+  {
+    "query": "令和6年の確定申告いつまで？",
+    "target_idx": 20,
+    "category": "date-format",
+    "note": "和暦で検索"
+  },
+  {
+    "query": "2024年の申告期限",
+    "target_idx": 20,
+    "category": "date-format",
+    "note": "西暦で検索"
+  },
+  {
+    "query": "R6年度の税金手続き",
+    "target_idx": 20,
+    "category": "date-format",
+    "note": "略式和暦「R6」"
+  },
+  {
+    "query": "1日に水を何リットル飲めばいい？",
+    "target_idx": 21,
+    "category": "counter",
+    "note": "アラビア数字の助数詞"
+  },
+  {
+    "query": "一日二リットルの水分摂取",
+    "target_idx": 21,
+    "category": "counter",
+    "note": "漢数字の助数詞"
+  },
+  {
+    "query": "ペットボトル三本分",
+    "target_idx": 21,
+    "category": "counter",
+    "note": "漢数字+助数詞。ノイズリサイクルと競合"
+  },
+  {
+    "query": "パソコンからガタガタ音がする",
+    "target_idx": 22,
+    "category": "onomatopoeia",
+    "note": "カタカナオノマトペ"
+  },
+  {
+    "query": "PCのカリカリ異音",
+    "target_idx": 22,
+    "category": "onomatopoeia",
+    "note": "別のオノマトペ+略語。ノイズキーボードと競合"
+  },
+  {
+    "query": "パソコンからへんな音",
+    "target_idx": 22,
+    "category": "onomatopoeia",
+    "note": "オノマトペなし口語。抽象的"
+  },
+  {
+    "query": "とうきょうスカイツリーのチケット",
+    "target_idx": 23,
+    "category": "place-name",
+    "note": "ひらがな地名"
+  },
+  {
+    "query": "東京スカイツリーの展望台",
+    "target_idx": 23,
+    "category": "place-name",
+    "note": "漢字地名"
+  },
+  {
+    "query": "Tokyo Skytreeの予約",
+    "target_idx": 23,
+    "category": "place-name",
+    "note": "英語表記"
+  },
+  {
+    "query": "鯖の味噌煮が煮崩れしない方法",
+    "target_idx": 24,
+    "category": "near-duplicate",
+    "note": "重複メモリ(idx=24)の方が適切。idx=0と競合"
+  },
+  {
+    "query": "味噌煮の味噌を入れるタイミング",
+    "target_idx": 24,
+    "category": "near-duplicate",
+    "note": "重複メモリのcontent固有キーワード"
+  },
+  {
+    "query": "鯖の味噌煮のレシピ",
+    "target_idx": 0,
+    "category": "near-duplicate",
+    "note": "元メモリ(idx=0)の方が適切。重複と競合"
+  },
+  {
+    "query": "田中太郎さんの引き継ぎ資料",
+    "target_idx": 25,
+    "category": "person-name",
+    "note": "漢字フルネーム"
+  },
+  {
+    "query": "たなかさんのAPI設計メモ",
+    "target_idx": 25,
+    "category": "person-name",
+    "note": "ひらがな姓のみ。ノイズ田中みな実と競合"
+  },
+  {
+    "query": "Tanakaが残したドキュメント",
+    "target_idx": 25,
+    "category": "person-name",
+    "note": "ローマ字姓"
+  },
+  {
+    "query": "タナカさんの仕事の引き継ぎ",
+    "target_idx": 25,
+    "category": "person-name",
+    "note": "カタカナ姓"
+  },
+  {
+    "query": "ソニーの事業セグメント",
+    "target_idx": 26,
+    "category": "company-name",
+    "note": "カタカナ社名"
+  },
+  {
+    "query": "Sonyの売上構成",
+    "target_idx": 26,
+    "category": "company-name",
+    "note": "英語社名。ノイズソニー損保と競合"
+  },
+  {
+    "query": "SONY グループの企業分析",
+    "target_idx": 26,
+    "category": "company-name",
+    "note": "大文字英語。ノイズソニー損保と競合"
+  },
+  {
+    "query": "プレイステーションを作っている会社",
+    "target_idx": 26,
+    "category": "company-name",
+    "note": "製品名→企業名の間接検索"
+  },
+  {
+    "query": "iPhone16Proのカメラ",
+    "target_idx": 27,
+    "category": "product-name",
+    "note": "スペースなし型番"
+  },
+  {
+    "query": "アイフォンの最新モデル",
+    "target_idx": 27,
+    "category": "product-name",
+    "note": "カタカナ表記。ノイズiPhoneSEと競合"
+  },
+  {
+    "query": "アイフォーン16プロのレビュー",
+    "target_idx": 27,
+    "category": "product-name",
+    "note": "Apple式カタカナ「アイフォーン」"
+  },
+  {
+    "query": "Apple最新スマホのカメラ性能",
+    "target_idx": 27,
+    "category": "product-name",
+    "note": "ブランド+カテゴリ。ノイズApple企業分析と競合"
+  },
+  {
+    "query": "さばのみそに",
+    "target_idx": 0,
+    "category": "hiragana-kanji",
+    "note": "全ひらがな→鯖の味噌煮"
+  },
+  {
+    "query": "ひっこしのひよう",
+    "target_idx": 3,
+    "category": "hiragana-kanji",
+    "note": "全ひらがな→引越しの費用"
+  },
+  {
+    "query": "けいごのつかいかた",
+    "target_idx": 18,
+    "category": "hiragana-kanji",
+    "note": "全ひらがな→敬語の使い方"
+  },
+  {
+    "query": "くものすのそうじ",
+    "target_idx": 6,
+    "category": "hiragana-kanji",
+    "note": "全ひらがな→蜘蛛の巣の掃除"
+  },
+  {
+    "query": "はたらきかたかいかく",
+    "target_idx": 15,
+    "category": "hiragana-kanji",
+    "note": "全ひらがな→働き方改革"
+  }
+]
