@@ -227,6 +227,8 @@ class KaguraClient:
         if filters:
             arguments["filters"] = filters
         if search_mode:
+            if search_mode not in ("hybrid", "semantic", "keyword"):
+                raise ValueError(f"Invalid search_mode: {search_mode!r}")
             arguments["search_mode"] = search_mode
         return await self._call_tool("recall", arguments)
 
