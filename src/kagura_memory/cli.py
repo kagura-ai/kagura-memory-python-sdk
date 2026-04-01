@@ -20,6 +20,14 @@ from .setup_claude import run_setup_claude
 # =============================================================================
 
 
+def _parse_tags(tags: str | None) -> list[str] | None:
+    """Parse comma-separated tags string into a list, or None if empty."""
+    if not tags:
+        return None
+    parsed = [t.strip() for t in tags.split(",") if t.strip()]
+    return parsed or None
+
+
 def _run_client_command(
     operation: Callable[[KaguraClient, str], Awaitable[dict[str, Any]]],
     context_id: str | None,
@@ -165,8 +173,7 @@ def remember(context_id, summary, content, memory_type, importance, tags):
       kagura remember -s "FastAPI DI pattern" --content "Use Depends()..."
       kagura remember -c dev -s "OAuth2 setup" --content "..." --tags "auth,oauth"
     """
-    tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
-    tag_list = tag_list or None
+    tag_list = _parse_tags(tags)
 
     async def op(client: KaguraClient, ctx: str) -> dict[str, Any]:
         return await client.remember(
@@ -264,8 +271,7 @@ def update_memory(
     if memory_id and external_id:
         raise click.ClickException("Provide only one of --memory-id or --external-id")
 
-    tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
-    tag_list = tag_list or None
+    tag_list = _parse_tags(tags)
 
     _run_client_command(
         lambda client, ctx: client.update_memory(
