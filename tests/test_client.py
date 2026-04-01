@@ -502,6 +502,49 @@ async def test_create_context_minimal():
 
 
 @pytest.mark.asyncio
+async def test_bulk_remember():
+    """bulk_remember() should call tool with memories list and extended timeout."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {
+            "status": "success",
+            "created_count": 2,
+            "failed_count": 0,
+            "created": [
+                {"memory_id": "m1", "summary": "first"},
+                {"memory_id": "m2", "summary": "second"},
+            ],
+            "failed": [],
+        }
+        memories = [
+            {"summary": "first", "content": "content 1", "type": "note"},
+            {"summary": "second", "content": "content 2", "type": "decision"},
+        ]
+        result = await client.bulk_remember(context_id="ctx", memories=memories)
+        mock.assert_called_once_with(
+            "bulk_remember",
+            {"context_id": "ctx", "memories": memories},
+            timeout=300.0,
+        )
+        assert result["created_count"] == 2
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_bulk_remember_max_100():
+    """bulk_remember() should reject more than 100 memories."""
+    client = _make_initialized_client()
+
+    memories = [{"summary": f"m{i}", "content": "c", "type": "note"} for i in range(101)]
+    with pytest.raises(ValueError, match="Max 100"):
+        await client.bulk_remember(context_id="ctx", memories=memories)
+
+    await client.close()
+
+
+@pytest.mark.asyncio
 async def test_delete_context():
     """delete_context() should call tool with context_id."""
     client = _make_initialized_client()

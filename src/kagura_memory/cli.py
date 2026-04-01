@@ -181,6 +181,37 @@ def remember(context_id, summary, content, memory_type, importance, tags):
     _run_client_command(op, context_id)
 
 
+@main.command(name="bulk-remember")
+@click.option("--context-id", "-c", help="Context ID (or set in .kagura.json)")
+@click.option(
+    "--file",
+    "-f",
+    "file_",
+    required=True,
+    type=click.File("r"),
+    help="JSON file with memories array",
+)
+def bulk_remember(context_id, file_):
+    """
+    Store multiple memories from a JSON file (max 100).
+
+    The file should contain a JSON array of memory objects:
+    [{"summary": "...", "content": "...", "type": "note"}, ...]
+
+    Examples:
+      kagura bulk-remember -f memories.json
+      kagura bulk-remember -c dev -f memories.json
+    """
+    memories = json.load(file_)
+    if not isinstance(memories, list):
+        raise click.ClickException("File must contain a JSON array of memories")
+
+    _run_client_command(
+        lambda client, ctx: client.bulk_remember(context_id=ctx, memories=memories),
+        context_id,
+    )
+
+
 @main.command()
 @click.argument("query")
 @click.option("--context-id", "-c", help="Context ID (or set in .kagura.json)")

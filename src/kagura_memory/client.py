@@ -84,13 +84,19 @@ class KaguraClient:
         except httpx.RequestError as e:
             raise KaguraConnectionError(f"Connection failed: {e}") from e
 
-    async def _make_jsonrpc_request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+    async def _make_jsonrpc_request(
+        self,
+        method: str,
+        params: dict[str, Any],
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
         """
         Make a JSON-RPC 2.0 request to MCP server (DRY: common logic).
 
         Args:
             method: JSON-RPC method name (e.g., "tools/call", "tools/list")
             params: Method parameters
+            timeout: Optional per-request timeout override in seconds
 
         Returns:
             Result dict from JSON-RPC response
@@ -111,7 +117,9 @@ class KaguraClient:
         headers = {"mcp-session-id": self._session_id} if self._session_id else {}
 
         try:
-            response = await self._client.post(self.mcp_url, json=body, headers=headers)
+            response = await self._client.post(
+                self.mcp_url, json=body, headers=headers, timeout=timeout
+            )
             response.raise_for_status()
 
             data = response.json() or {}
@@ -128,13 +136,19 @@ class KaguraClient:
         except httpx.RequestError as e:
             raise KaguraConnectionError(f"Connection failed: {e}") from e
 
-    async def _call_tool(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    async def _call_tool(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
         """
         Call MCP tool via JSON-RPC.
 
         Args:
             tool_name: Tool name (e.g., "remember", "recall")
             arguments: Tool arguments
+            timeout: Optional per-request timeout override in seconds
 
         Returns:
             Tool result parsed from content[0].text
@@ -144,7 +158,9 @@ class KaguraClient:
             KaguraConnectionError: Connection failed
         """
         result = await self._make_jsonrpc_request(
-            method="tools/call", params={"name": tool_name, "arguments": arguments}
+            method="tools/call",
+            params={"name": tool_name, "arguments": arguments},
+            timeout=timeout,
         )
 
         # Parse MCP tool response format
@@ -193,6 +209,31 @@ class KaguraClient:
             arguments["tags"] = tags
 
         return await self._call_tool("remember", arguments)
+
+    async def bulk_remember(
+        self,
+        context_id: str,
+        memories: list[dict[str, Any]],
+        timeout: float = 300.0,
+    ) -> dict[str, Any]:
+        """Store multiple memories in a single call (max 100).
+
+        Args:
+            context_id: Context UUID.
+            memories: List of memory dicts, each with summary, content, type,
+                and optional importance, tags, context_summary.
+            timeout: Request timeout in seconds (default 300s for bulk operations).
+
+        Returns:
+            API response with created_count, failed_count, created, failed.
+        """
+        if len(memories) > 100:
+            raise ValueError(f"Max 100 memories per batch, got {len(memories)}")
+        return await self._call_tool(
+            "bulk_remember",
+            {"context_id": context_id, "memories": memories},
+            timeout=timeout,
+        )
 
     async def recall(
         self,

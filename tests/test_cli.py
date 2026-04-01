@@ -288,6 +288,35 @@ def test_remember_with_empty_tags(mock_client_cls, mock_config):
 
 
 @patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_bulk_remember_cli(mock_client_cls, mock_config, tmp_path):
+    """bulk-remember should load file and call bulk_remember."""
+    mock_config.return_value = {
+        "api_key": "key",
+        "mcp_url": "https://test.com/mcp",
+        "context_id": "ctx",
+    }
+
+    mock_client = AsyncMock()
+    mock_client.bulk_remember.return_value = {
+        "status": "success",
+        "created_count": 2,
+        "failed_count": 0,
+    }
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    mock_client_cls.return_value = mock_client
+
+    f = tmp_path / "memories.json"
+    f.write_text('[{"summary": "a", "content": "b", "type": "note"}]')
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["bulk-remember", "-f", str(f)])
+    assert result.exit_code == 0
+    mock_client.bulk_remember.assert_called_once()
+
+
+@patch("kagura_memory.cli.load_config")
 @patch("kagura_memory.cli.ResourceClient")
 def test_resource_stats(mock_rc_cls, mock_config):
     """resource stats should call get_resource_impact."""
