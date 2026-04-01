@@ -182,6 +182,25 @@ def test_context_update_lock(mock_client_cls, mock_config):
     assert call_kwargs["is_locked"] is True
 
 
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_context_update_unlock(mock_client_cls, mock_config):
+    """context update --unlock should pass is_locked=False."""
+    mock_config.return_value = {"api_key": "key", "mcp_url": "https://test.com/mcp"}
+
+    mock_client = AsyncMock()
+    mock_client.update_context.return_value = {"id": "uuid-1", "is_locked": False}
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    mock_client_cls.return_value = mock_client
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["context", "update", "uuid-1", "--unlock"])
+    assert result.exit_code == 0
+    call_kwargs = mock_client.update_context.call_args[1]
+    assert call_kwargs["is_locked"] is False
+
+
 def test_context_update_requires_option():
     """context update should fail without any update option."""
     runner = CliRunner()
