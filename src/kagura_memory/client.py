@@ -196,32 +196,54 @@ class KaguraClient:
 
     async def recall(
         self,
-        context_id: str,
-        query: str,
+        context_id: str | None = None,
+        query: str = "",
         k: int = 5,
         use_rerank: bool = False,
         filters: dict[str, Any] | None = None,
         search_mode: str | None = None,
+        context_ids: list[str] | None = None,
     ) -> dict[str, Any]:
         """
         Call recall MCP tool.
 
         Args:
-            context_id: Context ID
+            context_id: Context ID for single-context search.
             query: Search query
             k: Number of results
             use_rerank: Enable AI reranking for higher quality results
-            filters: Optional filters (e.g., {"type": "code"}, {"tags": ["python"]})
+            filters: Optional filters. Supported keys:
+                - ``type``: memory type (e.g., ``"code"``)
+                - ``tags``: list of tag strings (e.g., ``["python"]``)
+                - ``tags_match``: ``"any"`` (default) or ``"all"`` for AND logic
+                - ``created_after`` / ``created_before``: ISO 8601 datetime
+                - ``updated_after`` / ``updated_before``: ISO 8601 datetime
             search_mode: Search strategy — "hybrid" (default), "semantic", or "keyword"
+            context_ids: Search across multiple contexts (2–20 IDs).
+                When provided, ``context_id`` is not required.
 
         Returns:
             API response with results list
+
+        Raises:
+            ValueError: If neither ``context_id`` nor ``context_ids`` is provided,
+                or ``context_ids`` has fewer than 2 or more than 20 IDs.
         """
+        if not isinstance(query, str) or not query.strip():
+            raise ValueError("query must be a non-empty string")
+        if context_ids is not None:
+            if len(context_ids) < 2 or len(context_ids) > 20:
+                raise ValueError(f"context_ids must contain 2–20 IDs, got {len(context_ids)}")
+        elif context_id is None:
+            raise ValueError("Either context_id or context_ids must be provided")
         arguments: dict[str, Any] = {
-            "context_id": context_id,
             "query": query,
             "k": k,
         }
+        if context_ids is not None:
+            arguments["context_ids"] = context_ids
+        else:
+            arguments["context_id"] = context_id
         if use_rerank:
             arguments["use_rerank"] = True
         if filters:
@@ -508,6 +530,40 @@ class KaguraClient:
         if is_locked is not None:
             arguments["is_locked"] = is_locked
         return await self._call_tool("update_context", arguments)
+
+    async def merge_contexts(
+        self,
+        source_id: str,
+        target_id: str,
+        delete_source: bool = False,
+    ) -> dict[str, Any]:
+        """
+        Merge memories from one context into another.
+
+        Copies all memories from the source context to the target context.
+        Both contexts must use the same embedding model and belong to the
+        same workspace.
+
+        Args:
+            source_id: Context ID to copy memories from.
+            target_id: Context ID to copy memories into.
+            delete_source: If True, soft-delete the source context after merge.
+
+        Returns:
+            API response with merge results (e.g., merged count).
+
+        Raises:
+            ValueError: If source_id and target_id are the same.
+        """
+        if source_id == target_id:
+            raise ValueError("source_id and target_id must be different")
+        arguments: dict[str, Any] = {
+            "source_id": source_id,
+            "target_id": target_id,
+        }
+        if delete_source:
+            arguments["delete_source"] = True
+        return await self._call_tool("merge_contexts", arguments)
 
     async def update_search_config(
         self,
