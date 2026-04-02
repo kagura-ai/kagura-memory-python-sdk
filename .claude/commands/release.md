@@ -67,13 +67,38 @@ This triggers the publish workflow to deploy to PyPI.
 
 ### 9. Create GitHub Release with notes
 
-Generate release notes from commits since the last tag:
+1. Run `git log --oneline vPREVIOUS..vX.Y.Z` to review all commits in this release.
+2. Write release notes in the following format, then create the release with `gh release create`:
 
-```bash
-gh release create vX.Y.Z --generate-notes --title "vX.Y.Z"
+```markdown
+## Highlights
+
+One-line summary of the release theme.
+
+### New features
+
+- **Feature name** — Description (#issue)
+  ```python
+  # Short code example showing usage
+  ```
+
+### Improvements
+
+- Bullet list of non-feature changes (perf, validation, refactor, etc.)
+
+### Bug fixes
+
+- Bullet list of fixes (omit section if none)
+
+## What's Changed
+* PR title by @author in URL (auto-generated section)
 ```
 
-Review the auto-generated notes. If needed, edit to add a summary section at the top highlighting the key changes (new features, breaking changes, etc.).
+Rules:
+- Include code examples for every new public API (method, parameter, CLI command)
+- Omit empty sections (e.g., skip "Bug fixes" if there are none)
+- Keep descriptions concise — one line per item, details go in code examples
+- Reference issue/PR numbers with `#N`
 
 ### 10. Report
 
