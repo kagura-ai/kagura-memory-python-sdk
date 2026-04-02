@@ -270,6 +270,135 @@ async def test_recall_search_mode_invalid():
 
 
 @pytest.mark.asyncio
+async def test_recall_with_tags_match_filter():
+    """recall() should pass tags_match in filters."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {"results": []}
+        await client.recall(
+            context_id="ctx",
+            query="budget",
+            filters={"tags": ["予算", "2026"], "tags_match": "all"},
+        )
+        args = mock.call_args[0][1]
+        assert args["filters"]["tags_match"] == "all"
+        assert args["filters"]["tags"] == ["予算", "2026"]
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_recall_with_date_filters():
+    """recall() should pass date range filters."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {"results": []}
+        await client.recall(
+            context_id="ctx",
+            query="recent",
+            filters={
+                "created_after": "2026-03-01T00:00:00Z",
+                "created_before": "2026-03-31T23:59:59Z",
+            },
+        )
+        args = mock.call_args[0][1]
+        assert args["filters"]["created_after"] == "2026-03-01T00:00:00Z"
+        assert args["filters"]["created_before"] == "2026-03-31T23:59:59Z"
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_recall_with_context_ids():
+    """recall() with context_ids should send context_ids, not context_id."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {"results": []}
+        await client.recall(
+            query="auth",
+            context_ids=["ctx-1", "ctx-2"],
+        )
+        args = mock.call_args[0][1]
+        assert args["context_ids"] == ["ctx-1", "ctx-2"]
+        assert "context_id" not in args
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_recall_context_ids_validation():
+    """recall() should reject context_ids with fewer than 2 or more than 20 IDs."""
+    client = _make_initialized_client()
+
+    with pytest.raises(ValueError, match="2–20 IDs"):
+        await client.recall(query="test", context_ids=["only-one"])
+
+    with pytest.raises(ValueError, match="2–20 IDs"):
+        await client.recall(query="test", context_ids=[f"ctx-{i}" for i in range(21)])
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_recall_requires_context_id_or_context_ids():
+    """recall() should raise ValueError when neither context_id nor context_ids."""
+    client = _make_initialized_client()
+
+    with pytest.raises(ValueError, match="Either context_id or context_ids"):
+        await client.recall(query="test")
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_recall_both_context_id_and_context_ids():
+    """recall() with both context_id and context_ids should use context_ids."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {"results": []}
+        await client.recall(
+            context_id="single",
+            query="test",
+            context_ids=["ctx-1", "ctx-2"],
+        )
+        args = mock.call_args[0][1]
+        assert args["context_ids"] == ["ctx-1", "ctx-2"]
+        assert "context_id" not in args
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_recall_empty_query():
+    """recall() should reject empty query string."""
+    client = _make_initialized_client()
+
+    with pytest.raises(ValueError, match="query must be a non-empty string"):
+        await client.recall(context_id="ctx", query="")
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_recall_without_context_ids_sends_context_id():
+    """recall() without context_ids should send context_id as before."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {"results": []}
+        await client.recall(context_id="my-ctx", query="test")
+        args = mock.call_args[0][1]
+        assert args["context_id"] == "my-ctx"
+        assert "context_ids" not in args
+
+    await client.close()
+
+
+@pytest.mark.asyncio
 async def test_forget_by_memory_id():
     """forget() with memory_id should pass it in arguments."""
     client = _make_initialized_client()
@@ -622,6 +751,67 @@ async def test_update_context_is_locked():
         await client.update_context(context_id="uuid-1", is_locked=False)
         args = mock.call_args[0][1]
         assert args["is_locked"] is False
+
+    await client.close()
+
+
+# ============================================================================
+# Context merge
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_merge_contexts():
+    """merge_contexts() should call tool with source and target IDs."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {"merged": 42, "source_id": "src", "target_id": "tgt"}
+        result = await client.merge_contexts(source_id="src", target_id="tgt")
+        args = mock.call_args[0][1]
+        assert args["source_id"] == "src"
+        assert args["target_id"] == "tgt"
+        assert "delete_source" not in args
+        assert result["merged"] == 42
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_merge_contexts_with_delete_source():
+    """merge_contexts() should pass delete_source when True."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {"merged": 10}
+        await client.merge_contexts(source_id="src", target_id="tgt", delete_source=True)
+        args = mock.call_args[0][1]
+        assert args["delete_source"] is True
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_merge_contexts_delete_source_not_sent_when_false():
+    """merge_contexts() should not send delete_source when False."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {"merged": 10}
+        await client.merge_contexts(source_id="src", target_id="tgt", delete_source=False)
+        args = mock.call_args[0][1]
+        assert "delete_source" not in args
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_merge_contexts_same_ids():
+    """merge_contexts() should reject same source and target IDs."""
+    client = _make_initialized_client()
+
+    with pytest.raises(ValueError, match="source_id and target_id must be different"):
+        await client.merge_contexts(source_id="same", target_id="same")
 
     await client.close()
 

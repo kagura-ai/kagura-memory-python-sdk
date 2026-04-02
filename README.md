@@ -109,6 +109,33 @@ async with KaguraClient(api_key="kagura_...", mcp_url="https://...") as client:
     await client.remember(context_id="dev", summary="OAuth2 pattern", content="Use Authlib...")
     results = await client.recall(context_id="dev", query="OAuth2", k=5)
     await client.explore(context_id="dev", memory_id="uuid", depth=3)
+
+    # Tag AND filter — match memories with ALL specified tags
+    results = await client.recall(
+        context_id="dev", query="budget",
+        filters={"tags": ["予算", "2026"], "tags_match": "all"},
+    )
+
+    # Date range filter
+    results = await client.recall(
+        context_id="dev", query="recent decisions",
+        filters={"created_after": "2026-03-01T00:00:00Z", "created_before": "2026-03-31T23:59:59Z"},
+    )
+
+    # Cross-context recall — search across multiple contexts at once
+    results = await client.recall(
+        query="authentication",
+        context_ids=["ctx-uuid-1", "ctx-uuid-2"], k=10,
+    )
+
+    # Merge contexts — copy all memories from source to target
+    result = await client.merge_contexts(source_id="old-ctx", target_id="new-ctx")
+    print(f"Merged {result['merged']} memories")
+
+    # Merge and delete the source context
+    result = await client.merge_contexts(
+        source_id="old-ctx", target_id="new-ctx", delete_source=True,
+    )
 ```
 
 ### ResourceClient — External Data Ingestion
