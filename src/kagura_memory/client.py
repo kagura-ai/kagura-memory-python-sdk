@@ -229,7 +229,7 @@ class KaguraClient:
             ValueError: If neither ``context_id`` nor ``context_ids`` is provided,
                 or ``context_ids`` has fewer than 2 or more than 20 IDs.
         """
-        if not query:
+        if not isinstance(query, str) or not query.strip():
             raise ValueError("query must be a non-empty string")
         if context_ids is not None:
             if len(context_ids) < 2 or len(context_ids) > 20:

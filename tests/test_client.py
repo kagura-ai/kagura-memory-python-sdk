@@ -384,6 +384,17 @@ async def test_recall_empty_query():
 
 
 @pytest.mark.asyncio
+async def test_recall_whitespace_only_query():
+    """recall() should reject whitespace-only query string."""
+    client = _make_initialized_client()
+
+    with pytest.raises(ValueError, match="query must be a non-empty string"):
+        await client.recall(context_id="ctx", query="   ")
+
+    await client.close()
+
+
+@pytest.mark.asyncio
 async def test_recall_without_context_ids_sends_context_id():
     """recall() without context_ids should send context_id as before."""
     client = _make_initialized_client()
