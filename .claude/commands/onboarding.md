@@ -24,9 +24,12 @@ echo "KAGURA_API_KEY=${KAGURA_API_KEY:+set}" "KAGURA_MCP_URL=${KAGURA_MCP_URL:+s
 
 **If no config**: Guide them to create `.kagura.json`:
 
-```bash
-cp .kagura.json.example .kagura.json
-# Then edit: set api_key and mcp_url
+```json
+{
+  "api_key": "kagura_YOUR_API_KEY",
+  "mcp_url": "http://localhost:8080/mcp/w/YOUR_WORKSPACE_ID",
+  "context_id": "auto"
+}
 ```
 
 Tell them:
