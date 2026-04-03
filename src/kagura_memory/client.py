@@ -585,7 +585,7 @@ class KaguraClient:
             bm25_weight: BM25 keyword search weight (0.0-1.0, server default 0.4).
             fetch_factor: Candidate fetch multiplier (1-10, server default 3).
             use_rerank: Enable AI reranking.
-            reranker_provider: Reranker provider ("voyage" or "cohere").
+            reranker_provider: Reranker provider ("voyage", "cohere", or "ollama").
             reranker_model: Reranker model name.
 
         Returns:
