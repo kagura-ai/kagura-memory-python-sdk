@@ -8,12 +8,17 @@ Usage:
     uv run python benchmarks/search_quality/run.py              # run + compare baseline
     uv run python benchmarks/search_quality/run.py --fresh      # forget all + re-seed + run
     uv run python benchmarks/search_quality/run.py --update-baseline  # save current as baseline
-    uv run python benchmarks/search_quality/run.py --cleanup    # forget all memories
+    uv run python benchmarks/search_quality/run.py --cleanup    # delete benchmark context
     uv run python benchmarks/search_quality/run.py --search-mode keyword  # BM25 only
+    uv run python benchmarks/search_quality/run.py --rerank     # enable reranking
+    uv run python benchmarks/search_quality/run.py --epochs 5   # multi-epoch Hebbian learning
+    uv run python benchmarks/search_quality/run.py --explore    # measure explore() precision
+    uv run python benchmarks/search_quality/run.py --scale      # include additional_memories.json
 """
 
 import asyncio
 import json
+import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
@@ -37,7 +42,9 @@ BASELINE_PATH = Path(__file__).parent / "baseline.json"
 REPORT_PATH = Path(__file__).parent / "report.md"
 
 
-def load_fixtures() -> tuple[list[dict], list[dict], list[dict]]:
+def load_fixtures(
+    *, include_additional: bool = False,
+) -> tuple[list[dict], list[dict], list[dict]]:
     """Load target memories, noise memories, and queries from JSON fixtures."""
     with open(FIXTURES_DIR / "target_memories.json") as f:
         targets = json.load(f)
@@ -45,6 +52,11 @@ def load_fixtures() -> tuple[list[dict], list[dict], list[dict]]:
         noise = json.load(f)
     with open(FIXTURES_DIR / "queries.json") as f:
         queries = json.load(f)
+    if include_additional:
+        additional_path = FIXTURES_DIR / "additional_memories.json"
+        if additional_path.exists():
+            with open(additional_path) as f:
+                noise = noise + json.load(f)
     return targets, noise, queries
 
 
@@ -298,13 +310,19 @@ def _print_failures(all_results: list[QueryResult]) -> None:
     console.rule("[bold red]Failures (Target not at Rank 1)[/bold red]")
     for f in failures:
         rank_str = f"rank {f.hit_rank}" if f.hit else "NOT FOUND"
+        if f.top5:
+            top_line = (
+                f"Top result: {f.top5[0]['summary']} (score: {f.top5[0]['score']:.3f})"
+                + (" [red]NOISE[/]" if f.top5[0].get("is_noise") else "")
+            )
+        else:
+            top_line = "Top result: (no results returned)"
         console.print(
             Panel(
                 f"[bold]{f.query}[/]\n"
                 f"Category: {f.category} | {f.note}\n"
                 f"Target: {rank_str} (score: {f.target_score or 0:.3f})\n"
-                f"Top result: {f.top5[0]['summary']} (score: {f.top5[0]['score']:.3f})"
-                + (" [red]NOISE[/]" if f.top5[0].get("is_noise") else ""),
+                + top_line,
                 title=f"[red]MISS[/] — {f.category}",
             )
         )
@@ -376,6 +394,109 @@ def _save_report(
 
 
 # ---------------------------------------------------------------------------
+# Graph stats & explore evaluation
+# ---------------------------------------------------------------------------
+
+
+def _get_graph_stats() -> dict[str, float]:
+    """Query neural_memory_edges from PostgreSQL."""
+    r = subprocess.run(
+        [
+            "docker", "exec", "kagura-postgres", "psql",
+            "-U", "kagura", "-d", "kagura", "-t", "-A", "-c",
+            "SELECT count(*), round(avg(weight)::numeric, 4), "
+            "round(max(weight)::numeric, 4) FROM neural_memory_edges;",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    parts = r.stdout.strip().split("|")
+    if len(parts) == 3 and parts[0].strip():
+        return {
+            "edges": int(parts[0]),
+            "avg_weight": float(parts[1]),
+            "max_weight": float(parts[2]),
+        }
+    return {"edges": 0, "avg_weight": 0.0, "max_weight": 0.0}
+
+
+async def _run_explore_eval(
+    client: KaguraClient,
+    context_id: str,
+    target_memories: list[dict],
+    all_memories: list[dict],
+) -> None:
+    """Evaluate explore() precision vs recall() for target memories."""
+    console.rule("[bold]Explore Evaluation[/bold]")
+
+    # Build tag lookup
+    all_tags: dict[str, set[str]] = {}
+    for mem in all_memories:
+        all_tags[mem["summary"][:30]] = set(mem["tags"])
+
+    # Find target memory IDs via recall
+    seed_ids: list[tuple[str, str, set[str]]] = []  # (id, summary, tags)
+    for t in target_memories:
+        r = await client.recall(context_id=context_id, query=t["summary"][:50], k=1)
+        hits = r.get("results", [])
+        if hits and _match_summary(hits[0]["summary"], t["summary"]):
+            seed_ids.append((hits[0]["memory_id"], t["summary"][:40], set(t["tags"])))
+
+    console.print(f"  Seeds: {len(seed_ids)}/{len(target_memories)} target memories found")
+
+    explore_related = 0
+    explore_total = 0
+    explore_unique = 0
+    recall_related = 0
+    recall_total = 0
+
+    for mid, summary, seed_tags in seed_ids:
+        # Explore
+        explored: list[dict] = []
+        try:
+            e = await client.explore(
+                context_id=context_id, memory_id=mid, depth=2, min_weight=0.0,
+            )
+            explored = e.get("exploration", {}).get("related_memories", [])
+        except Exception:
+            pass
+
+        for ex in explored[:5]:
+            explore_total += 1
+            ex_tags = all_tags.get(ex.get("summary", "")[:30], set())
+            if seed_tags & ex_tags:
+                explore_related += 1
+
+        # Recall for comparison
+        rc = await client.recall(context_id=context_id, query=summary, k=5)
+        recall_ids_seen: set[str] = set()
+        for h in rc.get("results", [])[:5]:
+            if h["memory_id"] == mid:
+                continue
+            recall_total += 1
+            recall_ids_seen.add(h["memory_id"])
+            h_tags = all_tags.get(h.get("summary", "")[:30], set())
+            if seed_tags & h_tags:
+                recall_related += 1
+
+        # Count explore-only hits as unique value (reuse explored)
+        for ex in explored[:5]:
+            ex_tags = all_tags.get(ex.get("summary", "")[:30], set())
+            if seed_tags & ex_tags and ex["memory_id"] not in recall_ids_seen:
+                explore_unique += 1
+
+    e_prec = explore_related / max(explore_total, 1)
+    r_prec = recall_related / max(recall_total, 1)
+
+    console.print(f"  Explore P@5: {explore_related}/{explore_total} ({e_prec:.1%})")
+    console.print(f"  Recall  P@5: {recall_related}/{recall_total} ({r_prec:.1%})")
+    console.print(
+        f"  Unique value: {explore_unique} "
+        f"({explore_unique / max(len(seed_ids) * 5, 1):.1%})"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -386,6 +507,10 @@ async def run_benchmark(
     cleanup: bool = False,
     update_baseline: bool = False,
     search_mode: str = "hybrid",
+    use_rerank: bool = False,
+    epochs: int = 1,
+    explore: bool = False,
+    scale: bool = False,
 ) -> None:
     config = load_config()
     api_key = config.get("api_key", "")
@@ -395,7 +520,9 @@ async def run_benchmark(
         console.print("[red]Error: .kagura.json required[/]")
         sys.exit(1)
 
-    target_memories, noise_memories, queries = load_fixtures()
+    target_memories, noise_memories, queries = load_fixtures(
+        include_additional=scale,
+    )
     all_memories = target_memories + noise_memories
 
     async with KaguraClient(api_key=api_key, mcp_url=mcp_url) as client:
@@ -405,19 +532,17 @@ async def run_benchmark(
         if cleanup:
             if CONTEXT_NAME in ctx_index:
                 ctx_id = ctx_index[CONTEXT_NAME]
-                await client._call_tool(
-                    "forget", {"context_id": ctx_id, "memory_id": "all"}
-                )
+                await client.delete_context(context_id=ctx_id)
                 console.print(
-                    f"[green]Cleaned {CONTEXT_NAME} ({ctx_id[:8]}...)[/]"
+                    f"[green]Deleted context {CONTEXT_NAME} ({ctx_id[:8]}...)[/]"
                 )
+            else:
+                console.print(f"[yellow]Context {CONTEXT_NAME} not found[/]")
             return
 
         if fresh and CONTEXT_NAME in ctx_index:
             ctx_id = ctx_index[CONTEXT_NAME]
-            await client._call_tool(
-                "forget", {"context_id": ctx_id, "memory_id": "all"}
-            )
+            await client.forget(context_id=ctx_id, memory_id="all")
             console.print(f"[yellow]Cleared all memories in {CONTEXT_NAME}[/]")
 
         # Create or reuse context
@@ -477,87 +602,110 @@ async def run_benchmark(
             console.print("[green]Done. Waiting for indexing...[/]")
             await asyncio.sleep(2.0)
 
-        # Run queries
-        console.rule("[bold]Running Queries[/bold]")
+        # Run queries (multi-epoch if requested)
+        noise_prefixes = {nm["summary"][:30] for nm in noise_memories}
         all_results: list[QueryResult] = []
+        for epoch in range(1, epochs + 1):
+            if epochs > 1:
+                console.rule(f"[bold]Epoch {epoch}/{epochs}[/bold]")
+            else:
+                console.rule("[bold]Running Queries[/bold]")
+            all_results.clear()
 
-        for q in queries:
-            t0 = time.monotonic()
-            results = await client.recall(
-                context_id=context_id,
-                query=q["query"],
-                k=5,
-                search_mode=search_mode if search_mode != "hybrid" else None,
-            )
-            latency = (time.monotonic() - t0) * 1000
-            hits = results.get("results", [])
-
-            top5 = []
-            for r in hits:
-                rs = r.get("summary", "")
-                is_target = False
-                is_noise_match = False
-                if q["target_idx"] is not None:
-                    is_target = _match_summary(
-                        rs, target_memories[q["target_idx"]]["summary"]
-                    )
-                for nm in noise_memories:
-                    if _match_summary(rs, nm["summary"]):
-                        is_noise_match = True
-                        break
-                top5.append(
-                    {
-                        "summary": rs[:70],
-                        "score": r.get("score", 0.0),
-                        "is_target": is_target,
-                        "is_noise": is_noise_match,
-                    }
+            for q in queries:
+                t0 = time.monotonic()
+                results = await client.recall(
+                    context_id=context_id,
+                    query=q["query"],
+                    k=5,
+                    search_mode=search_mode if search_mode != "hybrid" else None,
+                    use_rerank=use_rerank,
                 )
+                latency = (time.monotonic() - t0) * 1000
+                hits = results.get("results", [])
 
-            hit = False
-            hit_rank = None
-            target_score = None
-            for i, t in enumerate(top5):
-                if t["is_target"]:
-                    hit = True
-                    hit_rank = i + 1
-                    target_score = t["score"]
-                    break
+                top5 = []
+                for r in hits:
+                    rs = r.get("summary", "")
+                    is_target = False
+                    is_noise_match = False
+                    if q["target_idx"] is not None:
+                        is_target = _match_summary(
+                            rs, target_memories[q["target_idx"]]["summary"]
+                        )
+                    is_noise_match = rs[:30] in noise_prefixes
+                    top5.append(
+                        {
+                            "summary": rs[:70],
+                            "score": r.get("score", 0.0),
+                            "is_target": is_target,
+                            "is_noise": is_noise_match,
+                        }
+                    )
 
-            qr = QueryResult(
-                query=q["query"],
-                target_idx=q["target_idx"],
-                category=q["category"],
-                note=q["note"],
-                top5=top5,
-                hit=hit,
-                hit_rank=hit_rank,
-                latency_ms=latency,
-                target_score=target_score,
-                top1_is_correct=hit_rank == 1 if hit else False,
-            )
-            all_results.append(qr)
+                hit = False
+                hit_rank = None
+                target_score = None
+                for i, t in enumerate(top5):
+                    if t["is_target"]:
+                        hit = True
+                        hit_rank = i + 1
+                        target_score = t["score"]
+                        break
 
-            # Print live result
-            icon = (
-                "[green]✓[/]"
-                if qr.top1_is_correct
-                else "[yellow]△[/]" if hit else "[red]✗[/]"
-            )
-            console.print(f"\n{icon} [{q['category']:<12}] {q['query']}")
-            console.print(f"  [dim]{q['note']}[/]")
-            for i, t in enumerate(top5):
-                marker = ""
-                if t["is_target"]:
-                    marker = " [green]◀ TARGET[/]"
-                elif t["is_noise"]:
-                    marker = " [red]◀ NOISE[/]"
+                qr = QueryResult(
+                    query=q["query"],
+                    target_idx=q["target_idx"],
+                    category=q["category"],
+                    note=q["note"],
+                    top5=top5,
+                    hit=hit,
+                    hit_rank=hit_rank,
+                    latency_ms=latency,
+                    target_score=target_score,
+                    top1_is_correct=hit_rank == 1 if hit else False,
+                )
+                all_results.append(qr)
+
+                # Print live result (only on last epoch or single epoch)
+                if epoch == epochs:
+                    icon = (
+                        "[green]✓[/]"
+                        if qr.top1_is_correct
+                        else "[yellow]△[/]" if hit else "[red]✗[/]"
+                    )
+                    console.print(f"\n{icon} [{q['category']:<12}] {q['query']}")
+                    console.print(f"  [dim]{q['note']}[/]")
+                    for i, t in enumerate(top5):
+                        marker = ""
+                        if t["is_target"]:
+                            marker = " [green]◀ TARGET[/]"
+                        elif t["is_noise"]:
+                            marker = " [red]◀ NOISE[/]"
+                        console.print(
+                            f"  {i + 1}. [{t['score']:.3f}] {t['summary']}{marker}"
+                        )
+
+            # Epoch summary
+            if epochs > 1:
+                stats = _get_graph_stats()
+                total_scored = sum(
+                    1 for r in all_results if r.target_idx is not None
+                )
+                total_p1 = sum(1 for r in all_results if r.top1_is_correct)
                 console.print(
-                    f"  {i + 1}. [{t['score']:.3f}] {t['summary']}{marker}"
+                    f"  P@1={total_p1}/{total_scored} "
+                    f"({total_p1 / max(total_scored, 1):.0%})  "
+                    f"edges={stats['edges']} avg_w={stats['avg_weight']}"
                 )
 
         # Category summary
-        mode_label = f" (search_mode={search_mode})" if search_mode != "hybrid" else ""
+        mode_parts = []
+        if search_mode != "hybrid":
+            mode_parts.append(f"search_mode={search_mode}")
+        if use_rerank:
+            mode_parts.append("rerank=on")
+        mode_label = f" ({', '.join(mode_parts)})" if mode_parts else ""
         console.rule(f"[bold]Category Summary{mode_label}[/bold]")
         categories = _build_category_stats(all_results)
         _print_category_table(all_results, categories)
@@ -581,6 +729,12 @@ async def run_benchmark(
             all_results, categories, target_memories, noise_memories, queries
         )
 
+        # Explore evaluation
+        if explore:
+            await _run_explore_eval(
+                client, context_id, target_memories, all_memories,
+            )
+
 
 if __name__ == "__main__":
     args = sys.argv[1:]
@@ -589,11 +743,20 @@ if __name__ == "__main__":
         idx = args.index("--search-mode")
         if idx + 1 < len(args):
             mode = args[idx + 1]
+    num_epochs = 1
+    if "--epochs" in args:
+        idx = args.index("--epochs")
+        if idx + 1 < len(args):
+            num_epochs = int(args[idx + 1])
     asyncio.run(
         run_benchmark(
             fresh="--fresh" in args,
             cleanup="--cleanup" in args,
             update_baseline="--update-baseline" in args,
             search_mode=mode,
+            use_rerank="--rerank" in args,
+            epochs=num_epochs,
+            explore="--explore" in args,
+            scale="--scale" in args,
         )
     )

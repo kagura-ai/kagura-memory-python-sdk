@@ -1,5 +1,5 @@
 {
-  "version": "2026-04-01",
+  "version": "2026-04-03",
   "embedding_model": "qwen3-embedding:8b",
   "total": {
     "p_at_1": 100,
@@ -52,8 +52,8 @@
     },
     "noise": {
       "p_at_1": 0,
-      "hit_at_3": 1,
-      "hit_at_5": 2,
+      "hit_at_3": 2,
+      "hit_at_5": 3,
       "total": 5,
       "queries": 6
     },
@@ -94,8 +94,8 @@
     },
     "wago-kango": {
       "p_at_1": 3,
-      "hit_at_3": 4,
-      "hit_at_5": 4,
+      "hit_at_3": 3,
+      "hit_at_5": 3,
       "total": 4,
       "queries": 4
     },
@@ -261,7 +261,7 @@
     "ランニングの始め方",
     "蜘蛛の対策方法",
     "子供の教育と習い事",
-    "労働時間の規制",
+    "はたらき方の改革",
     "敬語",
     "DHA EPAが豊富な魚",
     "ひっこし みつもり",
