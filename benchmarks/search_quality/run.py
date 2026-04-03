@@ -452,21 +452,20 @@ async def _run_explore_eval(
 
     for mid, summary, seed_tags in seed_ids:
         # Explore
+        explored: list[dict] = []
         try:
             e = await client.explore(
                 context_id=context_id, memory_id=mid, depth=2, min_weight=0.0,
             )
             explored = e.get("exploration", {}).get("related_memories", [])
-            for ex in explored[:5]:
-                explore_total += 1
-                ex_tags = all_tags.get(ex.get("summary", "")[:30], set())
-                if seed_tags & ex_tags:
-                    explore_related += 1
-                    # Unique value: related via graph but cosine sim < 0.5
-                    # (we don't have vectors here, so count tag-only matches
-                    # where the explored memory wasn't in recall top-5)
         except Exception:
             pass
+
+        for ex in explored[:5]:
+            explore_total += 1
+            ex_tags = all_tags.get(ex.get("summary", "")[:30], set())
+            if seed_tags & ex_tags:
+                explore_related += 1
 
         # Recall for comparison
         rc = await client.recall(context_id=context_id, query=summary, k=5)
@@ -480,17 +479,11 @@ async def _run_explore_eval(
             if seed_tags & h_tags:
                 recall_related += 1
 
-        # Count explore-only hits as unique value
-        try:
-            e2 = await client.explore(
-                context_id=context_id, memory_id=mid, depth=2, min_weight=0.0,
-            )
-            for ex in e2.get("exploration", {}).get("related_memories", [])[:5]:
-                ex_tags = all_tags.get(ex.get("summary", "")[:30], set())
-                if seed_tags & ex_tags and ex["memory_id"] not in recall_ids_seen:
-                    explore_unique += 1
-        except Exception:
-            pass
+        # Count explore-only hits as unique value (reuse explored)
+        for ex in explored[:5]:
+            ex_tags = all_tags.get(ex.get("summary", "")[:30], set())
+            if seed_tags & ex_tags and ex["memory_id"] not in recall_ids_seen:
+                explore_unique += 1
 
     e_prec = explore_related / max(explore_total, 1)
     r_prec = recall_related / max(recall_total, 1)
@@ -549,9 +542,7 @@ async def run_benchmark(
 
         if fresh and CONTEXT_NAME in ctx_index:
             ctx_id = ctx_index[CONTEXT_NAME]
-            await client._call_tool(
-                "forget", {"context_id": ctx_id, "memory_id": "all"}
-            )
+            await client.forget(context_id=ctx_id, memory_id="all")
             console.print(f"[yellow]Cleared all memories in {CONTEXT_NAME}[/]")
 
         # Create or reuse context
@@ -612,6 +603,7 @@ async def run_benchmark(
             await asyncio.sleep(2.0)
 
         # Run queries (multi-epoch if requested)
+        noise_prefixes = {nm["summary"][:30] for nm in noise_memories}
         all_results: list[QueryResult] = []
         for epoch in range(1, epochs + 1):
             if epochs > 1:
@@ -641,10 +633,7 @@ async def run_benchmark(
                         is_target = _match_summary(
                             rs, target_memories[q["target_idx"]]["summary"]
                         )
-                    for nm in noise_memories:
-                        if _match_summary(rs, nm["summary"]):
-                            is_noise_match = True
-                            break
+                    is_noise_match = rs[:30] in noise_prefixes
                     top5.append(
                         {
                             "summary": rs[:70],
