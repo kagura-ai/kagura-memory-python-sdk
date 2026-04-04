@@ -22,7 +22,7 @@ uv run ruff format src/ tests/  # Format
 uv run pyright src/              # Type check
 ```
 
-**Slash commands**: `/quality` → `/simplify` → `/self-review` → PR, `/release patch|minor|major` for releases, `/kagura-guide` for reference
+**Slash commands**: `/quality` → `/simplify` → `/self-review` → PR, `/release patch|minor|major` for releases, `/kagura-memory:guide` for reference
 
 ## Key SDK Features
 
