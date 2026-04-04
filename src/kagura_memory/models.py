@@ -123,12 +123,7 @@ class EmbeddingModelsResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Resource Token models
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# Usage & context info models (v0.6.1)
+# Server info & usage models (v0.6.1)
 # ---------------------------------------------------------------------------
 
 
@@ -196,7 +191,7 @@ class ContextDetail(BaseModel):
     is_locked: bool = False
     embedding_model: str | None = None
     embedding_dimensions: int | None = None
-    search_config: SearchConfig | None = None
+    search_config: SearchConfig = Field(default_factory=SearchConfig)
 
 
 class WorkspaceInfo(BaseModel):
