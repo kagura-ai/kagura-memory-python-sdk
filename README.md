@@ -136,6 +136,25 @@ async with KaguraClient(api_key="kagura_...", mcp_url="https://...") as client:
     result = await client.merge_contexts(
         source_id="old-ctx", target_id="new-ctx", delete_source=True,
     )
+
+    # Workspace usage — check quota limits
+    usage = await client.get_usage()
+    print(f"Plan: {usage.plan}, Memories: {usage.memories.used}/{usage.memories.limit}")
+
+    # Context info — includes search_config
+    info = await client.get_context_info(context_id="dev")
+    print(f"Search config: {info.context.search_config}")
+
+    # Embedding status — check for failures
+    status = await client.get_embedding_status()
+    print(f"Embeddings: {status.total}, Failed: {len(status.failed_memories)}")
+
+    # Per-memory stats — recall frequency, access patterns
+    stats = await client.get_memory_stats(context_id="dev", sort_by="use_count", limit=10)
+
+    # Duplicate detection — find similar memory pairs
+    dupes = await client.find_duplicates(context_id="dev", threshold=0.90)
+    print(f"Found {dupes.total_pairs} duplicate pairs")
 ```
 
 ### ResourceClient — External Data Ingestion
@@ -207,7 +226,12 @@ kagura process -m "今日の学び：FastAPIのDIはDepends()を使う"
 | Operation | SDK Client | Protocol | Auth |
 |-----------|-----------|----------|------|
 | Memory (remember/recall/forget/explore/reference) | `KaguraClient` | MCP | API Key |
-| Context (create/update/list/get) | `KaguraClient` | MCP | API Key |
+| Context (create/update/list/get_context_info) | `KaguraClient` | MCP | API Key |
+| Workspace (get_usage) | `KaguraClient` | MCP | API Key |
+| Search config (update_search_config) | `KaguraClient` | MCP | API Key |
+| Embedding status (get_embedding_status) | `KaguraClient` | REST | API Key |
+| Memory stats (get_memory_stats) | `KaguraClient` | REST | API Key |
+| Duplicate detection (find_duplicates) | `KaguraClient` | REST | API Key |
 | Context delete | — | Web UI only | Session |
 | Resource Token (create/list/update/revoke) | `ResourceClient` | REST API | API Key |
 | Resource Event ingestion | `ResourceClient` | REST API | Resource Token |

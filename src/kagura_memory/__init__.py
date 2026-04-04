@@ -1,7 +1,7 @@
 """Kagura Memory SDK - AI-driven memory management for Kagura Memory Cloud."""
 
 from .agent import KaguraAgent
-from .client import KaguraClient
+from .client import MIN_SERVER_VERSION, KaguraClient
 from .exceptions import (
     KaguraAuthError,
     KaguraConnectionError,
@@ -14,13 +14,23 @@ from .exceptions import (
 )
 from .models import (
     Artifact,
+    ContextDetail,
+    ContextInfo,
+    ContextStats,
+    DuplicateMemoryInfo,
+    DuplicatePair,
+    DuplicatesResponse,
     EmbeddingModel,
     EmbeddingModelsResponse,
+    EmbeddingStatus,
     ExploredMemory,
+    FailedMemoryInfo,
     FieldDefinition,
     LLMUsage,
     Memory,
     MemoryInfo,
+    MemoryStatItem,
+    MemoryStatsResponse,
     MemoryToStore,
     Message,
     PaginatedResourceTokensResponse,
@@ -36,7 +46,14 @@ from .models import (
     ResourceTokenCreateResponse,
     ResourceTokenResponse,
     ResourceTokenUpdate,
+    SearchConfig,
+    ServerFeatures,
+    ServerInfo,
     Session,
+    UsageInfo,
+    UsageQuota,
+    UsageQuotaLimitOnly,
+    WorkspaceInfo,
 )
 from .resource_client import ResourceClient
 
@@ -47,6 +64,7 @@ __all__ = [
     "KaguraAgent",
     "KaguraClient",
     "ResourceClient",
+    "MIN_SERVER_VERSION",
     # Embedding models
     "EmbeddingModel",
     "EmbeddingModelsResponse",
@@ -61,6 +79,27 @@ __all__ = [
     "RecallQuery",
     "ExploredMemory",
     "LLMUsage",
+    # Usage & context info (v0.6.1)
+    "UsageInfo",
+    "UsageQuota",
+    "UsageQuotaLimitOnly",
+    "SearchConfig",
+    "ContextDetail",
+    "WorkspaceInfo",
+    "ContextStats",
+    "ContextInfo",
+    # Server info (v0.6.1)
+    "ServerInfo",
+    "ServerFeatures",
+    # Embedding status (v0.6.1)
+    "EmbeddingStatus",
+    "FailedMemoryInfo",
+    # Memory stats & duplicates (v0.6.1)
+    "MemoryStatItem",
+    "MemoryStatsResponse",
+    "DuplicateMemoryInfo",
+    "DuplicatePair",
+    "DuplicatesResponse",
     # Resource Token models
     "ResourceTokenCreate",
     "ResourceTokenUpdate",
