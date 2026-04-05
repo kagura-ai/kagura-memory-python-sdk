@@ -2,13 +2,31 @@
 
 import itertools
 import json
-from typing import Any
+import logging
+from typing import Any, Literal, TypeVar
 
 import httpx
+from pydantic import BaseModel as _BaseModel
 
 from ._http import SDK_VERSION, base_url_from_mcp, validate_https_url
 from .exceptions import KaguraAuthError, KaguraConnectionError
-from .models import EmbeddingModelsResponse
+from .models import (
+    ContextInfo,
+    DuplicatesResponse,
+    EmbeddingModelsResponse,
+    EmbeddingStatus,
+    MemoryStatsResponse,
+    ServerInfo,
+    UsageInfo,
+)
+
+_T = TypeVar("_T", bound=_BaseModel)
+
+
+MIN_SERVER_VERSION = "0.6.1"
+"""Minimum memory-cloud server version required by this SDK."""
+
+_MIN_SERVER_VERSION_TUPLE = tuple(int(x) for x in MIN_SERVER_VERSION.split(".")[:3])
 
 
 class KaguraClient:
@@ -127,6 +145,36 @@ class KaguraClient:
             raise KaguraConnectionError(f"HTTP {e.response.status_code}") from e
         except httpx.RequestError as e:
             raise KaguraConnectionError(f"Connection failed: {e}") from e
+
+    async def _rest_get(
+        self,
+        path: str,
+        model: type[_T],
+        params: dict[str, Any] | None = None,
+    ) -> _T:
+        """GET a REST endpoint and parse into a Pydantic model.
+
+        Args:
+            path: URL path (appended to ``_base_url``).
+            model: Pydantic model class for response validation.
+            params: Optional query parameters.
+
+        Returns:
+            Validated model instance.
+        """
+        url = f"{self._base_url}{path}"
+        try:
+            response = await self._client.get(url, params=params)
+            response.raise_for_status()
+            return model.model_validate(response.json())
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 401:
+                raise KaguraAuthError("Authentication failed. Check your API key.") from e
+            raise KaguraConnectionError(f"HTTP {e.response.status_code}") from e
+        except httpx.RequestError as e:
+            raise KaguraConnectionError(f"Connection failed: {e}") from e
+        except (ValueError, TypeError) as e:
+            raise KaguraConnectionError(f"Invalid response format: {e}") from e
 
     async def _call_tool(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         """
@@ -565,6 +613,36 @@ class KaguraClient:
             arguments["delete_source"] = True
         return await self._call_tool("merge_contexts", arguments)
 
+    async def get_usage(self) -> UsageInfo:
+        """Get workspace usage and quota limits.
+
+        Returns:
+            UsageInfo with plan, memories, contexts, members, and MCP call limits.
+        """
+        result = await self._call_tool("get_usage", {})
+        return UsageInfo.model_validate(result)
+
+    async def get_context_info(
+        self,
+        context_id: str,
+        include_details: bool = True,
+    ) -> ContextInfo:
+        """Get context information, usage guidelines, and search config.
+
+        Args:
+            context_id: Context UUID.
+            include_details: Include memory count breakdown (default: True).
+
+        Returns:
+            ContextInfo with context metadata, search_config, stats, and instructions.
+        """
+        arguments: dict[str, Any] = {
+            "context_id": context_id,
+            "include_details": include_details,
+        }
+        result = await self._call_tool("get_context_info", arguments)
+        return ContextInfo.model_validate(result)
+
     async def update_search_config(
         self,
         context_id: str,
@@ -606,6 +684,105 @@ class KaguraClient:
             arguments["reranker_model"] = reranker_model
         return await self._call_tool("update_search_config", arguments)
 
+    async def get_server_info(self) -> ServerInfo:
+        """Get server name, version, environment, and feature flags.
+
+        Calls ``GET /api/v1/system/info``.
+
+        Returns:
+            ServerInfo with version string and feature flags.
+        """
+        return await self._rest_get("/api/v1/system/info", ServerInfo)
+
+    async def check_server_version(self) -> ServerInfo:
+        """Check server version against SDK's minimum requirement.
+
+        Calls ``get_server_info()`` and emits a warning via
+        :mod:`logging` if the server version is below
+        :data:`MIN_SERVER_VERSION`.
+
+        Returns:
+            ServerInfo from the server.
+        """
+        info = await self.get_server_info()
+        try:
+            server_ver = tuple(int(x) for x in info.version.split(".")[:3])
+        except (ValueError, IndexError):
+            return info
+        if server_ver < _MIN_SERVER_VERSION_TUPLE:
+            logging.getLogger("kagura_memory").warning(
+                "Server version %s is below minimum %s required by this SDK. "
+                "Some features may not work.",
+                info.version,
+                MIN_SERVER_VERSION,
+            )
+        return info
+
+    async def get_embedding_status(self) -> EmbeddingStatus:
+        """Get embedding queue status for the workspace.
+
+        Calls ``GET /api/v1/workspace/embedding-status``.
+
+        Returns:
+            EmbeddingStatus with total, by_status breakdown, and failed memories.
+        """
+        return await self._rest_get("/api/v1/workspace/embedding-status", EmbeddingStatus)
+
+    async def get_memory_stats(
+        self,
+        context_id: str,
+        sort_by: str = "use_count",
+        sort_order: Literal["asc", "desc"] = "desc",
+        limit: int = 50,
+        offset: int = 0,
+    ) -> MemoryStatsResponse:
+        """Get per-memory usage statistics for a context.
+
+        Calls ``GET /api/v1/contexts/{context_id}/memory-stats``.
+
+        Args:
+            context_id: Context UUID.
+            sort_by: Sort field (default: "use_count").
+            sort_order: Sort order — "asc" or "desc" (default: "desc").
+            limit: Maximum results (1-200, default: 50).
+            offset: Pagination offset (default: 0).
+
+        Returns:
+            MemoryStatsResponse with per-memory stats and pagination info.
+        """
+        params = {
+            "sort_by": sort_by,
+            "sort_order": sort_order,
+            "limit": limit,
+            "offset": offset,
+        }
+        return await self._rest_get(
+            f"/api/v1/contexts/{context_id}/memory-stats", MemoryStatsResponse, params=params
+        )
+
+    async def find_duplicates(
+        self,
+        context_id: str,
+        threshold: float = 0.90,
+        limit: int = 50,
+    ) -> DuplicatesResponse:
+        """Find duplicate memory pairs in a context.
+
+        Calls ``GET /api/v1/contexts/{context_id}/duplicates``.
+
+        Args:
+            context_id: Context UUID.
+            threshold: Similarity threshold (0.5-1.0, default: 0.90).
+            limit: Maximum pairs (1-200, default: 50).
+
+        Returns:
+            DuplicatesResponse with duplicate pairs and similarity scores.
+        """
+        params = {"threshold": threshold, "limit": limit}
+        return await self._rest_get(
+            f"/api/v1/contexts/{context_id}/duplicates", DuplicatesResponse, params=params
+        )
+
     async def list_embedding_models(self) -> EmbeddingModelsResponse:
         """List available embedding models.
 
@@ -614,24 +791,8 @@ class KaguraClient:
 
         Returns:
             EmbeddingModelsResponse with models list and default_model.
-
-        Raises:
-            KaguraAuthError: Authentication failed.
-            KaguraConnectionError: Connection to server failed.
         """
-        url = f"{self._base_url}/api/v1/system/embedding/models"
-        try:
-            response = await self._client.get(url)
-            response.raise_for_status()
-            return EmbeddingModelsResponse.model_validate(response.json())
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code == 401:
-                raise KaguraAuthError("Authentication failed. Check your API key.") from e
-            raise KaguraConnectionError(f"HTTP {e.response.status_code}") from e
-        except httpx.RequestError as e:
-            raise KaguraConnectionError(f"Connection failed: {e}") from e
-        except (ValueError, TypeError) as e:
-            raise KaguraConnectionError(f"Invalid response format: {e}") from e
+        return await self._rest_get("/api/v1/system/embedding/models", EmbeddingModelsResponse)
 
     async def close(self) -> None:
         """Close the HTTP client."""

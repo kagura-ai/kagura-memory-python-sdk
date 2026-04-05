@@ -123,6 +123,188 @@ class EmbeddingModelsResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Server info & usage models (v0.6.1)
+# ---------------------------------------------------------------------------
+
+
+class ServerFeatures(BaseModel):
+    """Feature flags reported by the server."""
+
+    neural_memory: bool = False
+    research_tools: bool = False
+
+
+class ServerInfo(BaseModel):
+    """Server information from /api/v1/system/info."""
+
+    name: str
+    version: str
+    description: str | None = None
+    environment: str | None = None
+    features: ServerFeatures = Field(default_factory=ServerFeatures)
+
+
+class UsageQuota(BaseModel):
+    """Usage vs limit for a single resource category."""
+
+    used: int
+    limit: int
+    percentage: float | None = None
+
+
+class UsageQuotaLimitOnly(BaseModel):
+    """Quota with limit only (no usage counter)."""
+
+    limit: int
+
+
+class UsageInfo(BaseModel):
+    """Workspace usage and quota information."""
+
+    plan: str
+    memories: UsageQuota
+    contexts: UsageQuota
+    members: UsageQuota
+    mcp_calls_per_day: UsageQuotaLimitOnly
+
+
+class SearchConfig(BaseModel):
+    """Hybrid search configuration for a context."""
+
+    semantic_weight: float = 0.6
+    bm25_weight: float = 0.4
+    fetch_factor: int = 3
+    use_rerank: bool = False
+    reranker_provider: str | None = None
+    reranker_model: str | None = None
+
+
+class ContextDetail(BaseModel):
+    """Context metadata returned by get_context_info."""
+
+    id: str
+    name: str
+    display_name: str | None = None
+    summary: str | None = None
+    usage_guide: str | None = None
+    is_private: bool = True
+    is_locked: bool = False
+    embedding_model: str | None = None
+    embedding_dimensions: int | None = None
+    search_config: SearchConfig = Field(default_factory=SearchConfig)
+
+
+class WorkspaceInfo(BaseModel):
+    """Workspace metadata in context info response."""
+
+    id: str
+    name: str
+    description: str | None = None
+
+
+class ContextStats(BaseModel):
+    """Memory statistics for a context."""
+
+    total_memories: int
+    working_memories: int = 0
+    persistent_memories: int = 0
+    details: dict[str, Any] | None = None
+
+
+class ContextInfo(BaseModel):
+    """Full response from get_context_info."""
+
+    status: str = "success"
+    context: ContextDetail
+    workspace: WorkspaceInfo | None = None
+    stats: ContextStats | None = None
+    instructions: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Embedding status models (v0.6.1)
+# ---------------------------------------------------------------------------
+
+
+class FailedMemoryInfo(BaseModel):
+    """Info about a memory with failed embedding."""
+
+    id: str
+    summary: str
+    embedding_error: str | None = None
+    created_at: datetime
+    updated_at: datetime | None = None
+
+
+class EmbeddingStatus(BaseModel):
+    """Embedding queue status for the workspace."""
+
+    total: int
+    by_status: dict[str, int]
+    failed_memories: list[FailedMemoryInfo]
+
+
+# ---------------------------------------------------------------------------
+# Memory stats models (v0.6.1)
+# ---------------------------------------------------------------------------
+
+
+class MemoryStatItem(BaseModel):
+    """Per-memory usage statistics."""
+
+    id: str
+    summary: str
+    type: str
+    importance: float
+    scope: str
+    use_count: int
+    access_count: int
+    last_used_at: datetime | None = None
+    embedding_status: str
+    created_at: datetime
+
+
+class MemoryStatsResponse(BaseModel):
+    """Response from memory-stats endpoint."""
+
+    memories: list[MemoryStatItem]
+    total: int
+    sort_by: str
+    sort_order: str
+
+
+# ---------------------------------------------------------------------------
+# Duplicate detection models (v0.6.1)
+# ---------------------------------------------------------------------------
+
+
+class DuplicateMemoryInfo(BaseModel):
+    """Memory info for duplicate pair display."""
+
+    id: str
+    summary: str
+    type: str
+    created_at: datetime
+
+
+class DuplicatePair(BaseModel):
+    """A pair of similar memories."""
+
+    memory_a: DuplicateMemoryInfo
+    memory_b: DuplicateMemoryInfo
+    similarity: float
+
+
+class DuplicatesResponse(BaseModel):
+    """Response from duplicate detection endpoint."""
+
+    pairs: list[DuplicatePair]
+    total_pairs: int
+    threshold: float
+    memories_scanned: int
+
+
+# ---------------------------------------------------------------------------
 # Resource Token models
 # ---------------------------------------------------------------------------
 

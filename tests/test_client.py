@@ -5,7 +5,19 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
-from kagura_memory import KaguraAuthError, KaguraClient, KaguraConnectionError, KaguraQuotaError
+from kagura_memory import (
+    MIN_SERVER_VERSION,
+    ContextInfo,
+    DuplicatesResponse,
+    EmbeddingStatus,
+    KaguraAuthError,
+    KaguraClient,
+    KaguraConnectionError,
+    KaguraQuotaError,
+    MemoryStatsResponse,
+    ServerInfo,
+    UsageInfo,
+)
 
 # ============================================================================
 # HTTPS enforcement (C-3)
@@ -953,7 +965,9 @@ async def test_list_embedding_models():
         assert result.models[0].available is True
         assert result.models[1].available is False
 
-        mock_get.assert_called_once_with("https://test.com/api/v1/system/embedding/models")
+        mock_get.assert_called_once_with(
+            "https://test.com/api/v1/system/embedding/models", params=None
+        )
 
     await client.close()
 
@@ -1023,6 +1037,384 @@ async def test_list_embedding_models_connection_error():
         mock_get.side_effect = httpx.ConnectError("Connection refused")
         with pytest.raises(KaguraConnectionError, match="Connection failed"):
             await client.list_embedding_models()
+
+    await client.close()
+
+
+# ============================================================================
+# get_usage (MCP tool)
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_get_usage():
+    """get_usage() should return UsageInfo model."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {
+            "status": "success",
+            "plan": "pro",
+            "memories": {"used": 100, "limit": 11000, "percentage": 0.9},
+            "contexts": {"used": 3, "limit": 20},
+            "members": {"used": 1, "limit": 10},
+            "mcp_calls_per_day": {"limit": 50000},
+        }
+        result = await client.get_usage()
+        assert isinstance(result, UsageInfo)
+        assert result.plan == "pro"
+        assert result.memories.used == 100
+        assert result.memories.limit == 11000
+        assert result.contexts.used == 3
+        assert result.mcp_calls_per_day.limit == 50000
+        mock.assert_called_once_with("get_usage", {})
+
+    await client.close()
+
+
+# ============================================================================
+# get_context_info (MCP tool)
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_get_context_info():
+    """get_context_info() should return ContextInfo with search_config."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {
+            "status": "success",
+            "context": {
+                "id": "uuid-1",
+                "name": "test-ctx",
+                "display_name": "Test Context",
+                "summary": "A test context",
+                "is_private": True,
+                "is_locked": False,
+                "embedding_model": "qwen3-embedding:8b",
+                "embedding_dimensions": 4096,
+                "search_config": {
+                    "semantic_weight": 0.6,
+                    "bm25_weight": 0.4,
+                    "fetch_factor": 3,
+                    "use_rerank": False,
+                    "reranker_provider": "voyage",
+                    "reranker_model": "rerank-2-lite",
+                },
+            },
+            "workspace": {"id": "ws-1", "name": "My Workspace"},
+            "stats": {
+                "total_memories": 50,
+                "working_memories": 5,
+                "persistent_memories": 45,
+            },
+            "instructions": "Quick reference guide...",
+        }
+        result = await client.get_context_info(context_id="uuid-1")
+        assert isinstance(result, ContextInfo)
+        assert result.context.name == "test-ctx"
+        assert result.context.search_config is not None
+        assert result.context.search_config.semantic_weight == 0.6
+        assert result.context.search_config.reranker_provider == "voyage"
+        assert result.stats is not None
+        assert result.stats.total_memories == 50
+        args = mock.call_args[0][1]
+        assert args["context_id"] == "uuid-1"
+        assert args["include_details"] is True
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_get_context_info_without_details():
+    """get_context_info() with include_details=False."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {
+            "status": "success",
+            "context": {"id": "uuid-1", "name": "test-ctx", "is_private": True},
+        }
+        result = await client.get_context_info(context_id="uuid-1", include_details=False)
+        assert isinstance(result, ContextInfo)
+        args = mock.call_args[0][1]
+        assert args["include_details"] is False
+
+    await client.close()
+
+
+# ============================================================================
+# get_embedding_status (REST)
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_get_embedding_status():
+    """get_embedding_status() should return EmbeddingStatus model."""
+    client = _make_initialized_client()
+
+    mock_response = MagicMock()
+    mock_response.json.return_value = {
+        "total": 100,
+        "by_status": {"success": 98, "failed": 2},
+        "failed_memories": [
+            {
+                "id": "mem-1",
+                "summary": "broken",
+                "embedding_error": "model unavailable",
+                "created_at": "2026-04-01T00:00:00Z",
+                "updated_at": None,
+            }
+        ],
+    }
+    mock_response.raise_for_status = MagicMock()
+
+    with patch.object(client._client, "get", new_callable=AsyncMock) as mock_get:
+        mock_get.return_value = mock_response
+        result = await client.get_embedding_status()
+        assert isinstance(result, EmbeddingStatus)
+        assert result.total == 100
+        assert result.by_status["failed"] == 2
+        assert len(result.failed_memories) == 1
+        assert result.failed_memories[0].embedding_error == "model unavailable"
+        mock_get.assert_called_once_with(
+            "https://test.com/api/v1/workspace/embedding-status", params=None
+        )
+
+    await client.close()
+
+
+# ============================================================================
+# get_memory_stats (REST)
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_get_memory_stats():
+    """get_memory_stats() should return MemoryStatsResponse model."""
+    client = _make_initialized_client()
+
+    mock_response = MagicMock()
+    mock_response.json.return_value = {
+        "memories": [
+            {
+                "id": "mem-1",
+                "summary": "top memory",
+                "type": "note",
+                "importance": 0.9,
+                "scope": "persistent",
+                "use_count": 10,
+                "access_count": 25,
+                "last_used_at": "2026-04-03T00:00:00Z",
+                "embedding_status": "success",
+                "created_at": "2026-03-01T00:00:00Z",
+            }
+        ],
+        "total": 1,
+        "sort_by": "use_count",
+        "sort_order": "desc",
+    }
+    mock_response.raise_for_status = MagicMock()
+
+    with patch.object(client._client, "get", new_callable=AsyncMock) as mock_get:
+        mock_get.return_value = mock_response
+        result = await client.get_memory_stats(context_id="ctx-1", sort_by="use_count", limit=10)
+        assert isinstance(result, MemoryStatsResponse)
+        assert result.total == 1
+        assert result.memories[0].use_count == 10
+        mock_get.assert_called_once_with(
+            "https://test.com/api/v1/contexts/ctx-1/memory-stats",
+            params={"sort_by": "use_count", "sort_order": "desc", "limit": 10, "offset": 0},
+        )
+
+    await client.close()
+
+
+# ============================================================================
+# find_duplicates (REST)
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_find_duplicates():
+    """find_duplicates() should return DuplicatesResponse model."""
+    client = _make_initialized_client()
+
+    mock_response = MagicMock()
+    mock_response.json.return_value = {
+        "pairs": [
+            {
+                "memory_a": {
+                    "id": "mem-1",
+                    "summary": "foo",
+                    "type": "note",
+                    "created_at": "2026-03-01T00:00:00Z",
+                },
+                "memory_b": {
+                    "id": "mem-2",
+                    "summary": "foo bar",
+                    "type": "note",
+                    "created_at": "2026-03-02T00:00:00Z",
+                },
+                "similarity": 0.95,
+            }
+        ],
+        "total_pairs": 1,
+        "threshold": 0.90,
+        "memories_scanned": 50,
+    }
+    mock_response.raise_for_status = MagicMock()
+
+    with patch.object(client._client, "get", new_callable=AsyncMock) as mock_get:
+        mock_get.return_value = mock_response
+        result = await client.find_duplicates(context_id="ctx-1", threshold=0.90, limit=25)
+        assert isinstance(result, DuplicatesResponse)
+        assert result.total_pairs == 1
+        assert result.pairs[0].similarity == 0.95
+        assert result.pairs[0].memory_a.id == "mem-1"
+        mock_get.assert_called_once_with(
+            "https://test.com/api/v1/contexts/ctx-1/duplicates",
+            params={"threshold": 0.90, "limit": 25},
+        )
+
+    await client.close()
+
+
+# ============================================================================
+# get_server_info / check_server_version
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_get_server_info():
+    """get_server_info() should return ServerInfo model."""
+    client = _make_initialized_client()
+
+    mock_response = MagicMock()
+    mock_response.json.return_value = {
+        "name": "Kagura Memory Cloud",
+        "version": "0.6.1",
+        "description": "Remote MCP Server",
+        "environment": "production",
+        "features": {"neural_memory": True, "research_tools": True},
+    }
+    mock_response.raise_for_status = MagicMock()
+
+    with patch.object(client._client, "get", new_callable=AsyncMock) as mock_get:
+        mock_get.return_value = mock_response
+        result = await client.get_server_info()
+        assert isinstance(result, ServerInfo)
+        assert result.version == "0.6.1"
+        assert result.features.neural_memory is True
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_check_server_version_ok(caplog):
+    """check_server_version() should not warn when version meets minimum."""
+    client = _make_initialized_client()
+
+    mock_response = MagicMock()
+    mock_response.json.return_value = {
+        "name": "Kagura Memory Cloud",
+        "version": MIN_SERVER_VERSION,
+        "features": {},
+    }
+    mock_response.raise_for_status = MagicMock()
+
+    with patch.object(client._client, "get", new_callable=AsyncMock) as mock_get:
+        mock_get.return_value = mock_response
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="kagura_memory"):
+            result = await client.check_server_version()
+            assert result.version == MIN_SERVER_VERSION
+            assert "below minimum" not in caplog.text
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_check_server_version_old(caplog):
+    """check_server_version() should warn when server is too old."""
+    client = _make_initialized_client()
+
+    mock_response = MagicMock()
+    mock_response.json.return_value = {
+        "name": "Kagura Memory Cloud",
+        "version": "0.5.0",
+        "features": {},
+    }
+    mock_response.raise_for_status = MagicMock()
+
+    with patch.object(client._client, "get", new_callable=AsyncMock) as mock_get:
+        mock_get.return_value = mock_response
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="kagura_memory"):
+            result = await client.check_server_version()
+            assert result.version == "0.5.0"
+            assert "below minimum" in caplog.text
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_check_server_version_non_semver():
+    """check_server_version() should not crash on non-semver version strings."""
+    client = _make_initialized_client()
+
+    mock_response = MagicMock()
+    mock_response.json.return_value = {
+        "name": "Kagura Memory Cloud",
+        "version": "0.6.1-rc1",
+        "features": {},
+    }
+    mock_response.raise_for_status = MagicMock()
+
+    with patch.object(client._client, "get", new_callable=AsyncMock) as mock_get:
+        mock_get.return_value = mock_response
+        result = await client.check_server_version()
+        assert result.version == "0.6.1-rc1"
+
+    await client.close()
+
+
+# ============================================================================
+# _rest_get error handling
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_rest_get_auth_error():
+    """_rest_get should raise KaguraAuthError on 401."""
+    client = _make_initialized_client()
+
+    mock_response = MagicMock(spec=httpx.Response)
+    mock_response.status_code = 401
+
+    with patch.object(client._client, "get", new_callable=AsyncMock) as mock_get:
+        mock_get.return_value = mock_response
+        mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "401", request=MagicMock(), response=mock_response
+        )
+        with pytest.raises(KaguraAuthError):
+            await client.get_embedding_status()
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_rest_get_connection_error():
+    """_rest_get should raise KaguraConnectionError on network failure."""
+    client = _make_initialized_client()
+
+    with patch.object(client._client, "get", new_callable=AsyncMock) as mock_get:
+        mock_get.side_effect = httpx.ConnectError("Connection refused")
+        with pytest.raises(KaguraConnectionError, match="Connection failed"):
+            await client.get_embedding_status()
 
     await client.close()
 

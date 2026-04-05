@@ -37,6 +37,10 @@ Apply SemVer bump:
 
 Edit `__version__` in `src/kagura_memory/__init__.py` to the new version.
 
+### 4b. Update MIN_SERVER_VERSION (if needed)
+
+Check if `MIN_SERVER_VERSION` in `src/kagura_memory/client.py` needs updating for this release (e.g., if new methods require a newer server version). Update if necessary.
+
 ### 5. Update lock file
 
 ```bash
