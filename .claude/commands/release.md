@@ -103,6 +103,10 @@ Rules:
 - Omit empty sections (e.g., skip "Bug fixes" if there are none)
 - Keep descriptions concise — one line per item, details go in code examples
 - Reference issue/PR numbers with `#N`
+- **Breaking changes check**: If any commit contains breaking API/MCP changes (field renames, tool removals, endpoint changes), add a `## Migration` section at the top of the release notes with:
+  - What changed (before → after)
+  - What clients/users need to update
+  - Example of the new usage
 
 ### 10. Report
 
