@@ -745,6 +745,57 @@ async def test_update_context_with_resource_id_and_is_public():
 
 
 @pytest.mark.asyncio
+async def test_setup_resource_basic():
+    """Optional fields must be omitted when None so the server applies its own defaults."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {
+            "context_id": "ctx-uuid",
+            "context_name": "products",
+            "resource_id": "products",
+            "token": "kagura_resource_xyz",
+            "token_id": 1,
+        }
+        result = await client.setup_resource(resource_id="products")
+        tool_name = mock.call_args[0][0]
+        args = mock.call_args[0][1]
+        assert tool_name == "setup_resource"
+        assert args["resource_id"] == "products"
+        assert args["quota_events_per_hour"] == 1000
+        assert "name" not in args
+        assert "summary" not in args
+        assert "description" not in args
+        assert result["token"] == "kagura_resource_xyz"
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_setup_resource_with_all_args():
+    """setup_resource() should forward all optional args when provided."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {}
+        await client.setup_resource(
+            resource_id="products",
+            name="Product Catalog",
+            summary="All product data",
+            description="Catalog ingestion token",
+            quota_events_per_hour=5000,
+        )
+        args = mock.call_args[0][1]
+        assert args["resource_id"] == "products"
+        assert args["name"] == "Product Catalog"
+        assert args["summary"] == "All product data"
+        assert args["description"] == "Catalog ingestion token"
+        assert args["quota_events_per_hour"] == 5000
+
+    await client.close()
+
+
+@pytest.mark.asyncio
 async def test_create_context_minimal():
     """create_context() with only name should not send optional fields."""
     client = _make_initialized_client()
