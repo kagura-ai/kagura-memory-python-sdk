@@ -442,6 +442,254 @@ async def test_get_resource_schema_returns_none_on_404():
 
 
 # ============================================================================
+# Resource list (server v0.14+)
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_list_resources():
+    """list_resources should GET /api/v1/resources and parse the wrapped response."""
+    client = ResourceClient(api_key="test", base_url="https://test.com")
+
+    response_data = {
+        "resources": [
+            {
+                "resource_id": "products",
+                "context_id": "ctx-uuid-1",
+                "context_name": "products",
+                "context_display_name": "Product Catalog",
+                "token_count": 2,
+                "memory_count": 150,
+                "current_schema_version": 3,
+                "created_at": "2026-03-01T00:00:00Z",
+                "updated_at": "2026-04-28T00:00:00Z",
+            },
+            {
+                "resource_id": "slack-messages",
+                "context_id": "ctx-uuid-2",
+                "context_name": "slack-messages",
+                "context_display_name": None,
+                "token_count": 1,
+                "memory_count": 50,
+                "current_schema_version": None,
+                "created_at": "2026-04-01T00:00:00Z",
+                "updated_at": "2026-04-27T00:00:00Z",
+            },
+        ],
+        "total": 2,
+    }
+    mock_resp = _mock_response(200, response_data)
+
+    with patch.object(client._client, "request", new_callable=AsyncMock) as mock_req:
+        mock_req.return_value = mock_resp
+
+        result = await client.list_resources()
+
+        assert result.total == 2
+        assert len(result.resources) == 2
+        assert result.resources[0].resource_id == "products"
+        assert result.resources[0].context_display_name == "Product Catalog"
+        assert result.resources[0].current_schema_version == 3
+        assert result.resources[1].context_display_name is None
+        assert result.resources[1].current_schema_version is None
+        call_args = mock_req.call_args
+        assert call_args[0][0] == "GET"
+        assert call_args[0][1].endswith("/api/v1/resources")
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_list_resources_empty():
+    """list_resources should handle empty workspace."""
+    client = ResourceClient(api_key="test", base_url="https://test.com")
+
+    mock_resp = _mock_response(200, {"resources": [], "total": 0})
+
+    with patch.object(client._client, "request", new_callable=AsyncMock) as mock_req:
+        mock_req.return_value = mock_resp
+
+        result = await client.list_resources()
+
+        assert result.total == 0
+        assert result.resources == []
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_list_resources_403_non_owner():
+    """list_resources should surface a 403 from the workspace-owner gate."""
+    client = ResourceClient(api_key="test", base_url="https://test.com")
+
+    mock_response = MagicMock()
+    mock_response.status_code = 403
+    mock_response.json.return_value = {"detail": "Workspace owner required"}
+    mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
+        "403", request=MagicMock(), response=mock_response
+    )
+
+    with patch.object(client._client, "request", new_callable=AsyncMock) as mock_req:
+        mock_req.return_value = mock_response
+
+        with pytest.raises(KaguraConnectionError, match="Workspace owner required"):
+            await client.list_resources()
+
+    await client.close()
+
+
+# ============================================================================
+# Indexer status (server v0.14+)
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_get_indexer_status_active():
+    """get_indexer_status should parse a populated state."""
+    client = ResourceClient(api_key="test", base_url="https://test.com")
+
+    response_data = {
+        "resource_id": "products",
+        "state": {
+            "job_status": "idle",
+            "last_run_at": "2026-04-28T10:00:00Z",
+            "next_run_at": "2026-04-28T10:05:00Z",
+            "active_version": 3,
+            "last_offset": 12345,
+            "lag_seconds": 12.5,
+            "metrics": {
+                "applied_upserts": 100,
+                "applied_deletes": 5,
+                "errors": 0,
+                "skipped_reason": None,
+            },
+        },
+        "recent_events": [],
+    }
+    mock_resp = _mock_response(200, response_data)
+
+    with patch.object(client._client, "request", new_callable=AsyncMock) as mock_req:
+        mock_req.return_value = mock_resp
+
+        result = await client.get_indexer_status("products")
+
+        assert result.resource_id == "products"
+        assert result.state is not None
+        assert result.state.job_status == "idle"
+        assert result.state.active_version == 3
+        assert result.state.last_offset == 12345
+        assert result.state.lag_seconds == 12.5
+        assert result.state.metrics.applied_upserts == 100
+        assert result.state.metrics.skipped_reason is None
+        call_args = mock_req.call_args
+        assert call_args[0][0] == "GET"
+        assert "/api/v1/resources/products/indexer-status" in call_args[0][1]
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_get_indexer_status_never_ran():
+    """get_indexer_status should accept state=None (indexer has never run, 200 response)."""
+    client = ResourceClient(api_key="test", base_url="https://test.com")
+
+    response_data = {
+        "resource_id": "fresh-resource",
+        "state": None,
+        "recent_events": [],
+    }
+    mock_resp = _mock_response(200, response_data)
+
+    with patch.object(client._client, "request", new_callable=AsyncMock) as mock_req:
+        mock_req.return_value = mock_resp
+
+        result = await client.get_indexer_status("fresh-resource")
+
+        assert result.resource_id == "fresh-resource"
+        assert result.state is None
+        assert result.recent_events == []
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_get_indexer_status_404_raises():
+    """get_indexer_status should raise on 404 (resource not found, distinct from state=None)."""
+    client = ResourceClient(api_key="test", base_url="https://test.com")
+
+    mock_response = MagicMock()
+    mock_response.status_code = 404
+    mock_response.json.return_value = {"detail": "Resource not found"}
+    mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
+        "404", request=MagicMock(), response=mock_response
+    )
+
+    with patch.object(client._client, "request", new_callable=AsyncMock) as mock_req:
+        mock_req.return_value = mock_response
+
+        with pytest.raises(KaguraNotFoundError, match="Resource not found"):
+            await client.get_indexer_status("missing-slug")
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_get_indexer_status_with_recent_events():
+    """get_indexer_status should parse recent_events list."""
+    client = ResourceClient(api_key="test", base_url="https://test.com")
+
+    response_data = {
+        "resource_id": "products",
+        "state": {
+            "job_status": "running",
+            "last_run_at": None,
+            "next_run_at": None,
+            "active_version": 1,
+            "last_offset": 0,
+            "lag_seconds": None,
+            "metrics": {
+                "applied_upserts": 0,
+                "applied_deletes": 0,
+                "errors": 0,
+                "skipped_reason": "no_pending_events",
+            },
+        },
+        "recent_events": [
+            {
+                "id": 100,
+                "op": "upsert",
+                "doc_id": "SKU-001",
+                "version": 2,
+                "created_at": "2026-04-28T10:00:00Z",
+            },
+            {
+                "id": 99,
+                "op": "delete",
+                "doc_id": "SKU-002",
+                "version": None,
+                "created_at": None,
+            },
+        ],
+    }
+    mock_resp = _mock_response(200, response_data)
+
+    with patch.object(client._client, "request", new_callable=AsyncMock) as mock_req:
+        mock_req.return_value = mock_resp
+
+        result = await client.get_indexer_status("products")
+
+        assert len(result.recent_events) == 2
+        assert result.recent_events[0].op == "upsert"
+        assert result.recent_events[0].version == 2
+        assert result.recent_events[1].op == "delete"
+        assert result.recent_events[1].version is None
+        assert result.state is not None
+        assert result.state.metrics.skipped_reason == "no_pending_events"
+
+    await client.close()
+
+
+# ============================================================================
 # Error handling
 # ============================================================================
 

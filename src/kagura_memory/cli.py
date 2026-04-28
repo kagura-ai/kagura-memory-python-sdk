@@ -732,6 +732,42 @@ def resource_stats(resource_id):
     _run_resource_command(op)
 
 
+@resource.command(name="list")
+def resource_list():
+    """
+    List all resources in the workspace (owner only).
+
+    Examples:
+      kagura resource list
+    """
+
+    async def op(client: ResourceClient) -> str:
+        result = await client.list_resources()
+        return result.model_dump_json(indent=2)
+
+    _run_resource_command(op)
+
+
+@resource.command(name="indexer-status")
+@click.option("--resource-id", "-r", required=True, help="Resource ID")
+def resource_indexer_status(resource_id):
+    """
+    Show indexer state and recent ingest events for a resource.
+
+    The ``state`` field is null when the indexer has never run for this
+    resource (this is a normal 200 response, distinct from a 404).
+
+    Examples:
+      kagura resource indexer-status -r products
+    """
+
+    async def op(client: ResourceClient) -> str:
+        result = await client.get_indexer_status(resource_id)
+        return result.model_dump_json(indent=2)
+
+    _run_resource_command(op)
+
+
 @resource.command(name="schema")
 @click.option("--resource-id", "-r", required=True, help="Resource ID")
 @click.option("--version", "-v", "schema_version", type=int, help="Schema version")
