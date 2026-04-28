@@ -437,3 +437,94 @@ class ResourceSchemaResponse(BaseModel):
     schema_version: int
     field_definitions: list[FieldDefinition]
     created_at: datetime
+
+
+# ============================================================================
+# Resource list (workspace-scoped, server v0.14+)
+# ============================================================================
+
+
+class ResourceListItem(BaseModel):
+    """Single resource entry in the workspace resource list."""
+
+    resource_id: str
+    context_id: str
+    context_name: str
+    context_display_name: str | None = None
+    token_count: int
+    memory_count: int
+    current_schema_version: int | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ResourceListResponse(BaseModel):
+    """Workspace resource list response (non-paginated; server caps at < 50)."""
+
+    resources: list[ResourceListItem]
+    total: int
+
+
+# ============================================================================
+# Indexer status (server v0.14+)
+# ============================================================================
+
+
+IndexerJobStatus = Literal["idle", "queued", "running", "failed"]
+"""Indexer job status. Mirrors the server-side CHECK constraint on
+``indexer_state.job_status``."""
+
+
+IndexerSkippedReason = Literal[
+    "no_pending_events",
+    "schema_not_found",
+    "context_not_found",
+    "empty_valid_points",
+    "resource_entity_missing",
+]
+"""Reasons the indexer may record under ``metrics.skipped_reason`` when a run
+was skipped. Server degrades unknown values to ``None`` on the wire."""
+
+
+class IndexerStateMetrics(BaseModel):
+    """Per-run indexer metrics, flattened from the server JSONB column."""
+
+    applied_upserts: int = 0
+    applied_deletes: int = 0
+    errors: int = 0
+    skipped_reason: IndexerSkippedReason | None = None
+
+
+class IndexerState(BaseModel):
+    """Indexer state snapshot for one resource."""
+
+    job_status: IndexerJobStatus
+    last_run_at: datetime | None = None
+    next_run_at: datetime | None = None
+    active_version: int
+    last_offset: int
+    lag_seconds: float | None = None
+    metrics: IndexerStateMetrics
+
+
+class ResourceEventItem(BaseModel):
+    """Single row in the indexer's recent ingest events list."""
+
+    id: int
+    op: Literal["upsert", "delete"]
+    doc_id: str
+    version: int | None = None
+    created_at: datetime | None = None
+
+
+class IndexerStatusResponse(BaseModel):
+    """Response body for ``GET /api/v1/resources/{resource_id}/indexer-status``.
+
+    ``state`` is ``None`` when the indexer has never run for this resource
+    (the endpoint still returns 200 in that case). A 404 means the resource
+    slug does not exist in the caller's workspace.
+    """
+
+    resource_id: str
+    state: IndexerState | None = None
+    recent_events: list[ResourceEventItem] = Field(default_factory=list)

@@ -15,12 +15,14 @@ from .exceptions import (
     KaguraQuotaError,
 )
 from .models import (
+    IndexerStatusResponse,
     PaginatedResourceTokensResponse,
     ResourceEventBatchRequest,
     ResourceEventBatchResponse,
     ResourceEventRequest,
     ResourceEventResponse,
     ResourceImpactResponse,
+    ResourceListResponse,
     ResourceSchemaResponse,
     ResourceSetupResponse,
     ResourceTokenCreate,
@@ -324,6 +326,40 @@ class ResourceClient:
         """
         response = await self._request("GET", f"/api/v1/resources/{resource_id}/impact")
         return ResourceImpactResponse.model_validate(response.json())
+
+    async def list_resources(self) -> ResourceListResponse:
+        """List all resources in the caller's workspace (server v0.14+).
+
+        Returns workspace-scoped resources with aggregated stats
+        (token_count, memory_count, current_schema_version, ...). The
+        endpoint is currently non-paginated; the server caps a workspace
+        at well under 50 resources by design.
+
+        Workspace owners only — non-owners receive 403.
+
+        Returns:
+            ResourceListResponse with ``resources`` and ``total`` count.
+        """
+        response = await self._request("GET", "/api/v1/resources")
+        return ResourceListResponse.model_validate(response.json())
+
+    async def get_indexer_status(self, resource_id: str) -> IndexerStatusResponse:
+        """Get indexer state and recent ingest events for a resource.
+
+        Args:
+            resource_id: Resource identifier slug.
+
+        Returns:
+            IndexerStatusResponse. ``state`` is ``None`` when the indexer
+            has never run for this resource — this is a normal 200 response,
+            distinct from a 404. ``recent_events`` is server-capped at 5.
+
+        Raises:
+            KaguraNotFoundError: Resource slug does not exist in the caller's
+                workspace (404; cross-workspace probe protection).
+        """
+        response = await self._request("GET", f"/api/v1/resources/{resource_id}/indexer-status")
+        return IndexerStatusResponse.model_validate(response.json())
 
     async def get_resource_schema(
         self,

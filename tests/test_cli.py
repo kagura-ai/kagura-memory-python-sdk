@@ -457,6 +457,48 @@ def test_resource_setup(mock_rc_cls, mock_config):
 
 @patch("kagura_memory.cli.load_config")
 @patch("kagura_memory.cli.ResourceClient")
+def test_resource_list(mock_rc_cls, mock_config):
+    """resource list should call list_resources."""
+    mock_config.return_value = {"api_key": "key", "mcp_url": "https://test.com/mcp"}
+
+    mock_rc = AsyncMock()
+    json_out = '{"resources": [], "total": 0}'
+    mock_rc.list_resources.return_value = MagicMock(model_dump_json=lambda indent=None: json_out)
+    mock_rc.__aenter__ = AsyncMock(return_value=mock_rc)
+    mock_rc.__aexit__ = AsyncMock(return_value=None)
+    mock_rc_cls.from_mcp_url.return_value = mock_rc
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["resource", "list"])
+    assert result.exit_code == 0
+    assert '"total": 0' in result.output
+    mock_rc.list_resources.assert_called_once_with()
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.ResourceClient")
+def test_resource_indexer_status(mock_rc_cls, mock_config):
+    """resource indexer-status should call get_indexer_status."""
+    mock_config.return_value = {"api_key": "key", "mcp_url": "https://test.com/mcp"}
+
+    mock_rc = AsyncMock()
+    json_out = '{"resource_id": "products", "state": null, "recent_events": []}'
+    mock_rc.get_indexer_status.return_value = MagicMock(
+        model_dump_json=lambda indent=None: json_out
+    )
+    mock_rc.__aenter__ = AsyncMock(return_value=mock_rc)
+    mock_rc.__aexit__ = AsyncMock(return_value=None)
+    mock_rc_cls.from_mcp_url.return_value = mock_rc
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["resource", "indexer-status", "-r", "products"])
+    assert result.exit_code == 0
+    assert '"resource_id"' in result.output
+    mock_rc.get_indexer_status.assert_called_once_with("products")
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.ResourceClient")
 def test_resource_import_csv(mock_rc_cls, mock_config):
     """resource import should parse CSV and batch ingest."""
     mock_config.return_value = {"api_key": "key", "mcp_url": "https://test.com/mcp"}
