@@ -484,7 +484,12 @@ def sleep():
 
 @sleep.command(name="history")
 @click.argument("context_id")
-@click.option("--limit", default=10, type=int, help="Max runs to return (1-50, default: 10).")
+@click.option(
+    "--limit",
+    default=10,
+    type=click.IntRange(1, 50),
+    help="Max runs to return (1-50, default: 10).",
+)
 def sleep_history(context_id, limit):
     """List recent Sleep Maintenance runs for a context."""
 
