@@ -1468,7 +1468,8 @@ async def test_check_server_version_old(caplog):
         with caplog.at_level(logging.WARNING, logger="kagura_memory"):
             result = await client.check_server_version()
             assert result.version == "0.5.0"
-            assert "below minimum" in caplog.text
+            assert "is below" in caplog.text
+            assert "tested minimum" in caplog.text
 
     await client.close()
 

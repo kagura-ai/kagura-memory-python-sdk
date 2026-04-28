@@ -28,8 +28,11 @@ MIN_SERVER_VERSION = "0.14.0"
 
 This is the lowest server version where every parameter the SDK exposes
 (remember/recall pass-through fields, resource APIs) is fully supported.
-Connecting to an older server logs a warning but does not raise — older
-servers may silently ignore unknown parameters."""
+The check is opt-in: callers must explicitly invoke
+:meth:`KaguraClient.check_server_version` to log an advisory warning when
+the connected server is older. Plain ``KaguraClient`` instantiation and
+tool calls never raise on version mismatch, and older servers may
+silently ignore unknown parameters."""
 
 _MIN_SERVER_VERSION_TUPLE = tuple(int(x) for x in MIN_SERVER_VERSION.split(".")[:3])
 
@@ -737,8 +740,9 @@ class KaguraClient:
             return info
         if server_ver < _MIN_SERVER_VERSION_TUPLE:
             logging.getLogger("kagura_memory").warning(
-                "Server version %s is below minimum %s required by this SDK. "
-                "Some features may not work.",
+                "Server version %s is below the SDK's tested minimum %s. "
+                "Some features may not work; older servers may silently "
+                "ignore unknown parameters.",
                 info.version,
                 MIN_SERVER_VERSION,
             )
