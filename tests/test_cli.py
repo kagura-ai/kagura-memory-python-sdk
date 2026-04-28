@@ -774,3 +774,32 @@ def test_sleep_rollback_aborts_on_no(mock_client_cls, mock_config):
     result = runner.invoke(main, ["sleep", "rollback", "ctx-1", "rid-9"], input="n\n")
     assert result.exit_code != 0
     mock_client.rollback_sleep_run.assert_not_called()
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_sleep_rollback_wraps_unexpected_exception(mock_client_cls, mock_config):
+    """Unexpected exceptions inside _run() surface as click.ClickException."""
+    mock_config.return_value = {"api_key": "key", "mcp_url": "https://test.com/mcp"}
+
+    mock_client = AsyncMock()
+    mock_client.rollback_sleep_run.side_effect = RuntimeError("boom")
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    mock_client_cls.return_value = mock_client
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["sleep", "rollback", "ctx-1", "rid-9", "-y"])
+    assert result.exit_code != 0
+    assert "Error: boom" in result.output
+
+
+@patch("kagura_memory.cli.load_config")
+def test_get_kagura_client_missing_api_key(mock_config):
+    """_get_kagura_client raises ClickException when no api_key in config."""
+    mock_config.return_value = {"api_key": "", "mcp_url": "https://test.com/mcp"}
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["sleep", "rollback", "ctx-1", "rid-9", "-y"])
+    assert result.exit_code != 0
+    assert "No API key" in result.output
