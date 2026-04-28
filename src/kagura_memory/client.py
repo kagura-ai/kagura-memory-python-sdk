@@ -220,6 +220,9 @@ class KaguraClient:
         type: str = "note",
         importance: float = 0.5,
         tags: list[str] | None = None,
+        source_uri: str | None = None,
+        linked_memory_ids: list[str] | None = None,
+        linked_source_uris: list[str] | None = None,
     ) -> dict[str, Any]:
         """
         Call remember MCP tool.
@@ -231,11 +234,16 @@ class KaguraClient:
             type: Memory type
             importance: Importance score (0.0-1.0)
             tags: Optional tags
+            source_uri: Origin URI for this memory (e.g. ``file://``,
+                ``https://``, ``vault://``).
+            linked_memory_ids: Existing memory UUIDs to declare as graph
+                edges from this memory.
+            linked_source_uris: Source URIs to resolve into linked memories.
 
         Returns:
             API response with memory_id
         """
-        arguments = {
+        arguments: dict[str, Any] = {
             "context_id": context_id,
             "summary": summary,
             "content": content,
@@ -244,6 +252,12 @@ class KaguraClient:
         }
         if tags:
             arguments["tags"] = tags
+        if source_uri is not None:
+            arguments["source_uri"] = source_uri
+        if linked_memory_ids is not None:
+            arguments["linked_memory_ids"] = linked_memory_ids
+        if linked_source_uris is not None:
+            arguments["linked_source_uris"] = linked_source_uris
 
         return await self._call_tool("remember", arguments)
 
