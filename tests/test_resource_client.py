@@ -320,6 +320,7 @@ async def test_get_resource_impact():
     client = ResourceClient(api_key="test", base_url="https://test.com")
 
     response_data = {
+        "resource_id": "products",
         "token_count": 3,
         "memory_count": 150,
         "current_schema_version": 2,
@@ -331,6 +332,7 @@ async def test_get_resource_impact():
 
         result = await client.get_resource_impact("products")
 
+        assert result.resource_id == "products"
         assert result.token_count == 3
         assert result.memory_count == 150
         assert result.current_schema_version == 2

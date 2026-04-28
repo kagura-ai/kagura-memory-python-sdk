@@ -23,8 +23,16 @@ from .models import (
 _T = TypeVar("_T", bound=_BaseModel)
 
 
-MIN_SERVER_VERSION = "0.6.1"
-"""Minimum memory-cloud server version required by this SDK."""
+MIN_SERVER_VERSION = "0.14.0"
+"""Minimum memory-cloud server version this SDK was tested against.
+
+This is the lowest server version where every parameter the SDK exposes
+(remember/recall pass-through fields, resource APIs) is fully supported.
+The check is opt-in: callers must explicitly invoke
+:meth:`KaguraClient.check_server_version` to log an advisory warning when
+the connected server is older. Plain ``KaguraClient`` instantiation and
+tool calls never raise on version mismatch, and older servers may
+silently ignore unknown parameters."""
 
 _MIN_SERVER_VERSION_TUPLE = tuple(int(x) for x in MIN_SERVER_VERSION.split(".")[:3])
 
@@ -215,6 +223,9 @@ class KaguraClient:
         type: str = "note",
         importance: float = 0.5,
         tags: list[str] | None = None,
+        source_uri: str | None = None,
+        linked_memory_ids: list[str] | None = None,
+        linked_source_uris: list[str] | None = None,
     ) -> dict[str, Any]:
         """
         Call remember MCP tool.
@@ -226,19 +237,30 @@ class KaguraClient:
             type: Memory type
             importance: Importance score (0.0-1.0)
             tags: Optional tags
+            source_uri: Origin URI for this memory (e.g. ``file://``,
+                ``https://``, ``vault://``).
+            linked_memory_ids: Existing memory UUIDs to declare as graph
+                edges from this memory.
+            linked_source_uris: Source URIs to resolve into linked memories.
 
         Returns:
             API response with memory_id
         """
-        arguments = {
+        arguments: dict[str, Any] = {
             "context_id": context_id,
             "summary": summary,
             "content": content,
             "type": type,
             "importance": importance,
         }
-        if tags:
+        if tags is not None:
             arguments["tags"] = tags
+        if source_uri is not None:
+            arguments["source_uri"] = source_uri
+        if linked_memory_ids is not None:
+            arguments["linked_memory_ids"] = linked_memory_ids
+        if linked_source_uris is not None:
+            arguments["linked_source_uris"] = linked_source_uris
 
         return await self._call_tool("remember", arguments)
 
@@ -251,6 +273,7 @@ class KaguraClient:
         filters: dict[str, Any] | None = None,
         search_mode: str | None = None,
         context_ids: list[str] | None = None,
+        include_explore_hints: bool = False,
     ) -> dict[str, Any]:
         """
         Call recall MCP tool.
@@ -269,6 +292,10 @@ class KaguraClient:
             search_mode: Search strategy — "hybrid" (default), "semantic", or "keyword"
             context_ids: Search across multiple contexts (2–20 IDs).
                 When provided, ``context_id`` is not required.
+            include_explore_hints: When True, the server includes up to 3
+                graph discovery hints in the response under the
+                ``explore_hints`` key — useful as seeds for a follow-up
+                :meth:`explore` call.
 
         Returns:
             API response with results list
@@ -300,6 +327,8 @@ class KaguraClient:
             if search_mode not in ("hybrid", "semantic", "keyword"):
                 raise ValueError(f"Invalid search_mode: {search_mode!r}")
             arguments["search_mode"] = search_mode
+        if include_explore_hints:
+            arguments["include_explore_hints"] = True
         return await self._call_tool("recall", arguments)
 
     async def list_contexts(self) -> dict[str, Any]:
@@ -695,11 +724,12 @@ class KaguraClient:
         return await self._rest_get("/api/v1/system/info", ServerInfo)
 
     async def check_server_version(self) -> ServerInfo:
-        """Check server version against SDK's minimum requirement.
+        """Check the connected server's version against the SDK's tested minimum.
 
-        Calls ``get_server_info()`` and emits a warning via
-        :mod:`logging` if the server version is below
-        :data:`MIN_SERVER_VERSION`.
+        Advisory only — calls ``get_server_info()`` and logs a warning
+        via :mod:`logging` when the server version is below
+        :data:`MIN_SERVER_VERSION`. Does not raise. Older servers may
+        silently ignore unknown parameters.
 
         Returns:
             ServerInfo from the server.
@@ -711,8 +741,9 @@ class KaguraClient:
             return info
         if server_ver < _MIN_SERVER_VERSION_TUPLE:
             logging.getLogger("kagura_memory").warning(
-                "Server version %s is below minimum %s required by this SDK. "
-                "Some features may not work.",
+                "Server version %s is below the SDK's tested minimum %s. "
+                "Some features may not work; older servers may silently "
+                "ignore unknown parameters.",
                 info.version,
                 MIN_SERVER_VERSION,
             )
