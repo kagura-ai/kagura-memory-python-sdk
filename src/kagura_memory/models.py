@@ -528,3 +528,85 @@ class IndexerStatusResponse(BaseModel):
     resource_id: str
     state: IndexerState | None = None
     recent_events: list[ResourceEventItem] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Sleep Maintenance (issue #85)
+# ---------------------------------------------------------------------------
+
+
+SleepRunStatus = Literal["running", "completed", "failed", "cancelled", "rolled_back"]
+
+
+class SleepReport(BaseModel):
+    """Summary of a Sleep Maintenance run, returned by ``get_sleep_history``."""
+
+    report_id: str
+    context_id: str | None = None
+    status: SleepRunStatus
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    memories_processed: int
+    edges_created: int
+    memories_merged: int
+    memories_promoted: int
+    llm_calls_made: int
+    llm_tokens_used: int
+
+
+class SleepAction(BaseModel):
+    """One audit log entry from a Sleep Maintenance run.
+
+    ``action_type`` and ``phase`` are free-form strings — the server may add
+    new types over time. Known ``action_type`` values include ``create_edge``,
+    ``merge``, ``update_importance``, ``promote``, ``archive``, and ``flag``.
+    ``details`` is a generic dict whose shape depends on ``action_type``.
+    """
+
+    id: str
+    phase: str
+    action_type: str
+    memory_id: str | None = None
+    target_id: str | None = None
+    details: dict[str, Any] | None = None
+    created_at: datetime | None = None
+
+
+class SleepReportDetail(SleepReport):
+    """Full Sleep Maintenance report with audit log, returned by ``get_sleep_report``.
+
+    Extends ``SleepReport`` with per-phase result blobs and the per-action
+    audit log. Fields ending in ``_result`` are server-side phase outputs
+    kept as raw dicts because their shape evolves with the maintenance
+    pipeline.
+    """
+
+    memories_flagged: int
+    embedding_calls_made: int
+    error_message: str | None = None
+    edge_discovery_result: dict[str, Any] | None = None
+    dedup_result: dict[str, Any] | None = None
+    importance_result: dict[str, Any] | None = None
+    consolidation_result: dict[str, Any] | None = None
+    reindex_result: dict[str, Any] | None = None
+    actions: list[SleepAction] = Field(default_factory=list)
+    action_count: int
+
+
+class RollbackSummary(BaseModel):
+    """Per-category counts of actions reversed by ``rollback_sleep_run``."""
+
+    edges_deleted: int = 0
+    merges_reversed: int = 0
+    importance_restored: int = 0
+    promotions_reversed: int = 0
+    archives_restored: int = 0
+    errors: list[str] = Field(default_factory=list)
+
+
+class RollbackResult(BaseModel):
+    """Result of ``rollback_sleep_run`` on a successful (no-error) run."""
+
+    report_id: str
+    status: SleepRunStatus
+    rollback_summary: RollbackSummary

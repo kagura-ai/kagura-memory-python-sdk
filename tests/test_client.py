@@ -13,11 +13,18 @@ from kagura_memory import (
     KaguraAuthError,
     KaguraClient,
     KaguraConnectionError,
+    KaguraError,
+    KaguraNotFoundError,
     KaguraQuotaError,
     MemoryStatsResponse,
+    RollbackResult,
     ServerInfo,
+    SleepAction,
+    SleepReport,
+    SleepReportDetail,
     UsageInfo,
 )
+from tests.conftest import sleep_report_summary_dict
 
 # ============================================================================
 # HTTPS enforcement (C-3)
@@ -1588,3 +1595,187 @@ async def test_context_manager():
     """async with should return client and close on exit."""
     async with KaguraClient(api_key="test", mcp_url="https://test.com/mcp") as client:
         assert isinstance(client, KaguraClient)
+
+
+# ============================================================================
+# Sleep Maintenance (issue #85)
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_get_sleep_history_success():
+    """get_sleep_history() returns a list of SleepReport models."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {
+            "status": "success",
+            "reports": [sleep_report_summary_dict("rid-1"), sleep_report_summary_dict("rid-2")],
+            "count": 2,
+        }
+        result = await client.get_sleep_history(context_id="ctx-1", limit=5)
+
+    assert len(result) == 2
+    assert all(isinstance(r, SleepReport) for r in result)
+    assert result[0].report_id == "rid-1"
+    assert result[0].status == "completed"
+    assert result[0].edges_created == 2
+    mock.assert_called_once_with("get_sleep_history", {"context_id": "ctx-1", "limit": 5})
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_get_sleep_report_success():
+    """get_sleep_report() flattens report + actions into SleepReportDetail."""
+    client = _make_initialized_client()
+
+    summary = sleep_report_summary_dict("rid-9")
+    detail_extras = {
+        "memories_flagged": 1,
+        "embedding_calls_made": 4,
+        "error_message": None,
+        "edge_discovery_result": {"phase": "edge_discovery", "edges": 7},
+        "dedup_result": None,
+        "importance_result": None,
+        "consolidation_result": None,
+        "reindex_result": None,
+    }
+    actions = [
+        {
+            "id": "1",
+            "phase": "edge_discovery",
+            "action_type": "create_edge",
+            "memory_id": "m-1",
+            "target_id": "m-2",
+            "details": {"weight": 0.9},
+            "created_at": "2026-04-28T00:01:00",
+        }
+    ]
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {
+            "status": "success",
+            "report": {**summary, **detail_extras},
+            "actions": actions,
+            "action_count": 1,
+        }
+        result = await client.get_sleep_report(context_id="ctx-1", report_id="rid-9")
+
+    assert isinstance(result, SleepReportDetail)
+    assert result.report_id == "rid-9"
+    assert result.action_count == 1
+    assert len(result.actions) == 1
+    assert isinstance(result.actions[0], SleepAction)
+    assert result.actions[0].action_type == "create_edge"
+    assert result.actions[0].details == {"weight": 0.9}
+    mock.assert_called_once_with("get_sleep_report", {"context_id": "ctx-1", "report_id": "rid-9"})
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_rollback_sleep_run_success():
+    """rollback_sleep_run() returns RollbackResult on success."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {
+            "status": "rolled_back",
+            "report_id": "rid-9",
+            "rollback_summary": {
+                "edges_deleted": 5,
+                "merges_reversed": 2,
+                "importance_restored": 1,
+                "promotions_reversed": 0,
+                "archives_restored": 0,
+                "errors": [],
+            },
+        }
+        result = await client.rollback_sleep_run(context_id="ctx-1", report_id="rid-9")
+
+    assert isinstance(result, RollbackResult)
+    assert result.status == "rolled_back"
+    assert result.rollback_summary.edges_deleted == 5
+    assert result.rollback_summary.merges_reversed == 2
+    assert result.rollback_summary.errors == []
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_get_sleep_history_auth_error_on_401():
+    """HTTP 401 from MCP transport surfaces as KaguraAuthError."""
+    client = _make_initialized_client()
+
+    mock_response = MagicMock()
+    mock_response.status_code = 401
+    mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
+        "401", request=MagicMock(), response=mock_response
+    )
+    with patch.object(client._client, "post", new_callable=AsyncMock) as mock_post:
+        mock_post.return_value = mock_response
+        with pytest.raises(KaguraAuthError):
+            await client.get_sleep_history(context_id="ctx-1")
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_get_sleep_report_not_found_via_mcp_error():
+    """MCP-level ``report_not_found`` surfaces as KaguraNotFoundError."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {
+            "status": "error",
+            "error": "report_not_found",
+            "message": "Sleep report rid-x not found or not owned by you.",
+        }
+        with pytest.raises(KaguraNotFoundError, match="get_sleep_report"):
+            await client.get_sleep_report(context_id="ctx-1", report_id="rid-x")
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_rollback_sleep_run_partial_failure():
+    """``partial_rollback`` (some actions failed) raises KaguraError with code."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {
+            "status": "error",
+            "error": "partial_rollback",
+            "message": "Rollback completed with 1 error(s).",
+            "report_id": "rid-9",
+            "rollback_summary": {
+                "edges_deleted": 3,
+                "merges_reversed": 0,
+                "importance_restored": 0,
+                "promotions_reversed": 0,
+                "archives_restored": 0,
+                "errors": ["Action 42 (merge): db error"],
+            },
+        }
+        with pytest.raises(KaguraError, match="partial_rollback"):
+            await client.rollback_sleep_run(context_id="ctx-1", report_id="rid-9")
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_get_sleep_history_connection_error_on_5xx():
+    """HTTP 500 from MCP transport surfaces as KaguraConnectionError."""
+    client = _make_initialized_client()
+
+    mock_response = MagicMock()
+    mock_response.status_code = 500
+    mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
+        "500", request=MagicMock(), response=mock_response
+    )
+    with patch.object(client._client, "post", new_callable=AsyncMock) as mock_post:
+        mock_post.return_value = mock_response
+        with pytest.raises(KaguraConnectionError):
+            await client.get_sleep_history(context_id="ctx-1")
+
+    await client.close()

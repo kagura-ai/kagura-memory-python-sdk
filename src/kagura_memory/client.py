@@ -9,14 +9,17 @@ import httpx
 from pydantic import BaseModel as _BaseModel
 
 from ._http import SDK_VERSION, base_url_from_mcp, validate_https_url
-from .exceptions import KaguraAuthError, KaguraConnectionError
+from .exceptions import KaguraAuthError, KaguraConnectionError, KaguraError, KaguraNotFoundError
 from .models import (
     ContextInfo,
     DuplicatesResponse,
     EmbeddingModelsResponse,
     EmbeddingStatus,
     MemoryStatsResponse,
+    RollbackResult,
     ServerInfo,
+    SleepReport,
+    SleepReportDetail,
     UsageInfo,
 )
 
@@ -856,6 +859,119 @@ class KaguraClient:
         return await self._rest_get(
             f"/api/v1/contexts/{context_id}/duplicates", DuplicatesResponse, params=params
         )
+
+    @staticmethod
+    def _raise_for_mcp_error(result: dict[str, Any], operation: str) -> None:
+        """Translate an MCP tool's structured error response to an SDK exception.
+
+        The server's MCP tools return ``{"status": "error", "error": <code>,
+        "message": <str>, ...}`` for domain errors that the JSON-RPC transport
+        layer cannot represent (e.g. ``report_not_found``). HTTP-level
+        errors (401, 5xx) are already handled by ``_make_jsonrpc_request``.
+        """
+        if result.get("status") != "error":
+            return
+        code = result.get("error", "unknown")
+        message = result.get("message", "Unknown error")
+        if code in ("report_not_found", "context_not_found", "memory_not_found"):
+            raise KaguraNotFoundError(f"{operation}: {message}")
+        raise KaguraError(f"{operation} failed ({code}): {message}")
+
+    async def get_sleep_history(
+        self,
+        context_id: str,
+        limit: int = 10,
+    ) -> list[SleepReport]:
+        """List recent Sleep Maintenance runs for a context.
+
+        Args:
+            context_id: Context UUID.
+            limit: Maximum number of runs to return (server clamps to 1-50,
+                default: 10).
+
+        Returns:
+            List of ``SleepReport`` summaries ordered by ``started_at``
+            descending (newest first).
+
+        Raises:
+            KaguraNotFoundError: Context not found.
+            KaguraError: Other server-side error.
+        """
+        result = await self._call_tool(
+            "get_sleep_history",
+            {"context_id": context_id, "limit": limit},
+        )
+        self._raise_for_mcp_error(result, "get_sleep_history")
+        return [SleepReport.model_validate(r) for r in result["reports"]]
+
+    async def get_sleep_report(
+        self,
+        context_id: str,
+        report_id: str,
+    ) -> SleepReportDetail:
+        """Get a detailed Sleep Maintenance report including audit log.
+
+        Args:
+            context_id: Context UUID. Used for permission scoping; the server
+                also verifies the report belongs to the caller.
+            report_id: Sleep report UUID.
+
+        Returns:
+            ``SleepReportDetail`` with per-phase results and the per-action
+            audit log.
+
+        Raises:
+            KaguraNotFoundError: Report not found or not owned by caller.
+            KaguraError: Other server-side error.
+        """
+        result = await self._call_tool(
+            "get_sleep_report",
+            {"context_id": context_id, "report_id": report_id},
+        )
+        self._raise_for_mcp_error(result, "get_sleep_report")
+        # The MCP tool wraps the report fields under a "report" key;
+        # flatten so SleepReportDetail (a SleepReport subclass) validates
+        # naturally without forcing callers through an extra ``.report.``
+        # accessor.
+        return SleepReportDetail.model_validate(
+            {
+                **result["report"],
+                "actions": result["actions"],
+                "action_count": result["action_count"],
+            }
+        )
+
+    async def rollback_sleep_run(
+        self,
+        context_id: str,
+        report_id: str,
+    ) -> RollbackResult:
+        """Reverse the effects of a completed Sleep Maintenance run.
+
+        Reverses edge creation, memory merges, importance updates, scope
+        promotions, and archives. The server processes actions in reverse
+        order with per-step commits — a 5xx or partial failure means SOME
+        actions may have been reversed before the error surfaced.
+
+        Args:
+            context_id: Context UUID.
+            report_id: Sleep report UUID.
+
+        Returns:
+            ``RollbackResult`` with per-category counts of reversed actions.
+
+        Raises:
+            KaguraNotFoundError: Report not found or not owned by caller.
+            KaguraError: Partial rollback (some actions failed) or other
+                server-side error. The exception message includes the
+                server-side error code for triage.
+        """
+        result = await self._call_tool(
+            "rollback_sleep_run",
+            {"context_id": context_id, "report_id": report_id},
+        )
+        self._raise_for_mcp_error(result, "rollback_sleep_run")
+        return RollbackResult.model_validate(result)
 
     async def list_embedding_models(self) -> EmbeddingModelsResponse:
         """List available embedding models.
