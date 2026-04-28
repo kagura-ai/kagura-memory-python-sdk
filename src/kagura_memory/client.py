@@ -23,8 +23,13 @@ from .models import (
 _T = TypeVar("_T", bound=_BaseModel)
 
 
-MIN_SERVER_VERSION = "0.6.1"
-"""Minimum memory-cloud server version required by this SDK."""
+MIN_SERVER_VERSION = "0.14.0"
+"""Minimum memory-cloud server version this SDK was tested against.
+
+This is the lowest server version where every parameter the SDK exposes
+(remember/recall pass-through fields, resource APIs) is fully supported.
+Connecting to an older server logs a warning but does not raise — older
+servers may silently ignore unknown parameters."""
 
 _MIN_SERVER_VERSION_TUPLE = tuple(int(x) for x in MIN_SERVER_VERSION.split(".")[:3])
 
