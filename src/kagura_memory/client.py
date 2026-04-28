@@ -253,7 +253,7 @@ class KaguraClient:
             "type": type,
             "importance": importance,
         }
-        if tags:
+        if tags is not None:
             arguments["tags"] = tags
         if source_uri is not None:
             arguments["source_uri"] = source_uri
@@ -724,11 +724,12 @@ class KaguraClient:
         return await self._rest_get("/api/v1/system/info", ServerInfo)
 
     async def check_server_version(self) -> ServerInfo:
-        """Check server version against SDK's minimum requirement.
+        """Check the connected server's version against the SDK's tested minimum.
 
-        Calls ``get_server_info()`` and emits a warning via
-        :mod:`logging` if the server version is below
-        :data:`MIN_SERVER_VERSION`.
+        Advisory only — calls ``get_server_info()`` and logs a warning
+        via :mod:`logging` when the server version is below
+        :data:`MIN_SERVER_VERSION`. Does not raise. Older servers may
+        silently ignore unknown parameters.
 
         Returns:
             ServerInfo from the server.
