@@ -393,6 +393,7 @@ class ResourceEventBatchResponse(BaseModel):
 class ResourceImpactResponse(BaseModel):
     """Resource impact statistics per resource_id."""
 
+    resource_id: str
     token_count: int
     memory_count: int
     current_schema_version: int | None = None
