@@ -42,6 +42,7 @@ from .models import (
     ResourceEventResponse,
     ResourceImpactResponse,
     ResourceSchemaResponse,
+    ResourceSetupResponse,
     ResourceTokenCreate,
     ResourceTokenCreateResponse,
     ResourceTokenResponse,
@@ -113,6 +114,7 @@ __all__ = [
     "ResourceImpactResponse",
     "FieldDefinition",
     "ResourceSchemaResponse",
+    "ResourceSetupResponse",
     # Exceptions
     "KaguraError",
     "KaguraAuthError",

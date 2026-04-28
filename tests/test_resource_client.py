@@ -599,46 +599,83 @@ async def test_connection_error_non_json_body():
 # ============================================================================
 
 
+def _make_mcp_mock(server_response: dict) -> AsyncMock:
+    """Emulate ``async with KaguraClient(...) as mcp`` with a stubbed setup_resource."""
+    mock_mcp = AsyncMock()
+    mock_mcp.setup_resource.return_value = server_response
+    mock_mcp.__aenter__ = AsyncMock(return_value=mock_mcp)
+    mock_mcp.__aexit__ = AsyncMock(return_value=None)
+    return mock_mcp
+
+
 @pytest.mark.asyncio
 async def test_setup_resource():
-    """setup_resource() should create context, set resource_id, and create token."""
+    """All caller-provided args propagate to the atomic MCP tool; response is type-validated."""
     client = ResourceClient.from_mcp_url(api_key="test", mcp_url="http://localhost:8080/mcp")
 
-    token_response = {
-        "id": 1,
+    server_response = {
+        "status": "success",
+        "message": "Resource 'my-res' set up successfully.",
+        "context_id": "ctx-uuid",
+        "context_name": "my-res",
         "resource_id": "my-res",
-        "quota_events_per_hour": 1000,
-        "created_at": "2026-03-29T00:00:00Z",
-        "is_active": True,
-        "status": "active",
         "token": "kagura_resource_abc",
+        "token_id": 42,
+        "warning": "Save this token — it will not be shown again.",
     }
-    mock_resp = _mock_response(201, token_response)
+    mock_mcp = _make_mcp_mock(server_response)
 
-    with (
-        patch("kagura_memory.resource_client.KaguraClient") as mock_mcp_cls,
-        patch.object(client._client, "request", new_callable=AsyncMock) as mock_req,
-    ):
-        mock_mcp = AsyncMock()
-        mock_mcp.create_context.return_value = {"context_id": "ctx-1"}
-        mock_mcp.update_context.return_value = {"status": "success"}
-        mock_mcp.__aenter__ = AsyncMock(return_value=mock_mcp)
-        mock_mcp.__aexit__ = AsyncMock(return_value=None)
-        mock_mcp_cls.return_value = mock_mcp
-        mock_req.return_value = mock_resp
-
+    with patch("kagura_memory.resource_client.KaguraClient", return_value=mock_mcp):
         result = await client.setup_resource(
             resource_id="my-res",
+            context_name="my-res",
             summary="Test setup",
             description="Setup test token",
+            quota_events_per_hour=2000,
         )
 
-        assert result.token == "kagura_resource_abc"
-        mock_mcp.create_context.assert_called_once()
-        create_kwargs = mock_mcp.create_context.call_args[1]
-        assert create_kwargs["name"] == "my-res"
-        assert create_kwargs["is_private"] is False
-        mock_mcp.update_context.assert_called_once()
+    assert result.token == "kagura_resource_abc"
+    assert result.token_id == 42
+    assert result.context_id == "ctx-uuid"
+    assert result.resource_id == "my-res"
+    assert result.warning == "Save this token — it will not be shown again."
+
+    mock_mcp.setup_resource.assert_called_once_with(
+        resource_id="my-res",
+        name="my-res",
+        summary="Test setup",
+        description="Setup test token",
+        quota_events_per_hour=2000,
+    )
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_setup_resource_passes_none_context_name():
+    """Omitting context_name must surface as name=None so the server applies its own default."""
+    client = ResourceClient.from_mcp_url(api_key="test", mcp_url="http://localhost:8080/mcp")
+
+    server_response = {
+        "context_id": "ctx-uuid",
+        "context_name": "auto-named",
+        "resource_id": "auto-named",
+        "token": "kagura_resource_xyz",
+        "token_id": 7,
+    }
+    mock_mcp = _make_mcp_mock(server_response)
+
+    with patch("kagura_memory.resource_client.KaguraClient", return_value=mock_mcp):
+        result = await client.setup_resource(resource_id="auto-named")
+
+    assert result.warning is None
+    mock_mcp.setup_resource.assert_called_once_with(
+        resource_id="auto-named",
+        name=None,
+        summary=None,
+        description=None,
+        quota_events_per_hour=1000,
+    )
 
     await client.close()
 
@@ -656,12 +693,12 @@ async def test_setup_resource_requires_mcp_url():
 
 @pytest.mark.asyncio
 async def test_setup_resource_validates_auth_header():
-    """setup_resource() should raise ValueError if auth header is malformed."""
+    """setup_resource() should raise KaguraAuthError if auth header is malformed."""
     client = ResourceClient.from_mcp_url(api_key="test", mcp_url="http://localhost:8080/mcp")
     # Corrupt the Authorization header
     client._client.headers["authorization"] = "BadFormat"
 
-    with pytest.raises(ValueError, match="Authorization header"):
+    with pytest.raises(KaguraAuthError, match="Authorization header"):
         await client.setup_resource(resource_id="test")
 
     await client.close()

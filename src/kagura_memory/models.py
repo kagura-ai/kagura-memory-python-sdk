@@ -353,6 +353,23 @@ class PaginatedResourceTokensResponse(BaseModel):
     offset: int
 
 
+class ResourceSetupResponse(BaseModel):
+    """Atomic resource setup response (server v0.14+).
+
+    Returned by ``ResourceClient.setup_resource()`` and
+    ``KaguraClient.setup_resource()``, which create a Context, Resource entity,
+    and ingestion token in a single transaction. The plaintext ``token`` is
+    shown only once — save it immediately.
+    """
+
+    context_id: str
+    context_name: str
+    resource_id: str
+    token: str
+    token_id: int
+    warning: str | None = None
+
+
 class ResourceEventRequest(BaseModel):
     """Request model for resource event ingestion."""
 

@@ -22,6 +22,7 @@ from .models import (
     ResourceEventResponse,
     ResourceImpactResponse,
     ResourceSchemaResponse,
+    ResourceSetupResponse,
     ResourceTokenCreate,
     ResourceTokenCreateResponse,
     ResourceTokenResponse,
@@ -257,11 +258,13 @@ class ResourceClient:
         summary: str | None = None,
         description: str | None = None,
         quota_events_per_hour: int = 1000,
-    ) -> ResourceTokenCreateResponse:
-        """Set up a resource for data ingestion in one call.
+    ) -> ResourceSetupResponse:
+        """Atomically set up a resource for data ingestion (server v0.14+).
 
-        Creates a public context, sets its resource_id, and creates a
-        resource token. Requires the client to be created via ``from_mcp_url()``.
+        Calls the server-side atomic ``setup_resource`` MCP tool which creates
+        Context + Resource entity + token in a single transaction. On failure,
+        no orphan Context rows are left on the server. Requires the client to
+        be created via ``from_mcp_url()``.
 
         Args:
             resource_id: Resource identifier for data ingestion.
@@ -271,10 +274,16 @@ class ResourceClient:
             quota_events_per_hour: Token quota (1-10000).
 
         Returns:
-            ResourceTokenCreateResponse with token (shown only once).
+            ResourceSetupResponse with plaintext token (shown only once).
 
         Raises:
             RuntimeError: If client was not created via ``from_mcp_url()``.
+            KaguraAuthError: If the stored Authorization header is missing or malformed.
+
+        Note:
+            Idempotency for repeated calls with the same ``resource_id`` is
+            not guaranteed; server-side behavior may evolve. Avoid retrying
+            setup for an existing ``resource_id`` without first verifying state.
         """
         if not self._mcp_url:
             raise RuntimeError(
@@ -282,24 +291,20 @@ class ResourceClient:
                 "Create client via ResourceClient.from_mcp_url()."
             )
 
-        # Extract API key from httpx Authorization header
         auth = self._client.headers.get("authorization", "")
         if not auth.startswith("Bearer "):
-            raise ValueError("Authorization header missing or invalid")
+            raise KaguraAuthError("Authorization header missing or invalid")
         api_key = auth[7:]
 
-        name = context_name or resource_id
-
         async with KaguraClient(api_key=api_key, mcp_url=self._mcp_url) as mcp:
-            ctx = await mcp.create_context(name=name, summary=summary, is_private=False)
-            ctx_id = ctx["context_id"]
-            await mcp.update_context(context_id=ctx_id, resource_id=resource_id)
-
-        return await self.create_token(
-            resource_id=resource_id,
-            description=description,
-            quota_events_per_hour=quota_events_per_hour,
-        )
+            response = await mcp.setup_resource(
+                resource_id=resource_id,
+                name=context_name,
+                summary=summary,
+                description=description,
+                quota_events_per_hour=quota_events_per_hour,
+            )
+        return ResourceSetupResponse.model_validate(response)
 
     # -------------------------------------------------------------------
     # Resource Stats (Bearer auth)

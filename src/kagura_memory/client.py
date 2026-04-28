@@ -608,6 +608,49 @@ class KaguraClient:
             arguments["is_locked"] = is_locked
         return await self._call_tool("update_context", arguments)
 
+    async def setup_resource(
+        self,
+        resource_id: str,
+        name: str | None = None,
+        summary: str | None = None,
+        description: str | None = None,
+        quota_events_per_hour: int = 1000,
+    ) -> dict[str, Any]:
+        """Atomically create Context + Resource entity + ingestion token.
+
+        Wraps the v0.14 server-side ``setup_resource`` MCP tool, which performs
+        Context creation, Resource entity binding, and token issuance in a
+        single transaction. On failure, no orphan rows are left on the server.
+
+        Args:
+            resource_id: Resource identifier for data ingestion.
+            name: Context name (defaults to ``resource_id`` server-side).
+            summary: Context summary.
+            description: Token description.
+            quota_events_per_hour: Token quota (1-10000).
+
+        Returns:
+            Server response dict with keys: ``context_id``, ``context_name``,
+            ``resource_id``, ``token`` (plaintext, shown once), ``token_id``,
+            ``warning``. Server may include additional fields (e.g. ``status``,
+            ``message``) which callers can ignore.
+
+        Note:
+            Idempotency for repeated calls with the same ``resource_id`` is
+            not guaranteed by this SDK; server-side behavior may evolve.
+        """
+        arguments: dict[str, Any] = {
+            "resource_id": resource_id,
+            "quota_events_per_hour": quota_events_per_hour,
+        }
+        if name is not None:
+            arguments["name"] = name
+        if summary is not None:
+            arguments["summary"] = summary
+        if description is not None:
+            arguments["description"] = description
+        return await self._call_tool("setup_resource", arguments)
+
     async def merge_contexts(
         self,
         source_id: str,
