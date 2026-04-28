@@ -215,6 +215,90 @@ async def test_remember_with_tags():
 
 
 @pytest.mark.asyncio
+async def test_remember_with_source_uri():
+    """remember() should include source_uri when provided."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {"memory_id": "abc"}
+        await client.remember(
+            context_id="ctx", summary="s", content="c", source_uri="file:///foo.txt"
+        )
+        args = mock.call_args[0][1]
+        assert args["source_uri"] == "file:///foo.txt"
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_remember_pass_through_keys_absent_when_none():
+    """remember() should not send source_uri / linked_* keys when None."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {"memory_id": "abc"}
+        await client.remember(context_id="ctx", summary="s", content="c")
+        args = mock.call_args[0][1]
+        assert "source_uri" not in args
+        assert "linked_memory_ids" not in args
+        assert "linked_source_uris" not in args
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_remember_with_linked_memory_ids():
+    """remember() should include linked_memory_ids when provided."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {"memory_id": "abc"}
+        await client.remember(
+            context_id="ctx",
+            summary="s",
+            content="c",
+            linked_memory_ids=["mem-1", "mem-2"],
+        )
+        args = mock.call_args[0][1]
+        assert args["linked_memory_ids"] == ["mem-1", "mem-2"]
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_remember_with_linked_source_uris():
+    """remember() should include linked_source_uris when provided."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {"memory_id": "abc"}
+        await client.remember(
+            context_id="ctx",
+            summary="s",
+            content="c",
+            linked_source_uris=["vault://x", "vault://y"],
+        )
+        args = mock.call_args[0][1]
+        assert args["linked_source_uris"] == ["vault://x", "vault://y"]
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_remember_with_empty_linked_memory_ids():
+    """remember() should send linked_memory_ids even when empty list (not None)."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {"memory_id": "abc"}
+        await client.remember(context_id="ctx", summary="s", content="c", linked_memory_ids=[])
+        args = mock.call_args[0][1]
+        assert args["linked_memory_ids"] == []
+
+    await client.close()
+
+
+@pytest.mark.asyncio
 async def test_recall_with_rerank():
     """recall() should pass use_rerank when True."""
     client = _make_initialized_client()
@@ -266,6 +350,34 @@ async def test_recall_search_mode_not_sent_when_none():
         await client.recall(context_id="ctx", query="test")
         args = mock.call_args[0][1]
         assert "search_mode" not in args
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_recall_with_include_explore_hints():
+    """recall() should send include_explore_hints when True."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {"results": []}
+        await client.recall(context_id="ctx", query="test", include_explore_hints=True)
+        args = mock.call_args[0][1]
+        assert args["include_explore_hints"] is True
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_recall_include_explore_hints_not_sent_by_default():
+    """recall() should not send include_explore_hints when False (the default)."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {"results": []}
+        await client.recall(context_id="ctx", query="test")
+        args = mock.call_args[0][1]
+        assert "include_explore_hints" not in args
 
     await client.close()
 
