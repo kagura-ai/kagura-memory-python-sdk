@@ -270,6 +270,7 @@ class KaguraClient:
         filters: dict[str, Any] | None = None,
         search_mode: str | None = None,
         context_ids: list[str] | None = None,
+        include_explore_hints: bool = False,
     ) -> dict[str, Any]:
         """
         Call recall MCP tool.
@@ -288,6 +289,10 @@ class KaguraClient:
             search_mode: Search strategy — "hybrid" (default), "semantic", or "keyword"
             context_ids: Search across multiple contexts (2–20 IDs).
                 When provided, ``context_id`` is not required.
+            include_explore_hints: When True, the server includes up to 3
+                graph discovery hints in the response under the
+                ``explore_hints`` key — useful as seeds for a follow-up
+                :meth:`explore` call.
 
         Returns:
             API response with results list
@@ -319,6 +324,8 @@ class KaguraClient:
             if search_mode not in ("hybrid", "semantic", "keyword"):
                 raise ValueError(f"Invalid search_mode: {search_mode!r}")
             arguments["search_mode"] = search_mode
+        if include_explore_hints:
+            arguments["include_explore_hints"] = True
         return await self._call_tool("recall", arguments)
 
     async def list_contexts(self) -> dict[str, Any]:
