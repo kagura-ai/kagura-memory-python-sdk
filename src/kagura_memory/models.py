@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class Message(BaseModel):
@@ -610,3 +610,36 @@ class RollbackResult(BaseModel):
     report_id: str
     status: SleepRunStatus
     rollback_summary: RollbackSummary
+
+
+# ---------------------------------------------------------------------------
+# Edge model
+# ---------------------------------------------------------------------------
+
+
+class Edge(BaseModel):
+    """A neural memory edge between two memories.
+
+    Represents a directed link from ``source_id`` to ``target_id`` with a
+    semantic ``edge_type`` and a ``weight``/``confidence`` pair. Edges are
+    created either by users (manual curation) or by server-side processes
+    (Sleep Maintenance, k-NN seeding, declared links, tag co-occurrence).
+
+    Note:
+        ``edge_type`` is intentionally typed as ``str`` (not a ``Literal``)
+        because the server's ``VALID_EDGE_TYPES`` set is open-ended and grows
+        with new auto-discovery processes (currently 7 values:
+        ``neural_association``, ``related_to``, ``depends_on``,
+        ``learned_from``, ``semantic_similarity``, ``declared_link``,
+        ``tag_cooccurrence``). The server is the authority on validation.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    source_id: str
+    target_id: str
+    edge_type: str
+    weight: float = Field(ge=0.0, le=3.0)
+    confidence: float = Field(ge=0.0, le=1.0)
+    created_at: datetime | None = None
+    last_updated: datetime | None = None

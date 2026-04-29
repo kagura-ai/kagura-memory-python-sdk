@@ -472,6 +472,146 @@ def contexts():
 
 
 # =============================================================================
+# Edge Commands
+# =============================================================================
+
+
+@main.group()
+def edge():
+    """Manage neural memory edges (list, create, update, delete)."""
+    pass
+
+
+@edge.command(name="list")
+@click.argument("context_id")
+@click.argument("memory_id")
+@click.option("--min-weight", type=float, default=0.0, help="Minimum edge weight (0.0-3.0)")
+@click.option(
+    "--type",
+    "edge_types",
+    help="Comma-separated edge types to filter (e.g. 'related_to,depends_on')",
+)
+@click.option(
+    "--limit", type=int, help="Max edges per direction (effective max: 2x limit, dedup'd)"
+)
+def edge_list(context_id, memory_id, min_weight, edge_types, limit):
+    """
+    List edges connected to a memory.
+
+    Examples:
+      kagura edge list CTX_UUID MEM_UUID
+      kagura edge list CTX_UUID MEM_UUID --min-weight 0.5 --type related_to
+    """
+
+    async def op(client: KaguraClient, _ctx: str) -> dict[str, Any]:
+        edges = await client.list_edges(
+            context_id=context_id,
+            memory_id=memory_id,
+            min_weight=min_weight,
+            edge_types=_parse_tags(edge_types),
+            limit=limit,
+        )
+        return {"edges": [e.model_dump(mode="json") for e in edges], "count": len(edges)}
+
+    _run_client_command(op, context_id=None, needs_context=False)
+
+
+@edge.command(name="create")
+@click.argument("context_id")
+@click.argument("source_id")
+@click.argument("target_id")
+@click.option("--type", "edge_type", default="related_to", help="Edge type (default: related_to)")
+@click.option("--weight", type=float, default=0.5, help="Edge weight 0.0-3.0 (default: 0.5)")
+@click.option(
+    "--confidence", type=float, default=1.0, help="Edge confidence 0.0-1.0 (default: 1.0)"
+)
+def edge_create(context_id, source_id, target_id, edge_type, weight, confidence):
+    """
+    Create or upsert an edge from SOURCE_ID to TARGET_ID.
+
+    If an edge already exists for the same pair, the server applies max-weight
+    UPSERT semantics (existing weight is replaced only when the new weight is
+    higher). Self-loops are rejected.
+
+    Examples:
+      kagura edge create CTX_UUID SRC_UUID TGT_UUID
+      kagura edge create CTX_UUID SRC_UUID TGT_UUID --type depends_on --weight 0.8
+    """
+
+    async def op(client: KaguraClient, _ctx: str) -> dict[str, Any]:
+        result = await client.create_edge(
+            context_id=context_id,
+            source_id=source_id,
+            target_id=target_id,
+            edge_type=edge_type,
+            weight=weight,
+            confidence=confidence,
+        )
+        return result.model_dump(mode="json")
+
+    _run_client_command(op, context_id=None, needs_context=False)
+
+
+@edge.command(name="update")
+@click.argument("context_id")
+@click.argument("source_id")
+@click.argument("target_id")
+@click.option("--weight", type=float, help="New edge weight 0.0-3.0")
+@click.option("--type", "edge_type", help="New edge type")
+def edge_update(context_id, source_id, target_id, weight, edge_type):
+    """
+    Update an existing edge's weight and/or type.
+
+    At least one of --weight or --type must be provided.
+
+    Examples:
+      kagura edge update CTX_UUID SRC_UUID TGT_UUID --weight 0.9
+      kagura edge update CTX_UUID SRC_UUID TGT_UUID --type related_to --weight 0.7
+    """
+    if weight is None and edge_type is None:
+        raise click.ClickException("At least one of --weight or --type must be provided")
+
+    async def op(client: KaguraClient, _ctx: str) -> dict[str, Any]:
+        result = await client.update_edge(
+            context_id=context_id,
+            source_id=source_id,
+            target_id=target_id,
+            weight=weight,
+            edge_type=edge_type,
+        )
+        return result.model_dump(mode="json")
+
+    _run_client_command(op, context_id=None, needs_context=False)
+
+
+@edge.command(name="delete")
+@click.argument("context_id")
+@click.argument("source_id")
+@click.argument("target_id")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
+def edge_delete(context_id, source_id, target_id, yes):
+    """
+    Delete the edge between SOURCE_ID and TARGET_ID.
+
+    Examples:
+      kagura edge delete CTX_UUID SRC_UUID TGT_UUID
+      kagura edge delete CTX_UUID SRC_UUID TGT_UUID -y
+    """
+    if not yes:
+        click.confirm(f"Delete edge {source_id} -> {target_id}?", abort=True)
+
+    async def op(client: KaguraClient, _ctx: str) -> dict[str, Any]:
+        deleted = await client.delete_edge(
+            context_id=context_id,
+            source_id=source_id,
+            target_id=target_id,
+        )
+        return {"deleted": deleted}
+
+    _run_client_command(op, context_id=None, needs_context=False)
+
+
+# =============================================================================
 # Sleep Maintenance Commands (issue #85)
 # =============================================================================
 

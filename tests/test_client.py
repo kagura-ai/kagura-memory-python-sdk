@@ -1779,3 +1779,445 @@ async def test_get_sleep_history_connection_error_on_5xx():
             await client.get_sleep_history(context_id="ctx-1")
 
     await client.close()
+
+
+# ============================================================================
+# Edge CRUD tests
+# ============================================================================
+
+
+def _edge_dict(
+    source_id: str = "src-uuid",
+    target_id: str = "tgt-uuid",
+    edge_type: str = "related_to",
+    weight: float = 0.5,
+    confidence: float = 1.0,
+) -> dict:
+    """Build a minimal server-shaped edge dict for use as ``_call_tool`` mock returns."""
+    return {
+        "source_id": source_id,
+        "target_id": target_id,
+        "edge_type": edge_type,
+        "weight": weight,
+        "confidence": confidence,
+        "created_at": "2026-04-29T00:00:00",
+        "last_updated": "2026-04-29T00:05:00",
+    }
+
+
+@pytest.mark.asyncio
+async def test_list_edges_basic():
+    """list_edges() should call tool and parse edges into Edge models."""
+    from kagura_memory import Edge
+
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {
+            "memory_id": "mem-1",
+            "edges": [_edge_dict(), _edge_dict(target_id="tgt-2", weight=0.8)],
+            "count": 2,
+        }
+        edges = await client.list_edges(context_id="ctx-1", memory_id="mem-1")
+
+        assert len(edges) == 2
+        assert all(isinstance(e, Edge) for e in edges)
+        assert edges[0].source_id == "src-uuid"
+        assert edges[1].weight == 0.8
+
+        tool_name = mock.call_args[0][0]
+        args = mock.call_args[0][1]
+        assert tool_name == "list_edges"
+        assert args["context_id"] == "ctx-1"
+        assert args["memory_id"] == "mem-1"
+        assert args["min_weight"] == 0.0
+        assert "edge_types" not in args
+        assert "limit" not in args
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_list_edges_with_filters():
+    """list_edges() should pass min_weight, edge_types, limit when provided."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {"memory_id": "mem-1", "edges": [], "count": 0}
+        await client.list_edges(
+            context_id="ctx-1",
+            memory_id="mem-1",
+            min_weight=0.5,
+            edge_types=["related_to", "depends_on"],
+            limit=10,
+        )
+        args = mock.call_args[0][1]
+        assert args["min_weight"] == 0.5
+        assert args["edge_types"] == ["related_to", "depends_on"]
+        assert args["limit"] == 10
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_list_edges_empty_response():
+    """list_edges() should return [] when server returns no edges field."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {"memory_id": "mem-1"}
+        edges = await client.list_edges(context_id="ctx-1", memory_id="mem-1")
+        assert edges == []
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_create_edge_basic():
+    """create_edge() should call tool and return Edge model."""
+    from kagura_memory import Edge
+
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {"edge": _edge_dict()}
+        result = await client.create_edge(
+            context_id="ctx-1",
+            source_id="src-uuid",
+            target_id="tgt-uuid",
+        )
+
+        assert isinstance(result, Edge)
+        assert result.source_id == "src-uuid"
+        assert result.target_id == "tgt-uuid"
+        assert result.edge_type == "related_to"
+        assert result.weight == 0.5
+        assert result.confidence == 1.0
+
+        tool_name = mock.call_args[0][0]
+        args = mock.call_args[0][1]
+        assert tool_name == "create_edge"
+        assert args["context_id"] == "ctx-1"
+        assert args["source_id"] == "src-uuid"
+        assert args["target_id"] == "tgt-uuid"
+        assert args["edge_type"] == "related_to"
+        assert args["weight"] == 0.5
+        assert args["confidence"] == 1.0
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_create_edge_custom_values():
+    """create_edge() should pass custom edge_type, weight, confidence."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {"edge": _edge_dict(edge_type="depends_on", weight=2.5, confidence=0.7)}
+        result = await client.create_edge(
+            context_id="ctx-1",
+            source_id="a",
+            target_id="b",
+            edge_type="depends_on",
+            weight=2.5,
+            confidence=0.7,
+        )
+        assert result.edge_type == "depends_on"
+        assert result.weight == 2.5
+        assert result.confidence == 0.7
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_create_edge_self_loop_rejected():
+    """create_edge() should raise ValueError when source_id == target_id."""
+    client = _make_initialized_client()
+
+    with pytest.raises(ValueError, match="self-loops are not allowed"):
+        await client.create_edge(
+            context_id="ctx-1",
+            source_id="same-uuid",
+            target_id="same-uuid",
+        )
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_create_edge_accepts_unwrapped_response():
+    """create_edge() should also handle the edge dict directly without 'edge' wrapper."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = _edge_dict()
+        result = await client.create_edge(context_id="ctx-1", source_id="a", target_id="b")
+        assert result.source_id == "src-uuid"
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_update_edge_weight_only():
+    """update_edge() should send only weight when edge_type is None."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {"edge": _edge_dict(weight=0.9)}
+        result = await client.update_edge(
+            context_id="ctx-1",
+            source_id="a",
+            target_id="b",
+            weight=0.9,
+        )
+        assert result.weight == 0.9
+
+        args = mock.call_args[0][1]
+        assert args["weight"] == 0.9
+        assert "edge_type" not in args
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_update_edge_type_only():
+    """update_edge() should send only edge_type when weight is None."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {"edge": _edge_dict(edge_type="depends_on")}
+        await client.update_edge(
+            context_id="ctx-1",
+            source_id="a",
+            target_id="b",
+            edge_type="depends_on",
+        )
+        args = mock.call_args[0][1]
+        assert args["edge_type"] == "depends_on"
+        assert "weight" not in args
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_update_edge_both_fields():
+    """update_edge() should send both weight and edge_type when both given."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {"edge": _edge_dict(edge_type="learned_from", weight=1.5)}
+        await client.update_edge(
+            context_id="ctx-1",
+            source_id="a",
+            target_id="b",
+            weight=1.5,
+            edge_type="learned_from",
+        )
+        args = mock.call_args[0][1]
+        assert args["weight"] == 1.5
+        assert args["edge_type"] == "learned_from"
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_update_edge_neither_field():
+    """update_edge() should send only the identifying triple when both are None."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {"edge": _edge_dict()}
+        await client.update_edge(
+            context_id="ctx-1",
+            source_id="a",
+            target_id="b",
+        )
+        args = mock.call_args[0][1]
+        assert args == {"context_id": "ctx-1", "source_id": "a", "target_id": "b"}
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_delete_edge_success():
+    """delete_edge() should return True on success."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {"deleted": True, "status": "success"}
+        result = await client.delete_edge(context_id="ctx-1", source_id="a", target_id="b")
+        assert result is True
+
+        tool_name = mock.call_args[0][0]
+        args = mock.call_args[0][1]
+        assert tool_name == "delete_edge"
+        assert args == {"context_id": "ctx-1", "source_id": "a", "target_id": "b"}
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_delete_edge_defaults_true_when_no_deleted_key():
+    """delete_edge() should return True when no error and no 'deleted' key in response."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {"status": "success"}
+        result = await client.delete_edge(context_id="ctx-1", source_id="a", target_id="b")
+        assert result is True
+
+    await client.close()
+
+
+def test_edge_model_ignores_extra_fields():
+    """Edge model must accept (and silently drop) extra server fields.
+
+    Guards against future server-side provenance additions
+    (e.g. ``created_by``, ``origin``, ``frozen``) breaking older SDKs.
+    """
+    from kagura_memory import Edge
+
+    edge = Edge.model_validate(
+        {
+            **_edge_dict(),
+            "created_by": "user",
+            "origin": "manual",
+            "frozen": True,
+            "future_unknown_field": {"nested": [1, 2, 3]},
+        }
+    )
+
+    assert edge.source_id == "src-uuid"
+    assert edge.weight == 0.5
+    assert not hasattr(edge, "created_by")
+    assert not hasattr(edge, "origin")
+
+
+def test_edge_model_validates_weight_range():
+    """Edge.weight must reject values outside [0.0, 3.0]."""
+    from pydantic import ValidationError
+
+    from kagura_memory import Edge
+
+    # Below range
+    with pytest.raises(ValidationError):
+        Edge.model_validate({**_edge_dict(weight=-0.1)})
+
+    # Above range
+    with pytest.raises(ValidationError):
+        Edge.model_validate({**_edge_dict(weight=3.5)})
+
+    # Boundary values are valid
+    Edge.model_validate({**_edge_dict(weight=0.0)})
+    Edge.model_validate({**_edge_dict(weight=3.0)})
+
+
+def test_edge_model_validates_confidence_range():
+    """Edge.confidence must reject values outside [0.0, 1.0]."""
+    from pydantic import ValidationError
+
+    from kagura_memory import Edge
+
+    with pytest.raises(ValidationError):
+        Edge.model_validate({**_edge_dict(confidence=-0.1)})
+
+    with pytest.raises(ValidationError):
+        Edge.model_validate({**_edge_dict(confidence=1.5)})
+
+
+@pytest.mark.asyncio
+async def test_create_edge_surfaces_server_weight_error():
+    """Server-side validation_error responses must raise KaguraError, not slip past
+    as a Pydantic ValidationError on the error dict."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {
+            "status": "error",
+            "error": "validation_error",
+            "message": "weight must be between 0.0 and 3.0.",
+        }
+        with pytest.raises(KaguraError, match="weight must be between"):
+            await client.create_edge(
+                context_id="ctx-1",
+                source_id="a",
+                target_id="b",
+                weight=5.0,
+            )
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_list_edges_surfaces_server_error():
+    """list_edges() must raise on server-side error rather than returning []."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {
+            "status": "error",
+            "error": "memory_not_found",
+            "message": "Memory not found.",
+        }
+        with pytest.raises(KaguraNotFoundError, match="list_edges"):
+            await client.list_edges(context_id="ctx-1", memory_id="missing-mem")
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_update_edge_surfaces_server_error():
+    """update_edge() must raise on server-side error rather than running model_validate
+    on the error dict."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {
+            "status": "error",
+            "error": "edge_not_found",
+            "message": "Edge does not exist.",
+        }
+        with pytest.raises(KaguraError, match="edge_not_found"):
+            await client.update_edge(
+                context_id="ctx-1",
+                source_id="a",
+                target_id="b",
+                weight=0.7,
+            )
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_delete_edge_surfaces_server_error():
+    """delete_edge() must raise on server-side error rather than silently returning
+    False, so callers can distinguish 'edge missing' from 'auth/permission failure'."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {
+            "status": "error",
+            "error": "edge_not_found",
+            "message": "Edge does not exist.",
+        }
+        with pytest.raises(KaguraError, match="edge_not_found"):
+            await client.delete_edge(context_id="ctx-1", source_id="a", target_id="b")
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_list_edges_raises_not_found_for_context_not_found():
+    """list_edges() raises KaguraNotFoundError specifically for context_not_found code."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {
+            "status": "error",
+            "error": "context_not_found",
+            "message": "Context not found.",
+        }
+        with pytest.raises(KaguraNotFoundError):
+            await client.list_edges(context_id="ctx-missing", memory_id="mem-1")
+
+    await client.close()

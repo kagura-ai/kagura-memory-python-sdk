@@ -803,3 +803,226 @@ def test_get_kagura_client_missing_api_key(mock_config):
     result = runner.invoke(main, ["sleep", "rollback", "ctx-1", "rid-9", "-y"])
     assert result.exit_code != 0
     assert "No API key" in result.output
+
+
+# ============================================================================
+# Edge CRUD CLI tests
+# ============================================================================
+
+
+def _edge_obj():
+    """Build an Edge model instance for CLI test mocking."""
+    from datetime import datetime
+
+    from kagura_memory import Edge
+
+    return Edge(
+        source_id="src-uuid",
+        target_id="tgt-uuid",
+        edge_type="related_to",
+        weight=0.5,
+        confidence=1.0,
+        created_at=datetime(2026, 4, 29, 0, 0, 0),
+        last_updated=datetime(2026, 4, 29, 0, 5, 0),
+    )
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_edge_list(mock_client_cls, mock_config):
+    """edge list should call list_edges and emit JSON."""
+    mock_config.return_value = {"api_key": "key", "mcp_url": "https://test.com/mcp"}
+
+    mock_client = AsyncMock()
+    mock_client.list_edges.return_value = [_edge_obj()]
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    mock_client_cls.return_value = mock_client
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["edge", "list", "ctx-1", "mem-1"])
+    assert result.exit_code == 0, result.output
+    assert "src-uuid" in result.output
+    assert "tgt-uuid" in result.output
+
+    mock_client.list_edges.assert_called_once_with(
+        context_id="ctx-1",
+        memory_id="mem-1",
+        min_weight=0.0,
+        edge_types=None,
+        limit=None,
+    )
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_edge_list_with_filters(mock_client_cls, mock_config):
+    """edge list should pass --min-weight, --type, --limit through."""
+    mock_config.return_value = {"api_key": "key", "mcp_url": "https://test.com/mcp"}
+
+    mock_client = AsyncMock()
+    mock_client.list_edges.return_value = []
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    mock_client_cls.return_value = mock_client
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        [
+            "edge",
+            "list",
+            "ctx-1",
+            "mem-1",
+            "--min-weight",
+            "0.5",
+            "--type",
+            "related_to,depends_on",
+            "--limit",
+            "10",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    mock_client.list_edges.assert_called_once_with(
+        context_id="ctx-1",
+        memory_id="mem-1",
+        min_weight=0.5,
+        edge_types=["related_to", "depends_on"],
+        limit=10,
+    )
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_edge_create(mock_client_cls, mock_config):
+    """edge create should call create_edge with defaults."""
+    mock_config.return_value = {"api_key": "key", "mcp_url": "https://test.com/mcp"}
+
+    mock_client = AsyncMock()
+    mock_client.create_edge.return_value = _edge_obj()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    mock_client_cls.return_value = mock_client
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["edge", "create", "ctx-1", "src-uuid", "tgt-uuid"])
+    assert result.exit_code == 0, result.output
+    assert "related_to" in result.output
+
+    mock_client.create_edge.assert_called_once_with(
+        context_id="ctx-1",
+        source_id="src-uuid",
+        target_id="tgt-uuid",
+        edge_type="related_to",
+        weight=0.5,
+        confidence=1.0,
+    )
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_edge_create_with_options(mock_client_cls, mock_config):
+    """edge create should pass --type, --weight, --confidence."""
+    mock_config.return_value = {"api_key": "key", "mcp_url": "https://test.com/mcp"}
+
+    mock_client = AsyncMock()
+    mock_client.create_edge.return_value = _edge_obj()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    mock_client_cls.return_value = mock_client
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        [
+            "edge",
+            "create",
+            "ctx-1",
+            "src-uuid",
+            "tgt-uuid",
+            "--type",
+            "depends_on",
+            "--weight",
+            "0.8",
+            "--confidence",
+            "0.9",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    mock_client.create_edge.assert_called_once_with(
+        context_id="ctx-1",
+        source_id="src-uuid",
+        target_id="tgt-uuid",
+        edge_type="depends_on",
+        weight=0.8,
+        confidence=0.9,
+    )
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_edge_update(mock_client_cls, mock_config):
+    """edge update should call update_edge with the provided fields."""
+    mock_config.return_value = {"api_key": "key", "mcp_url": "https://test.com/mcp"}
+
+    mock_client = AsyncMock()
+    mock_client.update_edge.return_value = _edge_obj()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    mock_client_cls.return_value = mock_client
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        ["edge", "update", "ctx-1", "src-uuid", "tgt-uuid", "--weight", "0.9"],
+    )
+    assert result.exit_code == 0, result.output
+
+    mock_client.update_edge.assert_called_once_with(
+        context_id="ctx-1",
+        source_id="src-uuid",
+        target_id="tgt-uuid",
+        weight=0.9,
+        edge_type=None,
+    )
+
+
+def test_edge_update_requires_option():
+    """edge update should fail without --weight or --type."""
+    runner = CliRunner()
+    result = runner.invoke(main, ["edge", "update", "ctx-1", "src-uuid", "tgt-uuid"])
+    assert result.exit_code != 0
+    assert "At least one of --weight or --type" in result.output
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_edge_delete_with_yes_flag(mock_client_cls, mock_config):
+    """edge delete with -y should call delete_edge without prompting."""
+    mock_config.return_value = {"api_key": "key", "mcp_url": "https://test.com/mcp"}
+
+    mock_client = AsyncMock()
+    mock_client.delete_edge.return_value = True
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    mock_client_cls.return_value = mock_client
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["edge", "delete", "ctx-1", "src-uuid", "tgt-uuid", "-y"])
+    assert result.exit_code == 0, result.output
+    assert "true" in result.output.lower()
+
+    mock_client.delete_edge.assert_called_once_with(
+        context_id="ctx-1",
+        source_id="src-uuid",
+        target_id="tgt-uuid",
+    )
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_edge_delete_prompts_confirmation(mock_client_cls, mock_config):
+    """edge delete without -y should prompt and abort on 'n'."""
+    runner = CliRunner()
+    result = runner.invoke(main, ["edge", "delete", "ctx-1", "src-uuid", "tgt-uuid"], input="n\n")
+    assert result.exit_code != 0
