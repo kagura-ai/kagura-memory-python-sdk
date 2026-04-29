@@ -811,8 +811,8 @@ class KaguraClient:
             The updated :class:`Edge`.
 
         Raises:
-            KaguraNotFoundError: Edge or context not found.
-            KaguraError: Other server-side error.
+            KaguraNotFoundError: Context not found.
+            KaguraError: Edge not found or other server-side error.
         """
         arguments: dict[str, Any] = {
             "context_id": context_id,
@@ -844,8 +844,8 @@ class KaguraClient:
             ``True`` once the server confirms deletion succeeded.
 
         Raises:
-            KaguraNotFoundError: Edge or context not found.
-            KaguraError: Other server-side error.
+            KaguraNotFoundError: Context not found.
+            KaguraError: Edge not found or other server-side error.
         """
         arguments: dict[str, Any] = {
             "context_id": context_id,

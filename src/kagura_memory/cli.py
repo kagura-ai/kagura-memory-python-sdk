@@ -511,7 +511,7 @@ def edge_list(context_id, memory_id, min_weight, edge_types, limit):
             edge_types=_parse_tags(edge_types),
             limit=limit,
         )
-        return {"edges": [e.model_dump() for e in edges], "count": len(edges)}
+        return {"edges": [e.model_dump(mode="json") for e in edges], "count": len(edges)}
 
     _run_client_command(op, context_id=None, needs_context=False)
 
@@ -547,7 +547,7 @@ def edge_create(context_id, source_id, target_id, edge_type, weight, confidence)
             weight=weight,
             confidence=confidence,
         )
-        return result.model_dump()
+        return result.model_dump(mode="json")
 
     _run_client_command(op, context_id=None, needs_context=False)
 
@@ -579,7 +579,7 @@ def edge_update(context_id, source_id, target_id, weight, edge_type):
             weight=weight,
             edge_type=edge_type,
         )
-        return result.model_dump()
+        return result.model_dump(mode="json")
 
     _run_client_command(op, context_id=None, needs_context=False)
 

@@ -641,5 +641,5 @@ class Edge(BaseModel):
     edge_type: str
     weight: float = Field(ge=0.0, le=3.0)
     confidence: float = Field(ge=0.0, le=1.0)
-    created_at: str | None = None
-    last_updated: str | None = None
+    created_at: datetime | None = None
+    last_updated: datetime | None = None

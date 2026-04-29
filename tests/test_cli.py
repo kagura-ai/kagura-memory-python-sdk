@@ -812,6 +812,8 @@ def test_get_kagura_client_missing_api_key(mock_config):
 
 def _edge_obj():
     """Build an Edge model instance for CLI test mocking."""
+    from datetime import datetime
+
     from kagura_memory import Edge
 
     return Edge(
@@ -820,8 +822,8 @@ def _edge_obj():
         edge_type="related_to",
         weight=0.5,
         confidence=1.0,
-        created_at="2026-04-29T00:00:00",
-        last_updated="2026-04-29T00:05:00",
+        created_at=datetime(2026, 4, 29, 0, 0, 0),
+        last_updated=datetime(2026, 4, 29, 0, 5, 0),
     )
 
 
