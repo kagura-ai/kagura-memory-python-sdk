@@ -673,7 +673,7 @@ def test_resource_import_auto_detect_csv(tmp_path):
 @patch("kagura_memory.cli.load_config")
 @patch("kagura_memory.cli.KaguraClient")
 def test_sleep_history(mock_client_cls, mock_config):
-    """`kagura sleep history` echoes a JSON list of reports."""
+    """`kagura sleep history` echoes a JSON object with a top-level ``reports`` array."""
     from kagura_memory import SleepReport
 
     mock_config.return_value = {"api_key": "key", "mcp_url": "https://test.com/mcp"}

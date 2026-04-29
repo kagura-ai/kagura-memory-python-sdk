@@ -205,7 +205,7 @@ kagura resource schema -r products
 # Sleep Maintenance — observability + rollback
 kagura sleep history <context-id> --limit 5
 kagura sleep report <context-id> <report-id>
-kagura sleep rollback <context-id> <report-id> -y    # destructive: requires --yes
+kagura sleep rollback <context-id> <report-id> -y    # destructive: prompts unless --yes / -y is set
 
 # Config
 kagura config show
