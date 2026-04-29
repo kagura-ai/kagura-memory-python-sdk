@@ -13,6 +13,7 @@ from .exceptions import KaguraAuthError, KaguraConnectionError, KaguraError, Kag
 from .models import (
     ContextInfo,
     DuplicatesResponse,
+    Edge,
     EmbeddingModelsResponse,
     EmbeddingStatus,
     MemoryStatsResponse,
@@ -687,6 +688,173 @@ class KaguraClient:
         if delete_source:
             arguments["delete_source"] = True
         return await self._call_tool("merge_contexts", arguments)
+
+    async def list_edges(
+        self,
+        context_id: str,
+        memory_id: str,
+        min_weight: float = 0.0,
+        edge_types: list[str] | None = None,
+        limit: int | None = None,
+    ) -> list[Edge]:
+        """List neural memory edges connected to a memory.
+
+        Returns both outgoing and incoming edges, deduplicated.
+
+        Args:
+            context_id: Context UUID containing the memory.
+            memory_id: Memory UUID whose edges to list.
+            min_weight: Minimum edge weight (0.0-3.0). Edges below this are filtered.
+            edge_types: Restrict to these edge types (e.g. ``["related_to"]``). ``None``
+                returns all types.
+            limit: Maximum edges per direction. **The server applies this to outgoing
+                AND incoming queries independently**, so the practical maximum returned
+                is ``2 * limit`` minus dedup overlap. ``None`` means no limit.
+
+        Returns:
+            List of :class:`Edge` instances ordered as the server returns them.
+
+        Raises:
+            KaguraNotFoundError: Context or memory not found.
+            KaguraError: Other server-side error.
+        """
+        arguments: dict[str, Any] = {
+            "context_id": context_id,
+            "memory_id": memory_id,
+            "min_weight": min_weight,
+        }
+        if edge_types is not None:
+            arguments["edge_types"] = edge_types
+        if limit is not None:
+            arguments["limit"] = limit
+        result = await self._call_tool("list_edges", arguments)
+        self._raise_for_mcp_error(result, "list_edges")
+        return [Edge.model_validate(e) for e in result.get("edges", [])]
+
+    async def create_edge(
+        self,
+        context_id: str,
+        source_id: str,
+        target_id: str,
+        edge_type: str = "related_to",
+        weight: float = 0.5,
+        confidence: float = 1.0,
+    ) -> Edge:
+        """Create or upsert a neural memory edge from ``source_id`` to ``target_id``.
+
+        The server uses ``(user_id, source_id, target_id)`` as a unique key, so if an
+        edge already exists for the same pair the server applies **max-weight UPSERT**
+        semantics: the existing edge's weight is replaced only when the new weight is
+        higher, and the previous ``edge_type`` may be overwritten. This is **not** a
+        pure INSERT — callers expecting INSERT-or-fail semantics should call
+        :meth:`list_edges` first.
+
+        Args:
+            context_id: Context UUID containing both endpoints.
+            source_id: Source memory UUID.
+            target_id: Target memory UUID. Must differ from ``source_id`` (self-loops
+                are rejected client-side and server-side).
+            edge_type: Edge type label. Server validates against its current
+                ``VALID_EDGE_TYPES`` set; ``"related_to"`` is the standard default for
+                manual links.
+            weight: Edge weight in [0.0, 3.0]. Default 0.5 is a sensible mid-range
+                value for manual edges.
+            confidence: Edge confidence in [0.0, 1.0].
+
+        Returns:
+            The created :class:`Edge`.
+
+        Raises:
+            ValueError: If ``source_id == target_id``.
+            KaguraNotFoundError: Context or memory not found.
+            KaguraError: Server-side validation error (e.g. weight out of range,
+                self-loop accepted past the client preflight, edge type rejected).
+        """
+        if source_id == target_id:
+            raise ValueError(
+                "source_id and target_id must be different (self-loops are not allowed)"
+            )
+        arguments: dict[str, Any] = {
+            "context_id": context_id,
+            "source_id": source_id,
+            "target_id": target_id,
+            "edge_type": edge_type,
+            "weight": weight,
+            "confidence": confidence,
+        }
+        result = await self._call_tool("create_edge", arguments)
+        self._raise_for_mcp_error(result, "create_edge")
+        return Edge.model_validate(result.get("edge", result))
+
+    async def update_edge(
+        self,
+        context_id: str,
+        source_id: str,
+        target_id: str,
+        weight: float | None = None,
+        edge_type: str | None = None,
+    ) -> Edge:
+        """Update an existing edge's weight and/or edge type.
+
+        The edge is identified by the ``(source_id, target_id)`` pair (the server's
+        DB unique constraint covers ``(user_id, src, dst)``). Pass ``None`` for
+        either ``weight`` or ``edge_type`` to leave that field unchanged.
+
+        Args:
+            context_id: Context UUID containing both endpoints.
+            source_id: Source memory UUID.
+            target_id: Target memory UUID.
+            weight: New edge weight in [0.0, 3.0]. ``None`` keeps the existing value.
+            edge_type: New edge type label. ``None`` keeps the existing value.
+
+        Returns:
+            The updated :class:`Edge`.
+
+        Raises:
+            KaguraNotFoundError: Edge or context not found.
+            KaguraError: Other server-side error.
+        """
+        arguments: dict[str, Any] = {
+            "context_id": context_id,
+            "source_id": source_id,
+            "target_id": target_id,
+        }
+        if weight is not None:
+            arguments["weight"] = weight
+        if edge_type is not None:
+            arguments["edge_type"] = edge_type
+        result = await self._call_tool("update_edge", arguments)
+        self._raise_for_mcp_error(result, "update_edge")
+        return Edge.model_validate(result.get("edge", result))
+
+    async def delete_edge(
+        self,
+        context_id: str,
+        source_id: str,
+        target_id: str,
+    ) -> bool:
+        """Delete the edge between ``source_id`` and ``target_id``.
+
+        Args:
+            context_id: Context UUID containing both endpoints.
+            source_id: Source memory UUID.
+            target_id: Target memory UUID.
+
+        Returns:
+            ``True`` once the server confirms deletion succeeded.
+
+        Raises:
+            KaguraNotFoundError: Edge or context not found.
+            KaguraError: Other server-side error.
+        """
+        arguments: dict[str, Any] = {
+            "context_id": context_id,
+            "source_id": source_id,
+            "target_id": target_id,
+        }
+        result = await self._call_tool("delete_edge", arguments)
+        self._raise_for_mcp_error(result, "delete_edge")
+        return bool(result.get("deleted", True))
 
     async def get_usage(self) -> UsageInfo:
         """Get workspace usage and quota limits.

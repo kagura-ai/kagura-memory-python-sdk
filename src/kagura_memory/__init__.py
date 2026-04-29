@@ -20,6 +20,7 @@ from .models import (
     DuplicateMemoryInfo,
     DuplicatePair,
     DuplicatesResponse,
+    Edge,
     EmbeddingModel,
     EmbeddingModelsResponse,
     EmbeddingStatus,
@@ -115,6 +116,8 @@ __all__ = [
     "DuplicateMemoryInfo",
     "DuplicatePair",
     "DuplicatesResponse",
+    # Edge model
+    "Edge",
     # Resource Token models
     "ResourceTokenCreate",
     "ResourceTokenUpdate",
