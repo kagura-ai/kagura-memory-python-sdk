@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from click.testing import CliRunner
 
 from kagura_memory.cli import _parse_tags, main
+from tests.conftest import sleep_report_summary_dict
 
 
 def test_parse_tags():
@@ -662,3 +663,143 @@ def test_resource_import_auto_detect_csv(tmp_path):
     )
     # It gets past format detection (would fail at connection)
     assert "Cannot detect format" not in (result.output or "")
+
+
+# ============================================================================
+# Sleep Maintenance CLI (issue #85)
+# ============================================================================
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_sleep_history(mock_client_cls, mock_config):
+    """`kagura sleep history` echoes a JSON object with a top-level ``reports`` array."""
+    from kagura_memory import SleepReport
+
+    mock_config.return_value = {"api_key": "key", "mcp_url": "https://test.com/mcp"}
+
+    mock_client = AsyncMock()
+    mock_client.get_sleep_history.return_value = [SleepReport(**sleep_report_summary_dict("rid-9"))]
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    mock_client_cls.return_value = mock_client
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["sleep", "history", "ctx-1", "--limit", "5"])
+    assert result.exit_code == 0, result.output
+    assert "rid-9" in result.output
+    mock_client.get_sleep_history.assert_called_once_with(context_id="ctx-1", limit=5)
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_sleep_report(mock_client_cls, mock_config):
+    """`kagura sleep report` echoes the flattened detail JSON."""
+    from kagura_memory import SleepReportDetail
+
+    mock_config.return_value = {"api_key": "key", "mcp_url": "https://test.com/mcp"}
+
+    detail = SleepReportDetail(
+        **sleep_report_summary_dict("rid-9"),
+        memories_flagged=0,
+        embedding_calls_made=2,
+        actions=[],
+        action_count=0,
+    )
+    mock_client = AsyncMock()
+    mock_client.get_sleep_report.return_value = detail
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    mock_client_cls.return_value = mock_client
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["sleep", "report", "ctx-1", "rid-9"])
+    assert result.exit_code == 0, result.output
+    assert "rid-9" in result.output
+    assert "memories_flagged" in result.output
+    mock_client.get_sleep_report.assert_called_once_with(context_id="ctx-1", report_id="rid-9")
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_sleep_rollback_with_yes_flag(mock_client_cls, mock_config):
+    """`kagura sleep rollback -y` skips both the prompt and the pre-fetch."""
+    from kagura_memory import RollbackResult, RollbackSummary
+
+    mock_config.return_value = {"api_key": "key", "mcp_url": "https://test.com/mcp"}
+
+    rollback = RollbackResult(
+        report_id="rid-9",
+        status="rolled_back",
+        rollback_summary=RollbackSummary(edges_deleted=2, merges_reversed=1),
+    )
+
+    mock_client = AsyncMock()
+    mock_client.rollback_sleep_run.return_value = rollback
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    mock_client_cls.return_value = mock_client
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["sleep", "rollback", "ctx-1", "rid-9", "-y"])
+    assert result.exit_code == 0, result.output
+    assert "rolled_back" in result.output
+    mock_client.rollback_sleep_run.assert_called_once_with(context_id="ctx-1", report_id="rid-9")
+    # --yes must skip the cosmetic pre-fetch — no wasted round trip.
+    mock_client.get_sleep_report.assert_not_called()
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_sleep_rollback_aborts_on_no(mock_client_cls, mock_config):
+    """Without -y, answering 'n' aborts before calling rollback_sleep_run."""
+    from kagura_memory import SleepReportDetail
+
+    mock_config.return_value = {"api_key": "key", "mcp_url": "https://test.com/mcp"}
+
+    detail = SleepReportDetail(
+        **sleep_report_summary_dict("rid-9"),
+        memories_flagged=0,
+        embedding_calls_made=2,
+        actions=[],
+        action_count=3,
+    )
+    mock_client = AsyncMock()
+    mock_client.get_sleep_report.return_value = detail
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    mock_client_cls.return_value = mock_client
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["sleep", "rollback", "ctx-1", "rid-9"], input="n\n")
+    assert result.exit_code != 0
+    mock_client.rollback_sleep_run.assert_not_called()
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_sleep_rollback_wraps_unexpected_exception(mock_client_cls, mock_config):
+    """Unexpected exceptions inside _run() surface as click.ClickException."""
+    mock_config.return_value = {"api_key": "key", "mcp_url": "https://test.com/mcp"}
+
+    mock_client = AsyncMock()
+    mock_client.rollback_sleep_run.side_effect = RuntimeError("boom")
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    mock_client_cls.return_value = mock_client
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["sleep", "rollback", "ctx-1", "rid-9", "-y"])
+    assert result.exit_code != 0
+    assert "Error: boom" in result.output
+
+
+@patch("kagura_memory.cli.load_config")
+def test_get_kagura_client_missing_api_key(mock_config):
+    """_get_kagura_client raises ClickException when no api_key in config."""
+    mock_config.return_value = {"api_key": "", "mcp_url": "https://test.com/mcp"}
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["sleep", "rollback", "ctx-1", "rid-9", "-y"])
+    assert result.exit_code != 0
+    assert "No API key" in result.output

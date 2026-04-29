@@ -202,6 +202,11 @@ kagura resource ingest-batch -r products -k TOKEN -f events.json
 kagura resource stats -r products
 kagura resource schema -r products
 
+# Sleep Maintenance — observability + rollback
+kagura sleep history <context-id> --limit 5
+kagura sleep report <context-id> <report-id>
+kagura sleep rollback <context-id> <report-id> -y    # destructive: prompts unless --yes / -y is set
+
 # Config
 kagura config show
 ```
@@ -233,12 +238,14 @@ kagura process -m "今日の学び：FastAPIのDIはDepends()を使う"
 | Memory stats (get_memory_stats) | `KaguraClient` | REST | API Key |
 | Duplicate detection (find_duplicates) | `KaguraClient` | REST | API Key |
 | Context delete | — | Web UI only | Session |
+| Sleep Maintenance (history / report / rollback) | `KaguraClient` | MCP | API Key |
 | Resource Token (create/list/update/revoke) | `ResourceClient` | REST API | API Key |
 | Resource Event ingestion | `ResourceClient` | REST API | Resource Token |
 | Resource Impact (stats) | `ResourceClient` | REST API | API Key |
 | Resource Schema | `ResourceClient` | REST API | API Key |
+| Account erasure (GDPR Art.17 / APPI) | — | Web UI only | Session |
 
-Context deletion is intentionally Web UI only — destructive operations require session authentication and confirmation.
+Context deletion and account erasure are intentionally Web UI only — destructive operations require session authentication and confirmation. `kagura sleep rollback` runs over the MCP API Key but is itself destructive (reverses edge creation, merges, importance updates, promotions, and archives) and the CLI requires `--yes` to skip the interactive confirmation. The server commits per-action without a Saga, so a 5xx response after partial success means SOME actions may have been reversed before the error surfaced — re-run `kagura sleep report` to inspect the post-failure state.
 
 ## Development
 

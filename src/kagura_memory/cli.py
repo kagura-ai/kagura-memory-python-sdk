@@ -472,6 +472,88 @@ def contexts():
 
 
 # =============================================================================
+# Sleep Maintenance Commands (issue #85)
+# =============================================================================
+
+
+@main.group()
+def sleep():
+    """Inspect and roll back Sleep Maintenance runs."""
+    pass
+
+
+@sleep.command(name="history")
+@click.argument("context_id")
+@click.option(
+    "--limit",
+    default=10,
+    type=click.IntRange(1, 50),
+    help="Max runs to return (1-50, default: 10).",
+)
+def sleep_history(context_id, limit):
+    """List recent Sleep Maintenance runs for a context."""
+
+    async def _op(client: KaguraClient, _ctx: str) -> dict[str, Any]:
+        reports = await client.get_sleep_history(context_id=context_id, limit=limit)
+        return {"reports": [r.model_dump(mode="json") for r in reports]}
+
+    _run_client_command(_op, context_id=None, needs_context=False)
+
+
+@sleep.command(name="report")
+@click.argument("context_id")
+@click.argument("report_id")
+def sleep_report(context_id, report_id):
+    """Get a detailed Sleep Maintenance report including audit log."""
+
+    async def _op(client: KaguraClient, _ctx: str) -> dict[str, Any]:
+        detail = await client.get_sleep_report(context_id=context_id, report_id=report_id)
+        return detail.model_dump(mode="json")
+
+    _run_client_command(_op, context_id=None, needs_context=False)
+
+
+@sleep.command(name="rollback")
+@click.argument("context_id")
+@click.argument("report_id")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt.")
+def sleep_rollback(context_id, report_id, yes):
+    """Roll back a completed Sleep Maintenance run.
+
+    Reverses edge creation, memory merges, importance updates, scope
+    promotions, and archives.
+    """
+    # Bundled inline (not via ``_run_client_command``) so a "no" answer to
+    # ``click.confirm(..., abort=True)`` propagates as ``click.Abort`` and
+    # click prints "Aborted!" + exit 1 naturally — the helper's broad
+    # ``except Exception`` would otherwise wrap it as "Error: ".
+    client = _get_kagura_client()
+
+    async def _run() -> dict[str, Any]:
+        async with client:
+            # The pre-fetch only feeds the confirm prompt — skip it on --yes.
+            if not yes:
+                detail = await client.get_sleep_report(context_id=context_id, report_id=report_id)
+                click.confirm(
+                    f"Roll back sleep run {report_id}? "
+                    f"Started {detail.started_at}, {detail.action_count} action(s). "
+                    "This reverses edge creation, merges, importance updates, "
+                    "promotions, and archives.",
+                    abort=True,
+                )
+            result = await client.rollback_sleep_run(context_id=context_id, report_id=report_id)
+            return result.model_dump(mode="json")
+
+    try:
+        result = asyncio.run(_run())
+        click.echo(json.dumps(result, indent=2))
+    except (click.Abort, click.ClickException):
+        raise
+    except Exception as e:
+        raise click.ClickException(f"Error: {e}") from e
+
+
+# =============================================================================
 # Setup Commands
 # =============================================================================
 
@@ -524,6 +606,17 @@ def _get_resource_client() -> ResourceClient:
     if not config.get("api_key"):
         raise click.ClickException("No API key found. Set KAGURA_API_KEY or create .kagura.json")
     return ResourceClient.from_mcp_url(
+        api_key=config.get("api_key", ""),
+        mcp_url=config.get("mcp_url", "https://memory.kagura-ai.com/mcp"),
+    )
+
+
+def _get_kagura_client() -> KaguraClient:
+    """Load config and create KaguraClient (mirrors :func:`_get_resource_client`)."""
+    config = load_config()
+    if not config.get("api_key"):
+        raise click.ClickException("No API key found. Set KAGURA_API_KEY or create .kagura.json")
+    return KaguraClient(
         api_key=config.get("api_key", ""),
         mcp_url=config.get("mcp_url", "https://memory.kagura-ai.com/mcp"),
     )
