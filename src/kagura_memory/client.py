@@ -228,12 +228,12 @@ class KaguraClient:
         importance: float = 0.5,
         tags: list[str] | None = None,
         source_uri: str | None = None,
-        source_type: str | None = None,
+        linked_memory_ids: list[str] | None = None,
+        linked_source_uris: list[str] | None = None,
+        source_type: Literal["file", "url", "vault", "api", "manual"] | None = None,
         context_summary: str | None = None,
         details: dict[str, Any] | None = None,
         context: dict[str, Any] | None = None,
-        linked_memory_ids: list[str] | None = None,
-        linked_source_uris: list[str] | None = None,
     ) -> dict[str, Any]:
         """Call remember MCP tool.
 
@@ -247,8 +247,12 @@ class KaguraClient:
             tags: Optional tags.
             source_uri: Origin URI (e.g. ``file:///``, ``https://``,
                 ``vault://``).
-            source_type: Origin classification. One of
-                ``"file" | "url" | "vault" | "api" | "manual"`` per the MCP
+            linked_memory_ids: Existing memory UUIDs to declare as graph
+                edges from this memory. Server creates ``declared_link``
+                edges with ``weight=1.0`` atomically.
+            linked_source_uris: Source URIs to resolve into linked memories.
+                Unresolved URIs are silently skipped server-side.
+            source_type: Origin classification. Closed enum per the MCP
                 tool schema; pairs with ``source_uri`` for downstream filters.
             context_summary: Brief explanation (max 2000 chars) of why the
                 memory exists and how to use it. Distinct from ``summary``,
@@ -258,11 +262,6 @@ class KaguraClient:
                 payload that the server should store as-is.
             context: Open-ended context metadata JSON. Less structured than
                 ``details``; useful for free-form provenance hints.
-            linked_memory_ids: Existing memory UUIDs to declare as graph
-                edges from this memory. Server creates ``declared_link``
-                edges with ``weight=1.0`` atomically.
-            linked_source_uris: Source URIs to resolve into linked memories.
-                Unresolved URIs are silently skipped server-side.
 
         Returns:
             API response with ``memory_id``.
