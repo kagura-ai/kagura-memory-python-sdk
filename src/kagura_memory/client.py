@@ -230,25 +230,41 @@ class KaguraClient:
         source_uri: str | None = None,
         linked_memory_ids: list[str] | None = None,
         linked_source_uris: list[str] | None = None,
+        source_type: Literal["file", "url", "vault", "api", "manual"] | None = None,
+        context_summary: str | None = None,
+        details: dict[str, Any] | None = None,
+        context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """
-        Call remember MCP tool.
+        """Call remember MCP tool.
 
         Args:
-            context_id: Context ID
-            summary: Memory summary
-            content: Memory content
-            type: Memory type
-            importance: Importance score (0.0-1.0)
-            tags: Optional tags
-            source_uri: Origin URI for this memory (e.g. ``file://``,
-                ``https://``, ``vault://``).
+            context_id: Context ID.
+            summary: Memory summary (10-500 chars).
+            content: Memory content.
+            type: Memory type. Server validates against its own vocabulary;
+                the SDK passes through.
+            importance: Importance score (0.0-1.0).
+            tags: Optional tags.
+            source_uri: Origin URI (e.g. ``file:///``, ``https://``,
+                ``vault://``).
             linked_memory_ids: Existing memory UUIDs to declare as graph
-                edges from this memory.
+                edges from this memory. Server creates ``declared_link``
+                edges with ``weight=1.0`` atomically.
             linked_source_uris: Source URIs to resolve into linked memories.
+                Unresolved URIs are silently skipped server-side.
+            source_type: Origin classification. Closed enum per the MCP
+                tool schema; pairs with ``source_uri`` for downstream filters.
+            context_summary: Brief explanation (max 2000 chars) of why the
+                memory exists and how to use it. Distinct from ``summary``,
+                which is the search-target text.
+            details: Structured details JSON. Use for additional metadata
+                like code locations, parent/child links, or any caller-defined
+                payload that the server should store as-is.
+            context: Open-ended context metadata JSON. Less structured than
+                ``details``; useful for free-form provenance hints.
 
         Returns:
-            API response with memory_id
+            API response with ``memory_id``.
         """
         arguments: dict[str, Any] = {
             "context_id": context_id,
@@ -261,6 +277,14 @@ class KaguraClient:
             arguments["tags"] = tags
         if source_uri is not None:
             arguments["source_uri"] = source_uri
+        if source_type is not None:
+            arguments["source_type"] = source_type
+        if context_summary is not None:
+            arguments["context_summary"] = context_summary
+        if details is not None:
+            arguments["details"] = details
+        if context is not None:
+            arguments["context"] = context
         if linked_memory_ids is not None:
             arguments["linked_memory_ids"] = linked_memory_ids
         if linked_source_uris is not None:

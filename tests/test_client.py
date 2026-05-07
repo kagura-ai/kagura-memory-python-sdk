@@ -239,7 +239,7 @@ async def test_remember_with_source_uri():
 
 @pytest.mark.asyncio
 async def test_remember_pass_through_keys_absent_when_none():
-    """remember() should not send source_uri / linked_* keys when None."""
+    """remember() should not send optional keys when None."""
     client = _make_initialized_client()
 
     with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
@@ -247,8 +247,137 @@ async def test_remember_pass_through_keys_absent_when_none():
         await client.remember(context_id="ctx", summary="s", content="c")
         args = mock.call_args[0][1]
         assert "source_uri" not in args
+        assert "source_type" not in args
+        assert "context_summary" not in args
+        assert "details" not in args
+        assert "context" not in args
         assert "linked_memory_ids" not in args
         assert "linked_source_uris" not in args
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_remember_with_details():
+    """remember() should pass details JSON dict through to MCP arguments."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {"memory_id": "abc"}
+        await client.remember(
+            context_id="ctx",
+            summary="s",
+            content="c",
+            details={
+                "code_location": "src/auth.py:142",
+                "related_issue": "#123",
+                "tags_seen": ["oauth", "jwt"],
+            },
+        )
+        args = mock.call_args[0][1]
+        assert args["details"] == {
+            "code_location": "src/auth.py:142",
+            "related_issue": "#123",
+            "tags_seen": ["oauth", "jwt"],
+        }
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_remember_with_context_summary():
+    """remember() should pass context_summary when provided."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {"memory_id": "abc"}
+        await client.remember(
+            context_id="ctx",
+            summary="s",
+            content="c",
+            context_summary="Why this memory matters and how to use it.",
+        )
+        args = mock.call_args[0][1]
+        assert args["context_summary"] == "Why this memory matters and how to use it."
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_remember_with_source_type():
+    """remember() should pass source_type alongside source_uri."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {"memory_id": "abc"}
+        await client.remember(
+            context_id="ctx",
+            summary="s",
+            content="c",
+            source_uri="https://example.com/doc.html",
+            source_type="url",
+        )
+        args = mock.call_args[0][1]
+        assert args["source_type"] == "url"
+        assert args["source_uri"] == "https://example.com/doc.html"
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_remember_with_context_dict():
+    """remember() should pass context dict (free-form provenance metadata)."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {"memory_id": "abc"}
+        await client.remember(
+            context_id="ctx",
+            summary="s",
+            content="c",
+            context={"issue": 80, "branch": "feat/example", "session_id": "s-1"},
+        )
+        args = mock.call_args[0][1]
+        assert args["context"] == {
+            "issue": 80,
+            "branch": "feat/example",
+            "session_id": "s-1",
+        }
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_remember_combined_pass_through_payload():
+    """remember() with all the new pass-through kwargs together."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {"memory_id": "section-uuid"}
+        await client.remember(
+            context_id="ctx",
+            summary="Doc — chapter 0: Intro",
+            content="Chapter text...",
+            type="document_section",
+            importance=0.5,
+            tags=["pdf", "user-recipe"],
+            source_uri="https://example.com/doc.pdf",
+            source_type="url",
+            context_summary="Chapter 0 of doc.pdf",
+            details={
+                "parent_id": "overview-uuid",
+                "role": "section",
+                "section_index": 0,
+            },
+            linked_memory_ids=["overview-uuid"],
+        )
+        args = mock.call_args[0][1]
+        assert args["type"] == "document_section"
+        assert args["details"]["role"] == "section"
+        assert args["details"]["parent_id"] == "overview-uuid"
+        assert args["linked_memory_ids"] == ["overview-uuid"]
+        assert args["source_type"] == "url"
+        assert args["context_summary"] == "Chapter 0 of doc.pdf"
 
     await client.close()
 
