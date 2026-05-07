@@ -195,6 +195,11 @@ kagura explore -m "memory-uuid" --depth 3
 kagura forget -m "memory-uuid"
 kagura contexts
 
+# File ingestion (#80) — install with: pip install 'kagura-memory[ingest-pdf]'
+kagura ingest https://example.com/report.pdf -c dev
+kagura ingest ./report.pdf --vision-provider gemini --tags "Q1,report"
+kagura ingest ./report.pdf --dry-run    # local cost/page estimate only
+
 # Resource tokens
 kagura resource tokens create -r products -d "Product sync"
 kagura resource ingest -r products -k TOKEN --doc-id SKU-001 -V 1 -p '{"name":"Widget"}'
@@ -210,6 +215,65 @@ kagura sleep rollback <context-id> <report-id> -y    # destructive: prompts unle
 # Config
 kagura config show
 ```
+
+## File Ingestion (Issue #80)
+
+Convert URLs and local files (PDF — Phase 1) into structured Memory Cloud
+memories: one overview memory per document plus one section memory per
+structural section, linked via `declared_link` edges.
+
+```bash
+pip install 'kagura-memory[ingest-pdf]'
+
+kagura ingest https://example.com/report.pdf -c <context-id>
+kagura ingest ./local.pdf --vision-provider gemini --tags "Q1"
+kagura ingest ./report.pdf --dry-run     # cost preview, no LLM calls
+```
+
+Heavy parsing dependencies are optional:
+
+| Extra | Adds | Use case |
+|---|---|---|
+| `[ingest]` | `pillow` | Image preprocessing only |
+| `[ingest-pdf]` | + `pymupdf` | PDF ingestion (Phase 1) |
+| `[ingest-all]` | (= `[ingest-pdf]` for now) | Future-proof; will expand in Phase 2 |
+
+### URL safety / SSRF
+
+The fetcher resolves the hostname pre-flight and rejects any IP in the
+RFC 1918, link-local, loopback, multicast, IPv6 unique-local, or
+IPv4-mapped-IPv6 ranges. Cloud metadata endpoints (e.g.
+`169.254.169.254`) are blocked. HTTP redirects are followed manually with
+the same denylist applied to each `Location`. Defaults: 100 MB body cap,
+10 s connect / 60 s read timeout, max 3 redirects, HTTPS-only.
+
+Local file paths under `/etc`, `/proc`, `/sys`, `/root`, `~/.ssh`, etc.
+are blocked unless `--allow-system-paths` is passed.
+
+### Vision LLM and your data
+
+Image content (PDF page images, standalone images) is **opt-in only**.
+Without `--vision-provider`, image content is skipped with a warning —
+no implicit network egress.
+
+When you pass `--vision-provider`, image bytes are sent to the chosen
+provider's API. **Review the provider's data retention policy before
+ingesting sensitive documents:**
+
+- [Anthropic API privacy](https://www.anthropic.com/legal/privacy)
+- [Google Gemini API privacy](https://ai.google.dev/gemini-api/terms)
+- Ollama (`--vision-provider ollama`): local-first, nothing leaves your
+  machine. Recommended for sensitive documents.
+
+The SDK preprocesses every image before sending: resize to a 1568 px long
+edge, strip EXIF metadata (location, device, timestamp), re-encode as
+JPEG-85. The provider is given a fixed extraction prompt; any
+instruction-shaped text inside the image is treated as data, not as an
+instruction to the model.
+
+`--dry-run` is fully local: it counts tokens via `litellm.token_counter`
+and reports estimated section/page counts without calling any LLM
+provider.
 
 ## Claude Code Integration
 

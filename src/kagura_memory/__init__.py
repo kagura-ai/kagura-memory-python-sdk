@@ -7,6 +7,8 @@ from .exceptions import (
     KaguraConnectionError,
     KaguraContextError,
     KaguraError,
+    KaguraFetchError,
+    KaguraIngestError,
     KaguraLLMError,
     KaguraNotFoundError,
     KaguraQuotaError,
@@ -17,6 +19,7 @@ from .models import (
     ContextDetail,
     ContextInfo,
     ContextStats,
+    CostBreakdown,
     DuplicateMemoryInfo,
     DuplicatePair,
     DuplicatesResponse,
@@ -32,6 +35,8 @@ from .models import (
     IndexerState,
     IndexerStateMetrics,
     IndexerStatusResponse,
+    IngestErrorRecord,
+    IngestResult,
     LLMUsage,
     Memory,
     MemoryInfo,
@@ -149,6 +154,10 @@ __all__ = [
     "SleepAction",
     "RollbackSummary",
     "RollbackResult",
+    # File ingestion (#80)
+    "CostBreakdown",
+    "IngestErrorRecord",
+    "IngestResult",
     # Exceptions
     "KaguraError",
     "KaguraAuthError",
@@ -158,4 +167,6 @@ __all__ = [
     "KaguraQuotaError",
     "KaguraLLMError",
     "KaguraContextError",
+    "KaguraFetchError",
+    "KaguraIngestError",
 ]

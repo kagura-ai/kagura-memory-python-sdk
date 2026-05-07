@@ -228,6 +228,159 @@ def explore(context_id, memory_id, depth, min_weight):
     )
 
 
+@main.command(name="ingest")
+@click.argument("source")
+@click.option("--context-id", "-c", help="Context ID (or set in .kagura.json)")
+@click.option(
+    "--text-provider",
+    type=click.Choice(["claude", "gemini", "ollama"], case_sensitive=False),
+    default="claude",
+    show_default=True,
+    help="LLM provider for section/overview summarization.",
+)
+@click.option(
+    "--vision-provider",
+    type=click.Choice(["claude", "gemini", "ollama"], case_sensitive=False),
+    default=None,
+    help=(
+        "Vision LLM provider for image content. REQUIRED to ingest images — "
+        "without this flag, image content is SKIPPED with a warning. Image "
+        "bytes are sent to the chosen provider; review their retention policy "
+        "before enabling."
+    ),
+)
+@click.option("--tags", help="Comma-separated tags")
+@click.option(
+    "--importance",
+    "-i",
+    type=click.FloatRange(0.0, 1.0),
+    default=0.7,
+    show_default=True,
+    help="Importance 0.0-1.0 for the overview memory; sections inherit lower.",
+)
+@click.option(
+    "--max-bytes",
+    type=int,
+    default=100 * 1024 * 1024,
+    show_default=True,
+    help="Body cap (bytes) for URL/file fetch. Default 100 MB.",
+)
+@click.option(
+    "--timeout-connect",
+    type=float,
+    default=10.0,
+    show_default=True,
+    help="HTTP connect timeout (seconds).",
+)
+@click.option(
+    "--timeout-read",
+    type=float,
+    default=60.0,
+    show_default=True,
+    help="HTTP read timeout (seconds).",
+)
+@click.option(
+    "--allow-http",
+    is_flag=True,
+    default=False,
+    help="Allow http:// URLs (default: HTTPS only).",
+)
+@click.option(
+    "--allow-system-paths",
+    is_flag=True,
+    default=False,
+    help="Allow ingesting paths under /etc, /proc, /root, ~/.ssh, etc.",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    default=False,
+    help="Estimate token + page counts without calling any LLM provider.",
+)
+def ingest_file(
+    source,
+    context_id,
+    text_provider,
+    vision_provider,
+    tags,
+    importance,
+    max_bytes,
+    timeout_connect,
+    timeout_read,
+    allow_http,
+    allow_system_paths,
+    dry_run,
+):
+    """Ingest a URL or local file into Memory Cloud.
+
+    Extracts structural sections from the source and creates one overview
+    memory plus one memory per section, linked via declared_link edges. Heavy
+    parsing dependencies are optional — install them with:
+
+      pip install 'kagura-memory[ingest-pdf]'
+
+    Image content requires --vision-provider explicitly. Image bytes are
+    sent to the provider's API; review the provider's data retention policy
+    before enabling.
+
+    Examples:
+      kagura ingest https://example.com/report.pdf
+      kagura ingest ./slides.pptx --vision-provider gemini --tags "Q1,report"
+      kagura ingest report.pdf --dry-run
+    """
+    try:
+        client = _get_kagura_client()
+        ctx_id = context_id or load_config().get("context_id") or ""
+        if not ctx_id and not dry_run:
+            raise click.ClickException(
+                "context_id required. Use --context-id or set in .kagura.json"
+            )
+        # Dry-run does not write to Memory Cloud, but still uses the providers'
+        # local token counters; allow context_id to be empty in that case.
+        ctx_id = ctx_id or "00000000-0000-0000-0000-000000000000"
+
+        # Deferred: keeps litellm/pymupdf/pillow off the import path of CLI
+        # commands that don't ingest. Hoisting this to the top of the file
+        # would re-introduce a startup penalty for every `kagura ...` call.
+        from .ingest import FileIngestor
+
+        async def _run() -> Any:
+            async with client:
+                ingestor = FileIngestor(
+                    client=client,
+                    text_provider_name=text_provider,
+                    vision_provider_name=vision_provider,
+                )
+                if dry_run:
+                    return await ingestor.estimate_cost(
+                        source,
+                        max_bytes=max_bytes,
+                        connect_timeout=timeout_connect,
+                        read_timeout=timeout_read,
+                        allow_http=allow_http,
+                        allow_system_paths=allow_system_paths,
+                    )
+                return await ingestor.ingest(
+                    source,
+                    context_id=ctx_id,
+                    tags=_parse_tags(tags),
+                    importance=importance,
+                    max_bytes=max_bytes,
+                    connect_timeout=timeout_connect,
+                    read_timeout=timeout_read,
+                    allow_http=allow_http,
+                    allow_system_paths=allow_system_paths,
+                )
+
+        result = asyncio.run(_run())
+        click.echo(result.model_dump_json(indent=2))
+
+    except click.ClickException:
+        raise
+    except Exception as e:
+        raise click.ClickException(f"Error: {e}") from e
+
+
 @main.command()
 @click.option("--context-id", "-c", help="Context ID (or set in .kagura.json)")
 @click.option("--memory-id", "-m", required=True, help="Memory ID to get full details")
