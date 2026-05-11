@@ -192,7 +192,7 @@ from pathlib import Path
 from kagura_memory import FilesClient
 
 async with FilesClient.from_mcp_url(api_key="kagura_...", mcp_url="https://memory.kagura-ai.com/mcp") as client:
-    # Upload from a Path (streams sha256, no full-load for large files)
+    # Upload from a Path (read fully into memory; server caps file size at 100 MiB)
     f = await client.upload(context_id="ctx-uuid", source=Path("./report.pdf"))
     print(f"Uploaded {f.id}, sha256={f.sha256}, size={f.size_bytes}")
 

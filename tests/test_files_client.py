@@ -227,7 +227,7 @@ async def test_upload_sends_base64_raw_digest_header():
 
 @pytest.mark.asyncio
 async def test_upload_from_path(tmp_path: Path):
-    """Path source streams sha256 from disk and uses path.name as filename."""
+    """Path source reads bytes from disk and uses path.name as filename."""
     client = FilesClient(api_key="test", base_url="https://example.com")
 
     p = tmp_path / "report.pdf"
