@@ -2,10 +2,11 @@
 
 ## Overview
 
-Python SDK for Kagura Memory Cloud. Three clients:
+Python SDK for Kagura Memory Cloud. Four clients:
 - `KaguraClient` — MCP client for memory and context operations
 - `KaguraAgent` — LLM-powered session analysis with hooks/skills API
 - `ResourceClient` — REST client for resource token management and data ingestion
+- `FilesClient` — REST + presigned PUT client for file uploads with sha256 integrity binding (server v0.15.1+)
 
 ## Development Workflow
 
@@ -30,9 +31,10 @@ uv run pyright src/              # Type check
 - Search tuning: `update_search_config` (semantic/bm25 weights, reranking)
 - Resource ingestion: `setup_resource`, `ingest_event`, `ingest_events`
 - Resource stats/schema: `get_resource_impact`, `get_resource_schema`
+- **File uploads**: `FilesClient.upload/download_url/delete/list` with R2 sha256 binding (server v0.15.1+)
 - Agent hooks/skills: `@agent.hook("before_process")`, `@agent.skill("name")`
 - Ollama support: `model="ollama/qwen3:30b"` for local LLMs
-- CLI: `kagura setup claude`, `kagura resource setup/import/stats/schema`, `kagura context search-config`
+- CLI: `kagura setup claude`, `kagura resource setup/import/stats/schema`, `kagura files upload/list/delete/download-url`, `kagura context search-config`
 
 ## Branch Strategy
 

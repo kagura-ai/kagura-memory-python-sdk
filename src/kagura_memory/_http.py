@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 from importlib.metadata import version as _pkg_version
 
+import httpx
+
 SDK_VERSION: str = _pkg_version("kagura-memory")
 """Package version string, shared across client modules."""
 
@@ -22,6 +24,23 @@ def base_url_from_mcp(mcp_url: str) -> str:
     """
     m = re.search(r"/mcp(?=/|$)", mcp_url)
     return mcp_url[: m.start()] if m else mcp_url
+
+
+def extract_detail(response: httpx.Response) -> str:
+    """Return the JSON ``detail`` field from an httpx response if parseable.
+
+    Returns an empty string when the body is not JSON, not a dict, or
+    has no ``detail`` field. Used by REST clients to surface a useful
+    server-supplied message in chained exception text.
+    """
+    try:
+        body = response.json()
+    except (ValueError, UnicodeDecodeError):
+        return ""
+    if isinstance(body, dict):
+        detail = body.get("detail", "")
+        return detail if isinstance(detail, str) else ""
+    return ""
 
 
 def validate_https_url(url: str, *, label: str = "URL") -> None:

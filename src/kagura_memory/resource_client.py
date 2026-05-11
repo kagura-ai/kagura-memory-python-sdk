@@ -6,7 +6,7 @@ from typing import Any, Literal
 
 import httpx
 
-from ._http import SDK_VERSION, base_url_from_mcp, validate_https_url
+from ._http import SDK_VERSION, base_url_from_mcp, extract_detail, validate_https_url
 from .client import KaguraClient
 from .exceptions import (
     KaguraAuthError,
@@ -138,29 +138,15 @@ class ResourceClient:
             if status == 401:
                 raise KaguraAuthError("Authentication failed. Check your API key.") from e
             if status == 404:
-                detail = ""
-                try:
-                    body = e.response.json()
-                    detail = body.get("detail", "") if isinstance(body, dict) else ""
-                except (ValueError, UnicodeDecodeError):
-                    pass
-                raise KaguraNotFoundError(detail or "Not found") from e
+                raise KaguraNotFoundError(extract_detail(e.response) or "Not found") from e
             if status == 429:
                 retry_after = e.response.headers.get("Retry-After")
                 raise KaguraQuotaError(
                     "Quota exceeded. Try again later.",
                     retry_after=int(retry_after) if retry_after else None,
                 ) from e
-            # Try to extract detail from JSON response
-            detail = ""
-            try:
-                body = e.response.json()
-                detail = body.get("detail", "") if isinstance(body, dict) else ""
-            except (ValueError, UnicodeDecodeError):
-                pass
-            msg = f"HTTP {status}"
-            if detail:
-                msg = f"{msg}: {detail}"
+            detail = extract_detail(e.response)
+            msg = f"HTTP {status}: {detail}" if detail else f"HTTP {status}"
             raise KaguraConnectionError(msg) from e
         except httpx.RequestError as e:
             raise KaguraConnectionError(f"Connection failed: {e}") from e

@@ -18,13 +18,14 @@
 
 ## What is this?
 
-This SDK connects your Python code to [Kagura Memory Cloud](https://github.com/kagura-ai/memory-cloud), giving AI assistants the ability to **remember, search, and learn** from past interactions. It provides three clients for different use cases:
+This SDK connects your Python code to [Kagura Memory Cloud](https://github.com/kagura-ai/memory-cloud), giving AI assistants the ability to **remember, search, and learn** from past interactions. It provides four clients for different use cases:
 
 | Client | Protocol | Use Case |
 |--------|----------|----------|
 | **`KaguraAgent`** | MCP + LLM | AI-powered — auto-decides what to remember/recall from conversations |
 | **`KaguraClient`** | MCP (JSON-RPC) | Direct memory ops — remember, recall, explore, reference, forget |
 | **`ResourceClient`** | REST API | External data ingestion — push data from Slack, CI/CD, CRM into Kagura |
+| **`FilesClient`** | REST + presigned PUT | File uploads with sha256 integrity binding (R2) |
 
 ## Installation
 
@@ -182,6 +183,43 @@ async with ResourceClient.from_mcp_url(api_key="kagura_...", mcp_url="http://loc
 
 See [`examples/`](examples/) for complete working examples.
 
+### FilesClient — File Uploads with Checksum Binding
+
+Upload files to the workspace's object store via short-lived presigned PUT URLs. The SDK binds the body's sha256 into the PUT signature so the server (memory-cloud v0.15.1+, `R2_CHECKSUM_BINDING_ENABLED=true`) can reject tampered uploads with `400 BadDigest`:
+
+```python
+from pathlib import Path
+from kagura_memory import FilesClient
+
+async with FilesClient.from_mcp_url(api_key="kagura_...", mcp_url="https://memory.kagura-ai.com/mcp") as client:
+    # Upload from a Path (read fully into memory; server caps file size at 100 MiB)
+    f = await client.upload(context_id="ctx-uuid", source=Path("./report.pdf"))
+    print(f"Uploaded {f.id}, sha256={f.sha256}, size={f.size_bytes}")
+
+    # Upload from bytes — filename is required (server enforces non-empty)
+    f2 = await client.upload(context_id="ctx-uuid", source=b"...", filename="payload.bin")
+
+    # Short-lived presigned GET URL
+    url = await client.download_url(f.id)
+
+    # List & delete
+    page = await client.list(context_id="ctx-uuid", limit=50)
+    await client.delete(f.id)
+```
+
+Re-uploading bytes whose sha256 already exists in the workspace returns the **existing `FileObject`** (idempotent dedup happy-path) — no exception.
+
+## SDK ↔ memory-cloud Compatibility
+
+| SDK | Min memory-cloud | Notes |
+|---|---|---|
+| 0.14.0 | 0.15.1 | `FilesClient` + R2 checksum binding (`x-amz-checksum-sha256` on PUT) |
+| 0.13.x | 0.13.0 | Pre-`FilesClient` |
+
+When pointing the SDK at a backend with `R2_CHECKSUM_BINDING_ENABLED=true`, the SDK must be v0.14.0+ — older versions don't send the signed checksum header and uploads fail with `HTTP 403 SignatureDoesNotMatch`.
+
+> The `0.14.0` row above describes the next minor release; `__version__` is bumped from `0.13.0` to `0.14.0` by `/release minor` (see `.claude/rules/versioning.md`) at tag time, not in this feature branch.
+
 ## CLI
 
 ```bash
@@ -206,6 +244,12 @@ kagura resource schema -r products
 kagura sleep history <context-id> --limit 5
 kagura sleep report <context-id> <report-id>
 kagura sleep rollback <context-id> <report-id> -y    # destructive: prompts unless --yes / -y is set
+
+# File uploads (R2 checksum binding)
+kagura files upload ./report.pdf -c <context-id>
+kagura files list -c <context-id> --limit 50
+kagura files download-url <file-id>
+kagura files delete <file-id>
 
 # Config
 kagura config show
@@ -243,6 +287,7 @@ kagura process -m "今日の学び：FastAPIのDIはDepends()を使う"
 | Resource Event ingestion | `ResourceClient` | REST API | Resource Token |
 | Resource Impact (stats) | `ResourceClient` | REST API | API Key |
 | Resource Schema | `ResourceClient` | REST API | API Key |
+| File upload / download-url / delete / list | `FilesClient` | REST + presigned PUT | API Key |
 | Account erasure (GDPR Art.17 / APPI) | — | Web UI only | Session |
 
 Context deletion and account erasure are intentionally Web UI only — destructive operations require session authentication and confirmation. `kagura sleep rollback` runs over the MCP API Key but is itself destructive (reverses edge creation, merges, importance updates, promotions, and archives) and the CLI requires `--yes` to skip the interactive confirmation. The server commits per-action without a Saga, so a 5xx response after partial success means SOME actions may have been reversed before the error surfaced — re-run `kagura sleep report` to inspect the post-failure state.
