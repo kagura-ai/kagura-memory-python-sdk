@@ -64,6 +64,9 @@ dev = [
 
 [tool.pytest.ini_options]
 asyncio_mode = "strict"
+markers = [
+    "integration: requires a live memory-cloud backend (gated by KAGURA_INTEGRATION_URL env var)",
+]
 
 [tool.ruff]
 line-length = 100

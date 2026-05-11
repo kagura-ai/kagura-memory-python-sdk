@@ -4,6 +4,7 @@ import asyncio
 import json
 import sys
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from typing import Any
 
 import click
@@ -11,6 +12,7 @@ import click
 from .agent import KaguraAgent
 from .client import KaguraClient
 from .config import load_config
+from .files_client import FilesClient
 from .models import Message, ProcessResult, ResourceEventRequest, Session
 from .resource_client import ResourceClient
 from .setup_claude import run_setup_claude
@@ -1160,6 +1162,138 @@ def resource_import(resource_id, api_key, input_file, fmt, id_column, version):
         return json.dumps(output, indent=2)
 
     _run_resource_command(op)
+
+
+# =============================================================================
+# Files (`kagura files ...`) — server v0.15.1+
+# =============================================================================
+
+
+def _build_files_client(config: dict[str, Any]) -> FilesClient:
+    """Build a FilesClient from an already-loaded config dict."""
+    if not config.get("api_key"):
+        raise click.ClickException("No API key found. Set KAGURA_API_KEY or create .kagura.json")
+    return FilesClient.from_mcp_url(
+        api_key=config.get("api_key", ""),
+        mcp_url=config.get("mcp_url", "https://memory.kagura-ai.com/mcp"),
+    )
+
+
+def _run_files_command(
+    operation: Callable[[FilesClient, str], Awaitable[Any]],
+    context_id: str | None,
+    *,
+    needs_context: bool = True,
+) -> None:
+    """Execute a FilesClient operation with standard boilerplate.
+
+    Loads config exactly once, resolves api_key + context_id together
+    so the operator sees a single, consistent error path.
+    """
+    try:
+        config = load_config()
+        ctx_id = ""
+        if needs_context:
+            ctx_id = context_id or config.get("context_id") or ""
+            if not ctx_id:
+                raise click.ClickException(
+                    "context_id required. Use --context-id or set in .kagura.json"
+                )
+
+        client = _build_files_client(config)
+
+        async def _run() -> Any:
+            async with client:
+                return await operation(client, ctx_id)
+
+        result = asyncio.run(_run())
+        if result is not None:
+            click.echo(result)
+    except click.ClickException:
+        raise
+    except Exception as e:
+        raise click.ClickException(f"Error: {e}") from e
+
+
+@main.group()
+def files():
+    """Upload, list, and manage files in Kagura Memory Cloud."""
+    pass
+
+
+@files.command(name="upload")
+@click.argument("path", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--context-id", "-c", help="Target context (workspace) UUID")
+@click.option("--content-type", "-t", help="MIME type override (default: sniffed)")
+def files_upload(path: Path, context_id: str | None, content_type: str | None):
+    """
+    Upload a file to Kagura Memory Cloud.
+
+    Example:
+      kagura files upload ./report.pdf --context-id ctx-uuid
+    """
+
+    async def op(client: FilesClient, ctx: str) -> str:
+        result = await client.upload(
+            context_id=ctx,
+            source=path,
+            content_type=content_type,
+        )
+        return result.model_dump_json(indent=2)
+
+    _run_files_command(op, context_id)
+
+
+@files.command(name="download-url")
+@click.argument("file_id")
+def files_download_url(file_id: str):
+    """
+    Print a short-lived presigned GET URL for a file.
+
+    Example:
+      kagura files download-url <file_id>
+    """
+
+    async def op(client: FilesClient, _ctx: str) -> str:
+        return await client.download_url(file_id)
+
+    _run_files_command(op, None, needs_context=False)
+
+
+@files.command(name="delete")
+@click.argument("file_id")
+def files_delete(file_id: str):
+    """
+    Soft-delete a file by id.
+
+    Example:
+      kagura files delete <file_id>
+    """
+
+    async def op(client: FilesClient, _ctx: str) -> str:
+        await client.delete(file_id)
+        return f"Deleted {file_id}"
+
+    _run_files_command(op, None, needs_context=False)
+
+
+@files.command(name="list")
+@click.option("--context-id", "-c", help="Context (workspace) UUID to list")
+@click.option("--limit", "-l", type=int, default=50, help="Max results (1-500)")
+@click.option("--cursor", help="Forward-compat cursor (server v0.16+)")
+def files_list(context_id: str | None, limit: int, cursor: str | None):
+    """
+    List uploaded files in a context, newest first.
+
+    Example:
+      kagura files list --context-id ctx-uuid
+    """
+
+    async def op(client: FilesClient, ctx: str) -> str:
+        result = await client.list(context_id=ctx, limit=limit, cursor=cursor)
+        return result.model_dump_json(indent=2)
+
+    _run_files_command(op, context_id)
 
 
 if __name__ == "__main__":

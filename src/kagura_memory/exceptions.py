@@ -39,3 +39,12 @@ class KaguraQuotaError(KaguraError):
     def __init__(self, message: str, retry_after: int | None = None):
         super().__init__(message)
         self.retry_after = retry_after
+
+
+class KaguraIntegrityError(KaguraError):
+    """File integrity check failed.
+
+    Raised when R2 rejects an upload with ``400 BadDigest`` because the
+    body's sha256 does not match the value bound into the presigned PUT
+    URL (`x-amz-checksum-sha256` header / `ChecksumSHA256` parameter).
+    """

@@ -7,11 +7,13 @@ from .exceptions import (
     KaguraConnectionError,
     KaguraContextError,
     KaguraError,
+    KaguraIntegrityError,
     KaguraLLMError,
     KaguraNotFoundError,
     KaguraQuotaError,
     KaguraRateLimitError,
 )
+from .files_client import FilesClient
 from .models import (
     Artifact,
     ContextDetail,
@@ -27,6 +29,8 @@ from .models import (
     ExploredMemory,
     FailedMemoryInfo,
     FieldDefinition,
+    FileListResponse,
+    FileObject,
     IndexerJobStatus,
     IndexerSkippedReason,
     IndexerState,
@@ -80,6 +84,7 @@ __all__ = [
     "KaguraAgent",
     "KaguraClient",
     "ResourceClient",
+    "FilesClient",
     "MIN_SERVER_VERSION",
     # Embedding models
     "EmbeddingModel",
@@ -142,6 +147,9 @@ __all__ = [
     "IndexerState",
     "ResourceEventItem",
     "IndexerStatusResponse",
+    # File objects (server v0.15.1+)
+    "FileObject",
+    "FileListResponse",
     # Sleep Maintenance (server v0.8+)
     "SleepRunStatus",
     "SleepReport",
@@ -158,4 +166,5 @@ __all__ = [
     "KaguraQuotaError",
     "KaguraLLMError",
     "KaguraContextError",
+    "KaguraIntegrityError",
 ]

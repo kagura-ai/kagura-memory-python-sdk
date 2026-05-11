@@ -643,3 +643,59 @@ class Edge(BaseModel):
     confidence: float = Field(ge=0.0, le=1.0)
     created_at: datetime | None = None
     last_updated: datetime | None = None
+
+
+# ---------------------------------------------------------------------------
+# File objects (server v0.15.1+)
+# ---------------------------------------------------------------------------
+
+
+class FileObject(BaseModel):
+    """File metadata returned by upload / list / dedup operations.
+
+    Mirrors the server's ``FileObjectOut``. The ``workspace_id`` field
+    name is preserved on the wire; SDK public methods accept the same
+    value as ``context_id`` for vocabulary consistency with the rest of
+    the SDK.
+
+    ``status`` is typed as ``str`` (not a ``Literal``) because the server
+    may add new lifecycle states over time. Known values today:
+    ``reserved``, ``uploaded``, ``confirmed``.
+    """
+
+    id: str
+    workspace_id: str
+    filename: str
+    content_type: str
+    size_bytes: int
+    sha256: str
+    status: str
+    created_at: datetime
+    uploaded_at: datetime | None = None
+
+
+class FileReserveResponse(BaseModel):
+    """Internal response from ``POST /api/v1/files/reserve``."""
+
+    file_id: str
+    upload_url: str
+    expires_at: datetime
+
+
+class FileDownloadUrlResponse(BaseModel):
+    """Internal response from ``GET /api/v1/files/{file_id}/download-url``."""
+
+    download_url: str
+
+
+class FileListResponse(BaseModel):
+    """Paginated list of files.
+
+    ``next_cursor`` is forward-compatible — the current server
+    (memory-cloud v0.15.x) returns at most ``limit`` items with no
+    cursor field; SDK preserves the field as ``None`` so a future
+    server bump can populate it without breaking callers.
+    """
+
+    files: list[FileObject]
+    next_cursor: str | None = None
