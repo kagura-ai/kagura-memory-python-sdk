@@ -226,8 +226,16 @@ class FilesClient:
                 wire.
             source: File contents. ``Path`` reads the file fully
                 into memory; ``bytes`` uses the buffer directly.
-                Chunked / streaming PUT is out of scope for v0.14.0
-                (the server caps file size at 100 MiB by default).
+                **Memory contract**: peak memory is bounded by the
+                file size. R2 presigned PUT is single-PUT (chunked /
+                streaming PUT is out of scope for v0.14.0), so the
+                body has to be resident at upload time regardless of
+                how it's hashed. The server caps file size at 100 MiB
+                by default; callers uploading anywhere near that bound
+                should size their runtime accordingly. The server
+                rejects oversize uploads at the boundary — the SDK
+                does not enforce a client-side cap so that a future
+                server-side cap bump is non-breaking.
             filename: Required when ``source`` is ``bytes`` (the
                 server requires a filename). Defaults to ``path.name``
                 when ``source`` is a ``Path``.
