@@ -1285,7 +1285,13 @@ def files_delete(file_id: str):
 
 @files.command(name="list")
 @click.option("--context-id", "-c", help="Context (workspace) UUID to list")
-@click.option("--limit", "-l", type=int, default=50, help="Max results (1-500)")
+@click.option(
+    "--limit",
+    "-l",
+    type=click.IntRange(1, 500),
+    default=50,
+    help="Max results (1-500)",
+)
 @click.option("--cursor", help="Forward-compat cursor (server v0.16+)")
 def files_list(context_id: str | None, limit: int, cursor: str | None):
     """

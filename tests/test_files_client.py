@@ -313,10 +313,10 @@ async def test_upload_content_type_defaults_to_octet_stream_for_bytes():
 
 
 @pytest.mark.asyncio
-async def test_upload_path_not_found_raises():
+async def test_upload_path_not_found_raises(tmp_path: Path):
     """source=Path pointing at a missing file → FileNotFoundError, no HTTP call."""
     client = FilesClient(api_key="test", base_url="https://example.com")
-    missing = Path("/tmp/__kagura_does_not_exist_xyz__.bin")
+    missing = tmp_path / "missing.bin"  # tmp_path guarantees this doesn't exist
     with (
         patch.object(client._client, "request", new_callable=AsyncMock) as mock_req,
         patch.object(client._upload_client, "put", new_callable=AsyncMock) as mock_put,

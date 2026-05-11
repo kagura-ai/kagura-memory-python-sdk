@@ -19,6 +19,7 @@ store, regardless of what other methods are added to this class.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import mimetypes
@@ -248,7 +249,7 @@ class FilesClient:
             KaguraAuthError, KaguraNotFoundError, KaguraQuotaError,
             KaguraConnectionError: see class docstring.
         """
-        resolved_filename, body, sha256_hex = _prepare_source(source, filename)
+        resolved_filename, body, sha256_hex = await _prepare_source(source, filename)
         size_bytes = len(body)
         resolved_content_type = _resolve_content_type(content_type, resolved_filename)
 
@@ -401,7 +402,13 @@ def _resolve_content_type(content_type: str | None, filename: str) -> str:
     return guessed or "application/octet-stream"
 
 
-def _prepare_source(
+def _read_and_hash(path: Path) -> tuple[bytes, str]:
+    """Synchronously read a file and compute its sha256 — runs in a thread."""
+    body = path.read_bytes()
+    return body, hashlib.sha256(body).hexdigest()
+
+
+async def _prepare_source(
     source: Path | bytes,
     filename: str | None,
 ) -> tuple[str, bytes, str]:
@@ -411,13 +418,19 @@ def _prepare_source(
     materialized in memory — the PUT step needs all bytes and the
     server caps file size at 100 MiB by default. Chunked PUT is out
     of scope for v0.14.0.
+
+    For ``Path`` sources the disk read + hash runs in ``asyncio.to_thread``
+    so that ``upload()`` does not block the event loop while waiting on
+    file I/O — important when several concurrent uploads share a runtime.
+    ``bytes`` input stays on the loop because the buffer is already
+    resident in memory.
     """
     if isinstance(source, Path):
         if not source.is_file():
             raise FileNotFoundError(f"source path does not exist: {source}")
         resolved_filename = filename or source.name
-        body = source.read_bytes()
-        return resolved_filename, body, hashlib.sha256(body).hexdigest()
+        body, sha256_hex = await asyncio.to_thread(_read_and_hash, source)
+        return resolved_filename, body, sha256_hex
 
     if not filename:
         raise ValueError(
