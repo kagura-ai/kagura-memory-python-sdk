@@ -256,6 +256,35 @@ async def test_upload_from_path(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_upload_explicit_content_type_overrides_sniff():
+    """User-supplied content_type is passed through verbatim."""
+    client = FilesClient(api_key="test", base_url="https://example.com")
+
+    reserve_resp = _ok_response(201, _reserve_response_dict())
+    confirm_resp = _ok_response(200, _file_object_dict())
+    put_resp = _ok_response(200, {})
+
+    with (
+        patch.object(client._client, "request", new_callable=AsyncMock) as mock_req,
+        patch.object(client._upload_client, "put", new_callable=AsyncMock) as mock_put,
+    ):
+        mock_req.side_effect = [reserve_resp, confirm_resp]
+        mock_put.return_value = put_resp
+
+        await client.upload(
+            context_id=SAMPLE_CTX_ID,
+            source=SAMPLE_BODY,
+            filename="hello.txt",
+            content_type="application/x-custom",
+        )
+
+    body = mock_req.call_args_list[0][1]["json"]
+    assert body["content_type"] == "application/x-custom"
+
+    await client.close()
+
+
+@pytest.mark.asyncio
 async def test_upload_content_type_defaults_to_octet_stream_for_bytes():
     """bytes input without filename hint → application/octet-stream."""
     client = FilesClient(api_key="test", base_url="https://example.com")
@@ -412,6 +441,31 @@ async def test_upload_r2_network_error_raises_connection_error():
         mock_put.side_effect = httpx.ConnectError("connection refused")
 
         with pytest.raises(KaguraConnectionError, match="Object store PUT failed"):
+            await client.upload(
+                context_id=SAMPLE_CTX_ID,
+                source=SAMPLE_BODY,
+                filename="hello.txt",
+            )
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_upload_r2_5xx_raises_connection_error():
+    """Non-400 R2 HTTP error (e.g. 500) → KaguraConnectionError, not IntegrityError."""
+    client = FilesClient(api_key="test", base_url="https://example.com")
+
+    reserve_resp = _ok_response(201, _reserve_response_dict())
+    r2_500 = _error_response(500, {})
+
+    with (
+        patch.object(client._client, "request", new_callable=AsyncMock) as mock_req,
+        patch.object(client._upload_client, "put", new_callable=AsyncMock) as mock_put,
+    ):
+        mock_req.return_value = reserve_resp
+        mock_put.return_value = r2_500
+
+        with pytest.raises(KaguraConnectionError, match="Object store PUT failed: HTTP 500"):
             await client.upload(
                 context_id=SAMPLE_CTX_ID,
                 source=SAMPLE_BODY,
@@ -584,6 +638,87 @@ async def test_list_with_future_dict_response():
 
     assert len(result.files) == 1
     assert result.next_cursor == "page-2-token"
+    await client.close()
+
+
+# ============================================================================
+# Lifecycle
+# ============================================================================
+
+
+# ============================================================================
+# _extract_existing_file defensive branches (module-level helper)
+# ============================================================================
+
+
+def _make_dedup_error(response_mock: MagicMock) -> KaguraConnectionError:
+    """Build a KaguraConnectionError chained from an HTTPStatusError, mirroring
+    what `_request` raises for non-{401, 404, 429} HTTP errors."""
+    status_err = httpx.HTTPStatusError(
+        f"{response_mock.status_code}",
+        request=MagicMock(),
+        response=response_mock,
+    )
+    err = KaguraConnectionError(f"HTTP {response_mock.status_code}")
+    err.__cause__ = status_err
+    return err
+
+
+def test_extract_existing_file_returns_none_when_cause_not_httpstatus():
+    """KaguraConnectionError without an HTTPStatusError cause → None."""
+    from kagura_memory.files_client import _extract_existing_file
+
+    err = KaguraConnectionError("plain network failure")
+    err.__cause__ = httpx.ConnectError("refused")
+    assert _extract_existing_file(err) is None
+
+
+def test_extract_existing_file_returns_none_for_non_409_status():
+    """Cause is HTTPStatusError but status != 409 → None."""
+    from kagura_memory.files_client import _extract_existing_file
+
+    resp = _error_response(500)
+    err = _make_dedup_error(resp)
+    assert _extract_existing_file(err) is None
+
+
+def test_extract_existing_file_returns_none_when_body_not_parseable():
+    """409 body that fails to decode as JSON → None (defensive)."""
+    from kagura_memory.files_client import _extract_existing_file
+
+    resp = _error_response(409)
+    resp.json.side_effect = ValueError("not json")
+    err = _make_dedup_error(resp)
+    assert _extract_existing_file(err) is None
+
+
+def test_extract_existing_file_returns_none_when_body_is_not_dict():
+    """409 body that's a bare list/string → None (defensive)."""
+    from kagura_memory.files_client import _extract_existing_file
+
+    resp = _error_response(409)
+    resp.json.return_value = ["not", "a", "dict"]
+    err = _make_dedup_error(resp)
+    assert _extract_existing_file(err) is None
+
+
+# ============================================================================
+# extract_detail (_http.py) — non-dict body fallthrough
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_request_500_with_non_dict_body_message():
+    """5xx with a bare-string JSON body → HTTP 500 message (no ': detail' suffix)."""
+    client = FilesClient(api_key="test", base_url="https://example.com")
+    err_resp = _error_response(500)
+    err_resp.json.return_value = "just a string, not a dict"
+    with patch.object(client._client, "request", new_callable=AsyncMock) as mock_req:
+        mock_req.return_value = err_resp
+        with pytest.raises(KaguraConnectionError) as exc_info:
+            await client.delete("some-id")
+    # extract_detail returns "" for non-dict bodies; the message has no suffix.
+    assert str(exc_info.value) == "HTTP 500"
     await client.close()
 
 

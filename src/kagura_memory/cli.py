@@ -1296,5 +1296,5 @@ def files_list(context_id: str | None, limit: int, cursor: str | None):
     _run_files_command(op, context_id)
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover
     main()
