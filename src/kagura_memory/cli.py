@@ -1187,11 +1187,17 @@ def _run_files_command(
 ) -> None:
     """Execute a FilesClient operation with standard boilerplate.
 
-    Loads config exactly once, resolves api_key + context_id together
-    so the operator sees a single, consistent error path.
+    Validates api_key first (matching ``_run_client_command``'s order)
+    so the operator sees a consistent error when both api_key and
+    context_id are missing.
     """
     try:
         config = load_config()
+        if not config.get("api_key"):
+            raise click.ClickException(
+                "No API key found. Set KAGURA_API_KEY or create .kagura.json"
+            )
+
         ctx_id = ""
         if needs_context:
             ctx_id = context_id or config.get("context_id") or ""

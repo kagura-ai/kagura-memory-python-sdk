@@ -42,9 +42,15 @@ class KaguraQuotaError(KaguraError):
 
 
 class KaguraIntegrityError(KaguraError):
-    """File integrity check failed.
+    """Object store rejected an upload with HTTP 400.
 
-    Raised when R2 rejects an upload with ``400 BadDigest`` because the
-    body's sha256 does not match the value bound into the presigned PUT
-    URL (`x-amz-checksum-sha256` header / `ChecksumSHA256` parameter).
+    Raised for any ``HTTP 400`` response from the object store on a
+    presigned PUT — most commonly R2 ``BadDigest`` (the body's sha256
+    did not match the value bound into the presigned PUT URL via the
+    ``x-amz-checksum-sha256`` header / ``ChecksumSHA256`` parameter),
+    but also covers other 400 causes such as a malformed presigned
+    URL or a ``Content-Length`` mismatch. The exception message
+    documents the most likely cause; callers should not assume a
+    specific S3-XML error code without inspecting the underlying
+    ``__cause__`` response body.
     """

@@ -218,6 +218,8 @@ Re-uploading bytes whose sha256 already exists in the workspace returns the **ex
 
 When pointing the SDK at a backend with `R2_CHECKSUM_BINDING_ENABLED=true`, the SDK must be v0.14.0+ — older versions don't send the signed checksum header and uploads fail with `HTTP 403 SignatureDoesNotMatch`.
 
+> The `0.14.0` row above describes the next minor release; `__version__` is bumped from `0.13.0` to `0.14.0` by `/release minor` (see `.claude/rules/versioning.md`) at tag time, not in this feature branch.
+
 ## CLI
 
 ```bash
