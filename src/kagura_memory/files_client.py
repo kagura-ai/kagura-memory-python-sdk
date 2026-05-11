@@ -403,7 +403,17 @@ def _resolve_content_type(content_type: str | None, filename: str) -> str:
 
 
 def _read_and_hash(path: Path) -> tuple[bytes, str]:
-    """Synchronously read a file and compute its sha256 — runs in a thread."""
+    """Synchronously read a file and compute its sha256 — runs in a thread.
+
+    Reads the full file into memory by design. R2 presigned PUT is a
+    single-PUT operation (chunked / streaming PUT is out of scope for
+    v0.14.0 per the issue body's "Out of scope" section), so the body
+    is needed in memory at upload time regardless of how it's hashed.
+    Peak memory is bounded by the server's 100 MiB file size cap; a
+    streaming hash + second file read for PUT would double disk I/O
+    without lowering peak memory. Revisit when chunked PUT lands in
+    a future SDK release.
+    """
     body = path.read_bytes()
     return body, hashlib.sha256(body).hexdigest()
 

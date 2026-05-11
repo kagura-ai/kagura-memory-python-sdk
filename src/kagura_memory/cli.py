@@ -72,7 +72,7 @@ def _run_client_command(
     except click.ClickException:
         raise
     except Exception as e:
-        raise click.ClickException(f"Error: {e}") from e
+        raise click.ClickException(str(e)) from e
 
 
 @click.group()
@@ -132,7 +132,7 @@ def process(message, file, deep, verbose):
     except click.ClickException:
         raise
     except Exception as e:
-        raise click.ClickException(f"Error: {e}") from e
+        raise click.ClickException(str(e)) from e
 
 
 @main.group()
@@ -692,7 +692,7 @@ def sleep_rollback(context_id, report_id, yes):
     except (click.Abort, click.ClickException):
         raise
     except Exception as e:
-        raise click.ClickException(f"Error: {e}") from e
+        raise click.ClickException(str(e)) from e
 
 
 # =============================================================================
@@ -781,7 +781,7 @@ def _run_resource_command(
     except click.ClickException:
         raise
     except Exception as e:
-        raise click.ClickException(f"Error: {e}") from e
+        raise click.ClickException(str(e)) from e
 
 
 @main.group()
@@ -1218,7 +1218,7 @@ def _run_files_command(
     except click.ClickException:
         raise
     except Exception as e:
-        raise click.ClickException(f"Error: {e}") from e
+        raise click.ClickException(str(e)) from e
 
 
 @main.group()
