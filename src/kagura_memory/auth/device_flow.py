@@ -213,9 +213,19 @@ async def poll_for_token(
                 expires_at=expires_at,
             )
 
-        # Unknown error — surface what we got.
+        # Unknown error — surface the HTTP status + raw response so the
+        # operator can debug non-OAuth failures (HTML 5xx, proxy errors,
+        # non-JSON bodies that make `error` come back empty).
         description = body.get("error_description", "")
-        raise KaguraAuthError(f"Token endpoint returned unexpected error '{error}': {description}")
+        if error or description:
+            raise KaguraAuthError(
+                f"Token endpoint returned unexpected error '{error}': {description}"
+            )
+        detail = extract_detail(response) or response.text[:200]
+        raise KaguraAuthError(
+            f"Token endpoint returned HTTP {response.status_code} with no OAuth error code. "
+            f"Body: {detail}"
+        )
 
 
 async def refresh_access_token(
@@ -267,7 +277,15 @@ async def refresh_access_token(
         )
 
     description = body.get("error_description", "")
-    raise KaguraAuthError(f"Refresh failed: {error}{f' — {description}' if description else ''}")
+    if error:
+        raise KaguraAuthError(
+            f"Refresh failed: {error}{f' — {description}' if description else ''}"
+        )
+    # Non-OAuth failure (HTML 5xx, network proxy returning text/plain, etc.).
+    detail = extract_detail(response) or response.text[:200]
+    raise KaguraAuthError(
+        f"Refresh failed: HTTP {response.status_code} with no OAuth error code. Body: {detail}"
+    )
 
 
 async def revoke_token(

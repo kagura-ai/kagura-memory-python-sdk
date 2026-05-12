@@ -198,7 +198,7 @@ def _print_device_prompt(device: DeviceAuthorizationResponse, *, attempt_browser
 
 
 def _print_login_success(creds: OAuthCredentials, profile: str) -> None:
-    expires_local = creds.expires_at.astimezone(UTC).isoformat()
+    expires_utc = creds.expires_at.astimezone(UTC).isoformat()
     click.echo()
     click.echo(f"✓ Logged in as {creds.user_email or '<unknown user>'}")
     if creds.workspace_name:
@@ -206,7 +206,7 @@ def _print_login_success(creds: OAuthCredentials, profile: str) -> None:
     click.echo(f"  Profile: {profile}")
     click.echo(f"  Server: {creds.server}")
     click.echo(f"  Scope: {creds.scope}")
-    click.echo(f"  Expires: {expires_local} (refreshable)")
+    click.echo(f"  Expires: {expires_utc} (refreshable)")
     click.echo()
     click.echo(
         "  Note: To use Kagura from Claude Code, continue to use "

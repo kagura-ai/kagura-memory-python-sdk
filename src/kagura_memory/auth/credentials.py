@@ -230,13 +230,28 @@ def _atomic_write_json(path: Path, data: dict[str, Any], mode: int = CREDENTIALS
     )
     tmp = Path(tmp_str)
     try:
-        with os.fdopen(fd, "w") as f:
+        # encoding="utf-8" is explicit so writes don't depend on the
+        # system's default locale (load_credentials_file reads UTF-8).
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
             f.write("\n")
             f.flush()
             os.fsync(f.fileno())
         os.chmod(tmp, mode)
         os.replace(tmp, path)
+        # fsync the parent directory so the rename itself is durable on
+        # crash / power-loss: os.replace is atomic but the directory
+        # entry change isn't guaranteed to hit disk until the dir is
+        # fsync'd. Best-effort — Windows / some filesystems can't fsync
+        # a directory, so swallow OSError.
+        try:
+            dir_fd = os.open(str(path.parent), os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except OSError:
+            pass
     except Exception:
         if tmp.exists():
             tmp.unlink()
@@ -395,14 +410,17 @@ def get_shared_state(
     means they share a single :class:`asyncio.Lock` and any refresh
     fired by one of them benefits all of them.
     """
-    path = _resolve_path(path)
+    # Normalize the path once so the cache key and the persisted state
+    # path stay consistent — a relative path could otherwise cause the
+    # cache lookup and the refresh-time write to target different files.
+    path = _resolve_path(path).resolve()
     cf = load_credentials_file(path)
     creds = cf.get_profile(profile)
     if creds is None:
         return None
 
     profile_name = profile or cf.default_profile
-    key = (path.resolve(), profile_name)
+    key = (path, profile_name)
     cached = _state_cache.get(key)
     if cached is None:
         cached = _SharedCredentialsState(

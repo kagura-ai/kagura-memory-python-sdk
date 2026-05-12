@@ -77,7 +77,10 @@ def _resolve_auth(
     :class:`KaguraAuthError` when no source produces credentials.
     """
     # 1. Explicit constructor argument wins absolutely.
-    if api_key is not None:
+    # Empty / whitespace-only api_key is treated the same as None — sending
+    # `Authorization: Bearer ` would always 401 and is never what the caller
+    # intended; fall through to the env / OAuth / .kagura.json chain instead.
+    if api_key is not None and api_key.strip():
         return _StaticAuth(api_key=api_key, mcp_url=mcp_url or _DEFAULT_MCP_URL)
 
     # 2. KAGURA_API_KEY env var (highest auto-resolution priority).
