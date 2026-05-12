@@ -16,6 +16,7 @@ from .models import (
     Edge,
     EmbeddingModelsResponse,
     EmbeddingStatus,
+    ListTagsResponse,
     MemoryStatsResponse,
     RollbackResult,
     ServerInfo,
@@ -367,6 +368,63 @@ class KaguraClient:
             API response with available contexts
         """
         return await self._call_tool("list_contexts", {})
+
+    async def list_tags(
+        self,
+        context_id: str,
+        limit: int = 50,
+        min_count: int = 1,
+        sort: Literal["count", "recent", "alpha"] = "count",
+        prefix: str = "",
+    ) -> ListTagsResponse:
+        """List the tag vocabulary in a context with usage counts and recency.
+
+        Call before :meth:`remember` to reuse existing tag spellings, or before
+        :meth:`recall` with ``filters={"tags": [...]}`` to build accurate
+        filters. This is the primary mitigation for tag drift (e.g. ``"auth"``
+        vs ``"authentication"`` silently degrading recall precision).
+
+        Requires memory-cloud server v0.15.4+ — older servers expose
+        ``list_contexts`` and ``recall`` but not ``list_tags``, and will
+        return an MCP "tool not found" error. ``MIN_SERVER_VERSION`` is
+        deliberately not bumped because the rest of the SDK still works
+        against v0.15.1+; only this method needs the newer server.
+
+        Args:
+            context_id: Context ID to list tags from.
+            limit: Maximum tags to return (1-500, default 50).
+            min_count: Minimum memory count per tag (1-10000, default 1).
+            sort: Sort order — ``"count"`` (default), ``"recent"``, or ``"alpha"``.
+            prefix: Case-insensitive prefix filter for autocomplete-style lookup.
+                ``%`` and ``_`` are treated as literals server-side. Max 200 chars.
+
+        Returns:
+            :class:`ListTagsResponse` with ``context_id``, ``context_name``,
+            ``tags`` (list of :class:`TagInfo`), and ``total`` count.
+
+        Raises:
+            ValueError: If ``limit``, ``min_count``, or ``prefix`` are out of range.
+            KaguraNotFoundError: Context not found or caller lacks access.
+            KaguraError: Other server-side error.
+        """
+        if not 1 <= limit <= 500:
+            raise ValueError(f"limit must be between 1 and 500, got {limit}")
+        if not 1 <= min_count <= 10_000:
+            raise ValueError(f"min_count must be between 1 and 10000, got {min_count}")
+        if len(prefix) > 200:
+            raise ValueError(f"prefix must be at most 200 characters, got {len(prefix)}")
+
+        arguments: dict[str, Any] = {
+            "context_id": context_id,
+            "limit": limit,
+            "min_count": min_count,
+            "sort": sort,
+        }
+        if prefix:
+            arguments["prefix"] = prefix
+        result = await self._call_tool("list_tags", arguments)
+        self._raise_for_mcp_error(result, "list_tags")
+        return ListTagsResponse.model_validate(result)
 
     async def get_tool_definitions(self) -> list[dict[str, Any]]:
         """

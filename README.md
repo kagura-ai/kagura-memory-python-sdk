@@ -129,6 +129,10 @@ async with KaguraClient(api_key="kagura_...", mcp_url="https://...") as client:
         context_ids=["ctx-uuid-1", "ctx-uuid-2"], k=10,
     )
 
+    # Tag vocabulary — discover existing tag spellings before remember()/recall()
+    tags = await client.list_tags(context_id="dev", sort="recent", prefix="auth")
+    print([(t.tag, t.count) for t in tags.tags])
+
     # Merge contexts — copy all memories from source to target
     result = await client.merge_contexts(source_id="old-ctx", target_id="new-ctx")
     print(f"Merged {result['merged']} memories")

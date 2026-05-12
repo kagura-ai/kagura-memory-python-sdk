@@ -2350,3 +2350,155 @@ async def test_list_edges_raises_not_found_for_context_not_found():
             await client.list_edges(context_id="ctx-missing", memory_id="mem-1")
 
     await client.close()
+
+
+# ============================================================================
+# list_tags (Issue #620)
+# ============================================================================
+
+
+def _list_tags_envelope(
+    tags: list[dict] | None = None,
+    *,
+    context_id: str = "ctx-1",
+    context_name: str = "my-project",
+) -> dict:
+    """Build a server-success envelope for the list_tags MCP tool."""
+    tags = tags if tags is not None else []
+    return {
+        "status": "success",
+        "context_id": context_id,
+        "context_name": context_name,
+        "tags": tags,
+        "total": len(tags),
+    }
+
+
+@pytest.mark.asyncio
+async def test_list_tags_basic():
+    """list_tags() parses the server envelope into ListTagsResponse + TagInfo items."""
+    from kagura_memory import ListTagsResponse, TagInfo
+
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = _list_tags_envelope(
+            [
+                {"tag": "python", "count": 12, "last_used_at": "2026-05-01T10:00:00Z"},
+                {"tag": "auth", "count": 3, "last_used_at": None},
+            ]
+        )
+        result = await client.list_tags(context_id="ctx-1")
+
+        assert isinstance(result, ListTagsResponse)
+        assert result.context_id == "ctx-1"
+        assert result.context_name == "my-project"
+        assert result.total == 2
+        assert len(result.tags) == 2
+        assert all(isinstance(t, TagInfo) for t in result.tags)
+        assert result.tags[0].tag == "python"
+        assert result.tags[0].count == 12
+        assert result.tags[0].last_used_at is not None
+        assert result.tags[1].last_used_at is None
+
+        tool_name, args = mock.call_args[0]
+        assert tool_name == "list_tags"
+        assert args["context_id"] == "ctx-1"
+        assert args["limit"] == 50
+        assert args["min_count"] == 1
+        assert args["sort"] == "count"
+        assert "prefix" not in args
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_list_tags_passes_all_params():
+    """list_tags() forwards limit/min_count/sort/prefix to the MCP tool."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = _list_tags_envelope()
+        await client.list_tags(
+            context_id="ctx-1",
+            limit=200,
+            min_count=5,
+            sort="recent",
+            prefix="auth",
+        )
+        args = mock.call_args[0][1]
+        assert args["limit"] == 200
+        assert args["min_count"] == 5
+        assert args["sort"] == "recent"
+        assert args["prefix"] == "auth"
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_list_tags_empty_response():
+    """list_tags() handles an empty tag list."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = _list_tags_envelope(context_name="empty-context")
+        result = await client.list_tags(context_id="ctx-1")
+        assert result.tags == []
+        assert result.total == 0
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_list_tags_raises_not_found():
+    """list_tags() raises KaguraNotFoundError on context_not_found."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {
+            "status": "error",
+            "error": "context_not_found",
+            "message": "Context not found.",
+        }
+        with pytest.raises(KaguraNotFoundError, match="list_tags"):
+            await client.list_tags(context_id="ctx-missing")
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_list_tags_surfaces_server_error():
+    """list_tags() raises KaguraError on a generic server error code."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {
+            "status": "error",
+            "error": "invalid_argument",
+            "message": "limit must be an integer between 1 and 500.",
+        }
+        with pytest.raises(KaguraError, match="invalid_argument"):
+            await client.list_tags(context_id="ctx-1")
+
+    await client.close()
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"limit": 0}, "limit must be between"),
+        ({"limit": 501}, "limit must be between"),
+        ({"min_count": 0}, "min_count must be between"),
+        ({"min_count": 10_001}, "min_count must be between"),
+        ({"prefix": "x" * 201}, "prefix must be at most"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_list_tags_arg_validation(kwargs, match):
+    """list_tags() validates argument ranges client-side before issuing the call."""
+    client = _make_initialized_client()
+    try:
+        with pytest.raises(ValueError, match=match):
+            await client.list_tags(context_id="ctx-1", **kwargs)
+    finally:
+        await client.close()
