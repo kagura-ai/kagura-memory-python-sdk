@@ -99,6 +99,29 @@ def test_kagura_api_key_env_uses_kagura_mcp_url_env(isolated_credentials, monkey
     assert client.mcp_url == "https://env.example.com/mcp"
 
 
+def test_whitespace_only_api_key_falls_through(isolated_credentials, monkeypatch):
+    """An explicit api_key='   ' must not produce `Authorization: Bearer `."""
+    cf = CredentialsFile()
+    cf.set_profile("default", _make_creds())
+    save_credentials_file(cf, isolated_credentials)
+
+    # Whitespace-only explicit api_key → fall through to OAuth profile.
+    client = KaguraClient(api_key="   ")
+    assert isinstance(client._client.auth, KaguraOAuth)
+
+
+def test_whitespace_only_kagura_api_key_env_falls_through(isolated_credentials, monkeypatch):
+    """KAGURA_API_KEY='   ' must not produce `Authorization: Bearer `."""
+    cf = CredentialsFile()
+    cf.set_profile("default", _make_creds())
+    save_credentials_file(cf, isolated_credentials)
+
+    monkeypatch.setenv("KAGURA_API_KEY", "   ")
+    client = KaguraClient()
+    # Falls through to credentials.json OAuth profile.
+    assert isinstance(client._client.auth, KaguraOAuth)
+
+
 # ---------------------------------------------------------------------------
 # credentials.json OAuth path
 # ---------------------------------------------------------------------------

@@ -84,8 +84,10 @@ def _resolve_auth(
         return _StaticAuth(api_key=api_key, mcp_url=mcp_url or _DEFAULT_MCP_URL)
 
     # 2. KAGURA_API_KEY env var (highest auto-resolution priority).
+    # Strip-check mirrors the explicit-arg path above: a whitespace-only
+    # env var would otherwise send `Authorization: Bearer ` and 401.
     env_key = os.getenv("KAGURA_API_KEY")
-    if env_key:
+    if env_key and env_key.strip():
         return _StaticAuth(
             api_key=env_key,
             mcp_url=mcp_url or os.getenv("KAGURA_MCP_URL") or _DEFAULT_MCP_URL,
