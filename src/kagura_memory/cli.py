@@ -10,6 +10,7 @@ from typing import Any
 import click
 
 from .agent import KaguraAgent
+from .auth.cli import auth as _auth_group
 from .client import KaguraClient
 from .config import load_config
 from .files_client import FilesClient
@@ -80,6 +81,12 @@ def _run_client_command(
 def main():
     """Kagura Memory Cloud CLI - AI-driven memory management."""
     pass
+
+
+# Register the `kagura auth` sub-group (OAuth2 device-flow). Defined in
+# auth/cli.py so the auth surface stays in its own module; this line is
+# the wiring point.
+main.add_command(_auth_group, name="auth")
 
 
 @main.command()

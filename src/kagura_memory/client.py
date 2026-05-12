@@ -3,12 +3,16 @@
 import itertools
 import json
 import logging
+import os
+from dataclasses import dataclass
 from typing import Any, Literal, TypeVar
 
 import httpx
 from pydantic import BaseModel as _BaseModel
 
 from ._http import SDK_VERSION, base_url_from_mcp, validate_https_url
+from .auth.credentials import KaguraOAuth, get_shared_state
+from .config import load_config
 from .exceptions import KaguraAuthError, KaguraConnectionError, KaguraError, KaguraNotFoundError
 from .models import (
     ContextInfo,
@@ -42,6 +46,84 @@ silently ignore unknown parameters."""
 _MIN_SERVER_VERSION_TUPLE = tuple(int(x) for x in MIN_SERVER_VERSION.split(".")[:3])
 
 
+_DEFAULT_MCP_URL = "https://memory.kagura-ai.com/mcp"
+
+
+@dataclass
+class _StaticAuth:
+    """Long-lived API key resolution result."""
+
+    api_key: str
+    mcp_url: str
+
+
+@dataclass
+class _OAuthAuth:
+    """OAuth credentials.json resolution result."""
+
+    oauth: KaguraOAuth
+    mcp_url: str
+
+
+def _resolve_auth(
+    *,
+    api_key: str | None,
+    mcp_url: str | None,
+    profile: str | None,
+) -> _StaticAuth | _OAuthAuth:
+    """Pick a credential source per the documented precedence chain.
+
+    See :meth:`KaguraClient.__init__` for the full order. Raises
+    :class:`KaguraAuthError` when no source produces credentials.
+    """
+    # 1. Explicit constructor argument wins absolutely.
+    if api_key is not None:
+        return _StaticAuth(api_key=api_key, mcp_url=mcp_url or _DEFAULT_MCP_URL)
+
+    # 2. KAGURA_API_KEY env var (highest auto-resolution priority).
+    env_key = os.getenv("KAGURA_API_KEY")
+    if env_key:
+        return _StaticAuth(
+            api_key=env_key,
+            mcp_url=mcp_url or os.getenv("KAGURA_MCP_URL") or _DEFAULT_MCP_URL,
+        )
+
+    # 3. OAuth profile from credentials.json: explicit > KAGURA_PROFILE > default.
+    target_profile = profile or os.getenv("KAGURA_PROFILE")
+    state = get_shared_state(profile=target_profile)
+    if state is not None:
+        return _OAuthAuth(
+            oauth=KaguraOAuth(state),
+            mcp_url=mcp_url or state.credentials.mcp_url,
+        )
+    if target_profile:
+        # An explicit profile name (via arg or KAGURA_PROFILE env) was
+        # requested but credentials.json has no such profile. Falling
+        # through to .kagura.json would silently authenticate with the
+        # wrong account, so raise instead.
+        source = "profile argument" if profile else "KAGURA_PROFILE env"
+        raise KaguraAuthError(
+            f"Profile '{target_profile}' (from {source}) not found in credentials.json.\n"
+            f"  Run: kagura auth login --profile {target_profile}\n"
+            f"  Or: kagura auth status   # to list known profiles"
+        )
+
+    # 4. Legacy .kagura.json (which itself env-falls-back internally).
+    cfg = load_config()
+    if cfg.get("api_key"):
+        return _StaticAuth(
+            api_key=cfg["api_key"],
+            mcp_url=mcp_url or cfg.get("mcp_url") or _DEFAULT_MCP_URL,
+        )
+
+    raise KaguraAuthError(
+        "No credentials found.\n"
+        "  Run: kagura auth login\n"
+        "  Or set: KAGURA_API_KEY=<your key>\n"
+        '  Or create: .kagura.json with {"api_key": "..."}'
+    )
+
+
 class KaguraClient:
     """
     Low-level REST API client for Kagura Memory Cloud MCP tools.
@@ -54,28 +136,62 @@ class KaguraClient:
 
     def __init__(
         self,
-        api_key: str,
-        mcp_url: str = "https://memory.kagura-ai.com/mcp",
+        api_key: str | None = None,
+        mcp_url: str | None = None,
         timeout: float = 30.0,
+        profile: str | None = None,
     ):
-        """
-        Initialize Kagura API client.
+        """Initialize Kagura API client.
+
+        Authentication resolution order when ``api_key`` is omitted:
+
+        1. ``KAGURA_API_KEY`` env var (highest — CI / service accounts always win).
+        2. The OAuth profile from ``~/.kagura/credentials.json``,
+           selected by the ``profile`` argument or the ``KAGURA_PROFILE``
+           env var, falling back to ``default_profile``.
+        3. ``.kagura.json`` (cwd or ``~/``) plus its own env fallback
+           (existing legacy behavior).
 
         Args:
-            api_key: Kagura API key
-            mcp_url: MCP server URL
-            timeout: Request timeout in seconds
+            api_key: Explicit Kagura API key. When omitted, the
+                resolution chain above runs.
+            mcp_url: Explicit MCP URL. When omitted, derived from the
+                resolved credential source (OAuth profile, env, or
+                ``.kagura.json``).
+            timeout: Request timeout in seconds.
+            profile: Named OAuth profile to load (overrides
+                ``KAGURA_PROFILE`` and the credentials file's
+                ``default_profile``).
         """
-        stripped_url = mcp_url.rstrip("/")
+        resolved = _resolve_auth(api_key=api_key, mcp_url=mcp_url, profile=profile)
+
+        stripped_url = resolved.mcp_url.rstrip("/")
         validate_https_url(stripped_url, label="MCP URL")
 
         self.mcp_url = stripped_url
         self._base_url = base_url_from_mcp(stripped_url)
         self.timeout = timeout
-        self._client = httpx.AsyncClient(
-            timeout=timeout,
-            headers={"Authorization": f"Bearer {api_key}"},
-        )
+
+        if isinstance(resolved, _StaticAuth):
+            # Long-lived API key path: bake the bearer header once and
+            # forget the value (compliant with python.md "Never store
+            # API keys as instance attributes").
+            self._client = httpx.AsyncClient(
+                timeout=timeout,
+                headers={"Authorization": f"Bearer {resolved.api_key}"},
+            )
+        else:
+            # OAuth path: the KaguraOAuth httpx.Auth subclass injects a
+            # fresh bearer header per request and triggers refresh when
+            # the access_token is within REFRESH_SKEW_SEC of expiry.
+            # Concurrent KaguraClient instances pointing at the same
+            # credentials file share an asyncio.Lock through the
+            # module-level cache, so only one refresh fires per cycle.
+            self._client = httpx.AsyncClient(
+                timeout=timeout,
+                auth=resolved.oauth,
+            )
+
         self._session_id: str | None = None
         self._request_id_counter = itertools.count(1)
 
