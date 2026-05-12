@@ -300,7 +300,8 @@ def auth_logout(profile: str | None, all_profiles: bool, yes: bool) -> None:
     creds = cf.get_profile(target)
     if creds is None:
         raise click.ClickException(
-            f"No profile named '{target}'.\n  Run: kagura auth status   # to list known profiles"
+            f"No profile named '{target}'.\n"
+            f"  Inspect ~/.kagura/credentials.json to see which profiles exist."
         )
 
     asyncio.run(_revoke_one_best_effort(creds))

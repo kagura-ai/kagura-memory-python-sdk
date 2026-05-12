@@ -105,7 +105,7 @@ def _resolve_auth(
         raise KaguraAuthError(
             f"Profile '{target_profile}' (from {source}) not found in credentials.json.\n"
             f"  Run: kagura auth login --profile {target_profile}\n"
-            f"  Or: kagura auth status   # to list known profiles"
+            f"  Or inspect ~/.kagura/credentials.json to see which profiles exist."
         )
 
     # 4. Legacy .kagura.json (which itself env-falls-back internally).

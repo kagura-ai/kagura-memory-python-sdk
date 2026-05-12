@@ -263,6 +263,10 @@ def _enforce_file_perms(path: Path) -> None:
         if current != CREDENTIALS_FILE_MODE:
             os.chmod(path, CREDENTIALS_FILE_MODE)
     except OSError:
+        # Best-effort: a file we cannot chmod (read-only FS, foreign
+        # ownership) is the user's problem to fix, not ours to abort
+        # over. Downstream reads will fail with a clearer error if
+        # the perms genuinely block access.
         pass
 
 
@@ -346,12 +350,16 @@ def delete_profile(
 
 
 def delete_credentials_file(path: Path | None = None) -> None:
-    """Remove the entire credentials file (``kagura auth logout --all``)."""
+    """Remove the entire credentials file (``kagura auth logout --all``).
+
+    Missing file is treated as success — ``logout --all`` is idempotent.
+    """
     path = _resolve_path(path)
     try:
         path.unlink()
     except FileNotFoundError:
-        pass
+        # File already absent — logout is idempotent.
+        return
 
 
 # ---------------------------------------------------------------------------

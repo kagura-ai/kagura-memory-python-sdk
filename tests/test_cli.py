@@ -43,13 +43,22 @@ def test_config_show_no_api_key(mock_config):
 
 
 @patch("kagura_memory.cli.load_config")
-def test_remember_missing_api_key(mock_config):
-    """remember should fail without API key."""
-    mock_config.return_value = {"api_key": ""}
+def test_remember_missing_api_key(mock_config, monkeypatch, tmp_path):
+    """remember should fail when neither api_key nor OAuth credentials exist."""
+    mock_config.return_value = {"api_key": "", "context_id": "ctx-1"}
+    # Make sure env vars + credentials.json paths cannot rescue.
+    monkeypatch.delenv("KAGURA_API_KEY", raising=False)
+    monkeypatch.delenv("KAGURA_PROFILE", raising=False)
+    monkeypatch.setattr(
+        "kagura_memory.auth.credentials.DEFAULT_CREDENTIALS_PATH",
+        tmp_path / "missing-credentials.json",
+    )
+    # Also short-circuit the .kagura.json fallback inside KaguraClient._resolve_auth.
+    monkeypatch.setattr("kagura_memory.client.load_config", lambda: {"api_key": ""})
     runner = CliRunner()
     result = runner.invoke(main, ["remember", "-s", "test", "--content", "data"])
     assert result.exit_code != 0
-    assert "No API key" in result.output
+    assert "No credentials found" in result.output or "kagura auth login" in result.output
 
 
 @patch("kagura_memory.cli.load_config")
@@ -795,14 +804,21 @@ def test_sleep_rollback_wraps_unexpected_exception(mock_client_cls, mock_config)
 
 
 @patch("kagura_memory.cli.load_config")
-def test_get_kagura_client_missing_api_key(mock_config):
-    """_get_kagura_client raises ClickException when no api_key in config."""
+def test_get_kagura_client_missing_api_key(mock_config, monkeypatch, tmp_path):
+    """_get_kagura_client surfaces a credential error when no api_key + no OAuth."""
     mock_config.return_value = {"api_key": "", "mcp_url": "https://test.com/mcp"}
+    monkeypatch.delenv("KAGURA_API_KEY", raising=False)
+    monkeypatch.delenv("KAGURA_PROFILE", raising=False)
+    monkeypatch.setattr(
+        "kagura_memory.auth.credentials.DEFAULT_CREDENTIALS_PATH",
+        tmp_path / "missing-credentials.json",
+    )
+    monkeypatch.setattr("kagura_memory.client.load_config", lambda: {"api_key": ""})
 
     runner = CliRunner()
     result = runner.invoke(main, ["sleep", "rollback", "ctx-1", "rid-9", "-y"])
     assert result.exit_code != 0
-    assert "No API key" in result.output
+    assert "No credentials found" in result.output or "kagura auth login" in result.output
 
 
 # ============================================================================
