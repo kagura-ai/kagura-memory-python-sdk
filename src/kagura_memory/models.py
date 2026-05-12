@@ -646,6 +646,40 @@ class Edge(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Tag vocabulary (server v0.15.4+, Issue #614)
+# ---------------------------------------------------------------------------
+
+
+class TagInfo(BaseModel):
+    """A tag with its usage count and last-used timestamp.
+
+    Mirrors the wire shape of the server's ``RelatedTagItem`` as emitted by
+    the ``list_tags`` MCP tool. ``sample_summary`` from the server-side
+    pydantic model is intentionally omitted because ``list_tags`` does not
+    populate it (only ``recall.related_tags`` does). The schema is otherwise
+    aligned so callers can unify their tag-info type between the two
+    surfaces.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    tag: str
+    count: int
+    last_used_at: datetime | None = None
+
+
+class ListTagsResponse(BaseModel):
+    """Response from ``list_tags``: tag vocabulary for a context."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    context_id: str
+    context_name: str
+    tags: list[TagInfo] = Field(default_factory=list)
+    total: int
+
+
+# ---------------------------------------------------------------------------
 # File objects (server v0.15.1+)
 # ---------------------------------------------------------------------------
 

@@ -36,6 +36,7 @@ from .models import (
     IndexerState,
     IndexerStateMetrics,
     IndexerStatusResponse,
+    ListTagsResponse,
     LLMUsage,
     Memory,
     MemoryInfo,
@@ -70,6 +71,7 @@ from .models import (
     SleepReport,
     SleepReportDetail,
     SleepRunStatus,
+    TagInfo,
     UsageInfo,
     UsageQuota,
     UsageQuotaLimitOnly,
@@ -123,6 +125,9 @@ __all__ = [
     "DuplicatesResponse",
     # Edge model
     "Edge",
+    # Tag vocabulary (server v0.15.4+)
+    "TagInfo",
+    "ListTagsResponse",
     # Resource Token models
     "ResourceTokenCreate",
     "ResourceTokenUpdate",
