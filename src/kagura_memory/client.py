@@ -384,8 +384,14 @@ class KaguraClient:
         filters. This is the primary mitigation for tag drift (e.g. ``"auth"``
         vs ``"authentication"`` silently degrading recall precision).
 
+        Requires memory-cloud server v0.15.4+ — older servers expose
+        ``list_contexts`` and ``recall`` but not ``list_tags``, and will
+        return an MCP "tool not found" error. ``MIN_SERVER_VERSION`` is
+        deliberately not bumped because the rest of the SDK still works
+        against v0.15.1+; only this method needs the newer server.
+
         Args:
-            context_id: Context UUID to list tags from.
+            context_id: Context ID to list tags from.
             limit: Maximum tags to return (1-500, default 50).
             min_count: Minimum memory count per tag (1-10000, default 1).
             sort: Sort order — ``"count"`` (default), ``"recent"``, or ``"alpha"``.
