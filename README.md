@@ -226,6 +226,47 @@ When pointing the SDK at a backend with `R2_CHECKSUM_BINDING_ENABLED=true`, the 
 
 ## CLI
 
+### Authentication (OAuth2 device flow)
+
+Log in once with `kagura auth login` — the SDK stores credentials at
+`~/.kagura/credentials.json` (mode 0600) and `KaguraClient()` plus all
+`kagura` CLI commands pick them up automatically:
+
+```bash
+kagura auth login                                    # default scope: memory:read
+kagura auth login --scope "memory:read memory:write" # also request write access
+kagura auth login --no-browser                       # SSH / WSL2 / headless
+kagura auth login --profile work                     # named profile for a second workspace
+
+kagura auth status                                   # show profile, server, expiry, scope
+kagura auth refresh                                  # manual token rotation
+kagura auth refresh --scope "memory:write"           # incremental consent (re-runs device flow)
+kagura auth token                                    # raw access_token to stdout (CI use)
+kagura auth logout                                   # revoke + delete profile
+kagura auth logout --all --yes                       # remove every profile
+```
+
+Two integration paths:
+
+| You want… | Use |
+|---|---|
+| **CLI / `KaguraClient`** (terminal use, scripts, `KaguraAgent`) | `kagura auth login` — refresh happens automatically |
+| **Claude Code MCP** (Claude Code reads `.mcp.json`) | `kagura setup claude` with a long-lived API key from the web UI |
+
+Claude Code's MCP client reads its config once at startup and does
+not refresh tokens — a refresh-aware MCP proxy daemon
+(`kagura-mcp`) is tracked as a follow-up so that `kagura auth login`
+can eventually power both paths from a single credentials file. For
+now, use the long-lived API key path for Claude Code and the OAuth
+path for everything else.
+
+Credential resolution order when `KaguraClient()` is called with no
+arguments: `KAGURA_API_KEY` env (CI / service accounts always win) →
+`KAGURA_PROFILE` env or explicit `profile=` arg → `default_profile`
+from `~/.kagura/credentials.json` → legacy `.kagura.json`.
+
+### Other commands
+
 ```bash
 # AI-powered (requires LLM API key)
 kagura process -m "Remember: FastAPI uses Depends() for DI"
