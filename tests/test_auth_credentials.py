@@ -202,6 +202,48 @@ def test_load_returns_empty_on_corrupt_file(tmp_path: Path):
     assert cf.profiles == {}
 
 
+def test_load_returns_empty_on_non_dict_json(tmp_path: Path):
+    """Top-level JSON array / scalar must not crash."""
+    path = tmp_path / "creds.json"
+    path.write_text('["this is", "an array"]')
+    cf = load_credentials_file(path)
+    assert cf.profiles == {}
+
+
+def test_load_returns_empty_on_partial_profile(tmp_path: Path):
+    """A profile missing required fields falls through to empty CredentialsFile."""
+    import json as _json
+
+    path = tmp_path / "creds.json"
+    path.write_text(
+        _json.dumps(
+            {
+                "version": 1,
+                "default_profile": "broken",
+                "profiles": {
+                    "broken": {"only_has_one_field": "yes"},  # missing access_token etc.
+                },
+            }
+        )
+    )
+    cf = load_credentials_file(path)
+    assert cf.profiles == {}
+
+
+def test_delete_profile_no_op_when_missing(tmp_path: Path):
+    """Calling delete_profile on a name that isn't in the file is silent."""
+    from kagura_memory.auth.credentials import delete_profile
+
+    path = tmp_path / "creds.json"
+    cf = CredentialsFile()
+    cf.set_profile("alice", _sample_creds())
+    save_credentials_file(cf, path)
+
+    delete_profile("does-not-exist", path)
+    restored = load_credentials_file(path)
+    assert "alice" in restored.profiles  # untouched
+
+
 def test_load_fixes_loose_file_perms(tmp_path: Path):
     """File written 0644 should be coerced back to 0600 on read."""
     path = tmp_path / "creds.json"

@@ -357,6 +357,44 @@ async def test_refresh_invalid_grant_raises_expired():
 
 
 @pytest.mark.asyncio
+async def test_refresh_non_json_5xx_includes_http_status_and_body():
+    """Non-OAuth 5xx (HTML body, proxy error) must surface HTTP status + body."""
+    client = MagicMock()
+    response = _mock_response(503, body={}, text="Service Unavailable - proxy timeout")
+    # _safe_json returns {} for non-dict bodies, but here body is empty dict already.
+    # We need response.json to raise so _safe_json returns {}.
+    response.json = MagicMock(side_effect=ValueError("not json"))
+    response.text = "Service Unavailable - proxy timeout"
+    client.post = AsyncMock(return_value=response)
+
+    with pytest.raises(KaguraAuthError, match="HTTP 503"):
+        await refresh_access_token(
+            client, SERVER, client_id=DEFAULT_CLIENT_ID, refresh_token="rtok-old"
+        )
+
+
+@pytest.mark.asyncio
+async def test_poll_non_json_5xx_includes_http_status_and_body():
+    """poll_for_token must surface HTTP status when body is non-JSON / 5xx."""
+    client = MagicMock()
+    response = _mock_response(502, body={}, text="Bad Gateway")
+    response.json = MagicMock(side_effect=ValueError("not json"))
+    response.text = "Bad Gateway"
+    client.post = AsyncMock(return_value=response)
+
+    with pytest.raises(KaguraAuthError, match="HTTP 502"):
+        await poll_for_token(
+            client,
+            SERVER,
+            client_id=DEFAULT_CLIENT_ID,
+            device_code="dc",
+            interval=5,
+            expires_at=datetime.now(UTC) + timedelta(minutes=10),
+            sleep=_no_sleep,
+        )
+
+
+@pytest.mark.asyncio
 async def test_refresh_insufficient_scope_raises_auth_error():
     """``insufficient_scope`` → generic KaguraAuthError so CLI can detect+retry."""
     client = MagicMock()
