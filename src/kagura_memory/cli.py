@@ -111,6 +111,11 @@ def process(message, file, deep, verbose):
         elif file:
             session = Session(**json.load(file))
         else:
+            if sys.stdin.isatty():
+                raise click.UsageError(
+                    "No input given. Use -m / -f, or pipe a session JSON to stdin. "
+                    "Run `kagura process --help` for examples."
+                )
             session = Session(**json.load(sys.stdin))
 
         # KaguraAgent / KaguraClient run the full credential resolution

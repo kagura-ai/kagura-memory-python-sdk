@@ -360,6 +360,58 @@ def test_process_command(mock_agent_cls, mock_config):
 
 
 @patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.sys")
+def test_process_no_input_on_tty_exits_with_usage_hint(mock_sys, mock_config):
+    """`kagura process` (no -m / -f) on an interactive TTY must refuse to block
+    on stdin and surface a Click UsageError with the recovery hint instead.
+
+    CliRunner replaces the real sys.stdin with a BytesIO at invoke-time, so we
+    patch the cli module's `sys` reference itself to force isatty()=True and
+    exercise the TTY-detection branch deterministically.
+    """
+    mock_config.return_value = {"api_key": "key", "mcp_url": "https://test.com/mcp"}
+    mock_sys.stdin.isatty.return_value = True
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["process"])
+
+    assert result.exit_code == 2
+    assert "No input given" in result.output
+    assert "kagura process --help" in result.output
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraAgent")
+def test_process_reads_piped_json_when_not_tty(mock_agent_cls, mock_config):
+    """`echo '{...}' | kagura process` must still read session JSON from stdin —
+    the TTY check only blocks the interactive case, not pipe / redirect input.
+    """
+    mock_config.return_value = {
+        "api_key": "key",
+        "mcp_url": "https://test.com/mcp",
+        "context_id": "ctx",
+    }
+
+    mock_agent = AsyncMock()
+    mock_agent.process.return_value = MagicMock(
+        model_dump=lambda: {"remembered": [], "recalled": [], "context_used": "ctx"}
+    )
+    mock_agent.__aenter__ = AsyncMock(return_value=mock_agent)
+    mock_agent.__aexit__ = AsyncMock(return_value=None)
+    mock_agent_cls.return_value = mock_agent
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        ["process"],
+        input='{"messages":[{"role":"user","content":"piped"}]}',
+    )
+
+    assert result.exit_code == 0
+    assert "ctx" in result.output
+
+
+@patch("kagura_memory.cli.load_config")
 @patch("kagura_memory.cli.KaguraClient")
 def test_remember_with_empty_tags(mock_client_cls, mock_config):
     """remember with empty tags should not pass empty strings."""
