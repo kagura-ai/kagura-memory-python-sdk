@@ -1,5 +1,7 @@
 """Custom exceptions for Kagura Memory SDK."""
 
+from datetime import datetime
+
 
 class KaguraError(Exception):
     """Base exception for Kagura SDK."""
@@ -7,6 +9,24 @@ class KaguraError(Exception):
 
 class KaguraAuthError(KaguraError):
     """Authentication failed."""
+
+
+class KaguraAuthExpiredError(KaguraAuthError):
+    """OAuth refresh token expired or invalid.
+
+    Raised when an attempted refresh returns ``invalid_grant`` (or the
+    server otherwise indicates that the stored refresh token can no
+    longer be used). The caller must re-authenticate via
+    ``kagura auth login``.
+    """
+
+    def __init__(self, message: str, expires_at: datetime | None = None):
+        super().__init__(message)
+        self.expires_at = expires_at
+
+
+class KaguraAuthDeniedError(KaguraAuthError):
+    """User denied authorization at the device-flow consent screen."""
 
 
 class KaguraConnectionError(KaguraError):

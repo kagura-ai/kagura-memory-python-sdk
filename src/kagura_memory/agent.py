@@ -37,8 +37,8 @@ class KaguraAgent:
 
     def __init__(
         self,
-        api_key: str,
-        mcp_url: str = "https://memory.kagura-ai.com/mcp",
+        api_key: str | None = None,
+        mcp_url: str | None = None,
         model: str = "gpt-5.4-nano",
         context_id: str | None = None,
         timeout: float = 30.0,
@@ -52,8 +52,13 @@ class KaguraAgent:
         Initialize Kagura Agent.
 
         Args:
-            api_key: Kagura API key
-            mcp_url: MCP server URL
+            api_key: Kagura API key. When None, the underlying
+                ``KaguraClient`` resolves credentials via the env →
+                OAuth profile → .kagura.json chain (see
+                :class:`KaguraClient` docs).
+            mcp_url: MCP server URL. When None, the underlying
+                ``KaguraClient`` derives it from the resolved
+                credential source.
             model: LLM model to use (e.g., "gpt-5.4-nano", "ollama/qwen3:30b")
             context_id: Default context ID (None or "auto" for auto-selection)
             timeout: Request timeout in seconds

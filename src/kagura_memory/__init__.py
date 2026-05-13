@@ -3,7 +3,9 @@
 from .agent import KaguraAgent
 from .client import MIN_SERVER_VERSION, KaguraClient
 from .exceptions import (
+    KaguraAuthDeniedError,
     KaguraAuthError,
+    KaguraAuthExpiredError,
     KaguraConnectionError,
     KaguraContextError,
     KaguraError,
@@ -165,6 +167,8 @@ __all__ = [
     # Exceptions
     "KaguraError",
     "KaguraAuthError",
+    "KaguraAuthExpiredError",
+    "KaguraAuthDeniedError",
     "KaguraConnectionError",
     "KaguraRateLimitError",
     "KaguraNotFoundError",

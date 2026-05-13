@@ -10,6 +10,7 @@ from typing import Any
 import click
 
 from .agent import KaguraAgent
+from .auth.cli import auth as _auth_group
 from .client import KaguraClient
 from .config import load_config
 from .files_client import FilesClient
@@ -39,15 +40,14 @@ def _run_client_command(
     """
     Execute a client operation with standard boilerplate.
 
-    Handles: config loading, API key check, context resolution,
-    client lifecycle, async execution, JSON output, and error handling.
+    Handles: config loading, context resolution, client lifecycle,
+    async execution, JSON output, and error handling. ``KaguraClient``
+    itself runs the full credential resolution chain (env → OAuth
+    profile → .kagura.json), so commands work seamlessly after a
+    ``kagura auth login`` even if .kagura.json is absent.
     """
     try:
         config = load_config()
-        if not config.get("api_key"):
-            raise click.ClickException(
-                "No API key found. Set KAGURA_API_KEY or create .kagura.json"
-            )
 
         ctx_id = ""
         if needs_context:
@@ -58,8 +58,8 @@ def _run_client_command(
                 )
 
         client = KaguraClient(
-            api_key=config.get("api_key", ""),
-            mcp_url=config.get("mcp_url", "https://memory.kagura-ai.com/mcp"),
+            api_key=config.get("api_key") or None,
+            mcp_url=config.get("mcp_url") or None,
         )
 
         async def _run() -> dict[str, Any]:
@@ -82,6 +82,12 @@ def main():
     pass
 
 
+# Register the `kagura auth` sub-group (OAuth2 device-flow). Defined in
+# auth/cli.py so the auth surface stays in its own module; this line is
+# the wiring point.
+main.add_command(_auth_group, name="auth")
+
+
 @main.command()
 @click.option("--message", "-m", help="Single message to process")
 @click.option("--file", "-f", type=click.File("r"), help="Session JSON file")
@@ -98,10 +104,6 @@ def process(message, file, deep, verbose):
     """
     try:
         config = load_config()
-        if not config.get("api_key"):
-            raise click.ClickException(
-                "No API key found. Set KAGURA_API_KEY or create .kagura.json"
-            )
 
         # Parse input
         if message:
@@ -111,8 +113,9 @@ def process(message, file, deep, verbose):
         else:
             session = Session(**json.load(sys.stdin))
 
-        # Create agent — extract known keys to avoid TypeError on unknown config keys
-        agent_kwargs: dict[str, Any] = {"api_key": config.get("api_key", "")}
+        # KaguraAgent / KaguraClient run the full credential resolution
+        # chain when api_key is None — env > OAuth profile > .kagura.json.
+        agent_kwargs: dict[str, Any] = {"api_key": config.get("api_key") or None}
         if config.get("mcp_url"):
             agent_kwargs["mcp_url"] = config["mcp_url"]
         if config.get("model"):
@@ -754,14 +757,25 @@ def _get_resource_client() -> ResourceClient:
 
 
 def _get_kagura_client() -> KaguraClient:
-    """Load config and create KaguraClient (mirrors :func:`_get_resource_client`)."""
+    """Load config and create KaguraClient.
+
+    Unlike :func:`_get_resource_client`, this does NOT pre-check for
+    an api_key — ``KaguraClient.__init__`` runs the full resolution
+    chain (env > OAuth profile > .kagura.json) so a ``kagura auth
+    login``-only setup works without a static api_key. The credential
+    error from the chain is translated to a ``ClickException`` so the
+    operator sees a clean message instead of a traceback.
+    """
+    from .exceptions import KaguraAuthError
+
     config = load_config()
-    if not config.get("api_key"):
-        raise click.ClickException("No API key found. Set KAGURA_API_KEY or create .kagura.json")
-    return KaguraClient(
-        api_key=config.get("api_key", ""),
-        mcp_url=config.get("mcp_url", "https://memory.kagura-ai.com/mcp"),
-    )
+    try:
+        return KaguraClient(
+            api_key=config.get("api_key") or None,
+            mcp_url=config.get("mcp_url") or None,
+        )
+    except KaguraAuthError as e:
+        raise click.ClickException(str(e)) from e
 
 
 def _run_resource_command(
