@@ -31,10 +31,12 @@ from ..exceptions import (
     KaguraConnectionError,
 )
 
-# OAuth2 endpoint paths under {server}
-_PATH_DEVICE_AUTHORIZE = "/api/v1/oauth2/device/authorize"
-_PATH_TOKEN = "/api/v1/oauth2/token"
-_PATH_REVOKE = "/api/v1/oauth2/revoke"
+# OAuth2 endpoint paths under {server}.
+# The path prefix is /api/v1/oauth/ (NOT /oauth2/) per memory-cloud's
+# actual mount point; the token endpoint requires the trailing slash.
+_PATH_DEVICE_AUTHORIZE = "/api/v1/oauth/device/authorize"
+_PATH_TOKEN = "/api/v1/oauth/token/"
+_PATH_REVOKE = "/api/v1/oauth/revoke"
 
 # RFC 8628 §3.5 — "slow_down" requires the client to add 5 seconds.
 _SLOW_DOWN_INCREMENT_SEC = 5
@@ -113,10 +115,13 @@ async def authorize_device(
 ) -> DeviceAuthorizationResponse:
     """POST ``/api/v1/oauth2/device/authorize`` and parse the response."""
     url = f"{server.rstrip('/')}{_PATH_DEVICE_AUTHORIZE}"
-    data = {"client_id": client_id, "scope": scope}
+    # memory-cloud's device/authorize accepts JSON (DeviceAuthorizationRequest
+    # pydantic model), unlike the /oauth/token/ + /oauth/revoke endpoints
+    # which take application/x-www-form-urlencoded.
+    body = {"client_id": client_id, "scope": scope}
 
     try:
-        response = await client.post(url, data=data)
+        response = await client.post(url, json=body)
         response.raise_for_status()
     except httpx.HTTPStatusError as e:
         detail = extract_detail(e.response) or e.response.text

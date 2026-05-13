@@ -78,11 +78,11 @@ async def test_authorize_device_happy_path():
     assert da.user_code == "ABCD-1234"
     assert da.device_code == "dc-1"
     assert da.interval == 5
-    # The POST body uses application/x-www-form-urlencoded data.
+    # device/authorize uses application/json body (server-side pydantic model).
     client.post.assert_called_once()
     posted = client.post.call_args
-    assert posted.kwargs["data"]["client_id"] == DEFAULT_CLIENT_ID
-    assert posted.kwargs["data"]["scope"] == "memory:read"
+    assert posted.kwargs["json"]["client_id"] == DEFAULT_CLIENT_ID
+    assert posted.kwargs["json"]["scope"] == "memory:read"
 
 
 @pytest.mark.asyncio
