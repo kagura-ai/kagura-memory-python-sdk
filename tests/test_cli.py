@@ -382,6 +382,42 @@ def test_process_no_input_on_tty_exits_with_usage_hint(mock_sys, mock_config):
 
 @patch("kagura_memory.cli.load_config")
 @patch("kagura_memory.cli.KaguraAgent")
+def test_process_output_keeps_non_ascii_readable(mock_agent_cls, mock_config):
+    """`kagura process` JSON output must keep non-ASCII characters (CJK, emoji,
+    accented Latin) readable — i.e. `ensure_ascii=False` on json.dumps. Regression
+    guard for issue #106: agent action strings like "recall: こんにちは" were being
+    serialised as "recall: \\u3053\\u3093..." which is unreadable in a terminal.
+    """
+    mock_config.return_value = {
+        "api_key": "key",
+        "mcp_url": "https://test.com/mcp",
+        "context_id": "ctx",
+    }
+
+    mock_agent = AsyncMock()
+    mock_agent.process.return_value = MagicMock(
+        model_dump=lambda: {
+            "remembered": [],
+            "recalled": [],
+            "context_used": "ctx",
+            "actions": ["recall: こんにちは 挨拶 日本語"],
+        }
+    )
+    mock_agent.__aenter__ = AsyncMock(return_value=mock_agent)
+    mock_agent.__aexit__ = AsyncMock(return_value=None)
+    mock_agent_cls.return_value = mock_agent
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["process", "-m", "hi"])
+
+    assert result.exit_code == 0
+    assert "こんにちは" in result.output
+    assert "挨拶" in result.output
+    assert "\\u3053" not in result.output
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraAgent")
 def test_process_reads_piped_json_when_not_tty(mock_agent_cls, mock_config):
     """`echo '{...}' | kagura process` must still read session JSON from stdin —
     the TTY check only blocks the interactive case, not pipe / redirect input.
