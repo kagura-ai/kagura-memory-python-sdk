@@ -327,6 +327,45 @@ def test_get_shared_state_returns_same_object_for_same_key(tmp_path: Path):
     assert a is b
 
 
+def test_get_shared_state_profiles_share_one_lock_per_file(tmp_path: Path):
+    """Two profiles in the same file must share one asyncio.Lock to prevent
+    cross-profile lost-update during concurrent refresh."""
+    reset_state_cache()
+    path = tmp_path / "creds.json"
+    cf = CredentialsFile()
+    cf.set_profile("a", _sample_creds(access_token="a"))
+    cf.set_profile("b", _sample_creds(access_token="b"))
+    save_credentials_file(cf, path)
+
+    state_a = get_shared_state(path, profile="a")
+    state_b = get_shared_state(path, profile="b")
+    assert state_a is not state_b
+    assert state_a.lock is state_b.lock  # shared file-level lock
+
+
+def test_parse_iso_handles_naive_datetime(tmp_path: Path):
+    """Naive timestamps (no tz suffix) must be normalized to UTC."""
+    import json as _json
+
+    path = tmp_path / "creds.json"
+    creds_dict = _sample_creds().to_dict()
+    # Strip the trailing Z so the timestamp is naive.
+    creds_dict["expires_at"] = "2027-01-01T00:00:00"
+    creds_dict["issued_at"] = "2026-01-01T00:00:00"
+    path.write_text(
+        _json.dumps(
+            {"version": 1, "default_profile": "default", "profiles": {"default": creds_dict}}
+        )
+    )
+
+    cf = load_credentials_file(path)
+    profile = cf.get_profile("default")
+    assert profile is not None
+    # Must NOT crash on astimezone()
+    assert profile.is_expired() is False
+    assert profile.expires_at.tzinfo is not None
+
+
 def test_get_shared_state_separates_different_profiles(tmp_path: Path):
     reset_state_cache()
     path = tmp_path / "creds.json"

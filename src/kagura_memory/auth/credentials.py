@@ -202,10 +202,18 @@ def _iso_utc(dt: datetime) -> str:
 
 
 def _parse_iso(s: str) -> datetime:
-    """Parse ISO-8601, accepting both ``...Z`` and ``...+00:00`` suffixes."""
+    """Parse ISO-8601, accepting both ``...Z`` and ``...+00:00`` suffixes.
+
+    Normalizes a missing ``tzinfo`` to UTC so a user-edited / legacy
+    credentials file with naive timestamps doesn't crash later when
+    :meth:`OAuthCredentials.is_expired` calls ``astimezone(UTC)``.
+    """
     if s.endswith("Z"):
         s = s[:-1] + "+00:00"
-    return datetime.fromisoformat(s)
+    dt = datetime.fromisoformat(s)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt
 
 
 # ---------------------------------------------------------------------------
@@ -384,15 +392,35 @@ def delete_credentials_file(path: Path | None = None) -> None:
 
 @dataclass
 class _SharedCredentialsState:
-    """Mutable per-(path, profile) state shared across KaguraClients."""
+    """Mutable per-(path, profile) state shared across KaguraClients.
+
+    The ``lock`` is shared across **all profiles in the same file** via
+    :data:`_file_locks` — not per-(path, profile) — so two profiles
+    refreshing concurrently can't both read-modify-write the file and
+    clobber each other's update (lost-update bug).
+    """
 
     credentials: OAuthCredentials
     profile_name: str
     path: Path
-    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    lock: asyncio.Lock
 
 
 _state_cache: dict[tuple[Path, str], _SharedCredentialsState] = {}
+# One lock per credentials file path. Shared across profiles in the same
+# file so concurrent refreshes serialize at the file level — the
+# read-modify-write inside ``update_profile`` is then atomic w.r.t. all
+# in-process callers, even when they belong to different profiles.
+_file_locks: dict[Path, asyncio.Lock] = {}
+
+
+def _get_file_lock(path: Path) -> asyncio.Lock:
+    """Return the (lazy-created) shared lock for ``path``."""
+    lock = _file_locks.get(path)
+    if lock is None:
+        lock = asyncio.Lock()
+        _file_locks[path] = lock
+    return lock
 
 
 def get_shared_state(
@@ -427,6 +455,7 @@ def get_shared_state(
             credentials=creds,
             profile_name=profile_name,
             path=path,
+            lock=_get_file_lock(path),
         )
         _state_cache[key] = cached
     else:
@@ -439,6 +468,7 @@ def get_shared_state(
 def reset_state_cache() -> None:
     """Clear the module-level cache. Tests call this between cases."""
     _state_cache.clear()
+    _file_locks.clear()
 
 
 # ---------------------------------------------------------------------------
