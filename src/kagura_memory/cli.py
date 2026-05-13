@@ -67,7 +67,7 @@ def _run_client_command(
                 return await operation(client, ctx_id)
 
         result = asyncio.run(_run())
-        click.echo(json.dumps(result, indent=2))
+        click.echo(json.dumps(result, indent=2, ensure_ascii=False))
 
     except click.ClickException:
         raise
@@ -135,7 +135,7 @@ def process(message, file, deep, verbose):
                 return await agent.process(session, deep=deep, verbose=verbose)
 
         result = asyncio.run(_run_agent())
-        click.echo(json.dumps(result.model_dump(), indent=2))
+        click.echo(json.dumps(result.model_dump(), indent=2, ensure_ascii=False))
 
     except click.ClickException:
         raise
@@ -157,7 +157,7 @@ def config_show():
         # Mask API key
         if "api_key" in cfg and cfg["api_key"]:
             cfg["api_key"] = cfg["api_key"][:8] + "..." + cfg["api_key"][-4:]
-        click.echo(json.dumps(cfg, indent=2))
+        click.echo(json.dumps(cfg, indent=2, ensure_ascii=False))
     except Exception as e:
         click.echo(f"Error loading config: {e}", err=True)
         sys.exit(1)
@@ -696,7 +696,7 @@ def sleep_rollback(context_id, report_id, yes):
 
     try:
         result = asyncio.run(_run())
-        click.echo(json.dumps(result, indent=2))
+        click.echo(json.dumps(result, indent=2, ensure_ascii=False))
     except (click.Abort, click.ClickException):
         raise
     except Exception as e:
@@ -1178,7 +1178,7 @@ def resource_import(resource_id, api_key, input_file, fmt, id_column, version):
         output: dict = {"created": total_created, "failed": total_failed, "total": len(events)}
         if all_errors:
             output["errors"] = all_errors[:10]  # Show first 10 errors total
-        return json.dumps(output, indent=2)
+        return json.dumps(output, indent=2, ensure_ascii=False)
 
     _run_resource_command(op)
 
