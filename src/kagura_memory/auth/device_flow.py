@@ -8,7 +8,7 @@ state — that lives in :mod:`auth.cli` and :mod:`auth.credentials`.
 The transport client is intentionally separate from
 :class:`KaguraClient`'s own ``httpx.AsyncClient`` so the SDK's
 ``Authorization: Bearer`` header (for normal MCP calls) cannot leak
-into ``/oauth2/*`` requests, which use ``client_id`` body parameter
+into ``/oauth/*`` requests, which use ``client_id`` body parameter
 authentication (RFC 8628 §3.1 ``token_endpoint_auth_method='none'``).
 This mirrors :class:`FilesClient._upload_client`'s "isolate secrets to
 a dedicated client" idiom.
@@ -90,7 +90,7 @@ class TokenResponse:
 
 
 def make_oauth_client(timeout: float = 30.0) -> httpx.AsyncClient:
-    """Construct an unauthenticated ``httpx.AsyncClient`` for ``/oauth2/*``.
+    """Construct an unauthenticated ``httpx.AsyncClient`` for ``/oauth/*``.
 
     No ``Authorization`` header is set — device-flow uses ``client_id``
     in the form body for client authentication, not a bearer token.
@@ -113,7 +113,7 @@ async def authorize_device(
     client_id: str = DEFAULT_CLIENT_ID,
     scope: str = "memory:read",
 ) -> DeviceAuthorizationResponse:
-    """POST ``/api/v1/oauth2/device/authorize`` and parse the response."""
+    """POST ``/api/v1/oauth/device/authorize`` and parse the response."""
     url = f"{server.rstrip('/')}{_PATH_DEVICE_AUTHORIZE}"
     # memory-cloud's device/authorize accepts JSON (DeviceAuthorizationRequest
     # pydantic model), unlike the /oauth/token/ + /oauth/revoke endpoints
@@ -163,7 +163,7 @@ async def poll_for_token(
     expires_at: datetime,
     sleep: Any = asyncio.sleep,
 ) -> TokenResponse:
-    """Poll ``/api/v1/oauth2/token`` until the user approves or denies.
+    """Poll ``/api/v1/oauth/token/`` until the user approves or denies.
 
     The ``sleep`` parameter is injectable so tests can supply a no-op
     or counter-based stub without waiting real seconds.
@@ -257,7 +257,7 @@ async def refresh_access_token(
     refresh_token: str,
     scope: str | None = None,
 ) -> TokenResponse:
-    """POST ``/api/v1/oauth2/token`` with ``grant_type=refresh_token``.
+    """POST ``/api/v1/oauth/token/`` with ``grant_type=refresh_token``.
 
     When ``scope`` is supplied, the server may reject the call with
     ``insufficient_scope`` / ``invalid_scope`` if the grant doesn't
@@ -316,7 +316,7 @@ async def revoke_token(
     token: str,
     client_id: str = DEFAULT_CLIENT_ID,
 ) -> bool:
-    """POST ``/api/v1/oauth2/revoke``. Best-effort — never raises.
+    """POST ``/api/v1/oauth/revoke``. Best-effort — never raises.
 
     Returns ``True`` on success, ``False`` on any failure. The caller
     (``kagura auth logout``) deletes the local profile regardless of
@@ -364,7 +364,7 @@ def _safe_json_object(response: httpx.Response, endpoint: str) -> dict[str, Any]
 
 
 def _token_response_from_response(response: httpx.Response) -> TokenResponse:
-    """Build a :class:`TokenResponse` from a 200 ``/oauth2/token`` response.
+    """Build a :class:`TokenResponse` from a 200 ``/oauth/token/`` response.
 
     ``expires_at`` is computed from ``expires_in`` at receipt time so
     laptop sleep / clock skew won't yield a negative TTL after wake.
