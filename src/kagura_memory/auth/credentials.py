@@ -250,8 +250,7 @@ def _atomic_write_json(path: Path, data: dict[str, Any], mode: int = CREDENTIALS
         # fsync the parent directory so the rename itself is durable on
         # crash / power-loss: os.replace is atomic but the directory
         # entry change isn't guaranteed to hit disk until the dir is
-        # fsync'd. Best-effort — Windows / some filesystems can't fsync
-        # a directory, so swallow OSError.
+        # fsync'd. Best-effort — see below.
         try:
             dir_fd = os.open(str(path.parent), os.O_RDONLY)
             try:
@@ -259,6 +258,12 @@ def _atomic_write_json(path: Path, data: dict[str, Any], mode: int = CREDENTIALS
             finally:
                 os.close(dir_fd)
         except OSError:
+            # Windows and some filesystems (FAT, tmpfs, network mounts)
+            # don't support fsync on a directory file descriptor.
+            # The atomic rename above already happened, so swallowing
+            # this loss of durability is safe — the worst case is
+            # power-loss directly after rename, where we lose the most
+            # recent credential write but not the file's integrity.
             pass
     except Exception:
         if tmp.exists():
