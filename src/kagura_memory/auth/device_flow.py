@@ -118,7 +118,6 @@ async def authorize_device(
     try:
         response = await client.post(url, data=data)
         response.raise_for_status()
-        body = response.json()
     except httpx.HTTPStatusError as e:
         detail = extract_detail(e.response) or e.response.text
         raise KaguraAuthError(
@@ -128,15 +127,25 @@ async def authorize_device(
     except httpx.RequestError as e:
         raise KaguraConnectionError(f"Could not reach {url}: {e}") from e
 
-    return DeviceAuthorizationResponse(
-        device_code=body["device_code"],
-        user_code=body["user_code"],
-        verification_uri=body["verification_uri"],
-        verification_uri_complete=body.get("verification_uri_complete", body["verification_uri"]),
-        expires_in=int(body["expires_in"]),
-        interval=int(body.get("interval", 5)),
-        expires_at=datetime.now(UTC) + timedelta(seconds=int(body["expires_in"])),
-    )
+    body = _safe_json_object(response, "Device authorization")
+    try:
+        expires_in = int(body["expires_in"])
+        return DeviceAuthorizationResponse(
+            device_code=body["device_code"],
+            user_code=body["user_code"],
+            verification_uri=body["verification_uri"],
+            verification_uri_complete=body.get(
+                "verification_uri_complete", body["verification_uri"]
+            ),
+            expires_in=expires_in,
+            interval=int(body.get("interval", 5)),
+            expires_at=datetime.now(UTC) + timedelta(seconds=expires_in),
+        )
+    except (KeyError, TypeError, ValueError) as e:
+        raise KaguraAuthError(
+            f"Device authorization returned HTTP 200 but body is missing required fields: {e}. "
+            f"Body keys: {sorted(body.keys())}"
+        ) from e
 
 
 async def poll_for_token(
@@ -163,6 +172,7 @@ async def poll_for_token(
         KaguraConnectionError: network failure during polling.
     """
     current_interval = interval
+    first_poll = True
 
     while True:
         if datetime.now(UTC) >= expires_at:
@@ -171,7 +181,13 @@ async def poll_for_token(
                 expires_at=expires_at,
             )
 
-        await sleep(current_interval)
+        # Skip the initial sleep so an immediate approval (or a fast
+        # server-side error) doesn't wait one whole interval. Sleep
+        # only between retries — after authorization_pending / slow_down.
+        if first_poll:
+            first_poll = False
+        else:
+            await sleep(current_interval)
 
         try:
             response = await client.post(
@@ -189,7 +205,7 @@ async def poll_for_token(
             ) from e
 
         if response.status_code == 200:
-            return _token_response_from_body(response.json())
+            return _token_response_from_response(response)
 
         # RFC 8628 §3.5 — errors come as HTTP 4xx with JSON ``error`` field.
         body = _safe_json(response)
@@ -264,7 +280,7 @@ async def refresh_access_token(
         raise KaguraConnectionError(f"Could not reach {url}: {e}") from e
 
     if response.status_code == 200:
-        return _token_response_from_body(response.json())
+        return _token_response_from_response(response)
 
     body = _safe_json(response)
     error = body.get("error", "")
@@ -318,23 +334,56 @@ async def revoke_token(
 # ---------------------------------------------------------------------------
 
 
-def _token_response_from_body(body: dict[str, Any]) -> TokenResponse:
-    """Build a :class:`TokenResponse` from the server's JSON body.
+def _safe_json_object(response: httpx.Response, endpoint: str) -> dict[str, Any]:
+    """Parse a 200 response body as a JSON object.
+
+    Converts malformed / non-dict success bodies into a
+    :class:`KaguraAuthError` with HTTP status + truncated body, so a
+    server that wedges and returns HTML / a JSON array / a scalar
+    doesn't surface as an unhelpful ``ValueError`` traceback.
+    """
+    try:
+        body = response.json()
+    except (ValueError, UnicodeDecodeError) as e:
+        detail = response.text[:200] if response.text else ""
+        raise KaguraAuthError(
+            f"{endpoint} returned HTTP {response.status_code} but body is not JSON: {e}. "
+            f"Body: {detail}"
+        ) from e
+    if not isinstance(body, dict):
+        raise KaguraAuthError(
+            f"{endpoint} returned HTTP {response.status_code} but body is not a JSON object "
+            f"(got {type(body).__name__})"
+        )
+    return body
+
+
+def _token_response_from_response(response: httpx.Response) -> TokenResponse:
+    """Build a :class:`TokenResponse` from a 200 ``/oauth2/token`` response.
 
     ``expires_at`` is computed from ``expires_in`` at receipt time so
     laptop sleep / clock skew won't yield a negative TTL after wake.
+    Missing or invalid required fields surface as :class:`KaguraAuthError`
+    rather than ``KeyError`` / ``ValueError``.
     """
-    expires_in = int(body.get("expires_in", 0))
-    return TokenResponse(
-        access_token=body["access_token"],
-        refresh_token=body.get("refresh_token", ""),
-        token_type=body.get("token_type", "Bearer"),
-        expires_at=datetime.now(UTC) + timedelta(seconds=expires_in),
-        scope=body.get("scope", ""),
-        user_email=body.get("user_email", ""),
-        workspace_id=body.get("workspace_id", ""),
-        workspace_name=body.get("workspace_name", ""),
-    )
+    body = _safe_json_object(response, "Token endpoint")
+    try:
+        expires_in = int(body.get("expires_in", 0))
+        return TokenResponse(
+            access_token=body["access_token"],
+            refresh_token=body.get("refresh_token", ""),
+            token_type=body.get("token_type", "Bearer"),
+            expires_at=datetime.now(UTC) + timedelta(seconds=expires_in),
+            scope=body.get("scope", ""),
+            user_email=body.get("user_email", ""),
+            workspace_id=body.get("workspace_id", ""),
+            workspace_name=body.get("workspace_name", ""),
+        )
+    except (KeyError, TypeError, ValueError) as e:
+        raise KaguraAuthError(
+            f"Token endpoint returned HTTP 200 but body is missing required fields: {e}. "
+            f"Body keys: {sorted(body.keys())}"
+        ) from e
 
 
 def _safe_json(response: httpx.Response) -> dict[str, Any]:

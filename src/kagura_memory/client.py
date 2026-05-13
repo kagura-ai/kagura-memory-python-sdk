@@ -114,10 +114,14 @@ def _resolve_auth(
         )
 
     # 4. Legacy .kagura.json (which itself env-falls-back internally).
+    # Apply the same whitespace-only strip check used for the explicit
+    # arg and KAGURA_API_KEY env paths so a stray-whitespace config file
+    # doesn't produce a guaranteed-401 `Authorization: Bearer ` header.
     cfg = load_config()
-    if cfg.get("api_key"):
+    cfg_key = cfg.get("api_key", "")
+    if cfg_key and cfg_key.strip():
         return _StaticAuth(
-            api_key=cfg["api_key"],
+            api_key=cfg_key,
             mcp_url=mcp_url or cfg.get("mcp_url") or _DEFAULT_MCP_URL,
         )
 

@@ -212,8 +212,9 @@ async def test_poll_for_token_slow_down_increases_interval():
         expires_at=datetime.now(UTC) + timedelta(minutes=10),
         sleep=record_sleep,
     )
-    # First poll sleeps the original interval (5), second poll sleeps +5 = 10.
-    assert intervals == [5, 10]
+    # First poll is immediate (no sleep). After slow_down, increment interval by 5
+    # and sleep that before the second (successful) poll.
+    assert intervals == [10]
 
 
 @pytest.mark.asyncio
@@ -427,6 +428,104 @@ async def test_revoke_token_returns_false_on_5xx():
     client = MagicMock()
     client.post = AsyncMock(return_value=_mock_response(500))
     assert await revoke_token(client, SERVER, token="atok") is False
+
+
+@pytest.mark.asyncio
+async def test_authorize_device_malformed_200_body_raises_auth_error():
+    """200 response with non-JSON body must raise KaguraAuthError, not ValueError."""
+    client = MagicMock()
+    response = _mock_response(200, body={})
+    response.json = MagicMock(side_effect=ValueError("not json"))
+    response.text = "<html>500 Internal Server Error</html>"
+    client.post = AsyncMock(return_value=response)
+
+    with pytest.raises(KaguraAuthError, match="not JSON"):
+        await authorize_device(client, SERVER, scope="memory:read")
+
+
+@pytest.mark.asyncio
+async def test_authorize_device_missing_required_field_raises_auth_error():
+    """200 response missing `device_code` must surface as KaguraAuthError."""
+    client = MagicMock()
+    response = _mock_response(
+        200,
+        body={"user_code": "ABCD", "verification_uri": "https://x", "expires_in": 600},
+    )
+    client.post = AsyncMock(return_value=response)
+
+    with pytest.raises(KaguraAuthError, match="missing required fields"):
+        await authorize_device(client, SERVER, scope="memory:read")
+
+
+@pytest.mark.asyncio
+async def test_poll_for_token_malformed_200_body_raises_auth_error():
+    """`poll_for_token` 200 with non-JSON body surfaces as KaguraAuthError."""
+    client = MagicMock()
+    response = _mock_response(200, body={})
+    response.json = MagicMock(side_effect=ValueError("not json"))
+    response.text = "garbled"
+    client.post = AsyncMock(return_value=response)
+
+    with pytest.raises(KaguraAuthError, match="not JSON"):
+        await poll_for_token(
+            client,
+            SERVER,
+            client_id=DEFAULT_CLIENT_ID,
+            device_code="dc",
+            interval=5,
+            expires_at=datetime.now(UTC) + timedelta(minutes=10),
+            sleep=_no_sleep,
+        )
+
+
+@pytest.mark.asyncio
+async def test_poll_for_token_immediate_first_poll():
+    """First poll fires immediately without sleeping — fast approval should not wait."""
+    intervals: list[float] = []
+
+    async def record_sleep(seconds: float) -> None:
+        intervals.append(seconds)
+
+    client = MagicMock()
+    client.post = AsyncMock(
+        return_value=_mock_response(
+            200,
+            {
+                "access_token": "atok",
+                "refresh_token": "rtok",
+                "token_type": "Bearer",
+                "expires_in": 3600,
+                "scope": "memory:read",
+            },
+        )
+    )
+    token = await poll_for_token(
+        client,
+        SERVER,
+        client_id=DEFAULT_CLIENT_ID,
+        device_code="dc",
+        interval=5,
+        expires_at=datetime.now(UTC) + timedelta(minutes=10),
+        sleep=record_sleep,
+    )
+    assert token.access_token == "atok"
+    # Zero sleeps before the first (successful) poll.
+    assert intervals == []
+
+
+@pytest.mark.asyncio
+async def test_refresh_malformed_200_body_raises_auth_error():
+    """200 response from refresh with non-JSON body raises KaguraAuthError."""
+    client = MagicMock()
+    response = _mock_response(200, body={})
+    response.json = MagicMock(side_effect=ValueError("not json"))
+    response.text = "garbled"
+    client.post = AsyncMock(return_value=response)
+
+    with pytest.raises(KaguraAuthError, match="not JSON"):
+        await refresh_access_token(
+            client, SERVER, client_id=DEFAULT_CLIENT_ID, refresh_token="rtok"
+        )
 
 
 @pytest.mark.asyncio
