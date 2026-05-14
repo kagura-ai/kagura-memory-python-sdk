@@ -1,14 +1,26 @@
 [project]
 name = "kagura-memory"
 dynamic = ["version"]
-description = "Python SDK for Kagura Memory Cloud — AI-driven memory management"
+description = "Python SDK for Kagura Memory Cloud — memory management, document ingestion (PDF → memory graph), and R2 file storage for AI agents"
 readme = "README.md"
 requires-python = ">=3.11"
 license = {text = "MIT"}
 authors = [
     {name = "Fumikazu Kiyota", email = "fumikazu.kiyota@gmail.com"}
 ]
-keywords = ["ai", "memory", "mcp", "agent", "llm", "kagura"]
+keywords = [
+    "ai",
+    "memory",
+    "mcp",
+    "agent",
+    "llm",
+    "kagura",
+    "pdf",
+    "document-ingestion",
+    "rag",
+    "embeddings",
+    "vector-search",
+]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",

@@ -18,7 +18,7 @@
 
 ## What is this?
 
-This SDK connects your Python code to [Kagura Memory Cloud](https://github.com/kagura-ai/memory-cloud), giving AI assistants the ability to **remember, search, and learn** from past interactions. It provides four clients for different use cases:
+This SDK connects your Python code to [Kagura Memory Cloud](https://github.com/kagura-ai/memory-cloud), giving AI assistants the ability to **remember, search, and learn** from past interactions — and to **ingest documents** (PDFs, URLs) directly into a searchable memory graph. It provides four clients for different use cases:
 
 | Client | Protocol | Use Case |
 |--------|----------|----------|
@@ -26,11 +26,35 @@ This SDK connects your Python code to [Kagura Memory Cloud](https://github.com/k
 | **`KaguraClient`** | MCP (JSON-RPC) | Direct memory ops — remember, recall, explore, reference, forget |
 | **`ResourceClient`** | REST API | External data ingestion — push data from Slack, CI/CD, CRM into Kagura |
 | **`FilesClient`** | REST + presigned PUT | File uploads with sha256 integrity binding (R2) |
+| **`FileIngestor`** | CLI + SDK | Document ingestion — PDF / image → memory graph + R2 archive (one command) |
+
+## 60-second demo
+
+Turn a PDF into a structured graph of memories — one overview memory plus per-section summaries, linked via `declared_link` edges. The original file is archived to your workspace's storage so you can always pull the bytes back.
+
+```bash
+pip install 'kagura-memory[ingest-pdf]'
+kagura auth login
+kagura ingest ./report.pdf
+```
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/kagura-ai/kagura-memory-python-sdk/main/assets/ingest-demo.svg"
+       alt="kagura ingest demo" width="720">
+</p>
+
+```bash
+kagura recall "report findings" -k 5        # search across sections
+kagura files download-url <file_id>          # short-lived GET on the original
+```
+
+Vision is enabled by default (Gemini 2.5 Flash) so PDF page images and standalone images get OCR'd into the same graph. Pass `--no-vision` to skip image content entirely, or `--dry-run` to see token / cost estimates without calling an LLM.
 
 ## Installation
 
 ```bash
-pip install kagura-memory
+pip install kagura-memory                   # core SDK
+pip install 'kagura-memory[ingest-pdf]'     # adds PDF ingestion support
 # or
 uv add kagura-memory
 ```
@@ -299,6 +323,35 @@ kagura files delete <file-id>
 # Config
 kagura config show
 ```
+
+### Document ingestion (`kagura ingest`)
+
+See the [60-second demo](#60-second-demo) above for the happy path. The full option surface:
+
+```bash
+# Local file or URL → one overview + N sections + R2 archive
+kagura ingest ./report.pdf
+kagura ingest https://example.com/report.pdf --tags "Q1,research"
+
+# Preview cost / sections without calling any LLM
+kagura ingest ./report.pdf --dry-run
+
+# Privacy: skip image content (no bytes sent to a vision provider)
+kagura ingest ./report.pdf --no-vision
+
+# Storage: skip the R2 archive (no file_id stamped on the overview memory)
+kagura ingest ./report.pdf --no-archive
+
+# Machine-readable output for scripts
+kagura ingest ./report.pdf --json
+```
+
+Exit codes: `0` when the overview memory is created (per-section errors are still `0`, they show up in `result.errors`); `1` when the overview itself fails (corrupted PDF, network error, etc.); `0` for any `--dry-run` invocation.
+
+Provider configuration (env vars, picked up automatically via `litellm`):
+- `ANTHROPIC_API_KEY` — text summarization (default `claude/sonnet-4-6`)
+- `GEMINI_API_KEY` — vision OCR (default `gemini/gemini-2.5-flash`)
+- Override per invocation: `--text-provider {claude|gemini|ollama}`, `--vision-provider {claude|gemini|ollama}`
 
 ## Claude Code Integration
 
