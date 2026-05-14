@@ -18,7 +18,8 @@ from typing import Any
 
 from ..client import KaguraClient
 from ..exceptions import KaguraIngestError, KaguraLLMError
-from ..models import CostBreakdown, IngestErrorRecord, IngestResult
+from ..files_client import FilesClient
+from ..models import CostBreakdown, FileObject, IngestErrorRecord, IngestResult
 from ._types import Chunk, ExtractedContent
 from .chunker import chunk as do_chunk
 from .extractors import get_extractor
@@ -42,6 +43,7 @@ class FileIngestor:
         text_provider: Provider | None = None,
         vision_provider: Provider | None = None,
         concurrency: int = _DEFAULT_CONCURRENCY,
+        files_client: FilesClient | None = None,
     ):
         """Construct an ingestor.
 
@@ -63,6 +65,14 @@ class FileIngestor:
             text_provider: Pre-built provider override (mainly for tests).
             vision_provider: Pre-built vision provider override (tests).
             concurrency: Maximum concurrent section summarization calls.
+            files_client: Optional :class:`FilesClient` used to archive
+                the source bytes to the workspace's R2 bucket. When
+                supplied AND ``ingest(archive_original=True)``, the
+                resulting :class:`FileObject` id is stamped on the
+                overview memory's ``details.file_id`` so callers can
+                later resolve memory → original bytes via
+                :meth:`FilesClient.download_url`. Lifecycle is caller-
+                managed, same as ``client``.
         """
         self._client = client
         self._text = text_provider or get_provider(text_provider_name)
@@ -74,6 +84,7 @@ class FileIngestor:
         else:
             self._vision = None
         self._concurrency = max(1, concurrency)
+        self._files = files_client
 
     # --- Public API ----------------------------------------------------------
 
@@ -89,8 +100,20 @@ class FileIngestor:
         read_timeout: float = 60.0,
         allow_http: bool = False,
         allow_system_paths: bool = False,
+        archive_original: bool = True,
     ) -> IngestResult:
-        """Run a full ingestion against ``source``."""
+        """Run a full ingestion against ``source``.
+
+        Args:
+            archive_original: When True and a :class:`FilesClient` was
+                supplied at construction time, the source bytes are
+                uploaded to the workspace's object store and the
+                resulting ``file_id`` is recorded on the overview
+                memory's ``details.file_id``. Set to False to skip
+                archival (saves R2 storage; the memory then has no
+                back-reference to the original bytes). No effect when
+                ``files_client`` is None.
+        """
         fetched = await self._fetch(
             source,
             max_bytes=max_bytes,
@@ -100,7 +123,11 @@ class FileIngestor:
             allow_system_paths=allow_system_paths,
         )
         return await self._ingest_fetched(
-            fetched, context_id=context_id, tags=tags, importance=importance
+            fetched,
+            context_id=context_id,
+            tags=tags,
+            importance=importance,
+            archive_original=archive_original,
         )
 
     async def estimate_cost(
@@ -206,6 +233,7 @@ class FileIngestor:
         context_id: str,
         tags: list[str] | None,
         importance: float,
+        archive_original: bool,
     ) -> IngestResult:
         errors: list[IngestErrorRecord] = []
         warnings: list[str] = []
@@ -233,8 +261,22 @@ class FileIngestor:
             skipped_images = len(content.images)
             warnings.append(f"{skipped_images} image(s) skipped — no vision provider configured")
 
-        # Summarize sections in parallel (bounded).
+        # Run section summarization and (optionally) archive the original
+        # bytes in parallel. Archive is a network round-trip to R2 that is
+        # entirely independent of LLM work, so wasting it serially would
+        # add latency. Failures on either side are recorded as best-effort
+        # ``IngestErrorRecord`` entries and do not abort the run.
+        archive_task: asyncio.Task[FileObject | None] | None = None
+        if archive_original and self._files is not None:
+            archive_task = asyncio.create_task(
+                self._archive_original(fetched, context_id=context_id, errors=errors)
+            )
+
         section_summaries = await self._summarize_sections(chunks, errors)
+
+        archived: FileObject | None = None
+        if archive_task is not None:
+            archived = await archive_task
 
         # Build the overview from the section summaries.
         try:
@@ -258,6 +300,7 @@ class FileIngestor:
             context_id=context_id,
             tags=tags,
             importance=importance,
+            archived=archived,
             errors=errors,
         )
 
@@ -320,6 +363,34 @@ class FileIngestor:
         await asyncio.gather(*(run(i, c) for i, c in enumerate(chunks)))
         return results
 
+    async def _archive_original(
+        self,
+        fetched: FetchResult,
+        *,
+        context_id: str,
+        errors: list[IngestErrorRecord],
+    ) -> FileObject | None:
+        """Upload ``fetched.body`` to the workspace's object store.
+
+        Returns the resulting :class:`FileObject` on success, or ``None``
+        on any failure (with an :class:`IngestErrorRecord` of
+        ``step="archive"`` appended). The orchestrator still writes
+        memories in either case — archival is purely additive context.
+        """
+        assert self._files is not None  # caller guarded
+        filename = _filename_from_source_uri(fetched.source_uri)
+        try:
+            return await self._files.upload(
+                context_id=context_id,
+                source=fetched.body,
+                filename=filename,
+            )
+        except Exception as e:  # noqa: BLE001
+            errors.append(
+                IngestErrorRecord(step="archive", message=str(e), exception_type=type(e).__name__)
+            )
+            return None
+
     async def _write_overview(
         self,
         *,
@@ -330,6 +401,7 @@ class FileIngestor:
         context_id: str,
         tags: list[str] | None,
         importance: float,
+        archived: FileObject | None,
         errors: list[IngestErrorRecord],
     ) -> str | None:
         title = content.title or _infer_title(fetched.source_uri)
@@ -341,6 +413,10 @@ class FileIngestor:
         }
         if content.page_count is not None:
             details["pages"] = content.page_count
+        if archived is not None:
+            details["file_id"] = archived.id
+            details["sha256"] = archived.sha256
+            details["size_bytes"] = archived.size_bytes
 
         try:
             result = await self._client.remember(
@@ -496,6 +572,21 @@ def _infer_mime(fetched: FetchResult) -> str:
 
 def _infer_title(source_uri: str) -> str:
     return source_uri.rsplit("/", 1)[-1] or source_uri
+
+
+def _filename_from_source_uri(source_uri: str) -> str:
+    """Derive a filename for ``FilesClient.upload`` from a URI.
+
+    Strips any query string or fragment so the upload metadata does not
+    carry tracking parameters into R2. Falls back to a generic name when
+    the URI ends in a path separator (e.g. ``https://example.com/``).
+    """
+    tail = source_uri.rsplit("/", 1)[-1]
+    for sep in ("?", "#"):
+        idx = tail.find(sep)
+        if idx != -1:
+            tail = tail[:idx]
+    return tail or "ingested-source"
 
 
 def _truncate(text: str, limit: int) -> str:

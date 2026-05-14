@@ -776,7 +776,15 @@ class IngestErrorRecord(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
-    step: Literal["fetch", "extract", "chunk", "summarize", "vision", "remember"]
+    step: Literal[
+        "fetch",
+        "extract",
+        "chunk",
+        "summarize",
+        "vision",
+        "remember",
+        "archive",
+    ]
     section_index: int | None = None
     message: str
     exception_type: str | None = None

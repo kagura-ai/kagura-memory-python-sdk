@@ -265,6 +265,17 @@ def explore(context_id, memory_id, depth, min_weight):
     default=False,
     help="Skip image content (no image bytes sent to any provider).",
 )
+@click.option(
+    "--no-archive",
+    is_flag=True,
+    default=False,
+    help=(
+        "Skip uploading the original source bytes to the workspace's "
+        "object store. By default the source is archived to R2 and the "
+        "resulting file_id is stamped on the overview memory's details "
+        "so callers can resolve memory → original bytes later."
+    ),
+)
 @click.option("--tags", help="Comma-separated tags")
 @click.option(
     "--importance",
@@ -319,7 +330,10 @@ def explore(context_id, memory_id, depth, min_weight):
     "as_json",
     is_flag=True,
     default=False,
-    help="Emit the full IngestResult as JSON (machine-readable). Default is a human-readable summary.",
+    help=(
+        "Emit the full IngestResult as JSON (machine-readable). "
+        "Default is a human-readable summary."
+    ),
 )
 def ingest_file(
     source,
@@ -327,6 +341,7 @@ def ingest_file(
     text_provider,
     vision_provider,
     no_vision,
+    no_archive,
     tags,
     importance,
     max_bytes,
@@ -370,9 +385,14 @@ def ingest_file(
         # local token counters; allow context_id to be empty in that case.
         ctx_id = ctx_id or "00000000-0000-0000-0000-000000000000"
 
-        client = KaguraClient(
-            api_key=config.get("api_key", ""),
-            mcp_url=config.get("mcp_url", "https://memory.kagura-ai.com/mcp"),
+        api_key = config.get("api_key", "")
+        mcp_url = config.get("mcp_url", "https://memory.kagura-ai.com/mcp")
+        client = KaguraClient(api_key=api_key, mcp_url=mcp_url)
+        # Archive is disabled in dry-run (no network egress to LLM or R2)
+        # and when the caller passes --no-archive.
+        archive = not (dry_run or no_archive)
+        files_client = (
+            FilesClient.from_mcp_url(api_key=api_key, mcp_url=mcp_url) if archive else None
         )
 
         # Deferred: keeps litellm/pymupdf/pillow off the import path of CLI
@@ -382,31 +402,37 @@ def ingest_file(
 
         async def _run() -> Any:
             async with client:
-                ingestor = FileIngestor(
-                    client=client,
-                    text_provider_name=text_provider,
-                    vision_provider_name=None if no_vision else vision_provider,
-                )
-                if dry_run:
-                    return await ingestor.estimate_cost(
+                try:
+                    ingestor = FileIngestor(
+                        client=client,
+                        text_provider_name=text_provider,
+                        vision_provider_name=None if no_vision else vision_provider,
+                        files_client=files_client,
+                    )
+                    if dry_run:
+                        return await ingestor.estimate_cost(
+                            source,
+                            max_bytes=max_bytes,
+                            connect_timeout=timeout_connect,
+                            read_timeout=timeout_read,
+                            allow_http=allow_http,
+                            allow_system_paths=allow_system_paths,
+                        )
+                    return await ingestor.ingest(
                         source,
+                        context_id=ctx_id,
+                        tags=_parse_tags(tags),
+                        importance=importance,
                         max_bytes=max_bytes,
                         connect_timeout=timeout_connect,
                         read_timeout=timeout_read,
                         allow_http=allow_http,
                         allow_system_paths=allow_system_paths,
+                        archive_original=archive,
                     )
-                return await ingestor.ingest(
-                    source,
-                    context_id=ctx_id,
-                    tags=_parse_tags(tags),
-                    importance=importance,
-                    max_bytes=max_bytes,
-                    connect_timeout=timeout_connect,
-                    read_timeout=timeout_read,
-                    allow_http=allow_http,
-                    allow_system_paths=allow_system_paths,
-                )
+                finally:
+                    if files_client is not None:
+                        await files_client.close()
 
         result = asyncio.run(_run())
         # Stage 5 will branch on ``as_json`` and route the default path

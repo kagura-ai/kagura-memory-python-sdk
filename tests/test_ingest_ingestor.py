@@ -223,3 +223,162 @@ async def test_unsupported_format_returns_error_record(tmp_path: Any) -> None:
 def test_provider_protocol_is_satisfied_by_fake() -> None:
     """FakeProvider must satisfy the runtime-checkable Provider Protocol."""
     assert isinstance(FakeProvider(), Provider)
+
+
+# ---------------------------------------------------------------------------
+# Archive integration (FilesClient + archive_original)
+# ---------------------------------------------------------------------------
+
+
+def _make_files_client_mock(
+    *,
+    file_id: str = "f8e9d0c1",
+    sha256: str = "deadbeef",
+    size_bytes: int = 1024,
+) -> AsyncMock:
+    """Build an AsyncMock that mimics FilesClient.upload() returning a FileObject.
+
+    Returns a Mock whose ``upload`` coroutine resolves to a stand-in object
+    with the ``id`` / ``sha256`` / ``size_bytes`` attributes the ingestor
+    reads. We do not return a real FileObject because constructing one
+    requires pydantic-validated datetime fields that the orchestrator
+    never inspects.
+    """
+    from datetime import UTC, datetime
+
+    from kagura_memory.models import FileObject
+
+    fake_file = FileObject(
+        id=file_id,
+        workspace_id="ctx-uuid",
+        filename="sample.pdf",
+        content_type="application/pdf",
+        size_bytes=size_bytes,
+        sha256=sha256,
+        status="confirmed",
+        created_at=datetime.now(UTC),
+    )
+    files_client = AsyncMock()
+    files_client.upload = AsyncMock(return_value=fake_file)
+    files_client.close = AsyncMock(return_value=None)
+    return files_client
+
+
+@pytest.mark.asyncio
+async def test_archive_uploads_source_and_stamps_file_id_on_overview() -> None:
+    """archive_original=True + files_client → details.file_id is recorded."""
+    client = _make_client()
+    provider = FakeProvider()
+    files_client = _make_files_client_mock(file_id="archived-id-1", sha256="abc123")
+    ingestor = FileIngestor(
+        client=client,
+        text_provider=provider,
+        vision_provider=None,
+        files_client=files_client,
+    )
+
+    counter = {"n": 0}
+    captured: list[dict[str, Any]] = []
+
+    async def capture_remember(*, context_id: str, **kwargs: Any) -> dict[str, Any]:
+        captured.append({"context_id": context_id, **kwargs})
+        counter["n"] += 1
+        return {"memory_id": f"mem-{counter['n']}"}
+
+    with patch.object(client, "remember", side_effect=capture_remember):
+        result = await ingestor.ingest(
+            str(FIXTURE),
+            context_id="ctx-uuid",
+            archive_original=True,
+        )
+
+    files_client.upload.assert_called_once()
+    upload_kwargs = files_client.upload.call_args.kwargs
+    assert upload_kwargs["context_id"] == "ctx-uuid"
+    assert isinstance(upload_kwargs["source"], bytes)
+    assert upload_kwargs["filename"] == "sample.pdf"
+
+    overview_call = captured[0]
+    assert overview_call["details"]["file_id"] == "archived-id-1"
+    assert overview_call["details"]["sha256"] == "abc123"
+    assert overview_call["details"]["size_bytes"] == 1024
+    assert result.success is True
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_archive_opt_out_does_not_call_files_client() -> None:
+    """archive_original=False → upload is not called even when files_client is set."""
+    client = _make_client()
+    provider = FakeProvider()
+    files_client = _make_files_client_mock()
+    ingestor = FileIngestor(
+        client=client,
+        text_provider=provider,
+        vision_provider=None,
+        files_client=files_client,
+    )
+
+    async def fake_remember(**_: Any) -> dict[str, Any]:
+        return {"memory_id": "mem-x"}
+
+    with patch.object(client, "remember", side_effect=fake_remember):
+        await ingestor.ingest(str(FIXTURE), context_id="ctx-uuid", archive_original=False)
+
+    files_client.upload.assert_not_called()
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_archive_failure_recorded_as_error_overview_still_written() -> None:
+    """Best-effort: archive upload failure → IngestErrorRecord, ingest continues."""
+    client = _make_client()
+    provider = FakeProvider()
+    files_client = AsyncMock()
+    files_client.upload = AsyncMock(side_effect=RuntimeError("R2 boom"))
+    ingestor = FileIngestor(
+        client=client,
+        text_provider=provider,
+        vision_provider=None,
+        files_client=files_client,
+    )
+
+    captured: list[dict[str, Any]] = []
+
+    async def capture_remember(*, context_id: str, **kwargs: Any) -> dict[str, Any]:
+        captured.append(kwargs)
+        return {"memory_id": "mem-x"}
+
+    with patch.object(client, "remember", side_effect=capture_remember):
+        result = await ingestor.ingest(str(FIXTURE), context_id="ctx-uuid", archive_original=True)
+
+    assert result.overview_id == "mem-x"  # overview still succeeded
+    assert any(e.step == "archive" for e in result.errors)
+    # Overview details should NOT carry a file_id when archive failed.
+    assert "file_id" not in captured[0]["details"]
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_archive_no_files_client_skips_silently() -> None:
+    """archive_original=True but no files_client → no upload, no error."""
+    client = _make_client()
+    provider = FakeProvider()
+    ingestor = FileIngestor(
+        client=client,
+        text_provider=provider,
+        vision_provider=None,
+        files_client=None,  # explicit None
+    )
+
+    async def fake_remember(**_: Any) -> dict[str, Any]:
+        return {"memory_id": "mem-x"}
+
+    with patch.object(client, "remember", side_effect=fake_remember):
+        result = await ingestor.ingest(str(FIXTURE), context_id="ctx-uuid", archive_original=True)
+
+    assert result.success is True
+    assert not any(e.step == "archive" for e in result.errors)
+    await client.close()
