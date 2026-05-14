@@ -56,10 +56,17 @@ def test_output_format_none_explicit_is_also_silent(capsys):
 
 
 def _parse_lines(text: str) -> list[dict]:
-    """Parse newline-delimited JSON; assert each line is valid JSON."""
+    """Parse newline-delimited JSON, skipping non-JSON lines.
+
+    CLI tests that capture stderr may see ``click.ClickException`` output
+    (``Error: ...``) interspersed with our NDJSON events. Skip anything
+    that doesn't look like a JSON object so the test focuses on the
+    progress stream's structural correctness.
+    """
     parsed: list[dict] = []
-    for line in text.strip().splitlines():
-        if not line:
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or not line.startswith("{"):
             continue
         parsed.append(json.loads(line))
     return parsed
@@ -118,6 +125,29 @@ def test_ndjson_debug_serializes_non_primitive_via_str(capsys):
     events = _parse_lines(capsys.readouterr().err)
     assert events[-1]["kind"] == "debug"
     assert "_CustomPayload" in events[-1]["detail"]["data"]
+
+
+def test_ndjson_emits_placeholder_when_json_dumps_fails(capsys):
+    """``json.dumps`` failures (broken __str__, circular refs) trigger the fallback.
+
+    ``default=str`` only handles non-serializable types whose ``str()`` is
+    well-behaved. A class whose ``__str__`` raises makes ``default=str``
+    itself raise during encoding — the outer ``try/except`` should catch
+    it and emit a minimal placeholder event so the terminal-event
+    invariant still holds.
+    """
+
+    class _BadObject:
+        def __str__(self) -> str:
+            raise RuntimeError("nope")
+
+    logger = VerboseLogger(output_format="json")
+    logger.detail("key", _BadObject(), stage="x")
+    events = _parse_lines(capsys.readouterr().err)
+    assert len(events) == 1
+    assert events[0]["msg"] == "<event serialization failed>"
+    assert events[0]["v"] == 1
+    assert events[0]["kind"] == "detail"
 
 
 def test_ndjson_debug_swallows_broken_str_payload(capsys):
@@ -312,6 +342,108 @@ async def test_files_upload_emits_terminal_error_event_on_validator_failure(caps
     assert events, "validator failure must still emit a terminal event"
     assert events[-1]["kind"] == "error"
     await client.close()
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.ResourceClient")
+def test_resource_import_emits_single_terminal_success(mock_rc_cls, mock_config):
+    """`kagura resource import --progress=json` emits exactly ONE terminal event.
+
+    Even when the CLI loops over multiple batches internally, the user-facing
+    operation is one ``kagura resource import`` invocation and must emit one
+    terminal event total (per the AI-consumer "wait for first success/error"
+    contract). Verifies the round-3 fix that suppressed per-batch terminal
+    events from the SDK and added a single CLI-level closing event.
+    """
+    mock_config.return_value = {"api_key": "key", "mcp_url": "https://test.com/mcp"}
+
+    mock_rc = AsyncMock()
+    # 250 events at batch size 100 → 3 batches, 3 ingest_events calls.
+    mock_rc.ingest_events.return_value = MagicMock(created_count=100, failed_count=0, errors=[])
+    mock_rc.__aenter__ = AsyncMock(return_value=mock_rc)
+    mock_rc.__aexit__ = AsyncMock(return_value=None)
+    mock_rc_cls.from_mcp_url.return_value = mock_rc
+
+    jsonl = "\n".join(f'{{"name": "row{i}"}}' for i in range(250))
+    # Click 8.2+ separates stdout / stderr on CliRunner.invoke by default
+    # so we can parse the NDJSON progress stream independently of the
+    # stdout result JSON via result.stderr.
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        [
+            "resource",
+            "import",
+            "-r",
+            "products",
+            "-k",
+            "TOKEN",
+            "--format",
+            "jsonl",
+            "--progress",
+            "json",
+        ],
+        input=jsonl,
+    )
+    assert result.exit_code == 0, result.output
+
+    events = _parse_lines(result.stderr)
+    # 1 import_start + 3 import_batch + 1 complete (success) = 5 events.
+    terminal = [e for e in events if e["kind"] in ("success", "error")]
+    assert len(terminal) == 1, f"expected exactly 1 terminal event, got {len(terminal)}: {terminal}"
+    assert terminal[0]["kind"] == "success"
+    assert terminal[0]["stage"] == "complete"
+    assert terminal[0]["detail"]["total"] == 250
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.ResourceClient")
+def test_resource_import_emits_terminal_error_on_batch_failure(mock_rc_cls, mock_config):
+    """A mid-loop SDK failure emits exactly ONE terminal kind=error with partial state.
+
+    Locks the round-3 CLI-level ``try/except BaseException`` wrapper around
+    the batch loop so that even when ``ingest_events`` blows up, the user
+    sees a final terminal event reporting how many events were already
+    created/failed before the crash.
+    """
+    mock_config.return_value = {"api_key": "key", "mcp_url": "https://test.com/mcp"}
+
+    mock_rc = AsyncMock()
+    # First batch succeeds (100 created), second batch raises mid-loop.
+    mock_rc.ingest_events.side_effect = [
+        MagicMock(created_count=100, failed_count=0, errors=[]),
+        RuntimeError("simulated server crash"),
+    ]
+    mock_rc.__aenter__ = AsyncMock(return_value=mock_rc)
+    mock_rc.__aexit__ = AsyncMock(return_value=None)
+    mock_rc_cls.from_mcp_url.return_value = mock_rc
+
+    jsonl = "\n".join(f'{{"name": "row{i}"}}' for i in range(200))
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        [
+            "resource",
+            "import",
+            "-r",
+            "products",
+            "-k",
+            "TOKEN",
+            "--format",
+            "jsonl",
+            "--progress",
+            "json",
+        ],
+        input=jsonl,
+    )
+    assert result.exit_code != 0
+
+    events = _parse_lines(result.stderr)
+    terminal = [e for e in events if e["kind"] in ("success", "error")]
+    assert len(terminal) == 1
+    assert terminal[0]["kind"] == "error"
+    assert terminal[0]["detail"]["created_so_far"] == 100
+    assert terminal[0]["detail"]["total_events"] == 200
 
 
 def test_logger_swallows_broken_stderr_pipe(capsys, monkeypatch):
