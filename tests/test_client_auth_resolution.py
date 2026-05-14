@@ -281,3 +281,39 @@ def test_explicit_mcp_url_overrides_profile_mcp_url(isolated_credentials):
 
     client = KaguraClient(mcp_url="https://override.example.com/mcp")
     assert client.mcp_url == "https://override.example.com/mcp"
+
+
+# ---------------------------------------------------------------------------
+# Terminal .kagura.json fallback (static path of last resort)
+# ---------------------------------------------------------------------------
+
+
+def test_kagura_json_fallback_static_path(tmp_path: Path, monkeypatch):
+    """Last branch of the resolver: api_key=None, env clear, no profile → .kagura.json wins.
+
+    The credentials precedence ends at ``.kagura.json``; when every
+    earlier source (explicit arg, ``KAGURA_API_KEY``, OAuth profile) is
+    absent and the legacy config has an ``api_key``, the resolver must
+    return a ``_StaticAuth`` carrying that key. ``isolated_credentials``
+    blanks ``load_config`` for tests that exercise OAuth paths, so this
+    branch needs a dedicated fixture that lets ``load_config`` produce
+    a real ``api_key``.
+    """
+    monkeypatch.setattr(
+        "kagura_memory.auth.credentials.DEFAULT_CREDENTIALS_PATH",
+        tmp_path / "missing-credentials.json",
+    )
+    monkeypatch.delenv("KAGURA_API_KEY", raising=False)
+    monkeypatch.delenv("KAGURA_PROFILE", raising=False)
+    monkeypatch.delenv("KAGURA_MCP_URL", raising=False)
+    monkeypatch.setattr(
+        "kagura_memory._auth.load_config",
+        lambda: {"api_key": "key-from-dot-kagura", "mcp_url": "https://legacy.example.com/mcp"},
+    )
+    reset_state_cache()
+
+    client = KaguraClient()
+    assert client._client.headers.get("Authorization") == "Bearer key-from-dot-kagura"
+    assert client._client.auth is None  # static path, no httpx.Auth attached
+    assert client.mcp_url == "https://legacy.example.com/mcp"
+    reset_state_cache()
