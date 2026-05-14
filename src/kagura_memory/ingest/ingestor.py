@@ -38,7 +38,7 @@ class FileIngestor:
         self,
         client: KaguraClient,
         text_provider_name: str = "claude",
-        vision_provider_name: str | None = None,
+        vision_provider_name: str | None = "gemini",
         text_provider: Provider | None = None,
         vision_provider: Provider | None = None,
         concurrency: int = _DEFAULT_CONCURRENCY,
@@ -49,10 +49,17 @@ class FileIngestor:
             client: Authenticated :class:`KaguraClient`. The ingestor does
                 not own its lifecycle — caller manages ``async with``.
             text_provider_name: Short name for text summarization. Used
-                only when ``text_provider`` is None.
+                only when ``text_provider`` is None. Default ``"claude"``
+                because Sonnet's summarization quality outperforms cheaper
+                models for the section/overview tasks.
             vision_provider_name: Short name for vision. Used only when
-                ``vision_provider`` is None. Pass ``None`` (or omit) to
-                disable vision; image content will then be skipped.
+                ``vision_provider`` is None. Pass ``None`` to disable
+                vision; image content will then be skipped with a warning.
+                Default ``"gemini"`` because Gemini 2.5 Flash provides
+                strong OCR + layout description at roughly 1/10 the
+                per-token cost of Sonnet. Callers concerned about sending
+                image bytes to a third-party provider should pass
+                ``None`` (or ``--no-vision`` on the CLI).
             text_provider: Pre-built provider override (mainly for tests).
             vision_provider: Pre-built vision provider override (tests).
             concurrency: Maximum concurrent section summarization calls.

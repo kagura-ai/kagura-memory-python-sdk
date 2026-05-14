@@ -251,13 +251,19 @@ def explore(context_id, memory_id, depth, min_weight):
 @click.option(
     "--vision-provider",
     type=click.Choice(["claude", "gemini", "ollama"], case_sensitive=False),
-    default=None,
+    default="gemini",
+    show_default=True,
     help=(
-        "Vision LLM provider for image content. REQUIRED to ingest images — "
-        "without this flag, image content is SKIPPED with a warning. Image "
-        "bytes are sent to the chosen provider; review their retention policy "
-        "before enabling."
+        "Vision LLM provider for image content. Image bytes are sent to "
+        "the chosen provider; review their retention policy. Pass "
+        "--no-vision to skip images entirely."
     ),
+)
+@click.option(
+    "--no-vision",
+    is_flag=True,
+    default=False,
+    help="Skip image content (no image bytes sent to any provider).",
 )
 @click.option("--tags", help="Comma-separated tags")
 @click.option(
@@ -312,6 +318,7 @@ def ingest_file(
     context_id,
     text_provider,
     vision_provider,
+    no_vision,
     tags,
     importance,
     max_bytes,
@@ -329,13 +336,14 @@ def ingest_file(
 
       pip install 'kagura-memory[ingest-pdf]'
 
-    Image content requires --vision-provider explicitly. Image bytes are
-    sent to the provider's API; review the provider's data retention policy
-    before enabling.
+    Vision is enabled by default (Gemini Flash) so PDF page images and
+    standalone images get OCR'd. Pass --no-vision to skip image content
+    entirely (no bytes sent to any provider).
 
     Examples:
       kagura ingest https://example.com/report.pdf
-      kagura ingest ./report.pdf --vision-provider gemini --tags "Q1,report"
+      kagura ingest ./report.pdf --tags "Q1,report"
+      kagura ingest report.pdf --no-vision
       kagura ingest report.pdf --dry-run
     """
     try:
@@ -368,7 +376,7 @@ def ingest_file(
                 ingestor = FileIngestor(
                     client=client,
                     text_provider_name=text_provider,
-                    vision_provider_name=vision_provider,
+                    vision_provider_name=None if no_vision else vision_provider,
                 )
                 if dry_run:
                     return await ingestor.estimate_cost(
