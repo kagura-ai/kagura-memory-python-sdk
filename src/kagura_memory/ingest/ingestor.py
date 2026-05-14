@@ -138,8 +138,12 @@ class FileIngestor:
             )
         except KaguraFetchError as e:
             # Best-effort contract: surface fetch failures via IngestResult
-            # so --json output stays machine-readable for scripts.
-            log.error(f"Fetch failed: {e}", stage="fetch", detail={"source": source})
+            # so --json output stays machine-readable for scripts. Use
+            # stage="complete" because this IS the terminal event for the
+            # ingest operation — keeping all terminal events on the same
+            # stage lets consumers do coarse state tracking without a
+            # special "fetch-failed" stage carve-out.
+            log.error(f"Fetch failed: {e}", stage="complete", detail={"source": source})
             return _fetch_failure_result(source, e, is_dry_run=False, ingestor=self)
         log.detail("Fetched bytes", len(fetched.body), stage="fetch")
         try:

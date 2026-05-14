@@ -1485,20 +1485,57 @@ def resource_import(resource_id, api_key, input_file, fmt, id_column, version, v
             stage="import_start",
         )
 
-    # Batch ingest (100 at a time)
+    # Batch ingest (100 at a time). The CLI command is ONE user-facing
+    # operation, so it must emit exactly one terminal event. ``ingest_events``
+    # also has its own per-call terminal contract — calling it N times with
+    # the same logger would produce N ``kind=success`` events and break the
+    # "wait for the first success/error" reader contract. Resolution: pass
+    # ``logger=None`` to the SDK (suppresses its terminal events), emit
+    # per-batch progress here at the CLI level, and close with one terminal
+    # event at the very end covering the whole import.
     async def op(client: ResourceClient) -> str:
         total_created = 0
         total_failed = 0
         all_errors: list[dict] = []
-        for start in range(0, len(events), 100):
-            batch = events[start : start + 100]
-            result = await client.ingest_events(resource_id, api_key, batch, logger=logger)
-            total_created += result.created_count
-            total_failed += result.failed_count
-            all_errors.extend(result.errors[:5])  # Keep first 5 errors per batch
+        batch_count = (len(events) + 99) // 100
+        try:
+            for i, start in enumerate(range(0, len(events), 100), 1):
+                batch = events[start : start + 100]
+                if logger is not None:
+                    logger.action(
+                        "Ingesting batch",
+                        f"{i}/{batch_count} ({len(batch)} event(s))",
+                        stage="import_batch",
+                    )
+                result = await client.ingest_events(resource_id, api_key, batch, logger=None)
+                total_created += result.created_count
+                total_failed += result.failed_count
+                all_errors.extend(result.errors[:5])  # Keep first 5 errors per batch
+        except BaseException as e:
+            if logger is not None:
+                logger.error(
+                    f"Import failed: {e}",
+                    stage="complete",
+                    detail={
+                        "created_so_far": total_created,
+                        "failed_so_far": total_failed,
+                        "total_events": len(events),
+                    },
+                )
+            raise
         output: dict = {"created": total_created, "failed": total_failed, "total": len(events)}
         if all_errors:
             output["errors"] = all_errors[:10]  # Show first 10 errors total
+        if logger is not None:
+            logger.success(
+                "Import complete",
+                stage="complete",
+                detail={
+                    "created": total_created,
+                    "failed": total_failed,
+                    "total": len(events),
+                },
+            )
         return json.dumps(output, indent=2, ensure_ascii=False)
 
     _run_resource_command(op)

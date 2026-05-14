@@ -139,12 +139,23 @@ class VerboseLogger:
             event["msg"] = msg
         if detail:
             event["detail"] = detail
-        # ``default=str`` makes the JSON path best-effort: a non-serializable
-        # object in ``detail`` (Path, UUID, custom dataclass, …) is rendered
-        # via ``str()`` instead of crashing the operation we are reporting on.
-        # Progress logging must never raise — the caller has more important
-        # work to do than worry about its observability stream.
-        line = json.dumps(event, ensure_ascii=False, default=str) + "\n"
+        # Serialization is best-effort. ``default=str`` handles common non-
+        # serializable types (Path, UUID, …), but a class with a broken
+        # ``__str__`` or a circular reference can still raise. The outer
+        # try-except guarantees the "progress logging must never raise"
+        # contract — on any serialization failure we emit a minimal
+        # placeholder so the terminal-event invariant still holds.
+        try:
+            line = json.dumps(event, ensure_ascii=False, default=str) + "\n"
+        except Exception:  # noqa: BLE001 — best-effort fallback for any json.dumps error
+            fallback = {
+                "v": _NDJSON_SCHEMA_VERSION,
+                "ts": event["ts"],
+                "stage": event["stage"],
+                "kind": event["kind"],
+                "msg": "<event serialization failed>",
+            }
+            line = json.dumps(fallback) + "\n"
         try:
             sys.stderr.write(line)
             sys.stderr.flush()
@@ -194,16 +205,20 @@ class VerboseLogger:
         if self.output_format == "none":
             return
         if self.output_format == "json":
-            # Serialize non-primitive payloads via str() so the JSON line stays
-            # a single object. A class with a broken ``__str__`` will surface
-            # the exception to the caller — the logger does not silently
-            # swallow it, since hiding a broken debug payload makes the bug
-            # harder to find than a loud error during dev/CI.
-            serialized = (
-                data
-                if isinstance(data, (dict, list, str, int, float, bool, type(None)))
-                else str(data)
-            )
+            # Serialize non-primitive payloads via str() so the JSON line
+            # stays a single object. A class with a broken ``__str__``
+            # would otherwise crash the operation; per the "progress
+            # logging must never raise" contract, fall back to a safe
+            # placeholder that names the type without invoking its
+            # stringification. ``_emit_json`` has its own outer safety
+            # net for json.dumps failures.
+            if isinstance(data, (dict, list, str, int, float, bool, type(None))):
+                serialized: Any = data
+            else:
+                try:
+                    serialized = str(data)
+                except Exception:  # noqa: BLE001 — never crash the caller on a bad __str__
+                    serialized = f"<{type(data).__name__} __str__ raised>"
             self._emit_json(kind="debug", stage=stage, msg=title, detail={"data": serialized})
             return
         if not self._should_log_rich(3):

@@ -100,13 +100,13 @@ def test_ndjson_unknown_stage_when_omitted(capsys):
     assert events[0]["stage"] == "unknown"
 
 
-def test_ndjson_debug_serializes_non_primitive_safely(capsys):
-    """debug() with a non-primitive payload falls back to str() without raising.
+def test_ndjson_debug_serializes_non_primitive_via_str(capsys):
+    """debug() coerces non-primitive payloads through str() into the NDJSON line.
 
-    Covers the defensive ``except Exception`` branch around the isinstance
-    fallback — a payload whose ``__str__`` is well-behaved (the common case
-    when an SDK call passes an arbitrary object) still produces a valid
-    NDJSON line.
+    The well-behaved branch: a custom class with a normal ``__str__`` /
+    ``__repr__`` is rendered into ``detail.data`` rather than dropped.
+    The broken-``__str__`` branch is exercised by
+    ``test_ndjson_debug_swallows_broken_str_payload`` below.
     """
 
     class _CustomPayload:
@@ -117,8 +117,28 @@ def test_ndjson_debug_serializes_non_primitive_safely(capsys):
     logger.debug("LLM response", _CustomPayload(), stage="summarize")
     events = _parse_lines(capsys.readouterr().err)
     assert events[-1]["kind"] == "debug"
-    # The non-primitive is stringified, not dropped.
     assert "_CustomPayload" in events[-1]["detail"]["data"]
+
+
+def test_ndjson_debug_swallows_broken_str_payload(capsys):
+    """A payload whose ``__str__`` raises must not crash the operation.
+
+    Locks the "progress logging must never raise" contract for the
+    debug-JSON path: when ``str(data)`` itself fails, debug() emits a
+    safe placeholder naming the type instead of propagating.
+    """
+
+    class _BadStr:
+        def __str__(self) -> str:
+            raise RuntimeError("broken __str__")
+
+    logger = VerboseLogger(output_format="json")
+    # The call must not raise even though str(_BadStr()) does.
+    logger.debug("LLM response", _BadStr(), stage="summarize")
+    events = _parse_lines(capsys.readouterr().err)
+    assert events[-1]["kind"] == "debug"
+    assert "_BadStr" in events[-1]["detail"]["data"]
+    assert "raised" in events[-1]["detail"]["data"]
 
 
 def test_ndjson_level_is_ignored(capsys):
