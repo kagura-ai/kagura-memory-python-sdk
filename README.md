@@ -350,8 +350,8 @@ kagura ingest ./report.pdf --json
 Exit codes: `0` when the overview memory is created (per-section errors are still `0`, they show up in `result.errors`); `1` when the overview itself fails (corrupted PDF, network error, etc.); `0` for any `--dry-run` invocation.
 
 Provider configuration (env vars, picked up automatically via `litellm`):
-- `ANTHROPIC_API_KEY` — text summarization (default `claude/sonnet-4-6`)
-- `GEMINI_API_KEY` — reserved for vision OCR (default `gemini/gemini-2.5-flash`); not invoked in Phase 1
+- `ANTHROPIC_API_KEY` — text summarization (default model `claude-sonnet-4-6` via the `claude` preset)
+- `GEMINI_API_KEY` — reserved for vision OCR (default model `gemini/gemini-2.5-flash` via the `gemini` preset); not invoked in Phase 1
 - Override per invocation: `--text-provider {claude|gemini|ollama}`, `--vision-provider {claude|gemini|ollama}`
 
 ## Claude Code Integration

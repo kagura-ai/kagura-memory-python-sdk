@@ -86,7 +86,16 @@ def render_dry_run(result: IngestResult, console: Console) -> None:
     console.print()
 
     cost = result.cost
-    _print_kv(console, "Sections:", str(len(result.section_ids)) if result.section_ids else "—")
+    # In dry-run we have no section_ids (nothing was written), but we DO
+    # know how many sections the extractor produced; surface that count
+    # via the estimated_section_count field populated by estimate_cost.
+    if result.estimated_section_count is not None:
+        section_value = f"{result.estimated_section_count} detected"
+    elif result.section_ids:
+        section_value = str(len(result.section_ids))
+    else:
+        section_value = "—"
+    _print_kv(console, "Sections:", section_value)
     if cost.prompt_tokens is not None or cost.completion_tokens is not None:
         prompt = cost.prompt_tokens if cost.prompt_tokens is not None else "?"
         completion = cost.completion_tokens if cost.completion_tokens is not None else "?"

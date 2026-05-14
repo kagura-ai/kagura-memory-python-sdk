@@ -34,8 +34,11 @@ _DEMO = IngestResult(
     archived_file_id="f8e9d0c1-b2a3-4567-89ab-cdef01234567",
     cost=CostBreakdown(
         is_estimate=False,
-        text_provider="claude/sonnet-4-6",
-        vision_provider="gemini/2.5-flash",
+        # Provider NAME (matches what the orchestrator writes via
+        # ``Provider.name``); the demo previously used a model path like
+        # "claude/sonnet-4-6" which is not what the runtime emits.
+        text_provider="claude",
+        vision_provider="gemini",
         est_usd=0.03,
     ),
 )

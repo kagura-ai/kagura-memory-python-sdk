@@ -132,6 +132,18 @@ def test_dry_run_uses_arrow_glyph_and_token_estimates() -> None:
     assert "No LLM calls were made" in out
 
 
+def test_dry_run_shows_estimated_section_count_when_present() -> None:
+    """When estimate_cost stamps a chunk count, render it instead of em-dash."""
+    console = _capture()
+    result = _result(is_dry_run=True, section_count=0)
+    result.estimated_section_count = 8
+    render_dry_run(result, console)
+    out = console.export_text()
+    assert "8 detected" in out
+    # The legacy em-dash row must not appear when we have a real count.
+    assert "Sections:        —" not in out
+
+
 def test_render_failure_from_exception_uses_cross_glyph() -> None:
     """When an exception escapes, render_failure shows ✗ + type info."""
     console = _capture()

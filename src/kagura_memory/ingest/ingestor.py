@@ -203,6 +203,7 @@ class FileIngestor:
             source_uri=fetched.source_uri,
             source_type=fetched.source_type,
             section_ids=[],
+            estimated_section_count=len(chunks),
             skipped_images=len(content.images) if self._vision is None else 0,
             cost=cost,
             warnings=warnings,

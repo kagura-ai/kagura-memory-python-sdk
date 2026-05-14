@@ -15,6 +15,7 @@ user to the ``[ingest]`` extra.
 from __future__ import annotations
 
 import io
+import warnings
 from typing import Any
 
 from ..exceptions import KaguraIngestError
@@ -41,6 +42,12 @@ def _load_pillow() -> Any:
     if not _pillow_initialized:
         if Image.MAX_IMAGE_PIXELS is None or Image.MAX_IMAGE_PIXELS > _MAX_IMAGE_PIXELS:
             Image.MAX_IMAGE_PIXELS = _MAX_IMAGE_PIXELS
+        # Pillow's default behavior is to emit a DecompressionBombWarning
+        # between MAX_IMAGE_PIXELS and 2 * MAX_IMAGE_PIXELS and only raise
+        # DecompressionBombError above 2 *. Converting the warning to an
+        # exception makes the cap a hard limit — important for SSRF /
+        # malicious-upload defense.
+        warnings.simplefilter("error", Image.DecompressionBombWarning)
         _pillow_initialized = True
     return Image
 
@@ -74,7 +81,12 @@ def preprocess(image_bytes: bytes) -> tuple[bytes, str]:
         rgb.save(buf, format="JPEG", quality=_JPEG_QUALITY, optimize=True)
         rgb.close()
         return buf.getvalue(), "image/jpeg"
-    except Image.DecompressionBombError as e:
+    except (Image.DecompressionBombWarning, Image.DecompressionBombError) as e:
+        # DecompressionBombWarning fires between MAX and 2*MAX pixels (raised
+        # as an exception via the simplefilter promotion in _load_pillow);
+        # DecompressionBombError fires above 2*MAX (raised by Pillow directly).
+        # They are in separate class hierarchies (Warning vs Exception), so
+        # we must catch both explicitly.
         raise KaguraIngestError(f"image rejected as decompression bomb: {e}") from e
     except Exception as e:  # noqa: BLE001
         raise KaguraIngestError(f"image preprocessing failed: {e}") from e

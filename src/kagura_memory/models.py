@@ -809,6 +809,14 @@ class IngestResult(BaseModel):
     source_type: Literal["file", "url"]
     overview_id: str | None = None
     section_ids: list[str] = Field(default_factory=list)
+    estimated_section_count: int | None = None
+    """Number of sections detected during ``--dry-run`` extraction.
+
+    Populated only by :meth:`FileIngestor.estimate_cost` (the dry-run
+    path) where no memories are written and ``section_ids`` is empty.
+    The Rich renderer reads this for the dry-run "Sections:" row.
+    ``None`` on actual ingest runs — use ``len(section_ids)`` then.
+    """
     skipped_images: int = 0
     archived_file_id: str | None = None
     """``FileObject.id`` when the source was archived to R2, else ``None``.

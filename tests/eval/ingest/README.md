@@ -31,14 +31,24 @@ Each test runs the actual summarizer (`LiteLLMProvider.summarize`,
 `summarize_overview`, `describe_image`) against a small fixture and
 asserts deterministic properties:
 
-| Test                              | Property checked                                   |
-|-----------------------------------|----------------------------------------------------|
-| `test_summary_is_non_empty`       | The summarizer never returns whitespace-only text. |
-| `test_summary_respects_length_cap`| Output stays within the "2-4 sentences" ceiling.   |
-| `test_summary_preserves_language` | A Japanese input gets a Japanese reply.            |
+| Test                                       | Property checked                                                       |
+|--------------------------------------------|------------------------------------------------------------------------|
+| `test_summary_is_non_empty`                | The summarizer never returns whitespace-only text.                     |
+| `test_summary_respects_length_cap`         | Output stays within the "2-4 sentences" ceiling (≤7 terminators).     |
+| `test_summary_preserves_source_language`   | A Japanese input gets a Japanese reply (CJK codepoint count ≥ 20).    |
+| `test_overview_summarizer_is_non_empty`    | `summarize_overview()` also obeys the non-empty contract.              |
 
-`langdetect` is used for the language check. It's added as an `eval`
-optional dependency, NOT a runtime requirement.
+Language detection uses the inline `_is_cjk()` helper in
+`test_eval_summarizer.py` — a small Hiragana/Katakana/CJK/Hangul
+codepoint check. A heavier library (`langdetect`, `fastText`) would be
+more rigorous; the codepoint check captures the failure mode the
+prompt is defending against (the model replying in English on a
+Japanese input) without adding a runtime dependency.
+
+The eval suite has **no additional optional dependencies** beyond the
+ingest extras already required to run the orchestrator
+(`pip install kagura-memory[ingest-pdf]`). The real-LLM calls are
+made through `litellm`, which is already a core dependency.
 
 ## What's intentionally NOT here
 
