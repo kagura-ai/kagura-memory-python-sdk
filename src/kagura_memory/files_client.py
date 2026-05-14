@@ -23,12 +23,15 @@ import asyncio
 import base64
 import hashlib
 import mimetypes
+import uuid
 from pathlib import Path
 from typing import Any, Literal
 
 import httpx
 
+from ._auth import _resolve_auth, _StaticAuth
 from ._http import SDK_VERSION, base_url_from_mcp, extract_detail, validate_https_url
+from .auth.credentials import KaguraOAuth
 from .exceptions import (
     KaguraAuthError,
     KaguraConnectionError,
@@ -62,34 +65,70 @@ class FilesClient:
 
     def __init__(
         self,
-        api_key: str,
+        api_key: str | None = None,
         base_url: str = "https://memory.kagura-ai.com",
         timeout: float = 30.0,
         upload_timeout: float = 300.0,
+        *,
+        _oauth: KaguraOAuth | None = None,
     ) -> None:
-        """Initialize FilesClient.
+        """Initialize FilesClient with a static API key.
+
+        For OAuth profile resolution (the auto chain env → ``~/.kagura/
+        credentials.json`` → ``.kagura.json``), use :meth:`from_mcp_url`
+        which runs the resolver and selects the right transport.
 
         Args:
-            api_key: Kagura API key (Bearer token for API operations).
+            api_key: Kagura API key (Bearer token). Required unless
+                ``_oauth`` is supplied (see ``from_mcp_url``).
             base_url: REST API base URL (without path).
             timeout: API request timeout in seconds.
             upload_timeout: R2 PUT timeout in seconds (defaults to 5
                 minutes to accommodate large files on slow networks).
+            _oauth: Private. ``from_mcp_url`` passes a ``KaguraOAuth``
+                instance for OAuth profile authentication. Public
+                callers should not set this.
+
+        Raises:
+            ValueError: If neither ``api_key`` nor ``_oauth`` is given.
+                The OAuth path is intentionally not auto-resolved here
+                so that bare ``FilesClient()`` does not silently read
+                ``~/.kagura/credentials.json`` — that's the
+                ``from_mcp_url`` factory's job.
         """
+        if api_key is None and _oauth is None:
+            raise ValueError(
+                "FilesClient requires api_key, or use FilesClient.from_mcp_url(...) "
+                "to resolve credentials from environment, OAuth profile, or .kagura.json."
+            )
+
         stripped_url = base_url.rstrip("/")
         validate_https_url(stripped_url, label="Base URL")
 
         self.base_url = stripped_url
-        self._client = httpx.AsyncClient(
-            timeout=timeout,
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "User-Agent": f"kagura-memory-sdk/{SDK_VERSION}",
-            },
-        )
-        # Separate client for outbound PUT to the object store. Carries
-        # no Bearer header so a future contributor cannot accidentally
-        # leak the API key by adding another method that reuses it.
+        if _oauth is not None:
+            # OAuth path: KaguraOAuth injects a fresh access_token per request
+            # and coordinates refresh via the process-wide credentials lock.
+            self._client = httpx.AsyncClient(
+                timeout=timeout,
+                headers={"User-Agent": f"kagura-memory-sdk/{SDK_VERSION}"},
+                auth=_oauth,
+            )
+        else:
+            # Static path: bake the bearer header once. ``api_key`` is not
+            # stored as an instance attribute (per python.md "Never store
+            # API keys as instance attributes").
+            self._client = httpx.AsyncClient(
+                timeout=timeout,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "User-Agent": f"kagura-memory-sdk/{SDK_VERSION}",
+                },
+            )
+        # Defense in depth: never pass auth= or an Authorization header here.
+        # Bearer / OAuth credentials must not reach R2 — the presigned PUT
+        # carries its own short-lived SigV4 signature. A separate httpx client
+        # makes the no-auth invariant structural, not just a runtime convention.
         self._upload_client = httpx.AsyncClient(
             timeout=upload_timeout,
             headers={"User-Agent": f"kagura-memory-sdk/{SDK_VERSION}"},
@@ -98,23 +137,52 @@ class FilesClient:
     @classmethod
     def from_mcp_url(
         cls,
-        api_key: str,
-        mcp_url: str = "https://memory.kagura-ai.com/mcp",
+        api_key: str | None = None,
+        mcp_url: str | None = None,
         timeout: float = 30.0,
         upload_timeout: float = 300.0,
+        *,
+        profile: str | None = None,
     ) -> FilesClient:
-        """Create FilesClient by deriving the REST base URL from an MCP URL.
+        """Create FilesClient by resolving credentials from the SDK chain.
 
-        Strips ``/mcp`` and everything after it. Handles both
-        ``/mcp`` and ``/mcp/w/{workspace_id}`` formats.
+        Runs :func:`_resolve_auth` with the same precedence chain as
+        :class:`KaguraClient`: explicit ``api_key`` > ``KAGURA_API_KEY``
+        env > OAuth profile from ``~/.kagura/credentials.json`` >
+        ``.kagura.json``. The chosen credential source picks the
+        transport: a static API key bakes the Bearer header once; an
+        OAuth profile installs a ``KaguraOAuth`` httpx.Auth handler
+        with automatic refresh.
+
+        The REST ``base_url`` is derived from the resolved ``mcp_url``
+        (strips ``/mcp`` and any ``/mcp/w/{workspace_id}`` suffix).
+
+        Args:
+            api_key: Explicit Kagura API key. Skips the resolution chain.
+            mcp_url: Explicit MCP URL. When omitted, the OAuth profile's
+                stored ``mcp_url`` is used (or
+                ``https://memory.kagura-ai.com/mcp`` as a final default).
+            timeout: API request timeout in seconds.
+            upload_timeout: R2 PUT timeout in seconds.
+            profile: Named OAuth profile to load (overrides
+                ``KAGURA_PROFILE`` env and the credentials file's
+                ``default_profile``).
         """
-        url = mcp_url.rstrip("/")
-        base_url = base_url_from_mcp(url)
+        resolved = _resolve_auth(api_key=api_key, mcp_url=mcp_url, profile=profile)
+        base_url = base_url_from_mcp(resolved.mcp_url.rstrip("/"))
+
+        if isinstance(resolved, _StaticAuth):
+            return cls(
+                api_key=resolved.api_key,
+                base_url=base_url,
+                timeout=timeout,
+                upload_timeout=upload_timeout,
+            )
         return cls(
-            api_key=api_key,
             base_url=base_url,
             timeout=timeout,
             upload_timeout=upload_timeout,
+            _oauth=resolved.oauth,
         )
 
     # -------------------------------------------------------------------
@@ -257,6 +325,7 @@ class FilesClient:
             KaguraAuthError, KaguraNotFoundError, KaguraQuotaError,
             KaguraConnectionError: see class docstring.
         """
+        _validate_context_id(context_id)
         resolved_filename, body, sha256_hex = await _prepare_source(source, filename)
         size_bytes = len(body)
         resolved_content_type = _resolve_content_type(content_type, resolved_filename)
@@ -329,6 +398,7 @@ class FilesClient:
             ``next_cursor`` (always ``None`` against the current
             server).
         """
+        _validate_context_id(context_id)
         params: dict[str, Any] = {"workspace_id": context_id, "limit": limit}
         if cursor is not None:
             params["cursor"] = cursor
@@ -400,6 +470,34 @@ def _extract_existing_file(error: KaguraConnectionError) -> FileObject | None:
     if not isinstance(existing, dict):
         return None
     return FileObject.model_validate(existing)
+
+
+def _validate_context_id(context_id: str) -> None:
+    """Fail fast on a non-UUID ``context_id``.
+
+    The server's ``/api/v1/files/*`` endpoints validate ``workspace_id``
+    server-side and return 422, but the round-trip masks a class of
+    common errors — e.g. passing the CLI sentinel ``"auto"`` straight
+    through to the SDK without resolution. Raising locally turns that
+    into a clear ``ValueError`` instead of a generic HTTP status.
+
+    Args:
+        context_id: The workspace UUID to validate.
+
+    Raises:
+        ValueError: If ``context_id`` is not a parseable UUID. The
+            message points the caller at the OAuth profile's
+            ``workspace_id`` and ``kagura context list``, which are the
+            two ways the SDK expects ``context_id`` to be sourced.
+    """
+    try:
+        uuid.UUID(context_id)
+    except (ValueError, TypeError, AttributeError) as e:
+        raise ValueError(
+            f"context_id must be a UUID; got {context_id!r}. "
+            "Use the OAuth profile's workspace_id, a UUID from "
+            "`kagura context list`, or run `kagura auth login` first."
+        ) from e
 
 
 def _resolve_content_type(content_type: str | None, filename: str) -> str:
