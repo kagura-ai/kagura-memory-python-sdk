@@ -313,6 +313,14 @@ def explore(context_id, memory_id, depth, min_weight):
     default=False,
     help="Estimate token + page counts without calling any LLM provider.",
 )
+@click.option(
+    "--json",
+    "-J",
+    "as_json",
+    is_flag=True,
+    default=False,
+    help="Emit the full IngestResult as JSON (machine-readable). Default is a human-readable summary.",
+)
 def ingest_file(
     source,
     context_id,
@@ -327,6 +335,7 @@ def ingest_file(
     allow_http,
     allow_system_paths,
     dry_run,
+    as_json,
 ):
     """Ingest a URL or local file into Memory Cloud.
 
@@ -400,7 +409,21 @@ def ingest_file(
                 )
 
         result = asyncio.run(_run())
+        # Stage 5 will branch on ``as_json`` and route the default path
+        # through a Rich human formatter; for now both branches emit JSON
+        # so the --json flag is wired with a stable contract from v0.16.0.
+        _ = as_json
         click.echo(result.model_dump_json(indent=2))
+
+        # Exit code contract:
+        #   0 = overview created (partial section errors are still 0,
+        #       matching the best-effort design — callers can inspect
+        #       result.errors for finer-grained handling)
+        #   0 = dry-run completed (no real success/failure)
+        #   1 = overview NOT created (fatal)
+        if dry_run or result.success:
+            return
+        sys.exit(1)
 
     except click.ClickException:
         raise
