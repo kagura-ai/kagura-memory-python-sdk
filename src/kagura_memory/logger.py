@@ -221,7 +221,16 @@ class VerboseLogger:
             return
         if not self._should_log_rich(2):
             return
-        self._safe_rich_print(f"  [cyan]•[/cyan] {key}: [yellow]{value}[/yellow]")
+        # f-string interpolation calls ``value.__format__`` / ``__str__``
+        # BEFORE ``_safe_rich_print`` runs, so a broken stringifier would
+        # crash the caller without ever reaching the OSError guard.
+        # Pre-stringify defensively so the never-raise contract holds for
+        # the detail Rich path the same way it does for debug().
+        try:
+            value_str = str(value)
+        except Exception:  # noqa: BLE001 — never crash the caller on a bad __str__
+            value_str = f"<{type(value).__name__} __str__ raised>"
+        self._safe_rich_print(f"  [cyan]•[/cyan] {key}: [yellow]{value_str}[/yellow]")
 
     def debug(
         self, title: str, data: Any, syntax: str = "json", *, stage: str | None = None

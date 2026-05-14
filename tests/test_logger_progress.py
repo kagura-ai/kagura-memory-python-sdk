@@ -468,6 +468,28 @@ def test_rich_path_swallows_broken_console_print():
     logger.debug("dbg", {"x": 1})
 
 
+def test_rich_detail_swallows_broken_str_value():
+    """``detail()`` Rich path defensively stringifies ``value`` before f-string.
+
+    Without the pre-stringification, ``f"...{value}..."`` would call
+    ``value.__format__`` / ``__str__`` BEFORE ``_safe_rich_print``'s
+    OSError guard could ever run — so a broken ``__str__`` crashes the
+    caller. Locks the never-raise contract for ``detail()`` on the Rich
+    path, matching ``debug()``'s behavior.
+    """
+
+    class _BadStr:
+        def __str__(self) -> str:
+            raise RuntimeError("broken __str__")
+
+    buf = io.StringIO()
+    console = Console(file=buf, force_terminal=False, no_color=True)
+    logger = VerboseLogger(level=2, console=console, output_format="rich")
+    logger.detail("key", _BadStr())  # must not raise
+    assert "_BadStr" in buf.getvalue()
+    assert "raised" in buf.getvalue()
+
+
 def test_rich_debug_swallows_broken_str_payload():
     """The Rich debug path now falls back safely when ``str(data)`` raises.
 
