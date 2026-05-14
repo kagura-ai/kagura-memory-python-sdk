@@ -435,11 +435,18 @@ def ingest_file(
                         await files_client.close()
 
         result = asyncio.run(_run())
-        # Stage 5 will branch on ``as_json`` and route the default path
-        # through a Rich human formatter; for now both branches emit JSON
-        # so the --json flag is wired with a stable contract from v0.16.0.
-        _ = as_json
-        click.echo(result.model_dump_json(indent=2))
+        if as_json:
+            click.echo(result.model_dump_json(indent=2))
+        else:
+            from rich.console import Console
+
+            from .ingest._render import render_dry_run, render_result
+
+            console = Console()
+            if result.is_dry_run:
+                render_dry_run(result, console)
+            else:
+                render_result(result, console)
 
         # Exit code contract:
         #   0 = overview created (partial section errors are still 0,

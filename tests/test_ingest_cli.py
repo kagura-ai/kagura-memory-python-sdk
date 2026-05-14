@@ -50,7 +50,10 @@ def test_ingest_dry_run_emits_estimate_json(
         mock_ingestor_cls.return_value = mock_ingestor
 
         runner = CliRunner()
-        result = runner.invoke(main, ["ingest", str(FIXTURE), "--dry-run"])
+        # --json forces machine-readable output (default is the Rich
+        # human formatter from ingest/_render.py); these assertions
+        # are easier to anchor against JSON.
+        result = runner.invoke(main, ["ingest", str(FIXTURE), "--dry-run", "--json"])
 
         assert result.exit_code == 0, result.output
         assert '"is_dry_run": true' in result.output
@@ -88,7 +91,7 @@ def test_ingest_full_path_calls_ingest(mock_client_cls: MagicMock, mock_config: 
         runner = CliRunner()
         result = runner.invoke(
             main,
-            ["ingest", str(FIXTURE), "--tags", "pdf,doc", "--importance", "0.8"],
+            ["ingest", str(FIXTURE), "--tags", "pdf,doc", "--importance", "0.8", "--json"],
         )
 
         assert result.exit_code == 0, result.output
@@ -142,3 +145,72 @@ def test_ingest_no_context_id_fails_when_not_dry_run(
     result = runner.invoke(main, ["ingest", "x.pdf"])
     assert result.exit_code != 0
     assert "context_id" in result.output.lower() or "context id" in result.output.lower()
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_ingest_human_default_uses_rich_glyphs_not_json(
+    mock_client_cls: MagicMock, mock_config: MagicMock
+) -> None:
+    """Default (no --json) path goes through the Rich formatter, not JSON dump."""
+    mock_config.return_value = {
+        "api_key": "test-key",
+        "mcp_url": "https://test.com/mcp",
+        "context_id": "ctx-uuid",
+    }
+    mock_client_cls.return_value = MagicMock(spec=type(MagicMock()))
+
+    expected_result = IngestResult(
+        is_dry_run=False,
+        source_uri=f"file://{FIXTURE.resolve()}",
+        source_type="file",
+        overview_id="ov-1",
+        section_ids=["sec-1", "sec-2"],
+        cost=CostBreakdown(text_provider="claude", vision_provider="gemini"),
+    )
+
+    with patch("kagura_memory.ingest.FileIngestor") as mock_ingestor_cls:
+        mock_ingestor = MagicMock()
+        mock_ingestor.ingest = AsyncMock(return_value=expected_result)
+        mock_ingestor_cls.return_value = mock_ingestor
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["ingest", str(FIXTURE)])
+
+        assert result.exit_code == 0, result.output
+        # Rich formatter signature: ✓ for success + "Ingested" headline +
+        # "Overview:" label. None of these would appear in a JSON dump.
+        assert "✓" in result.output
+        assert "Ingested" in result.output
+        assert "Overview:" in result.output
+        # And no JSON braces (would appear if the JSON path leaked).
+        assert '"overview_id"' not in result.output
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_ingest_failure_exits_nonzero(mock_client_cls: MagicMock, mock_config: MagicMock) -> None:
+    """When the ingestor returns success=False, CLI exits 1."""
+    mock_config.return_value = {
+        "api_key": "test-key",
+        "mcp_url": "https://test.com/mcp",
+        "context_id": "ctx-uuid",
+    }
+    mock_client_cls.return_value = MagicMock(spec=type(MagicMock()))
+
+    failure_result = IngestResult(
+        is_dry_run=False,
+        source_uri=f"file://{FIXTURE.resolve()}",
+        source_type="file",
+        overview_id=None,  # signals failure
+        cost=CostBreakdown(text_provider="claude"),
+    )
+
+    with patch("kagura_memory.ingest.FileIngestor") as mock_ingestor_cls:
+        mock_ingestor = MagicMock()
+        mock_ingestor.ingest = AsyncMock(return_value=failure_result)
+        mock_ingestor_cls.return_value = mock_ingestor
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["ingest", str(FIXTURE)])
+        assert result.exit_code == 1, result.output
