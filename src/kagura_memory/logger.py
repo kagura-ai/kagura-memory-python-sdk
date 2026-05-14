@@ -125,6 +125,10 @@ class VerboseLogger:
         try:
             self._console.print(*args, **kwargs)
         except OSError:
+            # Deliberately silent: progress logging must never crash the
+            # operation it is reporting on. See the function docstring
+            # above and the module-level "progress logging must never
+            # raise" contract for the rationale.
             pass
 
     def _emit_json(
