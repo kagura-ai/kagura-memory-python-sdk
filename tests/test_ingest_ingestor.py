@@ -303,6 +303,7 @@ async def test_archive_uploads_source_and_stamps_file_id_on_overview() -> None:
     assert overview_call["details"]["sha256"] == "abc123"
     assert overview_call["details"]["size_bytes"] == 1024
     assert result.success is True
+    assert result.archived_file_id == "archived-id-1"
 
     await client.close()
 

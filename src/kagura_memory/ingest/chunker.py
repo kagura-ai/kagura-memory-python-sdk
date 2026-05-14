@@ -1,23 +1,22 @@
 """Structural-first chunker for the file ingestion pipeline.
 
-Strategy (per design doc §5):
+Per design doc §5: each :class:`ExtractedSection` becomes one or more
+:class:`Chunk` objects. Sections under ``max_tokens`` pass through
+untouched; oversized sections are split via a token-window fallback,
+with heading metadata preserved on the first sub-chunk.
 
-1. If extracted sections exist: pass each through; if a section's text
-   exceeds ``max_tokens``, split it into multiple chunks via a token-window
-   fallback. Heading metadata is preserved on the first sub-chunk.
-2. If no sections (extractor returned an empty list): treat the whole
-   document text as one synthetic section and token-window split.
+Empty extractions (no sections) currently yield no chunks. A future
+follow-up may synthesize a single section from the full document text;
+until then the orchestrator surfaces extraction errors directly.
 
 Token counting uses ``litellm.token_counter`` which is provider-aware. A
-fallback ``len(text) // 4`` heuristic kicks in when the counter is
-unavailable (e.g. unknown model, or ``litellm`` failing in a test).
+``len(text) // 4`` heuristic kicks in when the counter is unavailable
+(e.g. unknown model, or ``litellm`` failing in a test).
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable
-
-from ._types import Chunk, ExtractedContent, ExtractedSection
+from ._types import Chunk, ExtractedContent
 
 DEFAULT_MAX_TOKENS = 1500
 DEFAULT_OVERLAP_TOKENS = 100
@@ -45,17 +44,12 @@ def chunk(
     Returns:
         Chunks in document order with stable ``section_index`` values.
     """
-    sections: Iterable[ExtractedSection]
-    if content.sections:
-        sections = content.sections
-    else:
-        # Extractor returned no sections — synthesize one from the document.
-        # Empty content yields no chunks.
+    if not content.sections:
         return []
 
     chunks: list[Chunk] = []
     next_index = 0
-    for section in sections:
+    for section in content.sections:
         for sub_text, is_first in _split_section(
             section.body_text, max_tokens, overlap_tokens, model
         ):

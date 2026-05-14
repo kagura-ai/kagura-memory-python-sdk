@@ -31,6 +31,7 @@ _DEMO = IngestResult(
     overview_id="a1b2c3d4-e5f6-7890-abcd-ef0123456789",
     section_ids=[f"sec-{i:02d}" for i in range(8)],
     skipped_images=0,
+    archived_file_id="f8e9d0c1-b2a3-4567-89ab-cdef01234567",
     cost=CostBreakdown(
         is_estimate=False,
         text_provider="claude/sonnet-4-6",

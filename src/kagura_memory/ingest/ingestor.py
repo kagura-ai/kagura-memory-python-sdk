@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from ..client import KaguraClient
 from ..exceptions import KaguraIngestError, KaguraLLMError
@@ -171,8 +173,16 @@ class FileIngestor:
                 ],
             )
 
-        prompt_tokens = sum(self._text.count_tokens(c.text) for c in chunks)
-        prompt_tokens += self._text.count_tokens("\n\n".join(c.text[:200] for c in chunks))
+        # Estimate the prompt token bill the way the orchestrator will
+        # actually spend it:
+        #   * N section summaries feed each chunk's full text to the model.
+        #   * 1 overview summary feeds the SECTION SUMMARIES (not the raw
+        #     chunks) — we approximate that input with
+        #     ``len(chunks) * _DEFAULT_SECTION_TOKENS`` (the cap each
+        #     section summary will fit under).
+        section_prompt = sum(self._text.count_tokens(c.text) for c in chunks)
+        overview_prompt_est = len(chunks) * _DEFAULT_SECTION_TOKENS
+        prompt_tokens = section_prompt + overview_prompt_est
         completion_tokens_est = len(chunks) * _DEFAULT_SECTION_TOKENS + _DEFAULT_OVERVIEW_TOKENS
         cost = CostBreakdown(
             is_estimate=True,
@@ -261,10 +271,12 @@ class FileIngestor:
             skipped_images = len(content.images)
             warnings.append(f"{skipped_images} image(s) skipped — no vision provider configured")
 
-        # Run section summarization and (optionally) archive the original
-        # bytes in parallel. Archive is a network round-trip to R2 that is
-        # entirely independent of LLM work, so wasting it serially would
-        # add latency. Failures on either side are recorded as best-effort
+        # Archive runs concurrently with both summarize_sections AND the
+        # overview summarization that follows — the archive's result is
+        # only needed inside _write_overview to stamp details.file_id.
+        # Awaiting it later (vs. between section and overview LLM calls)
+        # overlaps the R2 PUT with the overview LLM round-trip too.
+        # Failures on either side are recorded as best-effort
         # ``IngestErrorRecord`` entries and do not abort the run.
         archive_task: asyncio.Task[FileObject | None] | None = None
         if archive_original and self._files is not None:
@@ -274,11 +286,8 @@ class FileIngestor:
 
         section_summaries = await self._summarize_sections(chunks, errors)
 
-        archived: FileObject | None = None
-        if archive_task is not None:
-            archived = await archive_task
-
-        # Build the overview from the section summaries.
+        # Build the overview from the section summaries (in parallel with
+        # the still-pending archive_task, if any).
         try:
             overview_summary = await self._text.summarize_overview(
                 [s for s in section_summaries if s], max_tokens=_DEFAULT_OVERVIEW_TOKENS
@@ -290,6 +299,12 @@ class FileIngestor:
                 )
             )
             overview_summary = content.title or fetched.source_uri
+
+        # Now collect the archive result before writing the overview, so
+        # archived.id can be stamped on details.file_id.
+        archived: FileObject | None = None
+        if archive_task is not None:
+            archived = await archive_task
 
         # Write the overview memory first (we need its id for section linking).
         overview_id = await self._write_overview(
@@ -329,6 +344,7 @@ class FileIngestor:
             overview_id=overview_id,
             section_ids=section_ids,
             skipped_images=skipped_images,
+            archived_file_id=archived.id if archived is not None else None,
             cost=cost,
             warnings=warnings,
             errors=errors,
@@ -577,16 +593,11 @@ def _infer_title(source_uri: str) -> str:
 def _filename_from_source_uri(source_uri: str) -> str:
     """Derive a filename for ``FilesClient.upload`` from a URI.
 
-    Strips any query string or fragment so the upload metadata does not
-    carry tracking parameters into R2. Falls back to a generic name when
-    the URI ends in a path separator (e.g. ``https://example.com/``).
+    ``urlsplit`` drops query / fragment for us so the upload metadata
+    does not carry tracking parameters into R2. Works for both
+    ``https://...`` and ``file://...``.
     """
-    tail = source_uri.rsplit("/", 1)[-1]
-    for sep in ("?", "#"):
-        idx = tail.find(sep)
-        if idx != -1:
-            tail = tail[:idx]
-    return tail or "ingested-source"
+    return Path(urlsplit(source_uri).path).name or "ingested-source"
 
 
 def _truncate(text: str, limit: int) -> str:

@@ -810,6 +810,13 @@ class IngestResult(BaseModel):
     overview_id: str | None = None
     section_ids: list[str] = Field(default_factory=list)
     skipped_images: int = 0
+    archived_file_id: str | None = None
+    """``FileObject.id`` when the source was archived to R2, else ``None``.
+
+    ``None`` covers three cases: archival was opt-out (``archive_original=False``),
+    no ``FilesClient`` was supplied, or the upload failed (also visible as an
+    ``errors[*].step == "archive"`` record).
+    """
     cost: CostBreakdown
     warnings: list[str] = Field(default_factory=list)
     errors: list[IngestErrorRecord] = Field(default_factory=list)

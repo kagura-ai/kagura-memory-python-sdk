@@ -155,23 +155,16 @@ def _print_kv(console: Console, label: str, value: str) -> None:
 
 
 def _print_archive_line(console: Console, result: IngestResult) -> None:
-    """Surface the R2 archive file_id when the orchestrator stamped one.
+    """Surface the archive file_id when one was actually stamped.
 
-    Reads details indirectly via warnings; the orchestrator does not
-    propagate the FileObject upward, but the file_id is captured on the
-    overview memory's details on the server side. For the CLI we infer
-    "archived" from the absence of an archive error.
+    Only prints when ``result.archived_file_id`` is populated — covers
+    the three reasons it can be ``None`` (opt-out, no FilesClient, upload
+    failed) with a single check, no inference from ``errors``.
     """
-    archived_failed = any(e.step == "archive" for e in result.errors)
-    if archived_failed:
+    if result.archived_file_id is None:
         return
-    # We don't currently have the file_id at this layer (it's inside the
-    # remember() payload, not echoed back through IngestResult). The line
-    # is a confirmation, not a reference — callers needing the id should
-    # use --json or query the overview memory's details.file_id.
-    if result.overview_id is not None:
-        console.print()
-        console.print("  [dim]Original archived to workspace storage.[/dim]")
+    console.print()
+    console.print(f"  [dim]Original archived:[/dim] file_id={_escape(result.archived_file_id)}")
 
 
 def _print_warnings(console: Console, warnings: list[str]) -> None:

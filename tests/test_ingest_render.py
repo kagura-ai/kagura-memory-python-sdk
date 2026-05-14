@@ -30,6 +30,7 @@ def _result(
     warnings: list[str] | None = None,
     is_dry_run: bool = False,
     source_uri: str = "/tmp/report.pdf",
+    archived_file_id: str | None = None,
 ) -> IngestResult:
     """Build an IngestResult fixture with sensible defaults."""
     return IngestResult(
@@ -39,6 +40,7 @@ def _result(
         overview_id="overview-uuid" if success else None,
         section_ids=[f"sec-{i}" for i in range(section_count)] if success else [],
         skipped_images=skipped_images,
+        archived_file_id=archived_file_id,
         cost=CostBreakdown(
             is_estimate=is_dry_run,
             text_provider="claude",
@@ -160,3 +162,19 @@ def test_skipped_images_row_always_present(skipped: int) -> None:
     out = console.export_text()
     assert "Skipped images:" in out
     assert str(skipped) in out
+
+
+def test_archive_line_only_printed_when_file_id_present() -> None:
+    """The 'Original archived' line shows file_id when stamped, nothing otherwise."""
+    # Case 1: archived → line with file_id appears.
+    console = _capture()
+    render_result(_result(archived_file_id="f8e9d0c1"), console)
+    out = console.export_text()
+    assert "Original archived" in out
+    assert "f8e9d0c1" in out
+
+    # Case 2: not archived → line absent (used to falsely claim archival).
+    console = _capture()
+    render_result(_result(archived_file_id=None), console)
+    out = console.export_text()
+    assert "Original archived" not in out
