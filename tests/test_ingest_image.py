@@ -16,11 +16,18 @@ from __future__ import annotations
 import io
 
 import pytest
-from PIL import Image  # type: ignore[import-not-found]
-from PIL.ExifTags import TAGS  # type: ignore[import-not-found]
 
-from kagura_memory.exceptions import KaguraIngestError
-from kagura_memory.ingest._image import preprocess
+# Skip the whole module when Pillow isn't installed. This file exercises
+# kagura_memory.ingest._image which depends on Pillow (an optional extra:
+# `pip install kagura-memory[ingest]`). Without this guard, pytest fails
+# at collection time on a bare `pip install kagura-memory[dev]` install.
+pytest.importorskip("PIL", reason="Pillow not installed — install [ingest] extras")
+
+from PIL import Image  # noqa: E402  type: ignore[import-not-found]
+from PIL.ExifTags import TAGS  # noqa: E402  type: ignore[import-not-found]
+
+from kagura_memory.exceptions import KaguraIngestError  # noqa: E402
+from kagura_memory.ingest._image import preprocess  # noqa: E402
 
 
 def _make_jpeg(width: int, height: int, color: str = "red") -> bytes:

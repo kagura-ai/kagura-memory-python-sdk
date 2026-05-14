@@ -8,9 +8,17 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from kagura_memory.client import KaguraClient
-from kagura_memory.ingest import FileIngestor
-from kagura_memory.ingest.providers.base import Provider
+# Real PDF extraction depends on pymupdf (an optional extra:
+# `pip install kagura-memory[ingest-pdf]`). Without it, the orchestrator's
+# extract step raises KaguraIngestError at runtime — but pytest collection
+# itself is fine because the import is lazy inside extractors/pdf.py. We
+# still skip the module here so the failure surface stays sane on a bare
+# `pip install kagura-memory[dev]` install.
+pytest.importorskip("pymupdf", reason="pymupdf not installed — install [ingest-pdf] extras")
+
+from kagura_memory.client import KaguraClient  # noqa: E402
+from kagura_memory.ingest import FileIngestor  # noqa: E402
+from kagura_memory.ingest.providers.base import Provider  # noqa: E402
 
 FIXTURE = Path(__file__).parent / "fixtures" / "sample.pdf"
 
