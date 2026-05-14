@@ -39,6 +39,7 @@ from .exceptions import (
     KaguraNotFoundError,
     KaguraQuotaError,
 )
+from .logger import _NULL_LOGGER, VerboseLogger
 from .models import (
     FileDownloadUrlResponse,
     FileListResponse,
@@ -281,6 +282,7 @@ class FilesClient:
         source: Path | bytes,
         filename: str | None = None,
         content_type: str | None = None,
+        logger: VerboseLogger | None = None,
     ) -> FileObject:
         """Upload a file to Kagura Memory Cloud.
 
@@ -325,11 +327,17 @@ class FilesClient:
             KaguraAuthError, KaguraNotFoundError, KaguraQuotaError,
             KaguraConnectionError: see class docstring.
         """
+        log = logger or _NULL_LOGGER
         _validate_context_id(context_id)
         resolved_filename, body, sha256_hex = await _prepare_source(source, filename)
         size_bytes = len(body)
         resolved_content_type = _resolve_content_type(content_type, resolved_filename)
 
+        log.action(
+            "Reserving upload",
+            f"{resolved_filename} ({size_bytes} bytes)",
+            stage="reserve",
+        )
         reserve_body = {
             "workspace_id": context_id,
             "filename": resolved_filename,
@@ -338,32 +346,64 @@ class FilesClient:
             "sha256": sha256_hex,
         }
 
+        reserved_file_id: str | None = None
+        uploaded = False
         try:
-            reserve_resp = await self._request("POST", "/api/v1/files/reserve", json=reserve_body)
-        except KaguraConnectionError as e:
-            # 409 dedup happy-path: server reports the existing file
-            # in the error detail; surface it as a FileObject so the
-            # caller does not have to special-case duplicates.
-            existing = _extract_existing_file(e)
-            if existing is not None:
-                return existing
+            try:
+                reserve_resp = await self._request(
+                    "POST", "/api/v1/files/reserve", json=reserve_body
+                )
+            except KaguraConnectionError as e:
+                # 409 dedup happy-path: server reports the existing file
+                # in the error detail; surface it as a FileObject so the
+                # caller does not have to special-case duplicates.
+                existing = _extract_existing_file(e)
+                if existing is not None:
+                    log.success(
+                        "Dedup hit — existing file returned",
+                        stage="complete",
+                        detail={"file_id": existing.id, "deduped": True},
+                    )
+                    return existing
+                raise
+
+            reserve = FileReserveResponse.model_validate(reserve_resp.json())
+            reserved_file_id = reserve.file_id
+            log.action("Uploading to object store", stage="upload")
+            await self._put_to_object_store(
+                upload_url=reserve.upload_url,
+                body=body,
+                sha256_hex=sha256_hex,
+                content_type=resolved_content_type,
+            )
+            uploaded = True
+
+            log.action("Confirming upload", stage="confirm")
+            confirm_resp = await self._request(
+                "POST",
+                f"/api/v1/files/{reserve.file_id}/confirm",
+                json={"sha256": sha256_hex},
+            )
+            result = FileObject.model_validate(confirm_resp.json())
+            log.success(
+                "Upload complete",
+                stage="complete",
+                detail={"file_id": result.id, "size_bytes": size_bytes},
+            )
+            return result
+        except BaseException as e:
+            # Terminal-event guarantee: include partial state so a recovering
+            # AI consumer can decide whether to retry confirm vs re-upload.
+            log.error(
+                f"Upload failed: {e}",
+                stage="complete",
+                detail={
+                    "reserved_file_id": reserved_file_id,
+                    "uploaded": uploaded,
+                    "confirmed": False,
+                },
+            )
             raise
-
-        reserve = FileReserveResponse.model_validate(reserve_resp.json())
-
-        await self._put_to_object_store(
-            upload_url=reserve.upload_url,
-            body=body,
-            sha256_hex=sha256_hex,
-            content_type=resolved_content_type,
-        )
-
-        confirm_resp = await self._request(
-            "POST",
-            f"/api/v1/files/{reserve.file_id}/confirm",
-            json={"sha256": sha256_hex},
-        )
-        return FileObject.model_validate(confirm_resp.json())
 
     async def download_url(self, file_id: str) -> str:
         """Return a short-lived presigned GET URL for ``file_id``."""

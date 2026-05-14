@@ -14,6 +14,7 @@ from .exceptions import (
     KaguraNotFoundError,
     KaguraQuotaError,
 )
+from .logger import _NULL_LOGGER, VerboseLogger
 from .models import (
     IndexerStatusResponse,
     PaginatedResourceTokensResponse,
@@ -407,6 +408,7 @@ class ResourceClient:
         resource_id: str,
         resource_api_key: str,
         events: list[ResourceEventRequest],
+        logger: VerboseLogger | None = None,
     ) -> ResourceEventBatchResponse:
         """Ingest a batch of resource events (max 100).
 
@@ -414,18 +416,45 @@ class ResourceClient:
             resource_id: Resource identifier.
             resource_api_key: Resource API key (X-Resource-API-Key header).
             events: List of events to ingest (1-100).
+            logger: Optional :class:`VerboseLogger` for progress events.
+                Honors the terminal-event contract — an unhandled
+                exception still emits ``kind=error`` with partial
+                progress in ``detail`` before propagating.
 
         Returns:
             Batch ingestion result with created/failed counts.
         """
-        batch = ResourceEventBatchRequest(events=events)
-        response = await self._request(
-            "POST",
-            f"/api/v1/resources/{resource_id}/events/batch",
-            json=batch.model_dump(exclude_none=True),
-            extra_headers={"X-Resource-API-Key": resource_api_key},
+        log = logger or _NULL_LOGGER
+        log.action(
+            "Ingesting events batch",
+            f"{len(events)} event(s) for resource {resource_id}",
+            stage="ingest_events",
         )
-        return ResourceEventBatchResponse.model_validate(response.json())
+        try:
+            batch = ResourceEventBatchRequest(events=events)
+            response = await self._request(
+                "POST",
+                f"/api/v1/resources/{resource_id}/events/batch",
+                json=batch.model_dump(exclude_none=True),
+                extra_headers={"X-Resource-API-Key": resource_api_key},
+            )
+            result = ResourceEventBatchResponse.model_validate(response.json())
+        except BaseException as e:
+            log.error(
+                f"Batch ingest failed: {e}",
+                stage="complete",
+                detail={"events_attempted": len(events), "resource_id": resource_id},
+            )
+            raise
+        log.success(
+            "Batch ingested",
+            stage="complete",
+            detail={
+                "created": result.created_count,
+                "failed": result.failed_count,
+            },
+        )
+        return result
 
     # -------------------------------------------------------------------
     # Lifecycle
