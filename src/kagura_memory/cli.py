@@ -16,9 +16,44 @@ from .auth.credentials import get_shared_state
 from .client import KaguraClient
 from .config import load_config
 from .files_client import FilesClient
+from .logger import VerboseLogger
 from .models import Message, ProcessResult, ResourceEventRequest, Session
 from .resource_client import ResourceClient
 from .setup_claude import run_setup_claude
+
+_PROGRESS_CHOICES = ["rich", "json", "none"]
+
+
+def _resolve_progress_logger(verbose: int, progress: str | None) -> VerboseLogger | None:
+    """Resolve ``-v`` / ``--progress`` CLI flags to a ``VerboseLogger`` (or None).
+
+    Issue #108 precedence rule (canonical):
+
+    1. ``--progress`` explicit wins; format is exactly its value.
+    2. ``--progress`` omitted → ``rich`` if ``-v`` count ≥ 1, else ``none``.
+    3. ``-v`` level controls Rich verbosity (1=actions, 2=details, 3=debug).
+       For ``--progress=json``, ``-v`` is ignored — JSON path always emits all
+       ``kind`` values (downstream consumers filter).
+    4. ``--progress=none`` is always silent regardless of ``-v`` count.
+
+    Returns ``None`` for the silent path so entry points can keep
+    ``logger: VerboseLogger | None = None`` and normalize internally.
+    """
+    if progress is not None:
+        progress = progress.lower()
+    if progress == "none":
+        return None
+    if progress == "json":
+        # level is irrelevant for JSON; pick the max so explicit -v isn't lost
+        # if the caller later switches output_format at the logger level.
+        return VerboseLogger(level=max(1, verbose), output_format="json")
+    if progress == "rich":
+        return VerboseLogger(level=max(1, verbose), output_format="rich")
+    # progress was omitted — fall back to -v presence.
+    if verbose >= 1:
+        return VerboseLogger(level=verbose, output_format="rich")
+    return None
+
 
 # =============================================================================
 # Helper Functions
@@ -93,8 +128,8 @@ main.add_command(_auth_group, name="auth")
 @main.command()
 @click.option("--message", "-m", help="Single message to process")
 @click.option("--file", "-f", type=click.File("r"), help="Session JSON file")
-@click.option("--deep", is_flag=True, help="Enable deep search (Phase 2)")
-@click.option("--verbose", "-v", count=True, help="Increase verbosity (Phase 2)")
+@click.option("--deep", is_flag=True, help="Enable deep search via memory graph exploration")
+@click.option("--verbose", "-v", count=True, help="Increase verbosity (repeatable: -v, -vv, -vvv)")
 def process(message, file, deep, verbose):
     """
     Process session with AI analysis.
@@ -338,6 +373,21 @@ def explore(context_id, memory_id, depth, min_weight):
         "Default is a human-readable summary."
     ),
 )
+@click.option(
+    "--verbose",
+    "-v",
+    count=True,
+    help="Increase verbosity (repeatable: -v, -vv, -vvv).",
+)
+@click.option(
+    "--progress",
+    type=click.Choice(_PROGRESS_CHOICES, case_sensitive=False),
+    default=None,
+    help=(
+        "Progress output format. Default: rich if -v given, none otherwise. "
+        "Use json for AI agents / scripts."
+    ),
+)
 def ingest_file(
     source,
     context_id,
@@ -354,6 +404,8 @@ def ingest_file(
     allow_system_paths,
     dry_run,
     as_json,
+    verbose,
+    progress,
 ):
     """Ingest a URL or local file into Memory Cloud.
 
@@ -440,6 +492,7 @@ def ingest_file(
                         allow_http=allow_http,
                         allow_system_paths=allow_system_paths,
                         archive_original=archive,
+                        logger=_resolve_progress_logger(verbose, progress),
                     )
                 finally:
                     if files_client is not None:
@@ -1318,7 +1371,22 @@ def resource_setup(resource_id, summary, description, quota):
 )
 @click.option("--id-column", help="Column name to use as doc_id (default: row number)")
 @click.option("--version", "-V", type=click.IntRange(1), default=1, help="Version (>=1)")
-def resource_import(resource_id, api_key, input_file, fmt, id_column, version):
+@click.option(
+    "--verbose",
+    "-v",
+    count=True,
+    help="Increase verbosity (repeatable: -v, -vv, -vvv).",
+)
+@click.option(
+    "--progress",
+    type=click.Choice(_PROGRESS_CHOICES, case_sensitive=False),
+    default=None,
+    help=(
+        "Progress output format. Default: rich if -v given, none otherwise. "
+        "Use json for AI agents / scripts."
+    ),
+)
+def resource_import(resource_id, api_key, input_file, fmt, id_column, version, verbose, progress):
     """
     Import data from CSV, JSON, or JSONL file.
 
@@ -1403,6 +1471,7 @@ def resource_import(resource_id, api_key, input_file, fmt, id_column, version):
         )
 
     click.echo(f"Importing {len(events)} events...")
+    logger = _resolve_progress_logger(verbose, progress)
 
     # Batch ingest (100 at a time)
     async def op(client: ResourceClient) -> str:
@@ -1411,7 +1480,7 @@ def resource_import(resource_id, api_key, input_file, fmt, id_column, version):
         all_errors: list[dict] = []
         for start in range(0, len(events), 100):
             batch = events[start : start + 100]
-            result = await client.ingest_events(resource_id, api_key, batch)
+            result = await client.ingest_events(resource_id, api_key, batch, logger=logger)
             total_created += result.created_count
             total_failed += result.failed_count
             all_errors.extend(result.errors[:5])  # Keep first 5 errors per batch
@@ -1527,19 +1596,42 @@ def files():
 @click.argument("path", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option("--context-id", "-c", help="Target context (workspace) UUID")
 @click.option("--content-type", "-t", help="MIME type override (default: sniffed)")
-def files_upload(path: Path, context_id: str | None, content_type: str | None):
+@click.option(
+    "--verbose",
+    "-v",
+    count=True,
+    help="Increase verbosity (repeatable: -v, -vv, -vvv).",
+)
+@click.option(
+    "--progress",
+    type=click.Choice(_PROGRESS_CHOICES, case_sensitive=False),
+    default=None,
+    help=(
+        "Progress output format. Default: rich if -v given, none otherwise. "
+        "Use json for AI agents / scripts."
+    ),
+)
+def files_upload(
+    path: Path,
+    context_id: str | None,
+    content_type: str | None,
+    verbose: int,
+    progress: str | None,
+):
     """
     Upload a file to Kagura Memory Cloud.
 
     Example:
       kagura files upload ./report.pdf --context-id ctx-uuid
     """
+    logger = _resolve_progress_logger(verbose, progress)
 
     async def op(client: FilesClient, ctx: str) -> str:
         result = await client.upload(
             context_id=ctx,
             source=path,
             content_type=content_type,
+            logger=logger,
         )
         return result.model_dump_json(indent=2)
 
