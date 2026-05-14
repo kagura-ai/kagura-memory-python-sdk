@@ -45,7 +45,7 @@ def isolated_credentials(tmp_path: Path, monkeypatch):
     monkeypatch.delenv("KAGURA_PROFILE", raising=False)
     monkeypatch.delenv("KAGURA_MCP_URL", raising=False)
     # Also short-circuit load_config so legacy .kagura.json paths don't leak.
-    monkeypatch.setattr("kagura_memory.client.load_config", lambda: {"api_key": ""})
+    monkeypatch.setattr("kagura_memory._auth.load_config", lambda: {"api_key": ""})
     reset_state_cache()
     yield fake_path
     reset_state_cache()

@@ -3,16 +3,13 @@
 import itertools
 import json
 import logging
-import os
-from dataclasses import dataclass
 from typing import Any, Literal, TypeVar
 
 import httpx
 from pydantic import BaseModel as _BaseModel
 
+from ._auth import _resolve_auth, _StaticAuth
 from ._http import SDK_VERSION, base_url_from_mcp, validate_https_url
-from .auth.credentials import KaguraOAuth, get_shared_state
-from .config import load_config
 from .exceptions import KaguraAuthError, KaguraConnectionError, KaguraError, KaguraNotFoundError
 from .models import (
     ContextInfo,
@@ -44,93 +41,6 @@ tool calls never raise on version mismatch, and older servers may
 silently ignore unknown parameters."""
 
 _MIN_SERVER_VERSION_TUPLE = tuple(int(x) for x in MIN_SERVER_VERSION.split(".")[:3])
-
-
-_DEFAULT_MCP_URL = "https://memory.kagura-ai.com/mcp"
-
-
-@dataclass
-class _StaticAuth:
-    """Long-lived API key resolution result."""
-
-    api_key: str
-    mcp_url: str
-
-
-@dataclass
-class _OAuthAuth:
-    """OAuth credentials.json resolution result."""
-
-    oauth: KaguraOAuth
-    mcp_url: str
-
-
-def _resolve_auth(
-    *,
-    api_key: str | None,
-    mcp_url: str | None,
-    profile: str | None,
-) -> _StaticAuth | _OAuthAuth:
-    """Pick a credential source per the documented precedence chain.
-
-    See :meth:`KaguraClient.__init__` for the full order. Raises
-    :class:`KaguraAuthError` when no source produces credentials.
-    """
-    # 1. Explicit constructor argument wins absolutely.
-    # Empty / whitespace-only api_key is treated the same as None — sending
-    # `Authorization: Bearer ` would always 401 and is never what the caller
-    # intended; fall through to the env / OAuth / .kagura.json chain instead.
-    if api_key is not None and api_key.strip():
-        return _StaticAuth(api_key=api_key, mcp_url=mcp_url or _DEFAULT_MCP_URL)
-
-    # 2. KAGURA_API_KEY env var (highest auto-resolution priority).
-    # Strip-check mirrors the explicit-arg path above: a whitespace-only
-    # env var would otherwise send `Authorization: Bearer ` and 401.
-    env_key = os.getenv("KAGURA_API_KEY")
-    if env_key and env_key.strip():
-        return _StaticAuth(
-            api_key=env_key,
-            mcp_url=mcp_url or os.getenv("KAGURA_MCP_URL") or _DEFAULT_MCP_URL,
-        )
-
-    # 3. OAuth profile from credentials.json: explicit > KAGURA_PROFILE > default.
-    target_profile = profile or os.getenv("KAGURA_PROFILE")
-    state = get_shared_state(profile=target_profile)
-    if state is not None:
-        return _OAuthAuth(
-            oauth=KaguraOAuth(state),
-            mcp_url=mcp_url or state.credentials.mcp_url,
-        )
-    if target_profile:
-        # An explicit profile name (via arg or KAGURA_PROFILE env) was
-        # requested but credentials.json has no such profile. Falling
-        # through to .kagura.json would silently authenticate with the
-        # wrong account, so raise instead.
-        source = "profile argument" if profile else "KAGURA_PROFILE env"
-        raise KaguraAuthError(
-            f"Profile '{target_profile}' (from {source}) not found in credentials.json.\n"
-            f"  Run: kagura auth login --profile {target_profile}\n"
-            f"  Or inspect ~/.kagura/credentials.json to see which profiles exist."
-        )
-
-    # 4. Legacy .kagura.json (which itself env-falls-back internally).
-    # Apply the same whitespace-only strip check used for the explicit
-    # arg and KAGURA_API_KEY env paths so a stray-whitespace config file
-    # doesn't produce a guaranteed-401 `Authorization: Bearer ` header.
-    cfg = load_config()
-    cfg_key = cfg.get("api_key", "")
-    if cfg_key and cfg_key.strip():
-        return _StaticAuth(
-            api_key=cfg_key,
-            mcp_url=mcp_url or cfg.get("mcp_url") or _DEFAULT_MCP_URL,
-        )
-
-    raise KaguraAuthError(
-        "No credentials found.\n"
-        "  Run: kagura auth login\n"
-        "  Or set: KAGURA_API_KEY=<your key>\n"
-        '  Or create: .kagura.json with {"api_key": "..."}'
-    )
 
 
 class KaguraClient:
