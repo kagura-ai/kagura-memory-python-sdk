@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 import sys
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -11,6 +12,7 @@ import click
 
 from .agent import KaguraAgent
 from .auth.cli import auth as _auth_group
+from .auth.credentials import get_shared_state
 from .client import KaguraClient
 from .config import load_config
 from .files_client import FilesClient
@@ -1425,15 +1427,55 @@ def resource_import(resource_id, api_key, input_file, fmt, id_column, version):
 # Files (`kagura files ...`) — server v0.15.1+
 # =============================================================================
 
+# Sentinel for `kagura setup claude`-generated `.kagura.json` — means
+# "fill in workspace_id from the OAuth profile or --context-id at runtime."
+# Defined as a constant so the CLI, tests, and any future config writer
+# share one source of truth and cannot drift.
+_CONTEXT_ID_AUTO = "auto"
+
 
 def _build_files_client(config: dict[str, Any]) -> FilesClient:
-    """Build a FilesClient from an already-loaded config dict."""
-    if not config.get("api_key"):
-        raise click.ClickException("No API key found. Set KAGURA_API_KEY or create .kagura.json")
+    """Build a FilesClient using the shared credential resolution chain.
+
+    Delegates to :meth:`FilesClient.from_mcp_url`, which runs
+    ``_resolve_auth`` (explicit api_key > ``KAGURA_API_KEY`` env > OAuth
+    profile in ``~/.kagura/credentials.json`` > ``.kagura.json``). When
+    no source produces credentials the resolver raises ``KaguraAuthError``,
+    which ``_run_files_command`` reformats as a ``click.ClickException``.
+    """
     return FilesClient.from_mcp_url(
-        api_key=config.get("api_key", ""),
-        mcp_url=config.get("mcp_url", "https://memory.kagura-ai.com/mcp"),
+        api_key=config.get("api_key") or None,
+        mcp_url=config.get("mcp_url") or None,
     )
+
+
+def _resolve_files_context_id(config: dict[str, Any], context_id: str | None) -> str:
+    """Resolve the workspace UUID for a Files CLI command.
+
+    Order: explicit ``--context-id`` flag > ``.kagura.json`` (skipping the
+    :data:`_CONTEXT_ID_AUTO` sentinel) > OAuth profile's ``workspace_id``
+    from ``~/.kagura/credentials.json``. Returns ``""`` when every source
+    is empty or the sentinel; the caller surfaces a single actionable error.
+
+    The sentinel is a CLI-level concern: the SDK only accepts real UUIDs
+    (``FilesClient`` validates at the entry point per issue #110). This
+    function converts ``"auto"`` to the right UUID before any SDK call.
+    """
+    if context_id and context_id.strip() and context_id != _CONTEXT_ID_AUTO:
+        return context_id
+
+    cfg_ctx = (config.get("context_id") or "").strip()
+    if cfg_ctx and cfg_ctx != _CONTEXT_ID_AUTO:
+        return cfg_ctx
+
+    # OAuth profile path: kagura auth login stored the workspace_id during
+    # /device consent. This is the natural fallback for users who logged in
+    # but never edited .kagura.json.
+    state = get_shared_state(profile=os.getenv("KAGURA_PROFILE"))
+    if state is not None and state.credentials.workspace_id:
+        return state.credentials.workspace_id
+
+    return ""
 
 
 def _run_files_command(
@@ -1444,23 +1486,20 @@ def _run_files_command(
 ) -> None:
     """Execute a FilesClient operation with standard boilerplate.
 
-    Validates api_key first (matching ``_run_client_command``'s order)
-    so the operator sees a consistent error when both api_key and
-    context_id are missing.
+    Credential and context resolution both delegate to the shared chain
+    (env > OAuth profile > .kagura.json). The operator sees a single
+    error message that points at all three sources when nothing resolves.
     """
     try:
         config = load_config()
-        if not config.get("api_key"):
-            raise click.ClickException(
-                "No API key found. Set KAGURA_API_KEY or create .kagura.json"
-            )
 
         ctx_id = ""
         if needs_context:
-            ctx_id = context_id or config.get("context_id") or ""
+            ctx_id = _resolve_files_context_id(config, context_id)
             if not ctx_id:
                 raise click.ClickException(
-                    "context_id required. Use --context-id or set in .kagura.json"
+                    "context_id required. Use --context-id, set context_id in "
+                    ".kagura.json, or run `kagura auth login` to bind a workspace."
                 )
 
         client = _build_files_client(config)
