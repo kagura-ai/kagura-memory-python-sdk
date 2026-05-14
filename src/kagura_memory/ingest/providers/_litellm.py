@@ -119,7 +119,7 @@ class LiteLLMProvider:
         try:
             import litellm  # type: ignore[import-untyped]
 
-            return int(litellm.token_counter(model=model, text=text))
+            return int(litellm.token_counter(model=model, text=text))  # pyright: ignore[reportPrivateImportUsage]
         except Exception:  # noqa: BLE001
             return max(1, len(text) // _FALLBACK_CHARS_PER_TOKEN)
 

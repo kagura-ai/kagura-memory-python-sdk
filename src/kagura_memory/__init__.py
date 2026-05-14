@@ -9,6 +9,8 @@ from .exceptions import (
     KaguraConnectionError,
     KaguraContextError,
     KaguraError,
+    KaguraFetchError,
+    KaguraIngestError,
     KaguraIntegrityError,
     KaguraLLMError,
     KaguraNotFoundError,
@@ -16,11 +18,13 @@ from .exceptions import (
     KaguraRateLimitError,
 )
 from .files_client import FilesClient
+from .ingest import FileIngestor
 from .models import (
     Artifact,
     ContextDetail,
     ContextInfo,
     ContextStats,
+    CostBreakdown,
     DuplicateMemoryInfo,
     DuplicatePair,
     DuplicatesResponse,
@@ -38,6 +42,8 @@ from .models import (
     IndexerState,
     IndexerStateMetrics,
     IndexerStatusResponse,
+    IngestErrorRecord,
+    IngestResult,
     ListTagsResponse,
     LLMUsage,
     Memory,
@@ -157,6 +163,11 @@ __all__ = [
     # File objects (server v0.15.1+)
     "FileObject",
     "FileListResponse",
+    # File ingestion (Issue #80)
+    "FileIngestor",
+    "IngestResult",
+    "IngestErrorRecord",
+    "CostBreakdown",
     # Sleep Maintenance (server v0.8+)
     "SleepRunStatus",
     "SleepReport",
@@ -176,4 +187,6 @@ __all__ = [
     "KaguraLLMError",
     "KaguraContextError",
     "KaguraIntegrityError",
+    "KaguraFetchError",
+    "KaguraIngestError",
 ]

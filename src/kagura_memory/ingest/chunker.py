@@ -83,7 +83,7 @@ def _count_tokens(text: str, model: str | None) -> int:
         try:
             import litellm  # type: ignore[import-untyped]
 
-            return int(litellm.token_counter(model=model, text=text))
+            return int(litellm.token_counter(model=model, text=text))  # pyright: ignore[reportPrivateImportUsage]
         except Exception:  # noqa: BLE001 - any failure → heuristic fallback
             pass
     return max(1, len(text) // _FALLBACK_CHARS_PER_TOKEN)
