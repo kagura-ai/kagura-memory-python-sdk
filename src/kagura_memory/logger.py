@@ -113,15 +113,17 @@ class VerboseLogger:
         stage: str | None,
         msg: str | None = None,
         detail: dict[str, Any] | None = None,
-        count: int | None = None,
-        duration_ms: float | None = None,
     ) -> None:
         """Serialize one NDJSON event to stderr.
 
         Writes directly to ``sys.stderr`` (not via Rich) so the line
         is exactly one ``\\n``-terminated JSON object with no markup
         injection. ``stage=None`` becomes ``"unknown"`` to keep the
-        field required-and-present for downstream parsers.
+        field required-and-present for downstream parsers. Stage-
+        specific structured fields (counts, durations, file_id, ...)
+        ride in the ``detail`` dict — the schema deliberately keeps the
+        top-level event shape minimal so future fields don't bloat
+        ``v=1``; consumers tolerate unknown ``detail`` keys.
         """
         event: dict[str, Any] = {
             "v": _NDJSON_SCHEMA_VERSION,
@@ -134,10 +136,6 @@ class VerboseLogger:
             event["msg"] = msg
         if detail:
             event["detail"] = detail
-        if count is not None:
-            event["count"] = count
-        if duration_ms is not None:
-            event["duration_ms"] = duration_ms
         sys.stderr.write(json.dumps(event, ensure_ascii=False) + "\n")
         sys.stderr.flush()
 
@@ -179,15 +177,16 @@ class VerboseLogger:
         if self.output_format == "none":
             return
         if self.output_format == "json":
-            # Serialize the payload so the JSON line stays a single object.
-            try:
-                serialized = (
-                    data
-                    if isinstance(data, (dict, list, str, int, float, bool, type(None)))
-                    else str(data)
-                )
-            except Exception:  # noqa: BLE001 — defensive: fall back to str on any repr error
-                serialized = str(data)
+            # Serialize non-primitive payloads via str() so the JSON line stays
+            # a single object. A class with a broken ``__str__`` will surface
+            # the exception to the caller — the logger does not silently
+            # swallow it, since hiding a broken debug payload makes the bug
+            # harder to find than a loud error during dev/CI.
+            serialized = (
+                data
+                if isinstance(data, (dict, list, str, int, float, bool, type(None)))
+                else str(data)
+            )
             self._emit_json(kind="debug", stage=stage, msg=title, detail={"data": serialized})
             return
         if not self._should_log_rich(3):

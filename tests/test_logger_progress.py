@@ -100,6 +100,27 @@ def test_ndjson_unknown_stage_when_omitted(capsys):
     assert events[0]["stage"] == "unknown"
 
 
+def test_ndjson_debug_serializes_non_primitive_safely(capsys):
+    """debug() with a non-primitive payload falls back to str() without raising.
+
+    Covers the defensive ``except Exception`` branch around the isinstance
+    fallback — a payload whose ``__str__`` is well-behaved (the common case
+    when an SDK call passes an arbitrary object) still produces a valid
+    NDJSON line.
+    """
+
+    class _CustomPayload:
+        def __repr__(self) -> str:
+            return "_CustomPayload(<x>)"
+
+    logger = VerboseLogger(output_format="json")
+    logger.debug("LLM response", _CustomPayload(), stage="summarize")
+    events = _parse_lines(capsys.readouterr().err)
+    assert events[-1]["kind"] == "debug"
+    # The non-primitive is stringified, not dropped.
+    assert "_CustomPayload" in events[-1]["detail"]["data"]
+
+
 def test_ndjson_level_is_ignored(capsys):
     """JSON path emits every event regardless of `level` — consumers filter."""
     logger = VerboseLogger(level=0, output_format="json")
@@ -243,6 +264,44 @@ async def test_files_upload_emits_terminal_error_event_on_exception(capsys):
 # ---------------------------------------------------------------------------
 # Library default is silent (no logger= → no progress emission)
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_ingestor_emits_terminal_error_event_on_unhandled_exception(capsys):
+    """FileIngestor.ingest's try/except wraps the post-fetch body for terminal error.
+
+    If ``_ingest_fetched`` raises (e.g. KaguraLLMError leaks through the
+    inner handlers), ``ingest`` still emits a ``kind=error`` final event
+    on the JSON path before propagating. Mirrors the FilesClient.upload
+    contract verified above.
+    """
+    from kagura_memory.ingest.ingestor import FileIngestor
+
+    ingestor = MagicMock(spec=FileIngestor)
+    # Stub _fetch to succeed so we reach the wrapped _ingest_fetched call.
+    fetched = MagicMock()
+    fetched.body = b"hello"
+    fetched.source_uri = "file:///tmp/x.txt"
+    fetched.source_type = "file"
+
+    ingestor._fetch = AsyncMock(return_value=fetched)
+    ingestor._ingest_fetched = AsyncMock(side_effect=RuntimeError("simulated llm crash"))
+    # Re-use the real method bound to the mock spec.
+    ingestor.ingest = FileIngestor.ingest.__get__(ingestor)
+
+    logger = VerboseLogger(output_format="json")
+    with pytest.raises(RuntimeError, match="simulated llm crash"):
+        await ingestor.ingest(
+            "file:///tmp/x.txt",
+            context_id="00000000-0000-0000-0000-000000000001",
+            logger=logger,
+        )
+
+    events = _parse_lines(capsys.readouterr().err)
+    assert events, "expected at least one NDJSON event before propagation"
+    terminal = events[-1]
+    assert terminal["kind"] == "error", f"terminal must be kind=error; got {terminal}"
+    assert terminal["stage"] == "complete"
 
 
 @pytest.mark.asyncio
