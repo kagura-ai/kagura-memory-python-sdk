@@ -1,63 +1,203 @@
-"""Verbose logging utilities using Rich library."""
+"""Verbose logging for the Kagura SDK and CLI.
+
+Two consumer classes share one event stream, three render formats:
+
+- **Human operators** read Rich-formatted glyphs/colors on stderr
+  (``output_format="rich"``, level-filtered by ``-v`` count).
+- **AI agents / scripts** read newline-delimited JSON on stderr
+  (``output_format="json"``); they parse the stream with ``jq -c`` or
+  any line-buffered JSON reader and wait for the terminal event
+  (``kind in ("success", "error")``) to know the operation finished.
+- **Library callers** that don't opt in get silent output via
+  :data:`_NULL_LOGGER` (``output_format="none"``).
+
+**Stderr-only invariant**: both the Rich and JSON paths write to
+``sys.stderr``. Progress must never collide with structured result
+output on stdout (CLI consumers pipe stdout through ``jq``).
+
+**Concurrency contract — single-producer per instance**: each logger
+instance is meant to be driven by a single async task or thread.
+Concurrent writes from multiple producers to the same instance would
+interleave NDJSON lines and break line-buffered parsers downstream.
+Operation-level dependency injection (each ``ingest()`` / ``upload()``
+/ ``ingest_events()`` call gets its own logger) makes this the default
+shape; if a future caller wants to fan out across tasks, it must
+construct one logger per task and merge streams externally.
+
+**Terminal-event contract**: callers that opt into the JSON path
+should emit exactly one terminal event per operation, with either
+``kind="success"`` or ``kind="error"`` as the **final** event in the
+stream. Mid-stream non-fatal warnings use ``kind="warning"``;
+``success`` / ``error`` appear ONLY at the end. AI consumers safely
+``wait while kind not in ("success", "error")`` and treat the first
+matching event as terminal. The logger itself does not enforce this —
+entry points (``FileIngestor.ingest``, ``FilesClient.upload``,
+``ResourceClient.ingest_events``) wrap their main body in
+``try/except`` so that even an unhandled exception still emits a
+terminal ``kind="error"`` before propagating.
+"""
+
+from __future__ import annotations
 
 import json
-from typing import Any
+import sys
+from datetime import UTC, datetime
+from typing import Any, Literal
 
 from rich.console import Console
 from rich.panel import Panel
 from rich.syntax import Syntax
 
+OutputFormat = Literal["rich", "json", "none"]
+"""The three render targets for a :class:`VerboseLogger` instance."""
+
+_NDJSON_SCHEMA_VERSION = 1
+"""Schema version field embedded in every NDJSON event.
+
+Bumped only when the wire format adds/removes/renames fields in a way
+that breaks consumers that already shipped against ``v=1``. Consumers
+MUST check ``v`` and refuse to parse unknown values (forward-compat:
+additions inside a major version are allowed; removals are not)."""
+
 
 class VerboseLogger:
-    """Handles verbose output at different levels."""
+    """Emit progress events for long-running SDK operations.
 
-    def __init__(self, level: int = 0, console: Console | None = None):
-        """
-        Initialize logger with verbosity level.
+    The six public methods (:meth:`action`, :meth:`detail`,
+    :meth:`success`, :meth:`warning`, :meth:`error`, :meth:`debug`)
+    are render-format-agnostic — each picks the right path based on
+    ``output_format`` and silently drops the call when the level
+    filter rejects it. See the module docstring for the concurrency
+    and terminal-event contracts.
+    """
+
+    def __init__(
+        self,
+        level: int = 0,
+        console: Console | None = None,
+        *,
+        output_format: OutputFormat = "rich",
+    ):
+        """Initialize a logger.
 
         Args:
-            level: 0=silent, 1=major actions, 2=detailed, 3=debug
-            console: Optional Rich Console instance (default: new Console())
+            level: Rich-path verbosity threshold. ``0`` is silent
+                (matches the ``--progress=none`` and ``-v`` not given
+                case), ``1`` shows actions/success/warning,
+                ``2`` adds details, ``3`` adds debug panels. Ignored
+                when ``output_format="json"`` — the JSON path emits
+                every event regardless of level (downstream consumers
+                filter by ``kind``).
+            console: Optional Rich :class:`Console` instance. When
+                omitted, a stderr-bound console is created. Tests
+                pass a stub here to capture output.
+            output_format: ``"rich"`` for Rich glyphs/colors,
+                ``"json"`` for newline-delimited JSON, ``"none"`` for
+                a NO-OP logger (used by :data:`_NULL_LOGGER`).
         """
         self.level = level
-        self._console = console or Console()
+        self.output_format: OutputFormat = output_format
+        # stderr-bound so progress never lands on stdout. Rich's
+        # auto-detect handles TTY-vs-pipe degradation (no ANSI escapes
+        # leak into a redirected stderr).
+        self._console = console or Console(stderr=True)
 
-    def _should_log(self, min_level: int) -> bool:
-        """Check if current verbosity level should log."""
-        return self.level >= min_level
+    def _should_log_rich(self, min_level: int) -> bool:
+        """True iff this logger should render a Rich event at ``min_level``."""
+        return self.output_format == "rich" and self.level >= min_level
 
-    def action(self, action: str, details: str = "") -> None:
-        """Log major action (level 1+)."""
-        if not self._should_log(1):
+    def _emit_json(
+        self,
+        *,
+        kind: str,
+        stage: str | None,
+        msg: str | None = None,
+        detail: dict[str, Any] | None = None,
+        count: int | None = None,
+        duration_ms: float | None = None,
+    ) -> None:
+        """Serialize one NDJSON event to stderr.
+
+        Writes directly to ``sys.stderr`` (not via Rich) so the line
+        is exactly one ``\\n``-terminated JSON object with no markup
+        injection. ``stage=None`` becomes ``"unknown"`` to keep the
+        field required-and-present for downstream parsers.
+        """
+        event: dict[str, Any] = {
+            "v": _NDJSON_SCHEMA_VERSION,
+            "ts": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.")
+            + f"{datetime.now(UTC).microsecond // 1000:03d}Z",
+            "stage": stage or "unknown",
+            "kind": kind,
+        }
+        if msg:
+            event["msg"] = msg
+        if detail:
+            event["detail"] = detail
+        if count is not None:
+            event["count"] = count
+        if duration_ms is not None:
+            event["duration_ms"] = duration_ms
+        sys.stderr.write(json.dumps(event, ensure_ascii=False) + "\n")
+        sys.stderr.flush()
+
+    def action(self, action: str, details: str = "", *, stage: str | None = None) -> None:
+        """Log a major action — ``kind=action``, level ≥ 1."""
+        if self.output_format == "none":
             return
-
+        if self.output_format == "json":
+            self._emit_json(
+                kind="action",
+                stage=stage,
+                msg=action,
+                detail={"desc": details} if details else None,
+            )
+            return
+        if not self._should_log_rich(1):
+            return
         self._console.print(f"[bold blue]→[/bold blue] {action}", end="")
         if details:
             self._console.print(f" [dim]{details}[/dim]")
         else:
             self._console.print()
 
-    def detail(self, key: str, value: Any) -> None:
-        """Log detailed information (level 2+)."""
-        if not self._should_log(2):
+    def detail(self, key: str, value: Any, *, stage: str | None = None) -> None:
+        """Log a structured detail — ``kind=detail``, level ≥ 2."""
+        if self.output_format == "none":
             return
-
+        if self.output_format == "json":
+            self._emit_json(kind="detail", stage=stage, msg=key, detail={"value": value})
+            return
+        if not self._should_log_rich(2):
+            return
         self._console.print(f"  [cyan]•[/cyan] {key}: [yellow]{value}[/yellow]")
 
-    def debug(self, title: str, data: Any, syntax: str = "json") -> None:
-        """Log debug information (level 3+)."""
-        if not self._should_log(3):
+    def debug(
+        self, title: str, data: Any, syntax: str = "json", *, stage: str | None = None
+    ) -> None:
+        """Log a debug payload — ``kind=debug``, level ≥ 3."""
+        if self.output_format == "none":
             return
-
+        if self.output_format == "json":
+            # Serialize the payload so the JSON line stays a single object.
+            try:
+                serialized = (
+                    data
+                    if isinstance(data, (dict, list, str, int, float, bool, type(None)))
+                    else str(data)
+                )
+            except Exception:  # noqa: BLE001 — defensive: fall back to str on any repr error
+                serialized = str(data)
+            self._emit_json(kind="debug", stage=stage, msg=title, detail={"data": serialized})
+            return
+        if not self._should_log_rich(3):
+            return
         if isinstance(data, (dict, list)):
             data_str = json.dumps(data, indent=2, ensure_ascii=False)
         else:
             data_str = str(data)
-
-        # Truncate if too long
         if len(data_str) > 2000:
             data_str = data_str[:2000] + "\n... (truncated)"
-
         self._console.print(
             Panel(
                 Syntax(data_str, syntax, theme="monokai", word_wrap=True),
@@ -67,20 +207,72 @@ class VerboseLogger:
             )
         )
 
-    def success(self, message: str) -> None:
-        """Log success message (level 1+)."""
-        if not self._should_log(1):
-            return
+    def success(
+        self,
+        message: str,
+        *,
+        stage: str | None = None,
+        detail: dict[str, Any] | None = None,
+    ) -> None:
+        """Log a terminal success event — ``kind=success``, level ≥ 1.
 
+        Per the terminal-event contract (module docstring), callers
+        should emit success **exactly once** as the final event for
+        an operation. Mid-stream OK states use :meth:`action` instead.
+        """
+        if self.output_format == "none":
+            return
+        if self.output_format == "json":
+            self._emit_json(kind="success", stage=stage, msg=message, detail=detail)
+            return
+        if not self._should_log_rich(1):
+            return
         self._console.print(f"[bold green]✓[/bold green] {message}")
 
-    def warning(self, message: str) -> None:
-        """Log warning (level 1+)."""
-        if not self._should_log(1):
-            return
+    def warning(self, message: str, *, stage: str | None = None) -> None:
+        """Log a non-fatal warning — ``kind=warning``, level ≥ 1.
 
+        Mid-stream warnings stay non-terminal (they don't conclude
+        the operation). Use :meth:`error` to signal a terminal failure.
+        """
+        if self.output_format == "none":
+            return
+        if self.output_format == "json":
+            self._emit_json(kind="warning", stage=stage, msg=message)
+            return
+        if not self._should_log_rich(1):
+            return
         self._console.print(f"[bold yellow]⚠[/bold yellow] {message}")
 
-    def error(self, message: str) -> None:
-        """Log error (always shown)."""
+    def error(
+        self,
+        message: str,
+        *,
+        stage: str | None = None,
+        detail: dict[str, Any] | None = None,
+    ) -> None:
+        """Log a terminal error event — ``kind=error``, always shown.
+
+        Per the terminal-event contract, callers should emit error
+        **exactly once** as the final event when the operation fails.
+        Unlike the other methods, the Rich path renders errors at any
+        level (errors are too important to gate behind ``-v``).
+        """
+        if self.output_format == "none":
+            return
+        if self.output_format == "json":
+            self._emit_json(kind="error", stage=stage, msg=message, detail=detail)
+            return
+        # Rich path: error always renders, regardless of self.level.
         self._console.print(f"[bold red]✗[/bold red] {message}", style="bold red")
+
+
+_NULL_LOGGER: VerboseLogger = VerboseLogger(level=0, output_format="none")
+"""Module-level NO-OP logger.
+
+Entry points that take ``logger: VerboseLogger | None = None`` should
+normalize ``None`` to :data:`_NULL_LOGGER` so call sites can drop the
+``if self.logger:`` guards. The instance is stateless beyond the
+output_format check, so a single shared instance is safe across
+threads / async tasks (every method returns at the ``"none"`` short-
+circuit before touching any state)."""
