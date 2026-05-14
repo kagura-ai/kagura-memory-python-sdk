@@ -155,18 +155,23 @@ class FileIngestor:
             # Terminal-event guarantee: emit kind=error before propagating.
             log.error(f"Ingest failed: {e}", stage="complete", detail={"source": source})
             raise
+        # Success means the overview memory was created. Per-section errors
+        # are best-effort (see IngestResult.success): they ride in
+        # ``error_count`` so AI consumers can react, but they do NOT flip the
+        # terminal event to ``kind=error``. Only a missing overview does.
         terminal_detail = {
             "overview_id": result.overview_id,
             "section_count": len(result.section_ids),
+            "error_count": len(result.errors),
         }
-        if result.errors:
+        if result.success:
+            log.success("Ingest complete", stage="complete", detail=terminal_detail)
+        else:
             log.error(
-                f"Ingest finished with {len(result.errors)} error(s)",
+                "Ingest failed — overview not created",
                 stage="complete",
                 detail=terminal_detail,
             )
-        else:
-            log.success("Ingest complete", stage="complete", detail=terminal_detail)
         return result
 
     async def estimate_cost(

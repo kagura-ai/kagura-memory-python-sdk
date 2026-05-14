@@ -144,8 +144,17 @@ class VerboseLogger:
         # via ``str()`` instead of crashing the operation we are reporting on.
         # Progress logging must never raise — the caller has more important
         # work to do than worry about its observability stream.
-        sys.stderr.write(json.dumps(event, ensure_ascii=False, default=str) + "\n")
-        sys.stderr.flush()
+        line = json.dumps(event, ensure_ascii=False, default=str) + "\n"
+        try:
+            sys.stderr.write(line)
+            sys.stderr.flush()
+        except OSError:
+            # Downstream consumer closed stderr early (BrokenPipeError) or
+            # the FD is otherwise unwritable. Swallow — the operation being
+            # logged must not crash because its observability stream went
+            # away. Matches the "progress logging must never raise" contract
+            # in the module docstring.
+            pass
 
     def action(self, action: str, details: str = "", *, stage: str | None = None) -> None:
         """Log a major action — ``kind=action``, level ≥ 1."""

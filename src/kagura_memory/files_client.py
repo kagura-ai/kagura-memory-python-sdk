@@ -328,27 +328,33 @@ class FilesClient:
             KaguraConnectionError: see class docstring.
         """
         log = normalize_logger(logger)
-        _validate_context_id(context_id)
-        resolved_filename, body, sha256_hex = await _prepare_source(source, filename)
-        size_bytes = len(body)
-        resolved_content_type = _resolve_content_type(content_type, resolved_filename)
-
-        log.action(
-            "Reserving upload",
-            f"{resolved_filename} ({size_bytes} bytes)",
-            stage="reserve",
-        )
-        reserve_body = {
-            "workspace_id": context_id,
-            "filename": resolved_filename,
-            "content_type": resolved_content_type,
-            "size_bytes": size_bytes,
-            "sha256": sha256_hex,
-        }
-
         reserved_file_id: str | None = None
         uploaded = False
         try:
+            # Pre-flight validators and source preparation can raise too
+            # (ValueError from _validate_context_id, FileNotFoundError /
+            # ValueError from _prepare_source). They live INSIDE the try so
+            # those failures also get a terminal kind=error event before
+            # propagating — matching the contract documented in the logger
+            # module's "terminal-event" docstring.
+            _validate_context_id(context_id)
+            resolved_filename, body, sha256_hex = await _prepare_source(source, filename)
+            size_bytes = len(body)
+            resolved_content_type = _resolve_content_type(content_type, resolved_filename)
+
+            log.action(
+                "Reserving upload",
+                f"{resolved_filename} ({size_bytes} bytes)",
+                stage="reserve",
+            )
+            reserve_body = {
+                "workspace_id": context_id,
+                "filename": resolved_filename,
+                "content_type": resolved_content_type,
+                "size_bytes": size_bytes,
+                "sha256": sha256_hex,
+            }
+
             try:
                 reserve_resp = await self._request(
                     "POST", "/api/v1/files/reserve", json=reserve_body

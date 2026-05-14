@@ -267,6 +267,57 @@ async def test_files_upload_emits_terminal_error_event_on_exception(capsys):
 
 
 @pytest.mark.asyncio
+async def test_files_upload_emits_terminal_error_event_on_validator_failure(capsys):
+    """Pre-flight validators (UUID check, source prep) still get terminal kind=error.
+
+    The fix for Copilot's review pulled ``_validate_context_id`` /
+    ``_prepare_source`` / ``_resolve_content_type`` inside the
+    ``try/except BaseException`` so a validator failure also emits a
+    terminal event before the exception propagates — matching the
+    "operation logging never leaves the AI consumer hanging" contract.
+    """
+    from kagura_memory import FilesClient
+
+    client = FilesClient(api_key="test", base_url="https://example.com")
+    logger = VerboseLogger(output_format="json")
+    with pytest.raises(ValueError, match="context_id must be a UUID"):
+        await client.upload(
+            context_id="not-a-uuid",
+            source=b"hello",
+            filename="x.txt",
+            logger=logger,
+        )
+
+    events = _parse_lines(capsys.readouterr().err)
+    assert events, "validator failure must still emit a terminal event"
+    assert events[-1]["kind"] == "error"
+    await client.close()
+
+
+def test_logger_swallows_broken_stderr_pipe(capsys, monkeypatch):
+    """A BrokenPipeError on stderr must not crash the operation being logged.
+
+    Simulates the consumer-pipe-closed-early case (``kagura ingest |
+    head -n 1``) where stderr writes start raising mid-stream. The
+    ``_emit_json`` path catches OSError and drops the line silently —
+    progress logging must never raise per the module docstring.
+    """
+    import sys
+
+    class _BrokenStream:
+        def write(self, data: str) -> int:
+            raise BrokenPipeError("downstream consumer gone")
+
+        def flush(self) -> None:
+            raise BrokenPipeError("downstream consumer gone")
+
+    logger = VerboseLogger(output_format="json")
+    monkeypatch.setattr(sys, "stderr", _BrokenStream())
+    # The call must not raise even though every write raises.
+    logger.action("orphan", stage="x")
+
+
+@pytest.mark.asyncio
 async def test_ingestor_emits_terminal_error_event_on_unhandled_exception(capsys):
     """FileIngestor.ingest's try/except wraps the post-fetch body for terminal error.
 
