@@ -53,8 +53,8 @@ def test_remember_missing_api_key(mock_config, monkeypatch, tmp_path):
         "kagura_memory.auth.credentials.DEFAULT_CREDENTIALS_PATH",
         tmp_path / "missing-credentials.json",
     )
-    # Also short-circuit the .kagura.json fallback inside KaguraClient._resolve_auth.
-    monkeypatch.setattr("kagura_memory.client.load_config", lambda: {"api_key": ""})
+    # Also short-circuit the .kagura.json fallback inside _resolve_auth.
+    monkeypatch.setattr("kagura_memory._auth.load_config", lambda: {"api_key": ""})
     runner = CliRunner()
     result = runner.invoke(main, ["remember", "-s", "test", "--content", "data"])
     assert result.exit_code != 0
@@ -901,7 +901,7 @@ def test_get_kagura_client_missing_api_key(mock_config, monkeypatch, tmp_path):
         "kagura_memory.auth.credentials.DEFAULT_CREDENTIALS_PATH",
         tmp_path / "missing-credentials.json",
     )
-    monkeypatch.setattr("kagura_memory.client.load_config", lambda: {"api_key": ""})
+    monkeypatch.setattr("kagura_memory._auth.load_config", lambda: {"api_key": ""})
 
     runner = CliRunner()
     result = runner.invoke(main, ["sleep", "rollback", "ctx-1", "rid-9", "-y"])
