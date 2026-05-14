@@ -371,6 +371,54 @@ async def test_archive_failure_recorded_as_error_overview_still_written() -> Non
 
 
 @pytest.mark.asyncio
+async def test_fetch_error_surfaces_as_ingest_result_in_full_path(tmp_path: Any) -> None:
+    """A KaguraFetchError during ingest() must become IngestResult, not raise.
+
+    Scripts using --json depend on getting machine-readable output on all
+    failure modes, including missing files / blocked URLs / DNS errors.
+    """
+    client = _make_client()
+    provider = FakeProvider()
+    ingestor = FileIngestor(
+        client=client,
+        text_provider=provider,
+        vision_provider=None,
+    )
+    nonexistent = str(tmp_path / "does-not-exist.pdf")
+
+    result = await ingestor.ingest(nonexistent, context_id="ctx-uuid")
+
+    assert result.success is False
+    assert result.overview_id is None
+    assert any(e.step == "fetch" for e in result.errors)
+    assert nonexistent in result.source_uri or "does-not-exist" in result.source_uri
+    assert result.source_type == "file"
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_fetch_error_surfaces_as_ingest_result_in_dry_run(tmp_path: Any) -> None:
+    """Same as above but for the --dry-run path (estimate_cost)."""
+    client = _make_client()
+    provider = FakeProvider()
+    ingestor = FileIngestor(
+        client=client,
+        text_provider=provider,
+        vision_provider=None,
+    )
+    nonexistent = str(tmp_path / "does-not-exist.pdf")
+
+    result = await ingestor.estimate_cost(nonexistent)
+
+    assert result.is_dry_run is True
+    assert result.success is False
+    assert any(e.step == "fetch" for e in result.errors)
+
+    await client.close()
+
+
+@pytest.mark.asyncio
 async def test_archive_no_files_client_skips_silently() -> None:
     """archive_original=True but no files_client → no upload, no error."""
     client = _make_client()

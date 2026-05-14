@@ -48,7 +48,7 @@ kagura recall "report findings" -k 5        # search across sections
 kagura files download-url <file_id>          # short-lived GET on the original
 ```
 
-Phase 1 ingests text content (PDF section text). The vision pipeline (Gemini 2.5 Flash by default) is wired through and can be exercised via the `FileIngestor` API, but the bundled PDF extractor does not yet emit page images — image-based OCR memories land in Phase 2. Pass `--no-vision` to skip the vision-provider configuration entirely, or `--dry-run` to see token / cost estimates without calling an LLM.
+Phase 1 ingests **text only**. A vision provider (Gemini 2.5 Flash by default) is configured and validated, but the orchestrator does not currently call it — no extractor in Phase 1 emits images, so neither `_image.preprocess()` nor `Provider.describe_image()` is invoked. Image-based OCR memories land in Phase 2. Pass `--no-vision` to skip provider configuration entirely, or `--dry-run` to see token / cost estimates without calling an LLM.
 
 ## Installation
 

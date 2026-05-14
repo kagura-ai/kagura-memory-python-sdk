@@ -375,7 +375,10 @@ def ingest_file(
     """
     try:
         config = load_config()
-        if not config.get("api_key"):
+        # api_key is only required when we're going to write memories or hit
+        # the object store. --dry-run is purely local (fetch + extract +
+        # token counter) and must work without authentication.
+        if not dry_run and not config.get("api_key"):
             raise click.ClickException(
                 "No API key found. Set KAGURA_API_KEY or create .kagura.json"
             )
@@ -388,8 +391,11 @@ def ingest_file(
         # local token counters; allow context_id to be empty in that case.
         ctx_id = ctx_id or "00000000-0000-0000-0000-000000000000"
 
-        api_key = config.get("api_key", "")
+        api_key = config.get("api_key", "") or "kagura_dry-run-no-auth"
         mcp_url = config.get("mcp_url", "https://memory.kagura-ai.com/mcp")
+        # KaguraClient validates the URL is HTTPS (or localhost) — the
+        # placeholder api_key above lets it construct cleanly when --dry-run
+        # is used without a config file. No network calls will use it.
         client = KaguraClient(api_key=api_key, mcp_url=mcp_url)
         # Archive is disabled in dry-run (no network egress to LLM or R2)
         # and when the caller passes --no-archive.
@@ -464,7 +470,10 @@ def ingest_file(
     except click.ClickException:
         raise
     except Exception as e:
-        raise click.ClickException(f"Error: {e}") from e
+        # ClickException's __str__ already prefixes "Error: " when printed,
+        # so wrapping the message with another "Error: " would render as
+        # "Error: Error: <msg>". Pass the raw exception message instead.
+        raise click.ClickException(str(e) or type(e).__name__) from e
 
 
 @main.command()

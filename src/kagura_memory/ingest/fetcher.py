@@ -170,29 +170,35 @@ class Fetcher:
         for _ in range(self.max_redirects + 1):
             response = await self._stream_request(current_url)
             if response.status_code in (301, 302, 303, 307, 308):
-                location = response.headers.get("Location")
-                if not location:
-                    raise KaguraFetchError(
-                        f"redirect status {response.status_code} with no Location header",
-                        url=current_url,
-                    )
-                # Resolve relative redirects against current_url.
-                next_url = str(httpx.URL(current_url).join(location))
-                next_parsed = urlsplit(next_url)
-                if next_parsed.scheme.lower() not in _ALLOWED_SCHEMES:
-                    raise KaguraFetchError(
-                        f"redirect to unsupported scheme {next_parsed.scheme!r}",
-                        url=next_url,
-                    )
-                if next_parsed.scheme.lower() == "http" and not self.allow_http:
-                    raise KaguraFetchError(
-                        "redirect to http:// is disabled; use https://",
-                        url=next_url,
-                    )
-                if not next_parsed.hostname:
-                    raise KaguraFetchError("redirect URL has no hostname", url=next_url)
-                await self._validate_hostname(next_parsed.hostname, next_url)
-                await response.aclose()
+                # ALL redirect error paths must close the streamed response
+                # before raising — otherwise repeated malformed redirects
+                # leak connections. The successful redirect path already
+                # closes via the explicit aclose() before the loop continues.
+                try:
+                    location = response.headers.get("Location")
+                    if not location:
+                        raise KaguraFetchError(
+                            f"redirect status {response.status_code} with no Location header",
+                            url=current_url,
+                        )
+                    # Resolve relative redirects against current_url.
+                    next_url = str(httpx.URL(current_url).join(location))
+                    next_parsed = urlsplit(next_url)
+                    if next_parsed.scheme.lower() not in _ALLOWED_SCHEMES:
+                        raise KaguraFetchError(
+                            f"redirect to unsupported scheme {next_parsed.scheme!r}",
+                            url=next_url,
+                        )
+                    if next_parsed.scheme.lower() == "http" and not self.allow_http:
+                        raise KaguraFetchError(
+                            "redirect to http:// is disabled; use https://",
+                            url=next_url,
+                        )
+                    if not next_parsed.hostname:
+                        raise KaguraFetchError("redirect URL has no hostname", url=next_url)
+                    await self._validate_hostname(next_parsed.hostname, next_url)
+                finally:
+                    await response.aclose()
                 current_url = next_url
                 continue
 

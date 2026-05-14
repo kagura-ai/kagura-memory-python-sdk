@@ -15,11 +15,11 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlsplit
 
 from ..client import KaguraClient
-from ..exceptions import KaguraIngestError, KaguraLLMError
+from ..exceptions import KaguraFetchError, KaguraIngestError, KaguraLLMError
 from ..files_client import FilesClient
 from ..models import CostBreakdown, FileObject, IngestErrorRecord, IngestResult
 from ._types import Chunk, ExtractedContent
@@ -116,14 +116,19 @@ class FileIngestor:
                 back-reference to the original bytes). No effect when
                 ``files_client`` is None.
         """
-        fetched = await self._fetch(
-            source,
-            max_bytes=max_bytes,
-            connect_timeout=connect_timeout,
-            read_timeout=read_timeout,
-            allow_http=allow_http,
-            allow_system_paths=allow_system_paths,
-        )
+        try:
+            fetched = await self._fetch(
+                source,
+                max_bytes=max_bytes,
+                connect_timeout=connect_timeout,
+                read_timeout=read_timeout,
+                allow_http=allow_http,
+                allow_system_paths=allow_system_paths,
+            )
+        except KaguraFetchError as e:
+            # Best-effort contract: surface fetch failures via IngestResult
+            # so --json output stays machine-readable for scripts.
+            return _fetch_failure_result(source, e, is_dry_run=False, ingestor=self)
         return await self._ingest_fetched(
             fetched,
             context_id=context_id,
@@ -148,15 +153,21 @@ class FileIngestor:
         section counts, but does NOT call any LLM provider. The returned
         :class:`IngestResult` has ``is_dry_run=True``, no memory IDs, and
         a populated :class:`CostBreakdown` with ``is_estimate=True``.
+        Fetch failures are also surfaced as a dry-run IngestResult with a
+        ``step="fetch"`` error record, never as a raised exception, so
+        ``kagura ingest --dry-run --json`` stays machine-readable.
         """
-        fetched = await self._fetch(
-            source,
-            max_bytes=max_bytes,
-            connect_timeout=connect_timeout,
-            read_timeout=read_timeout,
-            allow_http=allow_http,
-            allow_system_paths=allow_system_paths,
-        )
+        try:
+            fetched = await self._fetch(
+                source,
+                max_bytes=max_bytes,
+                connect_timeout=connect_timeout,
+                read_timeout=read_timeout,
+                allow_http=allow_http,
+                allow_system_paths=allow_system_paths,
+            )
+        except KaguraFetchError as e:
+            return _fetch_failure_result(source, e, is_dry_run=True, ingestor=self)
 
         try:
             content, chunks = self._extract_and_chunk(fetched)
@@ -589,6 +600,42 @@ def _infer_mime(fetched: FetchResult) -> str:
 
 def _infer_title(source_uri: str) -> str:
     return source_uri.rsplit("/", 1)[-1] or source_uri
+
+
+def _fetch_failure_result(
+    source: str,
+    error: KaguraFetchError,
+    *,
+    is_dry_run: bool,
+    ingestor: FileIngestor,
+) -> IngestResult:
+    """Wrap a fetch failure as an IngestResult instead of raising.
+
+    Lets ``kagura ingest`` (with or without ``--dry-run``) emit JSON for
+    fetch-time failures (missing files, blocked URLs, DNS errors, byte
+    cap, etc.) so scripts using ``--json`` get the same shape on every
+    failure mode. The orchestrator-internal contract is unchanged: the
+    raise-based ``Fetcher`` is the source of truth, and this is the
+    single conversion point.
+    """
+    # We have no FetchResult here, so reconstruct the metadata the
+    # renderer needs from the original ``source`` argument. URL-shaped
+    # inputs are tagged source_type="url"; everything else is "file".
+    source_type: Literal["url", "file"] = "url" if "://" in source else "file"
+    cost = CostBreakdown(
+        is_estimate=is_dry_run,
+        text_provider=ingestor._text.name,
+        vision_provider=ingestor._vision.name if ingestor._vision else None,
+    )
+    return IngestResult(
+        is_dry_run=is_dry_run,
+        source_uri=error.url or source,
+        source_type=source_type,
+        cost=cost,
+        errors=[
+            IngestErrorRecord(step="fetch", message=str(error), exception_type=type(error).__name__)
+        ],
+    )
 
 
 def _filename_from_source_uri(source_uri: str) -> str:

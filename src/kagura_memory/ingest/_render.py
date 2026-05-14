@@ -60,9 +60,12 @@ def render_result(result: IngestResult, console: Console) -> None:
     console.print()
 
     section_total = len(result.section_ids)
-    failed_sections = sum(
-        1 for e in result.errors if e.step == "summarize" and e.section_index is not None
-    )
+    # Count any per-section failure step (summarize OR remember-with-
+    # section_index OR future per-section steps), not just summarize.
+    # Previously only summarize was counted, so a section that
+    # summarized successfully but failed to write surfaced in
+    # ``errors`` while being silently omitted from the "M failed" line.
+    failed_sections = sum(1 for e in result.errors if e.section_index is not None)
     sections_label = f"{section_total} created"
     if failed_sections:
         sections_label += f", {failed_sections} failed"

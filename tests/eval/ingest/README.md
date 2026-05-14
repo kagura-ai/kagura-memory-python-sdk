@@ -27,9 +27,11 @@ uv run pytest -m eval tests/eval/ingest/
 
 ## What's covered
 
-Each test runs the actual summarizer (`LiteLLMProvider.summarize`,
-`summarize_overview`, `describe_image`) against a small fixture and
-asserts deterministic properties:
+Each test runs `LiteLLMProvider.summarize` or `summarize_overview`
+against a small fixture and asserts deterministic properties. Phase 1
+does **not** eval `describe_image` because the orchestrator has no
+image-extraction path yet (no extractor populates
+`ExtractedContent.images`); the vision-prompt eval lands with Phase 2.
 
 | Test                                       | Property checked                                                       |
 |--------------------------------------------|------------------------------------------------------------------------|
