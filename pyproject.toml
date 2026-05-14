@@ -79,6 +79,7 @@ dev = [
 asyncio_mode = "strict"
 markers = [
     "integration: requires a live memory-cloud backend (gated by KAGURA_INTEGRATION_URL, KAGURA_API_KEY, and KAGURA_INTEGRATION_CONTEXT_ID env vars)",
+    "eval: ingestion quality eval against real LLMs (gated by ANTHROPIC_API_KEY / GEMINI_API_KEY env vars; default-skipped, run with `pytest -m eval`)",
 ]
 
 [tool.ruff]
