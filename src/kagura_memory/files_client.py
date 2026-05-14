@@ -330,6 +330,15 @@ class FilesClient:
         log = normalize_logger(logger)
         reserved_file_id: str | None = None
         uploaded = False
+        # ``confirm_started`` flips True when the confirm HTTP request is
+        # dispatched; ``confirmed`` flips True only after the server response
+        # is fully parsed into a FileObject. The two flags together let an AI
+        # consumer reading the terminal-error detail tell apart "confirm
+        # never ran — safe to redo from scratch" vs "confirm dispatched but
+        # we don't know if the server processed it — must verify before
+        # retrying".
+        confirm_started = False
+        confirmed = False
         try:
             # Pre-flight validators and source preparation can raise too
             # (ValueError from _validate_context_id, FileNotFoundError /
@@ -385,12 +394,14 @@ class FilesClient:
             uploaded = True
 
             log.action("Confirming upload", stage="confirm")
+            confirm_started = True
             confirm_resp = await self._request(
                 "POST",
                 f"/api/v1/files/{reserve.file_id}/confirm",
                 json={"sha256": sha256_hex},
             )
             result = FileObject.model_validate(confirm_resp.json())
+            confirmed = True
             log.success(
                 "Upload complete",
                 stage="complete",
@@ -400,13 +411,18 @@ class FilesClient:
         except BaseException as e:
             # Terminal-event guarantee: include partial state so a recovering
             # AI consumer can decide whether to retry confirm vs re-upload.
+            # ``confirm_started`` AND NOT ``confirmed`` is the ambiguous case
+            # (the server may have processed the confirm, but we lost the
+            # response) — consumers should verify file state before retrying
+            # rather than re-uploading.
             log.error(
                 f"Upload failed: {e}",
                 stage="complete",
                 detail={
                     "reserved_file_id": reserved_file_id,
                     "uploaded": uploaded,
-                    "confirmed": False,
+                    "confirm_started": confirm_started,
+                    "confirmed": confirmed,
                 },
             )
             raise

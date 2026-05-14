@@ -446,6 +446,47 @@ def test_resource_import_emits_terminal_error_on_batch_failure(mock_rc_cls, mock
     assert terminal[0]["detail"]["total_events"] == 200
 
 
+def test_rich_path_swallows_broken_console_print():
+    """A Rich-path ``Console.print`` raising OSError must not crash the caller.
+
+    Locks the ``_safe_rich_print`` wrapper that catches BrokenPipeError /
+    OSError so ``kagura ingest -v | head -n 1`` does not crash the
+    underlying SDK operation when the consumer closes the pipe early.
+    """
+
+    class _BrokenConsole:
+        def print(self, *_args: object, **_kwargs: object) -> None:
+            raise BrokenPipeError("downstream consumer gone")
+
+    logger = VerboseLogger(level=2, console=_BrokenConsole(), output_format="rich")  # type: ignore[arg-type]
+    # Each method exercises the wrapper on a different render path.
+    logger.action("a")
+    logger.detail("k", "v")
+    logger.success("ok")
+    logger.warning("warn")
+    logger.error("boom")
+    logger.debug("dbg", {"x": 1})
+
+
+def test_rich_debug_swallows_broken_str_payload():
+    """The Rich debug path now falls back safely when ``str(data)`` raises.
+
+    Mirrors the JSON path's ``test_ndjson_debug_swallows_broken_str_payload``
+    so the "never raise" contract holds on both render targets — Rich
+    used to call ``str()`` eagerly without a guard.
+    """
+
+    class _BadStr:
+        def __str__(self) -> str:
+            raise RuntimeError("broken __str__")
+
+    buf = io.StringIO()
+    console = Console(file=buf, force_terminal=False, no_color=True)
+    logger = VerboseLogger(level=3, console=console, output_format="rich")
+    logger.debug("LLM response", _BadStr())  # must not raise
+    assert "serialization failed" in buf.getvalue()
+
+
 def test_logger_swallows_broken_stderr_pipe(capsys, monkeypatch):
     """A BrokenPipeError on stderr must not crash the operation being logged.
 

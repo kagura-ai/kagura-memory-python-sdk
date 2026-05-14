@@ -81,13 +81,18 @@ class VerboseLogger:
         """Initialize a logger.
 
         Args:
-            level: Rich-path verbosity threshold. ``0`` is silent
-                (matches the ``--progress=none`` and ``-v`` not given
-                case), ``1`` shows actions/success/warning,
-                ``2`` adds details, ``3`` adds debug panels. Ignored
-                when ``output_format="json"`` — the JSON path emits
-                every event regardless of level (downstream consumers
-                filter by ``kind``).
+            level: Rich-path verbosity threshold for non-error events.
+                ``0`` silences ``action``/``detail``/``success``/
+                ``warning``/``debug`` (matches the ``--progress=none``
+                and ``-v`` not given case), ``1`` shows actions /
+                success / warning, ``2`` adds details, ``3`` adds debug
+                panels. ``error`` is the one exception — terminal
+                failures render on the Rich path regardless of level,
+                because hiding an error behind ``-v`` is rarely what
+                a CLI user wants. Ignored entirely when
+                ``output_format="json"``: the JSON path emits every
+                event regardless of level so downstream consumers can
+                filter by ``kind``.
             console: Optional Rich :class:`Console` instance. When
                 omitted, a stderr-bound console is created. Tests
                 pass a stub here to capture output.
@@ -105,6 +110,22 @@ class VerboseLogger:
     def _should_log_rich(self, min_level: int) -> bool:
         """True iff this logger should render a Rich event at ``min_level``."""
         return self.output_format == "rich" and self.level >= min_level
+
+    def _safe_rich_print(self, *args: Any, **kwargs: Any) -> None:
+        """Wrap ``Console.print`` so a broken stderr pipe never crashes the caller.
+
+        The Rich path normally goes through a ``Console(stderr=True)``
+        instance. When a downstream consumer of the stderr pipe exits
+        early (``kagura ingest -v | head -n 1``) Rich's writer raises
+        ``BrokenPipeError`` / ``OSError`` mid-call — without this guard
+        the underlying SDK operation would crash because of its own
+        observability stream. Matches the JSON path's
+        ``except OSError`` in :meth:`_emit_json`.
+        """
+        try:
+            self._console.print(*args, **kwargs)
+        except OSError:
+            pass
 
     def _emit_json(
         self,
@@ -181,11 +202,11 @@ class VerboseLogger:
             return
         if not self._should_log_rich(1):
             return
-        self._console.print(f"[bold blue]→[/bold blue] {action}", end="")
+        self._safe_rich_print(f"[bold blue]→[/bold blue] {action}", end="")
         if details:
-            self._console.print(f" [dim]{details}[/dim]")
+            self._safe_rich_print(f" [dim]{details}[/dim]")
         else:
-            self._console.print()
+            self._safe_rich_print()
 
     def detail(self, key: str, value: Any, *, stage: str | None = None) -> None:
         """Log a structured detail — ``kind=detail``, level ≥ 2."""
@@ -196,7 +217,7 @@ class VerboseLogger:
             return
         if not self._should_log_rich(2):
             return
-        self._console.print(f"  [cyan]•[/cyan] {key}: [yellow]{value}[/yellow]")
+        self._safe_rich_print(f"  [cyan]•[/cyan] {key}: [yellow]{value}[/yellow]")
 
     def debug(
         self, title: str, data: Any, syntax: str = "json", *, stage: str | None = None
@@ -223,13 +244,21 @@ class VerboseLogger:
             return
         if not self._should_log_rich(3):
             return
-        if isinstance(data, (dict, list)):
-            data_str = json.dumps(data, indent=2, ensure_ascii=False)
-        else:
-            data_str = str(data)
+        # Same best-effort serialization as the JSON path: a dict/list with
+        # non-serializable members (Path, UUID, …) should render via
+        # ``default=str``, and an object whose ``__str__`` raises should
+        # surface as a labelled placeholder rather than crashing the caller.
+        # The never-raise contract applies to the Rich path too.
+        try:
+            if isinstance(data, (dict, list)):
+                data_str = json.dumps(data, indent=2, ensure_ascii=False, default=str)
+            else:
+                data_str = str(data)
+        except Exception:  # noqa: BLE001 — best-effort fallback for any serialization error
+            data_str = f"<{type(data).__name__} serialization failed>"
         if len(data_str) > 2000:
             data_str = data_str[:2000] + "\n... (truncated)"
-        self._console.print(
+        self._safe_rich_print(
             Panel(
                 Syntax(data_str, syntax, theme="monokai", word_wrap=True),
                 title=f"[bold magenta]{title}[/bold magenta]",
@@ -258,7 +287,7 @@ class VerboseLogger:
             return
         if not self._should_log_rich(1):
             return
-        self._console.print(f"[bold green]✓[/bold green] {message}")
+        self._safe_rich_print(f"[bold green]✓[/bold green] {message}")
 
     def warning(self, message: str, *, stage: str | None = None) -> None:
         """Log a non-fatal warning — ``kind=warning``, level ≥ 1.
@@ -273,7 +302,7 @@ class VerboseLogger:
             return
         if not self._should_log_rich(1):
             return
-        self._console.print(f"[bold yellow]⚠[/bold yellow] {message}")
+        self._safe_rich_print(f"[bold yellow]⚠[/bold yellow] {message}")
 
     def error(
         self,
@@ -295,7 +324,7 @@ class VerboseLogger:
             self._emit_json(kind="error", stage=stage, msg=message, detail=detail)
             return
         # Rich path: error always renders, regardless of self.level.
-        self._console.print(f"[bold red]✗[/bold red] {message}", style="bold red")
+        self._safe_rich_print(f"[bold red]✗[/bold red] {message}", style="bold red")
 
 
 _NULL_LOGGER: VerboseLogger = VerboseLogger(level=0, output_format="none")
