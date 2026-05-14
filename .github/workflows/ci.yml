@@ -46,11 +46,16 @@ jobs:
       - name: Set up Python ${{ matrix.python-version }}
         run: uv python install ${{ matrix.python-version }}
 
-      - name: Install dependencies
-        run: uv sync --dev --python ${{ matrix.python-version }}
+      - name: Install dependencies (with ingest extras)
+        # Issue #80's ingest module pulls pymupdf + pillow via optional
+        # extras. The unit tests for that module import PIL at module
+        # level, so we install the full extras here. Core SDK consumers
+        # are unaffected — extras are opt-in via `pip install
+        # kagura-memory[ingest-pdf]`.
+        run: uv sync --dev --extra ingest-all --python ${{ matrix.python-version }}
 
       - name: Test with coverage
-        run: uv run pytest tests/ -v -m "not integration" --cov=src/kagura_memory --cov-report=xml --cov-report=term
+        run: uv run pytest tests/ -v -m "not integration and not eval" --cov=src/kagura_memory --cov-report=xml --cov-report=term
 
       - name: Upload coverage to Codecov
         if: matrix.python-version == '3.11'

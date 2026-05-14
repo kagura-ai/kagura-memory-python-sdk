@@ -1,0 +1,43 @@
+name: Ingestion eval
+
+# Real-LLM eval suite for the kagura ingest summarizer prompts.
+# Cron-scheduled to catch model drift; manually triggerable from the UI.
+# See tests/eval/ingest/README.md for the operating contract.
+
+on:
+  schedule:
+    # Mondays 03:00 UTC — keeps the run off peak hours and matches the
+    # cadence of the weekly maintenance window. Adjust by re-issuing
+    # this PR; do not edit on main directly.
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
+    # Manual trigger from the Actions tab. Useful before merging any
+    # change to ingest/providers/_litellm.py or default model strings.
+
+jobs:
+  eval:
+    runs-on: ubuntu-latest
+    # Cost containment: a single run is cheap (a few cents), but if the
+    # job ever wedges in retries it could rack up provider bills.
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Install dependencies (with ingest extras)
+        run: uv sync --dev --extra ingest-all
+
+      - name: Run eval
+        env:
+          # Tests individually skip when the corresponding key is absent;
+          # the job as a whole still passes (skipped != failed).
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: uv run pytest -v -m eval tests/eval/

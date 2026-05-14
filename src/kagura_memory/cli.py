@@ -238,6 +238,244 @@ def explore(context_id, memory_id, depth, min_weight):
     )
 
 
+@main.command(name="ingest")
+@click.argument("source")
+@click.option("--context-id", "-c", help="Context ID (or set in .kagura.json)")
+@click.option(
+    "--text-provider",
+    type=click.Choice(["claude", "gemini", "ollama"], case_sensitive=False),
+    default="claude",
+    show_default=True,
+    help="LLM provider for section/overview summarization.",
+)
+@click.option(
+    "--vision-provider",
+    type=click.Choice(["claude", "gemini", "ollama"], case_sensitive=False),
+    default="gemini",
+    show_default=True,
+    help=(
+        "Vision LLM provider used when image content is extracted "
+        "(Phase 2+). Phase 1 extractors do not yet emit images, so this "
+        "setting is currently a no-op. Pass --no-vision to skip image "
+        "handling configuration entirely."
+    ),
+)
+@click.option(
+    "--no-vision",
+    is_flag=True,
+    default=False,
+    help="Skip image content (no image bytes sent to any provider).",
+)
+@click.option(
+    "--no-archive",
+    is_flag=True,
+    default=False,
+    help=(
+        "Skip uploading the original source bytes to the workspace's "
+        "object store. By default the source is archived to R2 and the "
+        "resulting file_id is stamped on the overview memory's details "
+        "so callers can resolve memory → original bytes later."
+    ),
+)
+@click.option("--tags", help="Comma-separated tags")
+@click.option(
+    "--importance",
+    "-i",
+    type=click.FloatRange(0.0, 1.0),
+    default=0.7,
+    show_default=True,
+    help="Importance 0.0-1.0 for the overview memory; sections inherit lower.",
+)
+@click.option(
+    "--max-bytes",
+    type=int,
+    default=100 * 1024 * 1024,
+    show_default=True,
+    help="Body cap (bytes) for URL/file fetch. Default 100 MB.",
+)
+@click.option(
+    "--timeout-connect",
+    type=float,
+    default=10.0,
+    show_default=True,
+    help="HTTP connect timeout (seconds).",
+)
+@click.option(
+    "--timeout-read",
+    type=float,
+    default=60.0,
+    show_default=True,
+    help="HTTP read timeout (seconds).",
+)
+@click.option(
+    "--allow-http",
+    is_flag=True,
+    default=False,
+    help="Allow http:// URLs (default: HTTPS only).",
+)
+@click.option(
+    "--allow-system-paths",
+    is_flag=True,
+    default=False,
+    help="Allow ingesting paths under /etc, /proc, /root, ~/.ssh, etc.",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    default=False,
+    help="Estimate token + page counts without calling any LLM provider.",
+)
+@click.option(
+    "--json",
+    "-J",
+    "as_json",
+    is_flag=True,
+    default=False,
+    help=(
+        "Emit the full IngestResult as JSON (machine-readable). "
+        "Default is a human-readable summary."
+    ),
+)
+def ingest_file(
+    source,
+    context_id,
+    text_provider,
+    vision_provider,
+    no_vision,
+    no_archive,
+    tags,
+    importance,
+    max_bytes,
+    timeout_connect,
+    timeout_read,
+    allow_http,
+    allow_system_paths,
+    dry_run,
+    as_json,
+):
+    """Ingest a URL or local file into Memory Cloud.
+
+    Extracts structural sections from the source and creates one overview
+    memory plus one memory per section, linked via declared_link edges. Heavy
+    parsing dependencies are optional — install them with:
+
+      pip install 'kagura-memory[ingest-pdf]'
+
+    Phase 1 ingests text content only. The vision pipeline (Gemini 2.5 Flash
+    by default) is configured but the bundled PDF extractor does not yet
+    emit page images — image-based OCR memories land in Phase 2. Pass
+    --no-vision to skip vision-provider configuration entirely (no
+    image bytes will be sent to any provider once Phase 2 lands).
+
+    Examples:
+      kagura ingest https://example.com/report.pdf
+      kagura ingest ./report.pdf --tags "Q1,report"
+      kagura ingest report.pdf --no-vision
+      kagura ingest report.pdf --dry-run
+    """
+    try:
+        config = load_config()
+        # api_key is only required when we're going to write memories or hit
+        # the object store. --dry-run is purely local (fetch + extract +
+        # token counter) and must work without authentication.
+        if not dry_run and not config.get("api_key"):
+            raise click.ClickException(
+                "No API key found. Set KAGURA_API_KEY or create .kagura.json"
+            )
+        ctx_id = context_id or config.get("context_id") or ""
+        if not ctx_id and not dry_run:
+            raise click.ClickException(
+                "context_id required. Use --context-id or set in .kagura.json"
+            )
+        # Dry-run does not write to Memory Cloud, but still uses the providers'
+        # local token counters; allow context_id to be empty in that case.
+        ctx_id = ctx_id or "00000000-0000-0000-0000-000000000000"
+
+        api_key = config.get("api_key", "") or "kagura_dry-run-no-auth"
+        mcp_url = config.get("mcp_url", "https://memory.kagura-ai.com/mcp")
+        # KaguraClient validates the URL is HTTPS (or localhost) — the
+        # placeholder api_key above lets it construct cleanly when --dry-run
+        # is used without a config file. No network calls will use it.
+        client = KaguraClient(api_key=api_key, mcp_url=mcp_url)
+        # Archive is disabled in dry-run (no network egress to LLM or R2)
+        # and when the caller passes --no-archive.
+        archive = not (dry_run or no_archive)
+        files_client = (
+            FilesClient.from_mcp_url(api_key=api_key, mcp_url=mcp_url) if archive else None
+        )
+
+        # Deferred: keeps litellm/pymupdf/pillow off the import path of CLI
+        # commands that don't ingest. Hoisting this to the top of the file
+        # would re-introduce a startup penalty for every `kagura ...` call.
+        from .ingest import FileIngestor
+
+        async def _run() -> Any:
+            async with client:
+                try:
+                    ingestor = FileIngestor(
+                        client=client,
+                        text_provider_name=text_provider,
+                        vision_provider_name=None if no_vision else vision_provider,
+                        files_client=files_client,
+                    )
+                    if dry_run:
+                        return await ingestor.estimate_cost(
+                            source,
+                            max_bytes=max_bytes,
+                            connect_timeout=timeout_connect,
+                            read_timeout=timeout_read,
+                            allow_http=allow_http,
+                            allow_system_paths=allow_system_paths,
+                        )
+                    return await ingestor.ingest(
+                        source,
+                        context_id=ctx_id,
+                        tags=_parse_tags(tags),
+                        importance=importance,
+                        max_bytes=max_bytes,
+                        connect_timeout=timeout_connect,
+                        read_timeout=timeout_read,
+                        allow_http=allow_http,
+                        allow_system_paths=allow_system_paths,
+                        archive_original=archive,
+                    )
+                finally:
+                    if files_client is not None:
+                        await files_client.close()
+
+        result = asyncio.run(_run())
+        if as_json:
+            click.echo(result.model_dump_json(indent=2))
+        else:
+            from rich.console import Console
+
+            from .ingest._render import render_dry_run, render_result
+
+            console = Console()
+            if result.is_dry_run:
+                render_dry_run(result, console)
+            else:
+                render_result(result, console)
+
+        # Exit code contract:
+        #   0 = overview created (partial section errors are still 0,
+        #       matching the best-effort design — callers can inspect
+        #       result.errors for finer-grained handling)
+        #   0 = dry-run completed (no real success/failure)
+        #   1 = overview NOT created (fatal)
+        if dry_run or result.success:
+            return
+        sys.exit(1)
+
+    except click.ClickException:
+        raise
+    except Exception as e:
+        # ClickException's __str__ already prefixes "Error: " when printed,
+        # so wrapping the message with another "Error: " would render as
+        # "Error: Error: <msg>". Pass the raw exception message instead.
+        raise click.ClickException(str(e) or type(e).__name__) from e
+
+
 @main.command()
 @click.option("--context-id", "-c", help="Context ID (or set in .kagura.json)")
 @click.option("--memory-id", "-m", required=True, help="Memory ID to get full details")

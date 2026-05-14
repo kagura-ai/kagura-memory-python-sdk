@@ -1,14 +1,26 @@
 [project]
 name = "kagura-memory"
 dynamic = ["version"]
-description = "Python SDK for Kagura Memory Cloud — AI-driven memory management"
+description = "Python SDK for Kagura Memory Cloud — memory management, document ingestion (PDF → memory graph), and R2 file storage for AI agents"
 readme = "README.md"
 requires-python = ">=3.11"
 license = {text = "MIT"}
 authors = [
     {name = "Fumikazu Kiyota", email = "fumikazu.kiyota@gmail.com"}
 ]
-keywords = ["ai", "memory", "mcp", "agent", "llm", "kagura"]
+keywords = [
+    "ai",
+    "memory",
+    "mcp",
+    "agent",
+    "llm",
+    "kagura",
+    "pdf",
+    "document-ingestion",
+    "rag",
+    "embeddings",
+    "vector-search",
+]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -33,6 +45,19 @@ dev = [
     "pytest-cov>=6.0.0",
     "ruff>=0.8.0",
     "pyright>=1.1.0",
+]
+# File ingestion (Issue #80) — heavy parsing dependencies are opt-in.
+# `httpx` is intentionally NOT listed here: it's already a core dependency
+# (see top of [dependencies]) and listing it again would shadow the core pin.
+ingest = [
+    "pillow>=10.4",
+]
+ingest-pdf = [
+    "kagura-memory[ingest]",
+    "pymupdf>=1.24",
+]
+ingest-all = [
+    "kagura-memory[ingest-pdf]",
 ]
 
 [project.scripts]
@@ -66,6 +91,7 @@ dev = [
 asyncio_mode = "strict"
 markers = [
     "integration: requires a live memory-cloud backend (gated by KAGURA_INTEGRATION_URL, KAGURA_API_KEY, and KAGURA_INTEGRATION_CONTEXT_ID env vars)",
+    "eval: ingestion quality eval against real LLMs (gated by ANTHROPIC_API_KEY / GEMINI_API_KEY env vars; default-skipped, run with `pytest -m eval`)",
 ]
 
 [tool.ruff]

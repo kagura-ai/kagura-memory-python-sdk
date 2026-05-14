@@ -733,3 +733,108 @@ class FileListResponse(BaseModel):
 
     files: list[FileObject]
     next_cursor: str | None = None
+
+
+# =============================================================================
+# File ingestion (Issue #80)
+# =============================================================================
+# These models are returned by the file-ingestion module
+# (``kagura_memory.ingest``) and exposed to CLI users via ``kagura ingest``.
+# Heavy parsing dependencies (pymupdf, pillow) are loaded lazily inside the
+# ingest subpackage; importing this models module never triggers them.
+
+
+class CostBreakdown(BaseModel):
+    """Cost and token usage for one ingest operation.
+
+    Used both for ``--dry-run`` cost estimation (``is_estimate=True``, no
+    network egress to LLM providers) and for the final cost reported by an
+    actual ingestion. Token counts are computed via ``litellm.token_counter``
+    when possible; ``None`` indicates the counter could not estimate that
+    field.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    is_estimate: bool = False
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    vision_tokens: int | None = None
+    est_usd: float | None = None
+    text_provider: str | None = None
+    vision_provider: str | None = None
+
+
+class IngestErrorRecord(BaseModel):
+    """A single per-step failure during ingestion.
+
+    Best-effort ingestion collects these in ``IngestResult.errors`` instead
+    of aborting. The Exception class for fatal orchestration failures is
+    :class:`kagura_memory.exceptions.KaguraIngestError` — these records
+    represent recoverable per-section issues.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    step: Literal[
+        "fetch",
+        "extract",
+        "chunk",
+        "summarize",
+        "vision",
+        "remember",
+        "archive",
+    ]
+    section_index: int | None = None
+    message: str
+    exception_type: str | None = None
+
+
+class IngestResult(BaseModel):
+    """Result of a single ``kagura ingest`` invocation.
+
+    Best-effort semantics: a non-empty ``errors`` list does NOT mean the
+    overall ingestion failed — partial successes (e.g. 4 of 5 sections
+    written) still return a populated result with the error recorded.
+    Callers should check ``IngestResult.success`` (or equivalently
+    ``overview_id is not None``) to confirm the overview memory was
+    created; downstream sections are guaranteed to reference an existing
+    overview when present.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    is_dry_run: bool = False
+    source_uri: str
+    source_type: Literal["file", "url"]
+    overview_id: str | None = None
+    section_ids: list[str] = Field(default_factory=list)
+    estimated_section_count: int | None = None
+    """Number of sections detected during ``--dry-run`` extraction.
+
+    Populated only by :meth:`FileIngestor.estimate_cost` (the dry-run
+    path) where no memories are written and ``section_ids`` is empty.
+    The Rich renderer reads this for the dry-run "Sections:" row.
+    ``None`` on actual ingest runs — use ``len(section_ids)`` then.
+    """
+    skipped_images: int = 0
+    archived_file_id: str | None = None
+    """``FileObject.id`` when the source was archived to R2, else ``None``.
+
+    ``None`` covers three cases: archival was opt-out (``archive_original=False``),
+    no ``FilesClient`` was supplied, or the upload failed (also visible as an
+    ``errors[*].step == "archive"`` record).
+    """
+    cost: CostBreakdown
+    warnings: list[str] = Field(default_factory=list)
+    errors: list[IngestErrorRecord] = Field(default_factory=list)
+
+    @property
+    def success(self) -> bool:
+        """True iff the overview memory was created.
+
+        Best-effort design: per-section ``errors`` do NOT flip this to
+        ``False``. Callers wanting a stricter "completed cleanly" check
+        should combine ``success`` with ``not errors``.
+        """
+        return self.overview_id is not None
