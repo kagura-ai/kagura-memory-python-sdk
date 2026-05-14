@@ -57,15 +57,7 @@ def extract_detail(response: httpx.Response) -> str:
 
 
 def _format_validation_errors(errors: list[Any]) -> str:
-    """Format FastAPI validation-error entries into a one-line string.
-
-    Each entry is expected to be a dict with at least ``msg``; ``loc`` is
-    used when present to produce a dotted path (integer list indices are
-    stringified so ``["body", "items", 0, "name"]`` becomes
-    ``"body.items.0.name"``). Entries missing ``msg``, with an empty
-    ``msg``, or that are not dicts are skipped silently — a single malformed
-    entry should not blank the whole detail line.
-    """
+    # Silent-skip malformed entries so a single bad entry doesn't blank the line.
     parts: list[str] = []
     for entry in errors:
         if not isinstance(entry, dict):

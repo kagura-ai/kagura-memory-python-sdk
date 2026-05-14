@@ -10,6 +10,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 import httpx
+import pytest
 
 from kagura_memory._http import extract_detail
 
@@ -22,7 +23,7 @@ def _response_with_json(payload: object) -> MagicMock:
 
 
 def _response_with_bad_json() -> MagicMock:
-    """Mock whose ``.json()`` raises — simulates a non-JSON / HTML / empty body."""
+    """Mock whose ``.json()`` raises ``ValueError`` — simulates a non-JSON body."""
     resp = MagicMock(spec=httpx.Response)
     resp.json.side_effect = ValueError("not json")
     return resp
@@ -48,21 +49,45 @@ def test_empty_string_detail_returns_empty():
 # ---------------------------------------------------------------------------
 
 
-def test_single_validation_error_formats_with_loc_path():
-    """The motivating case from #110: a single 422 with ``loc=[body, workspace_id]``."""
-    resp = _response_with_json(
-        {
-            "detail": [
+@pytest.mark.parametrize(
+    "detail, expected",
+    [
+        # The motivating case from #110: single 422 with loc=[body, workspace_id]
+        pytest.param(
+            [
                 {
                     "type": "uuid_parsing",
                     "loc": ["body", "workspace_id"],
                     "msg": "Input should be a valid UUID",
                     "input": "auto",
                 }
-            ]
-        }
-    )
-    assert extract_detail(resp) == "body.workspace_id: Input should be a valid UUID"
+            ],
+            "body.workspace_id: Input should be a valid UUID",
+            id="loc_path",
+        ),
+        # FastAPI puts list indices in loc as ints — stringify so the path stays printable
+        pytest.param(
+            [{"loc": ["body", "items", 0, "name"], "msg": "Field required"}],
+            "body.items.0.name: Field required",
+            id="integer_index_in_loc",
+        ),
+        # msg-only entry (non-field validator) → return msg alone
+        pytest.param(
+            [{"msg": "Internal validation failure"}],
+            "Internal validation failure",
+            id="missing_loc",
+        ),
+        # loc: [] is treated the same as missing loc
+        pytest.param(
+            [{"loc": [], "msg": "Top-level validation failure"}],
+            "Top-level validation failure",
+            id="empty_loc",
+        ),
+    ],
+)
+def test_single_entry_loc_variants(detail: list[dict], expected: str):
+    """Single-entry FastAPI 422 shapes: loc with strings, ints, missing, or empty."""
+    assert extract_detail(_response_with_json({"detail": detail})) == expected
 
 
 def test_multiple_validation_errors_joined_with_semicolon():
@@ -79,42 +104,6 @@ def test_multiple_validation_errors_joined_with_semicolon():
         "body.workspace_id: Input should be a valid UUID; "
         "body.size_bytes: Input should be greater than 0"
     )
-
-
-def test_loc_with_integer_list_index_stringified():
-    """FastAPI puts list indices in ``loc`` as ints — stringify so the path stays printable."""
-    resp = _response_with_json(
-        {
-            "detail": [
-                {"loc": ["body", "items", 0, "name"], "msg": "Field required"},
-            ]
-        }
-    )
-    assert extract_detail(resp) == "body.items.0.name: Field required"
-
-
-def test_missing_loc_uses_msg_alone():
-    """Entry with ``msg`` but no ``loc`` (e.g. a non-field validator) → return msg alone."""
-    resp = _response_with_json(
-        {
-            "detail": [
-                {"msg": "Internal validation failure"},
-            ]
-        }
-    )
-    assert extract_detail(resp) == "Internal validation failure"
-
-
-def test_empty_loc_list_uses_msg_alone():
-    """``loc: []`` is treated the same as missing ``loc``."""
-    resp = _response_with_json(
-        {
-            "detail": [
-                {"loc": [], "msg": "Top-level validation failure"},
-            ]
-        }
-    )
-    assert extract_detail(resp) == "Top-level validation failure"
 
 
 def test_malformed_entries_skipped_well_formed_kept():
