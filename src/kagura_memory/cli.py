@@ -1470,8 +1470,20 @@ def resource_import(resource_id, api_key, input_file, fmt, id_column, version, v
             )
         )
 
-    click.echo(f"Importing {len(events)} events...")
     logger = _resolve_progress_logger(verbose, progress)
+    # Pre-flight announcement: keep stdout strictly machine-readable (the
+    # JSON output below) by routing the human-readable count to stderr.
+    # Suppress entirely when progress is silent (--progress=none, or no -v
+    # and no --progress) so scripts piping stderr to /dev/null see nothing
+    # unexpected; otherwise emit it as a structured "start" action through
+    # the logger so the rich path stays consistent and json consumers get
+    # a parseable event.
+    if logger is not None:
+        logger.action(
+            "Importing events",
+            f"{len(events)} event(s)",
+            stage="import_start",
+        )
 
     # Batch ingest (100 at a time)
     async def op(client: ResourceClient) -> str:

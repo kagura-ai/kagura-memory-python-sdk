@@ -125,10 +125,13 @@ class VerboseLogger:
         top-level event shape minimal so future fields don't bloat
         ``v=1``; consumers tolerate unknown ``detail`` keys.
         """
+        # Capture `now` once: two separate ``datetime.now()`` calls would race
+        # across a second boundary and produce an inconsistent ``ts`` field
+        # (seconds from the first call, milliseconds from the second).
+        now = datetime.now(UTC)
         event: dict[str, Any] = {
             "v": _NDJSON_SCHEMA_VERSION,
-            "ts": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.")
-            + f"{datetime.now(UTC).microsecond // 1000:03d}Z",
+            "ts": now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond // 1000:03d}Z",
             "stage": stage or "unknown",
             "kind": kind,
         }
@@ -136,7 +139,12 @@ class VerboseLogger:
             event["msg"] = msg
         if detail:
             event["detail"] = detail
-        sys.stderr.write(json.dumps(event, ensure_ascii=False) + "\n")
+        # ``default=str`` makes the JSON path best-effort: a non-serializable
+        # object in ``detail`` (Path, UUID, custom dataclass, …) is rendered
+        # via ``str()`` instead of crashing the operation we are reporting on.
+        # Progress logging must never raise — the caller has more important
+        # work to do than worry about its observability stream.
+        sys.stderr.write(json.dumps(event, ensure_ascii=False, default=str) + "\n")
         sys.stderr.flush()
 
     def action(self, action: str, details: str = "", *, stage: str | None = None) -> None:
@@ -270,8 +278,21 @@ _NULL_LOGGER: VerboseLogger = VerboseLogger(level=0, output_format="none")
 """Module-level NO-OP logger.
 
 Entry points that take ``logger: VerboseLogger | None = None`` should
-normalize ``None`` to :data:`_NULL_LOGGER` so call sites can drop the
-``if self.logger:`` guards. The instance is stateless beyond the
-output_format check, so a single shared instance is safe across
-threads / async tasks (every method returns at the ``"none"`` short-
-circuit before touching any state)."""
+normalize ``None`` to :data:`_NULL_LOGGER` via :func:`normalize_logger`
+so call sites can drop the ``if self.logger:`` guards. The instance is
+stateless beyond the output_format check, so a single shared instance
+is safe across threads / async tasks (every method returns at the
+``"none"`` short-circuit before touching any state)."""
+
+
+def normalize_logger(logger: VerboseLogger | None) -> VerboseLogger:
+    """Return ``logger`` when given, else the module-level :data:`_NULL_LOGGER`.
+
+    The recommended way for SDK entry points (``FileIngestor.ingest``,
+    ``FilesClient.upload``, ``ResourceClient.ingest_events``) to accept
+    an optional logger without scattering ``logger or _NULL_LOGGER``
+    expressions across the codebase. Keeping the normalization in one
+    place also means the no-op fallback is documented at the import
+    site rather than at every call site.
+    """
+    return logger if logger is not None else _NULL_LOGGER

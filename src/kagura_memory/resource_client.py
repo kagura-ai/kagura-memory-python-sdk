@@ -14,7 +14,7 @@ from .exceptions import (
     KaguraNotFoundError,
     KaguraQuotaError,
 )
-from .logger import _NULL_LOGGER, VerboseLogger
+from .logger import VerboseLogger, normalize_logger
 from .models import (
     IndexerStatusResponse,
     PaginatedResourceTokensResponse,
@@ -424,7 +424,7 @@ class ResourceClient:
         Returns:
             Batch ingestion result with created/failed counts.
         """
-        log = logger or _NULL_LOGGER
+        log = normalize_logger(logger)
         log.action(
             "Ingesting events batch",
             f"{len(events)} event(s) for resource {resource_id}",

@@ -21,7 +21,7 @@ from urllib.parse import urlsplit
 from ..client import KaguraClient
 from ..exceptions import KaguraFetchError, KaguraIngestError, KaguraLLMError
 from ..files_client import FilesClient
-from ..logger import _NULL_LOGGER, VerboseLogger
+from ..logger import VerboseLogger, normalize_logger
 from ..models import CostBreakdown, FileObject, IngestErrorRecord, IngestResult
 from ._types import Chunk, ExtractedContent
 from .chunker import chunk as do_chunk
@@ -125,7 +125,7 @@ class FileIngestor:
                 ``kind=error`` as the final event) is honored even when
                 an unhandled exception escapes the body.
         """
-        log = logger or _NULL_LOGGER
+        log = normalize_logger(logger)
         log.action("Fetching source", source, stage="fetch")
         try:
             fetched = await self._fetch(
@@ -290,7 +290,7 @@ class FileIngestor:
         archive_original: bool,
         logger: VerboseLogger | None = None,
     ) -> IngestResult:
-        log = logger or _NULL_LOGGER
+        log = normalize_logger(logger)
         errors: list[IngestErrorRecord] = []
         warnings: list[str] = []
 

@@ -39,7 +39,7 @@ from .exceptions import (
     KaguraNotFoundError,
     KaguraQuotaError,
 )
-from .logger import _NULL_LOGGER, VerboseLogger
+from .logger import VerboseLogger, normalize_logger
 from .models import (
     FileDownloadUrlResponse,
     FileListResponse,
@@ -327,7 +327,7 @@ class FilesClient:
             KaguraAuthError, KaguraNotFoundError, KaguraQuotaError,
             KaguraConnectionError: see class docstring.
         """
-        log = logger or _NULL_LOGGER
+        log = normalize_logger(logger)
         _validate_context_id(context_id)
         resolved_filename, body, sha256_hex = await _prepare_source(source, filename)
         size_bytes = len(body)
