@@ -39,6 +39,7 @@ from .exceptions import (
     KaguraNotFoundError,
     KaguraQuotaError,
 )
+from .logger import VerboseLogger, normalize_logger
 from .models import (
     FileDownloadUrlResponse,
     FileListResponse,
@@ -281,6 +282,7 @@ class FilesClient:
         source: Path | bytes,
         filename: str | None = None,
         content_type: str | None = None,
+        logger: VerboseLogger | None = None,
     ) -> FileObject:
         """Upload a file to Kagura Memory Cloud.
 
@@ -325,45 +327,105 @@ class FilesClient:
             KaguraAuthError, KaguraNotFoundError, KaguraQuotaError,
             KaguraConnectionError: see class docstring.
         """
-        _validate_context_id(context_id)
-        resolved_filename, body, sha256_hex = await _prepare_source(source, filename)
-        size_bytes = len(body)
-        resolved_content_type = _resolve_content_type(content_type, resolved_filename)
-
-        reserve_body = {
-            "workspace_id": context_id,
-            "filename": resolved_filename,
-            "content_type": resolved_content_type,
-            "size_bytes": size_bytes,
-            "sha256": sha256_hex,
-        }
-
+        log = normalize_logger(logger)
+        reserved_file_id: str | None = None
+        uploaded = False
+        # ``confirm_started`` flips True when the confirm HTTP request is
+        # dispatched; ``confirmed`` flips True only after the server response
+        # is fully parsed into a FileObject. The two flags together let an AI
+        # consumer reading the terminal-error detail tell apart "confirm
+        # never ran — safe to redo from scratch" vs "confirm dispatched but
+        # we don't know if the server processed it — must verify before
+        # retrying".
+        confirm_started = False
+        confirmed = False
         try:
-            reserve_resp = await self._request("POST", "/api/v1/files/reserve", json=reserve_body)
-        except KaguraConnectionError as e:
-            # 409 dedup happy-path: server reports the existing file
-            # in the error detail; surface it as a FileObject so the
-            # caller does not have to special-case duplicates.
-            existing = _extract_existing_file(e)
-            if existing is not None:
-                return existing
+            # Pre-flight validators and source preparation can raise too
+            # (ValueError from _validate_context_id, FileNotFoundError /
+            # ValueError from _prepare_source). They live INSIDE the try so
+            # those failures also get a terminal kind=error event before
+            # propagating — matching the contract documented in the logger
+            # module's "terminal-event" docstring.
+            _validate_context_id(context_id)
+            resolved_filename, body, sha256_hex = await _prepare_source(source, filename)
+            size_bytes = len(body)
+            resolved_content_type = _resolve_content_type(content_type, resolved_filename)
+
+            log.action(
+                "Reserving upload",
+                f"{resolved_filename} ({size_bytes} bytes)",
+                stage="reserve",
+            )
+            reserve_body = {
+                "workspace_id": context_id,
+                "filename": resolved_filename,
+                "content_type": resolved_content_type,
+                "size_bytes": size_bytes,
+                "sha256": sha256_hex,
+            }
+
+            try:
+                reserve_resp = await self._request(
+                    "POST", "/api/v1/files/reserve", json=reserve_body
+                )
+            except KaguraConnectionError as e:
+                # 409 dedup happy-path: server reports the existing file
+                # in the error detail; surface it as a FileObject so the
+                # caller does not have to special-case duplicates.
+                existing = _extract_existing_file(e)
+                if existing is not None:
+                    log.success(
+                        "Dedup hit — existing file returned",
+                        stage="complete",
+                        detail={"file_id": existing.id, "deduped": True},
+                    )
+                    return existing
+                raise
+
+            reserve = FileReserveResponse.model_validate(reserve_resp.json())
+            reserved_file_id = reserve.file_id
+            log.action("Uploading to object store", stage="upload")
+            await self._put_to_object_store(
+                upload_url=reserve.upload_url,
+                body=body,
+                sha256_hex=sha256_hex,
+                content_type=resolved_content_type,
+            )
+            uploaded = True
+
+            log.action("Confirming upload", stage="confirm")
+            confirm_started = True
+            confirm_resp = await self._request(
+                "POST",
+                f"/api/v1/files/{reserve.file_id}/confirm",
+                json={"sha256": sha256_hex},
+            )
+            result = FileObject.model_validate(confirm_resp.json())
+            confirmed = True
+            log.success(
+                "Upload complete",
+                stage="complete",
+                detail={"file_id": result.id, "size_bytes": size_bytes},
+            )
+            return result
+        except BaseException as e:
+            # Terminal-event guarantee: include partial state so a recovering
+            # AI consumer can decide whether to retry confirm vs re-upload.
+            # ``confirm_started`` AND NOT ``confirmed`` is the ambiguous case
+            # (the server may have processed the confirm, but we lost the
+            # response) — consumers should verify file state before retrying
+            # rather than re-uploading.
+            log.error(
+                f"Upload failed: {e}",
+                stage="complete",
+                detail={
+                    "reserved_file_id": reserved_file_id,
+                    "uploaded": uploaded,
+                    "confirm_started": confirm_started,
+                    "confirmed": confirmed,
+                },
+            )
             raise
-
-        reserve = FileReserveResponse.model_validate(reserve_resp.json())
-
-        await self._put_to_object_store(
-            upload_url=reserve.upload_url,
-            body=body,
-            sha256_hex=sha256_hex,
-            content_type=resolved_content_type,
-        )
-
-        confirm_resp = await self._request(
-            "POST",
-            f"/api/v1/files/{reserve.file_id}/confirm",
-            json={"sha256": sha256_hex},
-        )
-        return FileObject.model_validate(confirm_resp.json())
 
     async def download_url(self, file_id: str) -> str:
         """Return a short-lived presigned GET URL for ``file_id``."""

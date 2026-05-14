@@ -21,6 +21,7 @@ from urllib.parse import urlsplit
 from ..client import KaguraClient
 from ..exceptions import KaguraFetchError, KaguraIngestError, KaguraLLMError
 from ..files_client import FilesClient
+from ..logger import VerboseLogger, normalize_logger
 from ..models import CostBreakdown, FileObject, IngestErrorRecord, IngestResult
 from ._types import Chunk, ExtractedContent
 from .chunker import chunk as do_chunk
@@ -103,6 +104,7 @@ class FileIngestor:
         allow_http: bool = False,
         allow_system_paths: bool = False,
         archive_original: bool = True,
+        logger: VerboseLogger | None = None,
     ) -> IngestResult:
         """Run a full ingestion against ``source``.
 
@@ -115,7 +117,16 @@ class FileIngestor:
                 archival (saves R2 storage; the memory then has no
                 back-reference to the original bytes). No effect when
                 ``files_client`` is None.
+            logger: Optional :class:`VerboseLogger` for progress events
+                (Rich for human stderr, NDJSON for AI consumers). When
+                omitted, the no-op :data:`_NULL_LOGGER` is used and no
+                events are emitted — library default is silent. The
+                terminal-event contract (exactly one ``kind=success`` or
+                ``kind=error`` as the final event) is honored even when
+                an unhandled exception escapes the body.
         """
+        log = normalize_logger(logger)
+        log.action("Fetching source", source, stage="fetch")
         try:
             fetched = await self._fetch(
                 source,
@@ -127,15 +138,45 @@ class FileIngestor:
             )
         except KaguraFetchError as e:
             # Best-effort contract: surface fetch failures via IngestResult
-            # so --json output stays machine-readable for scripts.
+            # so --json output stays machine-readable for scripts. Use
+            # stage="complete" because this IS the terminal event for the
+            # ingest operation — keeping all terminal events on the same
+            # stage lets consumers do coarse state tracking without a
+            # special "fetch-failed" stage carve-out.
+            log.error(f"Fetch failed: {e}", stage="complete", detail={"source": source})
             return _fetch_failure_result(source, e, is_dry_run=False, ingestor=self)
-        return await self._ingest_fetched(
-            fetched,
-            context_id=context_id,
-            tags=tags,
-            importance=importance,
-            archive_original=archive_original,
-        )
+        log.detail("Fetched bytes", len(fetched.body), stage="fetch")
+        try:
+            result = await self._ingest_fetched(
+                fetched,
+                context_id=context_id,
+                tags=tags,
+                importance=importance,
+                archive_original=archive_original,
+                logger=log,
+            )
+        except BaseException as e:
+            # Terminal-event guarantee: emit kind=error before propagating.
+            log.error(f"Ingest failed: {e}", stage="complete", detail={"source": source})
+            raise
+        # Success means the overview memory was created. Per-section errors
+        # are best-effort (see IngestResult.success): they ride in
+        # ``error_count`` so AI consumers can react, but they do NOT flip the
+        # terminal event to ``kind=error``. Only a missing overview does.
+        terminal_detail = {
+            "overview_id": result.overview_id,
+            "section_count": len(result.section_ids),
+            "error_count": len(result.errors),
+        }
+        if result.success:
+            log.success("Ingest complete", stage="complete", detail=terminal_detail)
+        else:
+            log.error(
+                "Ingest failed — overview not created",
+                stage="complete",
+                detail=terminal_detail,
+            )
+        return result
 
     async def estimate_cost(
         self,
@@ -256,10 +297,13 @@ class FileIngestor:
         tags: list[str] | None,
         importance: float,
         archive_original: bool,
+        logger: VerboseLogger | None = None,
     ) -> IngestResult:
+        log = normalize_logger(logger)
         errors: list[IngestErrorRecord] = []
         warnings: list[str] = []
 
+        log.action("Extracting and chunking", stage="chunk")
         try:
             content, chunks = self._extract_and_chunk(fetched)
         except (KaguraIngestError, ValueError) as e:
@@ -296,10 +340,13 @@ class FileIngestor:
                 self._archive_original(fetched, context_id=context_id, errors=errors)
             )
 
+        log.action(f"Summarizing {len(chunks)} section(s)", stage="summarize")
         section_summaries = await self._summarize_sections(chunks, errors)
+        log.detail("Sections summarized", len(section_summaries), stage="summarize")
 
         # Build the overview from the section summaries (in parallel with
         # the still-pending archive_task, if any).
+        log.action("Summarizing overview", stage="summarize")
         try:
             overview_summary = await self._text.summarize_overview(
                 [s for s in section_summaries if s], max_tokens=_DEFAULT_OVERVIEW_TOKENS

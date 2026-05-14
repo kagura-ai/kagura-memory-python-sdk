@@ -12,7 +12,7 @@ import litellm
 
 from .client import KaguraClient
 from .exceptions import KaguraAuthError, KaguraConnectionError, KaguraLLMError, KaguraRateLimitError
-from .logger import VerboseLogger
+from .logger import _NULL_LOGGER, VerboseLogger
 from .models import (
     AnalysisResult,
     ExploredMemory,
@@ -78,7 +78,9 @@ class KaguraAgent:
         self._ollama_stream = ollama_stream
         self._ollama_client: httpx.AsyncClient | None = None
         self.client = KaguraClient(api_key, mcp_url, timeout)
-        self.logger: VerboseLogger | None = None
+        # Default to the NO-OP logger so call sites can drop `if self.logger:`
+        # guards. process(verbose=N) overwrites this with a real instance.
+        self.logger: VerboseLogger = _NULL_LOGGER
 
         # Generic cache system with individual timestamps (5 minutes TTL)
         self._cache: dict[str, tuple[Any, float]] = {}
@@ -140,9 +142,8 @@ class KaguraAgent:
                 if asyncio.iscoroutine(result):
                     await result
             except Exception as e:
-                if self.logger:
-                    hook_name = getattr(fn, "__name__", repr(fn))
-                    self.logger.warning(f"Hook '{hook_name}' failed: {e}")
+                hook_name = getattr(fn, "__name__", repr(fn))
+                self.logger.warning(f"Hook '{hook_name}' failed: {e}")
 
     def skill(self, name: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
         """Register a skill.
@@ -237,13 +238,12 @@ class KaguraAgent:
                 return copy.deepcopy(data)
 
         # Cache miss or expired - fetch new data
-        if self.logger:
-            self.logger.detail(f"Fetching {label}", "cache miss or expired")
+        self.logger.detail(f"Fetching {label}", "cache miss or expired")
 
         data = await fetch_fn()
         self._cache[cache_key] = (data, time.time())
 
-        if self.logger and data:
+        if data:
             count = len(data) if isinstance(data, list) else "N/A"
             self.logger.detail(f"Cached {label}", f"{count} items" if count != "N/A" else "")
 
@@ -367,8 +367,7 @@ class KaguraAgent:
                 if attempt == self.max_retries - 1:
                     raise
                 wait_time = 2**attempt
-                if self.logger:
-                    self.logger.warning(f"Rate limited, retrying in {wait_time}s...")
+                self.logger.warning(f"Rate limited, retrying in {wait_time}s...")
                 await asyncio.sleep(wait_time)
 
             except json.JSONDecodeError as e:
@@ -459,8 +458,7 @@ class KaguraAgent:
             KaguraLLMError: LLM call failed
             KaguraRateLimitError: Rate limit exceeded
         """
-        if self.logger:
-            self.logger.action("Analyzing session with LLM", f"model={self.model}")
+        self.logger.action("Analyzing session with LLM", f"model={self.model}")
 
         # Build prompt (with or without enhanced context)
         if use_enhanced_context:
@@ -469,32 +467,27 @@ class KaguraAgent:
                 user_prompt = build_analysis_prompt_with_tools(
                     session, enhanced_ctx["tools"], enhanced_ctx["contexts"]
                 )
-
-                if self.logger:
-                    tools_count = len(enhanced_ctx["tools"])
-                    contexts_count = len(enhanced_ctx["contexts"])
-                    self.logger.detail(
-                        "Using enhanced context", f"{tools_count} tools, {contexts_count} contexts"
-                    )
+                tools_count = len(enhanced_ctx["tools"])
+                contexts_count = len(enhanced_ctx["contexts"])
+                self.logger.detail(
+                    "Using enhanced context", f"{tools_count} tools, {contexts_count} contexts"
+                )
             except KaguraAuthError:
                 raise  # Don't swallow auth errors — surface to caller
             except KaguraConnectionError as e:
                 # Fallback to basic prompt only for network/server errors
-                if self.logger:
-                    self.logger.warning(f"Enhanced context failed, using basic prompt: {e}")
+                self.logger.warning(f"Enhanced context failed, using basic prompt: {e}")
                 user_prompt = build_analysis_prompt(session)
             except Exception as e:
-                if self.logger:
-                    self.logger.warning(f"Enhanced context failed, using basic prompt: {e}")
+                self.logger.warning(f"Enhanced context failed, using basic prompt: {e}")
                 user_prompt = build_analysis_prompt(session)
         else:
             user_prompt = build_analysis_prompt(session)
 
-        if self.logger:
-            self.logger.debug(
-                "LLM Prompt",
-                {"system": SYSTEM_PROMPT[:200] + "...", "user": user_prompt[:500] + "..."},
-            )
+        self.logger.debug(
+            "LLM Prompt",
+            {"system": SYSTEM_PROMPT[:200] + "...", "user": user_prompt[:500] + "..."},
+        )
 
         # Call LLM
         messages = [
@@ -503,12 +496,11 @@ class KaguraAgent:
         ]
         analysis_data, response = await self._call_llm(messages, temperature=0.3)
 
-        if self.logger:
-            self.logger.debug("LLM Response", analysis_data)
+        self.logger.debug("LLM Response", analysis_data)
 
         # Extract and log usage
         llm_usage = self._extract_usage(response)
-        if llm_usage and self.logger:
+        if llm_usage:
             self.logger.detail(
                 "Tokens used",
                 f"{llm_usage.total_tokens} (prompt: {llm_usage.prompt_tokens}, "
@@ -547,8 +539,7 @@ class KaguraAgent:
 
         for query_info in queries:
             query = query_info.query
-            if self.logger:
-                self.logger.action("Recalling memories", f'query="{query}"')
+            self.logger.action("Recalling memories", f'query="{query}"')
 
             result = await self.client.recall(ctx, query, k=recall_k, filters=query_info.filters)
 
@@ -562,13 +553,11 @@ class KaguraAgent:
                 )
 
             actions.append(f"recall: {query}")
-            if self.logger:
-                self.logger.detail("Found memories", len(recalled))
+            self.logger.detail("Found memories", len(recalled))
 
             # Deep mode: explore if results found
             if deep and recalled:
-                if self.logger:
-                    self.logger.action("Deep exploration", f"seed={recalled[0].memory_id}")
+                self.logger.action("Deep exploration", f"seed={recalled[0].memory_id}")
                 seed_id = recalled[0].memory_id
 
                 try:
@@ -591,14 +580,12 @@ class KaguraAgent:
                         )
 
                     actions.append(f"explore: depth=2, found={len(explored)}")
-                    if self.logger:
-                        self.logger.detail("Explored memories", len(explored))
+                    self.logger.detail("Explored memories", len(explored))
 
                 except KaguraAuthError:
                     raise
                 except Exception as e:
-                    if self.logger:
-                        self.logger.warning(f"Explore failed: {e}")
+                    self.logger.warning(f"Explore failed: {e}")
 
         return recalled, explored, actions
 
@@ -619,8 +606,7 @@ class KaguraAgent:
         actions: list[str] = []
 
         for mem in memories:
-            if self.logger:
-                self.logger.action("Storing memory", f'summary="{mem.summary[:50]}..."')
+            self.logger.action("Storing memory", f'summary="{mem.summary[:50]}..."')
 
             try:
                 result = await self.client.remember(
@@ -635,14 +621,12 @@ class KaguraAgent:
                 remembered.append(MemoryInfo(memory_id=result["memory_id"], summary=mem.summary))
 
                 actions.append(f"remember: {mem.summary[:50]}")
-                if self.logger:
-                    self.logger.success(f"Stored memory: {result['memory_id']}")
+                self.logger.success(f"Stored memory: {result['memory_id']}")
 
             except KaguraAuthError:
                 raise  # Auth errors are unrecoverable — surface to caller
             except Exception as e:
-                if self.logger:
-                    self.logger.error(f"Failed to store memory: {e}")
+                self.logger.error(f"Failed to store memory: {e}")
 
         return remembered, actions
 
@@ -659,8 +643,7 @@ class KaguraAgent:
         Raises:
             KaguraLLMError: Context selection failed
         """
-        if self.logger:
-            self.logger.action("Auto-selecting context")
+        self.logger.action("Auto-selecting context")
 
         # Get available contexts
         contexts_response = await self.client.list_contexts()
@@ -672,8 +655,7 @@ class KaguraAgent:
         # If only one context, use it
         if len(contexts) == 1:
             selected = contexts[0]["id"]
-            if self.logger:
-                self.logger.detail("Auto-selected", f"{contexts[0]['name']} (only option)")
+            self.logger.detail("Auto-selected", f"{contexts[0]['name']} (only option)")
             return selected
 
         # Use LLM to select best context
@@ -689,15 +671,14 @@ class KaguraAgent:
 
             selected_id = result.get("selected_context_id")
 
-            if selected_id and self.logger:
+            if selected_id:
                 self.logger.detail("Context selected", result.get("reason", ""))
 
             return selected_id or contexts[0]["id"]
 
         except Exception as e:
             # Fallback to first context
-            if self.logger:
-                self.logger.warning(f"Context selection failed, using first context: {e}")
+            self.logger.warning(f"Context selection failed, using first context: {e}")
             return contexts[0]["id"]
 
     async def process(
