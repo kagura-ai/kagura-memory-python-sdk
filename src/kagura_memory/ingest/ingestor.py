@@ -407,11 +407,17 @@ class FileIngestor:
         """
         assert self._files is not None  # caller guarded
         filename = _filename_from_source_uri(fetched.source_uri)
+        # Forward the fetched / sniffed MIME so signed-URL archives don't
+        # land in R2 as application/octet-stream when the filename happens
+        # to lack a useful extension. ``None`` lets FilesClient fall back
+        # to its own mimetypes.guess_type pipeline.
+        content_type = fetched.content_type or None
         try:
             return await self._files.upload(
                 context_id=context_id,
                 source=fetched.body,
                 filename=filename,
+                content_type=content_type,
             )
         except Exception as e:  # noqa: BLE001
             errors.append(
@@ -570,14 +576,24 @@ class FileIngestor:
         return [r for r in results if r is not None]
 
 
+def _uri_path_lower(source_uri: str) -> str:
+    """Lowercased URI path stripped of query / fragment.
+
+    Used for extension-based MIME / format detection so URLs like
+    ``https://example.com/report.pdf?token=...`` are recognized as
+    PDFs. ``urlsplit().path`` is empty for non-URL strings (bare paths
+    without a scheme) — fall back to the full string in that case.
+    """
+    parsed = urlsplit(source_uri)
+    return (parsed.path or source_uri).lower()
+
+
 def _infer_format(fetched: FetchResult) -> str:
     if fetched.content_type == "application/pdf":
         return "pdf"
     if fetched.content_type.startswith("image/"):
         return "image"
-    # Fall back to URI extension.
-    uri = fetched.source_uri.lower()
-    if uri.endswith(".pdf"):
+    if _uri_path_lower(fetched.source_uri).endswith(".pdf"):
         return "pdf"
     return fetched.content_type or "unknown"
 
@@ -586,7 +602,7 @@ def _infer_mime(fetched: FetchResult) -> str:
     """Decide which extractor to dispatch based on Content-Type and URI."""
     if fetched.content_type == "application/pdf":
         return "application/pdf"
-    if fetched.source_uri.lower().endswith(".pdf"):
+    if _uri_path_lower(fetched.source_uri).endswith(".pdf"):
         return "application/pdf"
     # Magic-byte sniff for local files (no Content-Type).
     if fetched.body[:5] == b"%PDF-":

@@ -196,6 +196,14 @@ class Fetcher:
                         )
                     if not next_parsed.hostname:
                         raise KaguraFetchError("redirect URL has no hostname", url=next_url)
+                    # Reject embedded credentials on redirect targets too — the
+                    # initial URL passes this check, but a malicious server can
+                    # bounce us through `https://user:pass@host`.
+                    if next_parsed.username or next_parsed.password:
+                        raise KaguraFetchError(
+                            "redirect URL has embedded credentials (user:pass@host)",
+                            url=next_url,
+                        )
                     await self._validate_hostname(next_parsed.hostname, next_url)
                 finally:
                     await response.aclose()

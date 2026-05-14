@@ -14,21 +14,27 @@ original Issue #80 body is the higher-level intent and should be read first.
 
 ## 1. Scope
 
-URL またはローカルファイル（PDF, Image — Phase 1; PPT, Excel — Phase 2）を
+URL またはローカルファイル（PDF text — Phase 1; Image, PPT, Excel — Phase 2）を
 入力として受け、内容を抽出・分割・要約し、Memory Cloud にメモリとして自動
 登録する SDK サブコマンド `kagura ingest`。
 
-**Phase 1 対象 (this branch / PR)**:
+**Phase 1 対象 (this branch / PR — what actually shipped)**:
 - PDF text 抽出 + overview-only memory（chunking なし、最小 ingestor）
 - 構造ベースの semantic chunking + section memory + section→overview edge
-- Image (Vision LLM via Provider) — opt-in only
+- Vision LLM Provider scaffold (claude/gemini/ollama) — **wired and validated but not invoked** because `extractors/pdf.py` returns `images=[]` in Phase 1; ready for Phase 2 to populate.
+- FilesClient integration (`archive_original=True`) — overview memory's `details.file_id` references the R2-archived original.
 - `kagura ingest` CLI subcommand
-- `--dry-run` (cost/token preflight, no network egress to LLM provider)
+- `--dry-run` (cost/token preflight, no network egress to LLM provider, no auth required)
 
 **Phase 2 (separate issue)**:
+- Image extraction in `extractors/pdf.py` (per-page images → `ExtractedContent.images`)
+- Vision orchestration path (orchestrator calls `_image.preprocess` + `Provider.describe_image`, results become section memories)
 - PPTX, XLSX extractors
 - Batch CLI (`--batch urls.txt`)
 - Auth'd URLs (Google Drive, SharePoint)
+- Windows drive-letter path support
+- TOC entries sharing a start page (currently produces duplicated content)
+- Empty-extract handling (currently writes a generic overview)
 
 ---
 

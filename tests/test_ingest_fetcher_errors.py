@@ -126,6 +126,24 @@ async def test_fetch_url_redirect_to_unsupported_scheme_raises() -> None:
 
 
 @pytest.mark.asyncio
+async def test_fetch_url_redirect_to_credentialed_url_raises() -> None:
+    """Redirect targets must reject embedded credentials like the initial URL."""
+    async with Fetcher() as fetcher:
+        response = MagicMock(spec=httpx.Response)
+        response.status_code = 302
+        response.headers = {"Location": "https://attacker:secret@evil.example/file.pdf"}
+        response.aclose = AsyncMock()
+
+        with patch(
+            "socket.getaddrinfo",
+            return_value=[(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("8.8.8.8", 0))],
+        ):
+            with patch.object(fetcher._client, "send", return_value=response):
+                with pytest.raises(KaguraFetchError, match="embedded credentials"):
+                    await fetcher.fetch("https://example.com/x.pdf")
+
+
+@pytest.mark.asyncio
 async def test_fetch_url_redirect_to_http_when_disabled_raises() -> None:
     async with Fetcher(allow_http=False) as fetcher:
         response = MagicMock(spec=httpx.Response)
