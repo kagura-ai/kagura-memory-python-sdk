@@ -173,8 +173,29 @@ def test_archive_line_only_printed_when_file_id_present() -> None:
     assert "Original archived" in out
     assert "f8e9d0c1" in out
 
-    # Case 2: not archived → line absent (used to falsely claim archival).
+    # Case 2: not archived, not attempted → line absent.
     console = _capture()
     render_result(_result(archived_file_id=None), console)
     out = console.export_text()
     assert "Original archived" not in out
+    assert "NOT archived" not in out
+
+
+def test_archive_failure_surfaces_explicit_warning() -> None:
+    """When an archive step error is present but no file_id was stamped,
+    the renderer must say 'Original NOT archived' so the user knows the
+    memory has no back-reference to the original bytes."""
+    errors = [
+        IngestErrorRecord(
+            step="archive",
+            message="R2 PUT failed: connection reset",
+            exception_type="KaguraConnectionError",
+        )
+    ]
+    console = _capture()
+    render_result(_result(archived_file_id=None, errors=errors), console)
+    out = console.export_text()
+    assert "Original NOT archived" in out
+    # And the underlying error still surfaces in the error list.
+    assert "archive" in out
+    assert "connection reset" in out

@@ -26,7 +26,7 @@ This SDK connects your Python code to [Kagura Memory Cloud](https://github.com/k
 | **`KaguraClient`** | MCP (JSON-RPC) | Direct memory ops — remember, recall, explore, reference, forget |
 | **`ResourceClient`** | REST API | External data ingestion — push data from Slack, CI/CD, CRM into Kagura |
 | **`FilesClient`** | REST + presigned PUT | File uploads with sha256 integrity binding (R2) |
-| **`FileIngestor`** | CLI + SDK | Document ingestion — PDF / image → memory graph + R2 archive (one command) |
+| **`FileIngestor`** | CLI + SDK | Document ingestion — PDF text → memory graph + R2 archive (Phase 1; image/PPT/Excel in Phase 2) |
 
 ## 60-second demo
 
@@ -48,7 +48,7 @@ kagura recall "report findings" -k 5        # search across sections
 kagura files download-url <file_id>          # short-lived GET on the original
 ```
 
-Vision is enabled by default (Gemini 2.5 Flash) so PDF page images and standalone images get OCR'd into the same graph. Pass `--no-vision` to skip image content entirely, or `--dry-run` to see token / cost estimates without calling an LLM.
+Phase 1 ingests text content (PDF section text). The vision pipeline (Gemini 2.5 Flash by default) is wired through and can be exercised via the `FileIngestor` API, but the bundled PDF extractor does not yet emit page images — image-based OCR memories land in Phase 2. Pass `--no-vision` to skip the vision-provider configuration entirely, or `--dry-run` to see token / cost estimates without calling an LLM.
 
 ## Installation
 
@@ -336,7 +336,8 @@ kagura ingest https://example.com/report.pdf --tags "Q1,research"
 # Preview cost / sections without calling any LLM
 kagura ingest ./report.pdf --dry-run
 
-# Privacy: skip image content (no bytes sent to a vision provider)
+# Skip vision-provider configuration entirely (Phase 1 already ingests
+# text only; this becomes meaningful once Phase 2 image extraction lands)
 kagura ingest ./report.pdf --no-vision
 
 # Storage: skip the R2 archive (no file_id stamped on the overview memory)
@@ -350,7 +351,7 @@ Exit codes: `0` when the overview memory is created (per-section errors are stil
 
 Provider configuration (env vars, picked up automatically via `litellm`):
 - `ANTHROPIC_API_KEY` — text summarization (default `claude/sonnet-4-6`)
-- `GEMINI_API_KEY` — vision OCR (default `gemini/gemini-2.5-flash`)
+- `GEMINI_API_KEY` — reserved for vision OCR (default `gemini/gemini-2.5-flash`); not invoked in Phase 1
 - Override per invocation: `--text-provider {claude|gemini|ollama}`, `--vision-provider {claude|gemini|ollama}`
 
 ## Claude Code Integration

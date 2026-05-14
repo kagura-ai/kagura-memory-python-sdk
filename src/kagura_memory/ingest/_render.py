@@ -155,16 +155,25 @@ def _print_kv(console: Console, label: str, value: str) -> None:
 
 
 def _print_archive_line(console: Console, result: IngestResult) -> None:
-    """Surface the archive file_id when one was actually stamped.
+    """Surface the archive outcome on the overview path.
 
-    Only prints when ``result.archived_file_id`` is populated — covers
-    the three reasons it can be ``None`` (opt-out, no FilesClient, upload
-    failed) with a single check, no inference from ``errors``.
+    Three states:
+        * Archive succeeded (``archived_file_id`` set) → show the file_id.
+        * Archive attempted but failed (an ``errors[*].step == "archive"``
+          record is present, no file_id) → surface the absence so the user
+          knows the memory has no back-reference to the original bytes.
+        * Archive was not requested (opt-out or no FilesClient) → silent.
     """
-    if result.archived_file_id is None:
+    if result.archived_file_id is not None:
+        console.print()
+        console.print(f"  [dim]Original archived:[/dim] file_id={_escape(result.archived_file_id)}")
         return
-    console.print()
-    console.print(f"  [dim]Original archived:[/dim] file_id={_escape(result.archived_file_id)}")
+    if any(e.step == "archive" for e in result.errors):
+        console.print()
+        console.print(
+            "  [bold yellow]⚠[/bold yellow] [yellow]Original NOT archived[/yellow]"
+            " — see errors below."
+        )
 
 
 def _print_warnings(console: Console, warnings: list[str]) -> None:
