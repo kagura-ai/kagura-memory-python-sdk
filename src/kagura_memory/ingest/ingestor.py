@@ -1,0 +1,500 @@
+"""File ingestion orchestrator.
+
+Stitches together :class:`Fetcher`, :class:`Extractor`, the chunker, and
+:class:`Provider` to produce 1 overview memory + N section memories with
+``declared_link`` edges atomically created via
+:meth:`KaguraClient.remember`'s ``linked_memory_ids`` parameter.
+
+The orchestrator is best-effort: per-section LLM or write failures are
+captured in :attr:`IngestResult.errors` and do NOT abort the run. Only
+fetch failures and overview-write failures are terminal.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from datetime import UTC, datetime
+from typing import Any
+
+from ..client import KaguraClient
+from ..exceptions import KaguraIngestError, KaguraLLMError
+from ..models import CostBreakdown, IngestErrorRecord, IngestResult
+from ._types import Chunk, ExtractedContent
+from .chunker import chunk as do_chunk
+from .extractors import get_extractor
+from .fetcher import Fetcher, FetchResult
+from .providers import get_provider
+from .providers.base import Provider
+
+_DEFAULT_OVERVIEW_TOKENS = 400
+_DEFAULT_SECTION_TOKENS = 200
+_DEFAULT_CONCURRENCY = 4
+
+
+class FileIngestor:
+    """Orchestrate URL/file → Memory Cloud ingestion."""
+
+    def __init__(
+        self,
+        client: KaguraClient,
+        text_provider_name: str = "claude",
+        vision_provider_name: str | None = None,
+        text_provider: Provider | None = None,
+        vision_provider: Provider | None = None,
+        concurrency: int = _DEFAULT_CONCURRENCY,
+    ):
+        """Construct an ingestor.
+
+        Args:
+            client: Authenticated :class:`KaguraClient`. The ingestor does
+                not own its lifecycle — caller manages ``async with``.
+            text_provider_name: Short name for text summarization. Used
+                only when ``text_provider`` is None.
+            vision_provider_name: Short name for vision. Used only when
+                ``vision_provider`` is None. Pass ``None`` (or omit) to
+                disable vision; image content will then be skipped.
+            text_provider: Pre-built provider override (mainly for tests).
+            vision_provider: Pre-built vision provider override (tests).
+            concurrency: Maximum concurrent section summarization calls.
+        """
+        self._client = client
+        self._text = text_provider or get_provider(text_provider_name)
+        self._vision: Provider | None
+        if vision_provider is not None:
+            self._vision = vision_provider
+        elif vision_provider_name is not None:
+            self._vision = get_provider(vision_provider_name)
+        else:
+            self._vision = None
+        self._concurrency = max(1, concurrency)
+
+    # --- Public API ----------------------------------------------------------
+
+    async def ingest(
+        self,
+        source: str,
+        *,
+        context_id: str,
+        tags: list[str] | None = None,
+        importance: float = 0.7,
+        max_bytes: int = 100 * 1024 * 1024,
+        connect_timeout: float = 10.0,
+        read_timeout: float = 60.0,
+        allow_http: bool = False,
+        allow_system_paths: bool = False,
+    ) -> IngestResult:
+        """Run a full ingestion against ``source``."""
+        fetched = await self._fetch(
+            source,
+            max_bytes=max_bytes,
+            connect_timeout=connect_timeout,
+            read_timeout=read_timeout,
+            allow_http=allow_http,
+            allow_system_paths=allow_system_paths,
+        )
+        return await self._ingest_fetched(
+            fetched, context_id=context_id, tags=tags, importance=importance
+        )
+
+    async def estimate_cost(
+        self,
+        source: str,
+        *,
+        max_bytes: int = 100 * 1024 * 1024,
+        connect_timeout: float = 10.0,
+        read_timeout: float = 60.0,
+        allow_http: bool = False,
+        allow_system_paths: bool = False,
+    ) -> IngestResult:
+        """Local-only token + page count estimate (``--dry-run``).
+
+        Performs the fetch + extract + chunk so the user gets accurate
+        section counts, but does NOT call any LLM provider. The returned
+        :class:`IngestResult` has ``is_dry_run=True``, no memory IDs, and
+        a populated :class:`CostBreakdown` with ``is_estimate=True``.
+        """
+        fetched = await self._fetch(
+            source,
+            max_bytes=max_bytes,
+            connect_timeout=connect_timeout,
+            read_timeout=read_timeout,
+            allow_http=allow_http,
+            allow_system_paths=allow_system_paths,
+        )
+
+        try:
+            content, chunks = self._extract_and_chunk(fetched)
+        except KaguraIngestError as e:
+            return IngestResult(
+                is_dry_run=True,
+                source_uri=fetched.source_uri,
+                source_type=fetched.source_type,
+                cost=CostBreakdown(is_estimate=True),
+                errors=[
+                    IngestErrorRecord(
+                        step="extract", message=str(e), exception_type=type(e).__name__
+                    )
+                ],
+            )
+
+        prompt_tokens = sum(self._text.count_tokens(c.text) for c in chunks)
+        prompt_tokens += self._text.count_tokens("\n\n".join(c.text[:200] for c in chunks))
+        completion_tokens_est = len(chunks) * _DEFAULT_SECTION_TOKENS + _DEFAULT_OVERVIEW_TOKENS
+        cost = CostBreakdown(
+            is_estimate=True,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens_est,
+            vision_tokens=None,
+            est_usd=None,  # USD pricing varies by provider/region; left to caller
+            text_provider=self._text.name,
+            vision_provider=self._vision.name if self._vision else None,
+        )
+        warnings: list[str] = []
+        if content.images and self._vision is None:
+            warnings.append(
+                f"{len(content.images)} image(s) detected; pass vision_provider to ingest them"
+            )
+        return IngestResult(
+            is_dry_run=True,
+            source_uri=fetched.source_uri,
+            source_type=fetched.source_type,
+            section_ids=[],
+            skipped_images=len(content.images) if self._vision is None else 0,
+            cost=cost,
+            warnings=warnings,
+        )
+
+    # --- Internals -----------------------------------------------------------
+
+    async def _fetch(
+        self,
+        source: str,
+        *,
+        max_bytes: int,
+        connect_timeout: float,
+        read_timeout: float,
+        allow_http: bool,
+        allow_system_paths: bool,
+    ) -> FetchResult:
+        async with Fetcher(
+            max_bytes=max_bytes,
+            connect_timeout=connect_timeout,
+            read_timeout=read_timeout,
+            allow_http=allow_http,
+            allow_system_paths=allow_system_paths,
+        ) as fetcher:
+            return await fetcher.fetch(source)
+
+    def _extract_and_chunk(self, fetched: FetchResult) -> tuple[ExtractedContent, list[Chunk]]:
+        mime = _infer_mime(fetched)
+        extractor = get_extractor(mime)
+        content = extractor.extract(fetched.body, source_uri=fetched.source_uri)
+        chunks = do_chunk(content, model=getattr(self._text, "text_model", None))
+        return content, chunks
+
+    async def _ingest_fetched(
+        self,
+        fetched: FetchResult,
+        *,
+        context_id: str,
+        tags: list[str] | None,
+        importance: float,
+    ) -> IngestResult:
+        errors: list[IngestErrorRecord] = []
+        warnings: list[str] = []
+
+        try:
+            content, chunks = self._extract_and_chunk(fetched)
+        except (KaguraIngestError, ValueError) as e:
+            return IngestResult(
+                is_dry_run=False,
+                source_uri=fetched.source_uri,
+                source_type=fetched.source_type,
+                cost=CostBreakdown(
+                    text_provider=self._text.name,
+                    vision_provider=self._vision.name if self._vision else None,
+                ),
+                errors=[
+                    IngestErrorRecord(
+                        step="extract", message=str(e), exception_type=type(e).__name__
+                    )
+                ],
+            )
+
+        skipped_images = 0
+        if content.images and self._vision is None:
+            skipped_images = len(content.images)
+            warnings.append(f"{skipped_images} image(s) skipped — no vision provider configured")
+
+        # Summarize sections in parallel (bounded).
+        section_summaries = await self._summarize_sections(chunks, errors)
+
+        # Build the overview from the section summaries.
+        try:
+            overview_summary = await self._text.summarize_overview(
+                [s for s in section_summaries if s], max_tokens=_DEFAULT_OVERVIEW_TOKENS
+            )
+        except KaguraLLMError as e:
+            errors.append(
+                IngestErrorRecord(
+                    step="summarize", message=f"overview: {e}", exception_type=type(e).__name__
+                )
+            )
+            overview_summary = content.title or fetched.source_uri
+
+        # Write the overview memory first (we need its id for section linking).
+        overview_id = await self._write_overview(
+            fetched=fetched,
+            content=content,
+            chunks=chunks,
+            overview_summary=overview_summary,
+            context_id=context_id,
+            tags=tags,
+            importance=importance,
+            errors=errors,
+        )
+
+        section_ids: list[str] = []
+        if overview_id is not None:
+            section_ids = await self._write_sections(
+                fetched=fetched,
+                chunks=chunks,
+                section_summaries=section_summaries,
+                overview_id=overview_id,
+                context_id=context_id,
+                tags=tags,
+                importance=importance,
+                errors=errors,
+            )
+
+        cost = CostBreakdown(
+            is_estimate=False,
+            text_provider=self._text.name,
+            vision_provider=self._vision.name if self._vision else None,
+        )
+        return IngestResult(
+            is_dry_run=False,
+            source_uri=fetched.source_uri,
+            source_type=fetched.source_type,
+            overview_id=overview_id,
+            section_ids=section_ids,
+            skipped_images=skipped_images,
+            cost=cost,
+            warnings=warnings,
+            errors=errors,
+        )
+
+    async def _summarize_sections(
+        self,
+        chunks: list[Chunk],
+        errors: list[IngestErrorRecord],
+    ) -> list[str | None]:
+        sem = asyncio.Semaphore(self._concurrency)
+        results: list[str | None] = [None] * len(chunks)
+
+        async def run(idx: int, chunk_obj: Chunk) -> None:
+            async with sem:
+                try:
+                    summary = await self._text.summarize(
+                        chunk_obj.text, max_tokens=_DEFAULT_SECTION_TOKENS
+                    )
+                except KaguraLLMError as e:
+                    errors.append(
+                        IngestErrorRecord(
+                            step="summarize",
+                            section_index=idx,
+                            message=str(e),
+                            exception_type=type(e).__name__,
+                        )
+                    )
+                    return
+                results[idx] = summary
+
+        await asyncio.gather(*(run(i, c) for i, c in enumerate(chunks)))
+        return results
+
+    async def _write_overview(
+        self,
+        *,
+        fetched: FetchResult,
+        content: ExtractedContent,
+        chunks: list[Chunk],
+        overview_summary: str,
+        context_id: str,
+        tags: list[str] | None,
+        importance: float,
+        errors: list[IngestErrorRecord],
+    ) -> str | None:
+        title = content.title or _infer_title(fetched.source_uri)
+        details: dict[str, Any] = {
+            "format": _infer_format(fetched),
+            "source_uri": fetched.source_uri,
+            "section_count": len(chunks),
+            "extracted_at": datetime.now(UTC).isoformat(),
+        }
+        if content.page_count is not None:
+            details["pages"] = content.page_count
+
+        try:
+            result = await self._client.remember(
+                context_id=context_id,
+                summary=_truncate(f"{title}: {overview_summary}", 500),
+                content=overview_summary,
+                type="document",
+                importance=importance,
+                tags=tags,
+                source_uri=fetched.source_uri,
+                source_type=fetched.source_type,
+                context_summary=_truncate(
+                    f"Document overview ingested from {fetched.source_uri}", 2000
+                ),
+                details=details,
+            )
+        except Exception as e:  # noqa: BLE001
+            errors.append(
+                IngestErrorRecord(
+                    step="remember", message=f"overview: {e}", exception_type=type(e).__name__
+                )
+            )
+            return None
+        if not isinstance(result, dict) or result.get("status") == "error":
+            errors.append(
+                IngestErrorRecord(
+                    step="remember",
+                    message=f"overview write reported error: {result}",
+                )
+            )
+            return None
+        memory_id = result.get("memory_id")
+        if not memory_id:
+            errors.append(
+                IngestErrorRecord(
+                    step="remember",
+                    message=f"overview response missing memory_id: {result}",
+                )
+            )
+            return None
+        return str(memory_id)
+
+    async def _write_sections(
+        self,
+        *,
+        fetched: FetchResult,
+        chunks: list[Chunk],
+        section_summaries: list[str | None],
+        overview_id: str,
+        context_id: str,
+        tags: list[str] | None,
+        importance: float,
+        errors: list[IngestErrorRecord],
+    ) -> list[str]:
+        sem = asyncio.Semaphore(self._concurrency)
+        results: list[str | None] = [None] * len(chunks)
+        section_importance = max(0.0, min(1.0, importance - 0.2))
+
+        async def write_one(idx: int, chunk_obj: Chunk) -> None:
+            summary = section_summaries[idx]
+            if summary is None:
+                # Section summary failed earlier; skip the write.
+                return
+            details = {
+                "parent_id": overview_id,
+                "role": "section",
+                "section_index": idx,
+                "depth": chunk_obj.depth,
+            }
+            if chunk_obj.anchor:
+                details["anchor"] = chunk_obj.anchor
+            if chunk_obj.page_range:
+                details["page_range"] = list(chunk_obj.page_range)
+            heading = chunk_obj.heading or f"section {idx + 1}"
+
+            async with sem:
+                try:
+                    result = await self._client.remember(
+                        context_id=context_id,
+                        summary=_truncate(f"{heading}: {summary}", 500),
+                        content=chunk_obj.text,
+                        type="document_section",
+                        importance=section_importance,
+                        tags=tags,
+                        source_uri=fetched.source_uri,
+                        source_type=fetched.source_type,
+                        context_summary=_truncate(summary, 2000),
+                        details=details,
+                        linked_memory_ids=[overview_id],
+                    )
+                except Exception as e:  # noqa: BLE001
+                    errors.append(
+                        IngestErrorRecord(
+                            step="remember",
+                            section_index=idx,
+                            message=str(e),
+                            exception_type=type(e).__name__,
+                        )
+                    )
+                    return
+            if not isinstance(result, dict) or result.get("status") == "error":
+                errors.append(
+                    IngestErrorRecord(
+                        step="remember",
+                        section_index=idx,
+                        message=f"section write reported error: {result}",
+                    )
+                )
+                return
+            memory_id = result.get("memory_id")
+            if memory_id:
+                results[idx] = str(memory_id)
+            else:
+                errors.append(
+                    IngestErrorRecord(
+                        step="remember",
+                        section_index=idx,
+                        message=f"section response missing memory_id: {result}",
+                    )
+                )
+
+        await asyncio.gather(*(write_one(i, c) for i, c in enumerate(chunks)))
+        return [r for r in results if r is not None]
+
+
+def _infer_format(fetched: FetchResult) -> str:
+    if fetched.content_type == "application/pdf":
+        return "pdf"
+    if fetched.content_type.startswith("image/"):
+        return "image"
+    # Fall back to URI extension.
+    uri = fetched.source_uri.lower()
+    if uri.endswith(".pdf"):
+        return "pdf"
+    return fetched.content_type or "unknown"
+
+
+def _infer_mime(fetched: FetchResult) -> str:
+    """Decide which extractor to dispatch based on Content-Type and URI."""
+    if fetched.content_type == "application/pdf":
+        return "application/pdf"
+    if fetched.source_uri.lower().endswith(".pdf"):
+        return "application/pdf"
+    # Magic-byte sniff for local files (no Content-Type).
+    if fetched.body[:5] == b"%PDF-":
+        return "application/pdf"
+    if fetched.content_type:
+        return fetched.content_type
+    raise KaguraIngestError(
+        f"could not determine MIME for {fetched.source_uri}; supported types: application/pdf"
+    )
+
+
+def _infer_title(source_uri: str) -> str:
+    return source_uri.rsplit("/", 1)[-1] or source_uri
+
+
+def _truncate(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1] + "…"
+
+
+__all__ = ["FileIngestor"]

@@ -34,6 +34,19 @@ dev = [
     "ruff>=0.8.0",
     "pyright>=1.1.0",
 ]
+# File ingestion (Issue #80) — heavy parsing dependencies are opt-in.
+# `httpx` is intentionally NOT listed here: it's already a core dependency
+# (see top of [dependencies]) and listing it again would shadow the core pin.
+ingest = [
+    "pillow>=10.4",
+]
+ingest-pdf = [
+    "kagura-memory[ingest]",
+    "pymupdf>=1.24",
+]
+ingest-all = [
+    "kagura-memory[ingest-pdf]",
+]
 
 [project.scripts]
 kagura = "kagura_memory.cli:main"
