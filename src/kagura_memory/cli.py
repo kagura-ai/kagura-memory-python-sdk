@@ -10,7 +10,13 @@ from typing import Any
 
 import click
 
-from ._auth import _DEFAULT_MCP_URL, _OAuthAuth, _resolve_auth, _StaticAuth
+from ._auth import (
+    _DEFAULT_MCP_URL,
+    _SOURCE_LABEL,
+    _OAuthAuth,
+    _resolve_auth,
+    _StaticAuth,
+)
 from .agent import KaguraAgent
 from .auth.cli import auth as _auth_group
 from .client import KaguraClient
@@ -1604,9 +1610,9 @@ def _resolve_workspace_from_source(
         )
 
     # 4. env / explicit api_key: no associated workspace source.
-    src_label = "KAGURA_API_KEY env" if auth.source == "env" else "explicit api_key argument"
     raise click.ClickException(
-        f"api_key from {src_label} has no associated workspace; pass --context-id "
+        f"api_key from {_SOURCE_LABEL[auth.source]} has no associated workspace; "
+        "pass --context-id "
         "(mixing api_key and OAuth profile's workspace is not allowed — see issue #115)."
     )
 
@@ -1641,24 +1647,26 @@ def _resolve_files_auth(config: dict[str, Any]) -> _StaticAuth | _OAuthAuth:
     )
 
 
-def _build_files_client(
-    config: dict[str, Any], explicit_ctx: str | None
-) -> tuple[FilesClient, str]:
-    """Build a (FilesClient, workspace_id) pair from the same credential source.
+def _bound_workspace_for_hint(auth: _StaticAuth | _OAuthAuth, config: dict[str, Any]) -> str | None:
+    """The workspace BOUND to the api_key source — for 403 hint display only.
 
-    Resolves the credential chain once via :func:`_resolve_files_auth`
-    and pairs ``workspace_id`` to it via
-    :func:`_resolve_workspace_from_source`. Returning the pair lets the
-    caller use the resolved workspace directly instead of re-running an
-    independent resolution chain (the bug fixed by issue #115).
+    Used by :func:`_run_files_command` to thread the right
+    "source workspace" prefix into :class:`FilesClient` so a 403 can
+    show ``api_key source: .kagura.json (workspace=<source-bound>)``
+    next to the request's target workspace. Returns ``None`` when no
+    workspace is bound to the source (env / explicit api_key) so the
+    formatter renders ``<none>`` instead.
 
-    Raises ``click.ClickException`` when no same-source pair can be
-    formed; raises :class:`KaguraAuthError` (via ``_resolve_auth``)
-    when no credentials exist at all.
+    OAuth callers receive their workspace hint via the resolver
+    (``_OAuthAuth.workspace_id``); this helper only fills the
+    ``_StaticAuth(source="config")`` case where the bound workspace
+    lives in ``.kagura.json``'s ``context_id`` field.
     """
-    auth = _resolve_files_auth(config)
-    workspace_id = _resolve_workspace_from_source(auth, config, explicit_ctx)
-    return FilesClient._from_resolved_auth(auth), workspace_id
+    if isinstance(auth, _StaticAuth) and auth.source == "config":
+        cfg_ctx = (config.get("context_id") or "").strip()
+        if cfg_ctx and cfg_ctx != _CONTEXT_ID_AUTO:
+            return cfg_ctx
+    return None
 
 
 def _run_files_command(
@@ -1671,19 +1679,24 @@ def _run_files_command(
 
     When ``needs_context=True`` (the default), credential and
     workspace_id are resolved together so they come from the same
-    source — see :func:`_build_files_client`. When ``needs_context=False``
+    source via :func:`_resolve_files_auth` +
+    :func:`_resolve_workspace_from_source`. When ``needs_context=False``
     (file-id-based operations like ``download-url`` / ``delete``) only
     the client is built; ``ctx_id`` is the empty string and operations
     must ignore it.
     """
     try:
         config = load_config()
+        auth = _resolve_files_auth(config)
 
         ctx_id = ""
         if needs_context:
-            client, ctx_id = _build_files_client(config, context_id)
+            ctx_id = _resolve_workspace_from_source(auth, config, context_id)
+            client = FilesClient._from_resolved_auth(
+                auth, workspace_id_hint=_bound_workspace_for_hint(auth, config)
+            )
         else:
-            client = FilesClient._from_resolved_auth(_resolve_files_auth(config))
+            client = FilesClient._from_resolved_auth(auth)
 
         async def _run() -> Any:
             async with client:

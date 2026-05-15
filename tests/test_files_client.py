@@ -804,6 +804,39 @@ async def test_request_403_with_source_emits_workspace_hint():
 
 
 @pytest.mark.asyncio
+async def test_request_403_config_source_emits_workspace_hint():
+    """Static api_key from ``.kagura.json`` → 403 hint shows the bound workspace.
+
+    After the /simplify refactor the CLI threads
+    ``workspace_id_hint`` into ``FilesClient._from_resolved_auth`` for
+    the ``_StaticAuth(source="config")`` path, so a config-source 403
+    no longer surfaces ``workspace=<none>`` — it shows the workspace
+    UUID prefix the api_key was bound to.
+    """
+    client = FilesClient(
+        api_key="test-key",
+        base_url="https://example.com",
+        _auth_source="config",
+        _workspace_id_hint="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+    )
+    err_resp = _error_response(403, {"detail": "forbidden"})
+    with patch.object(client._client, "request", new_callable=AsyncMock) as mock_req:
+        mock_req.return_value = err_resp
+        with pytest.raises(KaguraConnectionError) as exc_info:
+            await client.list(context_id="11111111-2222-3333-4444-555555555555")
+        msg = str(exc_info.value)
+    await client.close()
+
+    assert ".kagura.json" in msg
+    # Bound workspace prefix surfaces — not "<none>".
+    assert "aaaaaaaa" in msg
+    assert "workspace=<none>" not in msg
+    # Request workspace is distinct from the bound one (the mismatch the
+    # hint is meant to clarify).
+    assert "workspace requested: 11111111" in msg
+
+
+@pytest.mark.asyncio
 async def test_request_403_hint_does_not_leak_api_key_or_bearer():
     """The 403 hint must not include the api_key value or Authorization header.
 

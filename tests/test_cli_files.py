@@ -378,6 +378,38 @@ def test_files_upload_rejects_env_api_key_without_context(monkeypatch, tmp_path)
     assert "--context-id" in result.output
 
 
+def test_files_upload_oauth_profile_without_workspace_id_errors(monkeypatch, tmp_path):
+    """OAuth profile resolved but ``workspace_id`` is empty → actionable error.
+
+    Pre-issue-#170 OAuth profiles did not record ``workspace_id`` (the
+    field was added later). An operator upgrading from such a profile
+    has a valid login but no bound workspace; the CLI must point them
+    at ``kagura auth login`` or ``--context-id``, not produce a 422 at
+    request time.
+    """
+    fake_creds_path = tmp_path / "credentials.json"
+    monkeypatch.setattr("kagura_memory.auth.credentials.DEFAULT_CREDENTIALS_PATH", fake_creds_path)
+    monkeypatch.delenv("KAGURA_API_KEY", raising=False)
+    monkeypatch.delenv("KAGURA_PROFILE", raising=False)
+
+    cf = CredentialsFile()
+    # workspace_id="" simulates the legacy profile shape.
+    cf.set_profile("default", _oauth_creds_with_workspace(""))
+    save_credentials_file(cf, fake_creds_path)
+    reset_state_cache()
+
+    with patch("kagura_memory.cli.load_config", return_value={}):
+        p = tmp_path / "hello.txt"
+        p.write_text("hi")
+        runner = CliRunner()
+        result = runner.invoke(main, ["files", "upload", str(p)])
+
+    reset_state_cache()
+
+    assert result.exit_code != 0, result.output
+    assert "kagura auth login" in result.output or "--context-id" in result.output
+
+
 def test_files_upload_env_api_key_with_explicit_context_succeeds(monkeypatch, tmp_path):
     """``KAGURA_API_KEY`` env + ``-c`` → succeed (operator override).
 

@@ -29,7 +29,13 @@ from typing import Any, Literal
 
 import httpx
 
-from ._auth import _OAuthAuth, _resolve_auth, _StaticAuth, _StaticSource
+from ._auth import (
+    _SOURCE_LABEL,
+    _AuthSource,
+    _OAuthAuth,
+    _resolve_auth,
+    _StaticAuth,
+)
 from ._http import SDK_VERSION, base_url_from_mcp, extract_detail, validate_https_url
 from .auth.credentials import KaguraOAuth
 from .exceptions import (
@@ -72,7 +78,7 @@ class FilesClient:
         upload_timeout: float = 300.0,
         *,
         _oauth: KaguraOAuth | None = None,
-        _auth_source: _StaticSource | Literal["oauth"] | None = None,
+        _auth_source: _AuthSource | None = None,
         _workspace_id_hint: str | None = None,
     ) -> None:
         """Initialize FilesClient with a static API key.
@@ -150,8 +156,8 @@ class FilesClient:
         # "HTTP 403". Storing the source label and a workspace UUID is
         # not sensitive (no api_key value is retained — see python.md
         # "Never store API keys as instance attributes").
-        self._auth_source = _auth_source
-        self._workspace_id_hint = _workspace_id_hint
+        self._auth_source: _AuthSource | None = _auth_source
+        self._workspace_id_hint: str | None = _workspace_id_hint
 
     @classmethod
     def from_mcp_url(
@@ -197,6 +203,7 @@ class FilesClient:
         *,
         timeout: float = 30.0,
         upload_timeout: float = 300.0,
+        workspace_id_hint: str | None = None,
     ) -> FilesClient:
         """Construct from a pre-resolved auth — internal CLI helper.
 
@@ -205,6 +212,13 @@ class FilesClient:
         and workspace_id can be paired from the same source (#115);
         threading the resolved auth through here keeps construction in
         one place and lets the 403 hint carry the source provenance.
+
+        ``workspace_id_hint`` lets the CLI thread the workspace bound
+        to a static api_key (from ``.kagura.json``'s ``context_id``)
+        into the client so the 403 hint can show it. For the OAuth
+        path the resolver already carries ``workspace_id`` on the
+        :class:`_OAuthAuth` result, so the hint is set from there
+        unconditionally — passing ``workspace_id_hint`` is ignored.
         """
         base_url = base_url_from_mcp(resolved.mcp_url.rstrip("/"))
         if isinstance(resolved, _StaticAuth):
@@ -214,6 +228,7 @@ class FilesClient:
                 timeout=timeout,
                 upload_timeout=upload_timeout,
                 _auth_source=resolved.source,
+                _workspace_id_hint=workspace_id_hint,
             )
         return cls(
             base_url=base_url,
@@ -596,7 +611,7 @@ def _extract_requested_workspace(
 
 def _format_workspace_403_hint(
     *,
-    auth_source: str | None,
+    auth_source: _AuthSource | None,
     source_workspace_hint: str | None,
     requested_workspace: str | None,
 ) -> str:
@@ -614,12 +629,7 @@ def _format_workspace_403_hint(
     """
     if auth_source is None:
         return "HTTP 403"
-    source_label = {
-        "config": ".kagura.json",
-        "env": "KAGURA_API_KEY env",
-        "explicit": "explicit api_key argument",
-        "oauth": "OAuth profile (~/.kagura/credentials.json)",
-    }.get(auth_source, auth_source)
+    source_label = _SOURCE_LABEL[auth_source]
     lines = [
         "HTTP 403 — workspace not accessible with current credentials.",
         f"  api_key source: {source_label} (workspace={_short_workspace(source_workspace_hint)})",

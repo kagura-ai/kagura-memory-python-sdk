@@ -39,6 +39,24 @@ _DEFAULT_MCP_URL = "https://memory.kagura-ai.com/mcp"
 # class of bug we are preventing (see issue #115).
 _StaticSource = Literal["explicit", "env", "config"]
 
+# Superset of :data:`_StaticSource` that also covers the ``_OAuthAuth``
+# branch. Used by client code (e.g. :class:`FilesClient`) to remember
+# which branch built the client, so a 403 can surface an actionable
+# "credential source X expects workspace Y" hint.
+_AuthSource = Literal["explicit", "env", "config", "oauth"]
+
+# Human-readable label for each credential source — single source of
+# truth shared by the CLI's `_resolve_workspace_from_source` error
+# messages and the SDK's 403 hint formatter. Keeping one mapping
+# prevents the two surfaces from drifting and surfacing inconsistent
+# names for the same source ("KAGURA_API_KEY env" vs "env variable").
+_SOURCE_LABEL: dict[_AuthSource, str] = {
+    "explicit": "explicit api_key argument",
+    "env": "KAGURA_API_KEY env",
+    "config": ".kagura.json",
+    "oauth": "OAuth profile (~/.kagura/credentials.json)",
+}
+
 
 @dataclass
 class _StaticAuth:
