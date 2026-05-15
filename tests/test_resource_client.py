@@ -1,5 +1,7 @@
 """Tests for ResourceClient."""
 
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -12,6 +14,13 @@ from kagura_memory import (
     KaguraQuotaError,
     ResourceClient,
     ResourceEventRequest,
+)
+from kagura_memory.auth.credentials import (
+    CredentialsFile,
+    KaguraOAuth,
+    OAuthCredentials,
+    reset_state_cache,
+    save_credentials_file,
 )
 
 # ============================================================================
@@ -968,3 +977,107 @@ async def test_context_manager():
     """async with should work correctly."""
     async with ResourceClient(api_key="test", base_url="https://test.com") as client:
         assert isinstance(client, ResourceClient)
+
+
+# ============================================================================
+# OAuth credential resolution (#117 — feat(cli/resource))
+# ============================================================================
+
+
+def _make_oauth_creds(
+    workspace_id: str = "00000000-0000-0000-0000-0000000000ff",
+    expires_in_seconds: int = 3600,
+) -> OAuthCredentials:
+    """Build an OAuthCredentials fixture for from_mcp_url tests."""
+    return OAuthCredentials(
+        server="https://oauth.example.com",
+        mcp_url="https://oauth.example.com/mcp",
+        client_id="kagura-cli",
+        access_token="atok-resource-test",
+        refresh_token="rtok-resource-test",
+        token_type="Bearer",
+        expires_at=datetime.now(UTC) + timedelta(seconds=expires_in_seconds),
+        scope="memory:read memory:write",
+        workspace_id=workspace_id,
+        workspace_name="resource-test-ws",
+        user_email="resource@example.com",
+        issued_at=datetime.now(UTC),
+    )
+
+
+@pytest.fixture
+def _isolated_credentials(tmp_path: Path, monkeypatch):
+    """Redirect credentials.json to tmp_path and clear all credential env vars."""
+    fake_path = tmp_path / "credentials.json"
+    monkeypatch.setattr("kagura_memory.auth.credentials.DEFAULT_CREDENTIALS_PATH", fake_path)
+    monkeypatch.delenv("KAGURA_API_KEY", raising=False)
+    monkeypatch.delenv("KAGURA_PROFILE", raising=False)
+    monkeypatch.delenv("KAGURA_MCP_URL", raising=False)
+    monkeypatch.setattr("kagura_memory._auth.load_config", lambda: {"api_key": ""})
+    reset_state_cache()
+    yield fake_path
+    reset_state_cache()
+
+
+def test_init_requires_api_key_or_oauth():
+    """Bare ResourceClient() with neither api_key nor _oauth must raise ValueError."""
+    with pytest.raises(ValueError, match="requires api_key"):
+        ResourceClient()
+
+
+def test_from_mcp_url_static_path_unchanged(_isolated_credentials):
+    """from_mcp_url(api_key=...) keeps the static-bearer behavior intact."""
+    client = ResourceClient.from_mcp_url(
+        api_key="kagura_explicit",
+        mcp_url="https://memory.kagura-ai.com/mcp",
+    )
+    assert client._client.headers.get("Authorization") == "Bearer kagura_explicit"
+    assert client._client.auth is None
+    assert client._oauth is None
+    assert client._auth_source == "explicit"
+
+
+def test_from_mcp_url_resolves_oauth_profile(_isolated_credentials):
+    """With api_key=None and a profile on disk, from_mcp_url uses KaguraOAuth."""
+    cf = CredentialsFile()
+    cf.set_profile("default", _make_oauth_creds())
+    save_credentials_file(cf, _isolated_credentials)
+
+    client = ResourceClient.from_mcp_url(api_key=None, profile="default")
+
+    # OAuth path: no static Authorization header; httpx.Auth installed instead.
+    assert "Authorization" not in client._client.headers
+    assert isinstance(client._client.auth, KaguraOAuth)
+    assert client._oauth is client._client.auth
+    assert client._auth_source == "oauth"
+    # base_url is derived from the profile's stored mcp_url.
+    assert client.base_url == "https://oauth.example.com"
+
+
+def test_from_mcp_url_missing_profile_raises_loud(_isolated_credentials):
+    """Explicit profile arg with no matching credentials.json entry raises."""
+    cf = CredentialsFile()
+    cf.set_profile("default", _make_oauth_creds())
+    save_credentials_file(cf, _isolated_credentials)
+    with pytest.raises(KaguraAuthError, match="Profile 'nonexistent'"):
+        ResourceClient.from_mcp_url(api_key=None, profile="nonexistent")
+
+
+@pytest.mark.asyncio
+async def test_setup_resource_refuses_oauth_mode(_isolated_credentials):
+    """setup_resource() in OAuth mode raises NotImplementedError with a hint.
+
+    OAuth-mode setup is intentionally deferred for #117. The CRUD/ingest
+    endpoints work end-to-end via OAuth; only the bootstrap-time MCP
+    setup currently requires a static api_key.
+    """
+    cf = CredentialsFile()
+    cf.set_profile("default", _make_oauth_creds())
+    save_credentials_file(cf, _isolated_credentials)
+
+    client = ResourceClient.from_mcp_url(api_key=None, profile="default")
+    try:
+        with pytest.raises(NotImplementedError, match="OAuth mode"):
+            await client.setup_resource(resource_id="any")
+    finally:
+        await client.close()

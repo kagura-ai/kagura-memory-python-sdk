@@ -1049,14 +1049,25 @@ def setup_claude(api_key, mcp_url, context_id, project_dir, non_interactive):
 
 
 def _get_resource_client() -> ResourceClient:
-    """Load config and create ResourceClient."""
+    """Load config and create ResourceClient via the canonical SDK chain.
+
+    Walks :func:`_resolve_auth`'s precedence (``env > OAuth profile >
+    .kagura.json``), matching the Files CLI (#118) and :class:`KaguraClient`.
+    OAuth-only operators can now run ``kagura resource ...`` end-to-end
+    except for ``kagura resource setup``, which currently requires a
+    static api_key (see :meth:`ResourceClient.setup_resource`).
+    """
+    from .exceptions import KaguraAuthError
+
     config = load_config()
-    if not config.get("api_key"):
-        raise click.ClickException("No API key found. Set KAGURA_API_KEY or create .kagura.json")
-    return ResourceClient.from_mcp_url(
-        api_key=config.get("api_key", ""),
-        mcp_url=config.get("mcp_url", "https://memory.kagura-ai.com/mcp"),
-    )
+    try:
+        return ResourceClient.from_mcp_url(
+            api_key=None,
+            mcp_url=config.get("mcp_url") or None,
+            profile=os.getenv("KAGURA_PROFILE"),
+        )
+    except KaguraAuthError as e:
+        raise click.ClickException(str(e)) from e
 
 
 def _get_kagura_client() -> KaguraClient:
