@@ -753,13 +753,15 @@ async def test_request_401_raises_auth_error():
 
 
 @pytest.mark.asyncio
-async def test_request_403_without_source_is_bare_http_403():
-    """Direct ``FilesClient(api_key=...)`` (no resolver) → bare ``HTTP 403``.
+async def test_request_403_without_source_includes_sanitized_detail():
+    """Direct ``FilesClient(api_key=...)`` (no resolver) → ``HTTP 403`` + server detail.
 
     SDK callers who construct ``FilesClient`` without going through
     ``_from_resolved_auth`` haven't told us their credential source, so
-    we cannot produce the actionable hint. Surface the legacy bare
-    message in that case (no false claims about source mismatch).
+    we cannot produce the workspace-specific hint. But the server's
+    ``detail`` field still flows through (after sanitization), so
+    operators can see "forbidden" / scope-related reasons even on the
+    bare path.
     """
     client = FilesClient(api_key="test-key", base_url="https://example.com")
     err_resp = _error_response(403, {"detail": "forbidden"})
@@ -767,8 +769,45 @@ async def test_request_403_without_source_is_bare_http_403():
         mock_req.return_value = err_resp
         with pytest.raises(KaguraConnectionError) as exc_info:
             await client.delete("some-file-id")
-        assert str(exc_info.value) == "HTTP 403"
+        msg = str(exc_info.value)
     await client.close()
+
+    assert msg == "HTTP 403: forbidden"
+
+
+@pytest.mark.asyncio
+async def test_request_403_without_workspace_uses_generic_heading():
+    """File-id endpoints (no workspace_id on the wire) → generic 403 heading.
+
+    download-url / delete don't accept ``--context-id``, so the
+    workspace-mismatch language and the ``--context-id`` recovery hint
+    are misleading for those commands. The hint adapts: keep the
+    source label, drop the workspace-specific lines.
+    """
+    client = FilesClient(
+        api_key="test-key",
+        base_url="https://example.com",
+        _auth_source="config",
+        _workspace_id_hint="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+    )
+    err_resp = _error_response(403, {"detail": "insufficient_scope"})
+    with patch.object(client._client, "request", new_callable=AsyncMock) as mock_req:
+        mock_req.return_value = err_resp
+        with pytest.raises(KaguraConnectionError) as exc_info:
+            await client.delete("some-file-id")
+        msg = str(exc_info.value)
+    await client.close()
+
+    assert "HTTP 403" in msg
+    assert "access denied" in msg
+    # workspace-specific language must NOT appear for file-id endpoints.
+    assert "workspace not accessible" not in msg
+    assert "workspace requested:" not in msg
+    assert "--context-id" not in msg
+    # The source provenance and server detail still surface.
+    assert ".kagura.json" in msg
+    assert "aaaaaaaa" in msg
+    assert "insufficient_scope" in msg
 
 
 @pytest.mark.asyncio
@@ -801,6 +840,30 @@ async def test_request_403_with_source_emits_workspace_hint():
     assert "aaaaaaaa" in msg
     assert "workspace requested: 11111111" in msg
     assert "--context-id" in msg
+
+
+def test_sanitize_server_detail_drops_credential_markers():
+    """A server detail string containing credential markers must be dropped.
+
+    ``detail`` is operator-facing text the server controls. A future server
+    bug echoing back the Bearer header or api_key value would otherwise
+    flow straight through to the user. The sanitizer drops any detail
+    that contains common credential-shaped markers.
+    """
+    from kagura_memory.files_client import _sanitize_server_detail
+
+    # Safe details pass through unchanged.
+    assert _sanitize_server_detail("forbidden") == "forbidden"
+    assert _sanitize_server_detail("insufficient_scope") == "insufficient_scope"
+    assert _sanitize_server_detail("account deactivated") == "account deactivated"
+    # Empty / None → None.
+    assert _sanitize_server_detail("") is None
+    assert _sanitize_server_detail(None) is None
+    # Credential markers → drop (case-insensitive).
+    assert _sanitize_server_detail("Bearer rotk-leaked-value") is None
+    assert _sanitize_server_detail("bearer xxx") is None
+    assert _sanitize_server_detail("Authorization: Bearer xxx") is None
+    assert _sanitize_server_detail("api_key=plaintext-bad") is None
 
 
 def test_format_workspace_403_hint_handles_unknown_source_tag():

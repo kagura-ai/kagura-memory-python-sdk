@@ -266,14 +266,17 @@ class FilesClient:
                 # common 403 cause (api_key bound to workspace A, request
                 # targets workspace B). Surface the credential source and
                 # requested workspace prefix so the cause is visible without
-                # leaking the api_key value or Bearer header. The hint is
-                # advisory — other 403 causes (scope, deactivation) read the
-                # same message and the operator interprets in context.
+                # leaking the api_key value or Bearer header. The hint shape
+                # adapts to whether the failing request carries a workspace —
+                # file-id-based endpoints (download-url/delete) don't, so the
+                # "workspace not accessible / --context-id" language is
+                # suppressed for those to avoid misleading operators.
                 raise KaguraConnectionError(
                     _format_workspace_403_hint(
                         auth_source=self._auth_source,
                         source_workspace_hint=self._workspace_id_hint,
                         requested_workspace=_extract_requested_workspace(json, params),
+                        server_detail=extract_detail(e.response),
                     )
                 ) from e
             if status == 404:
@@ -609,11 +612,34 @@ def _extract_requested_workspace(
     return None
 
 
+def _sanitize_server_detail(detail: str | None) -> str | None:
+    """Drop server-provided detail strings that contain credential markers.
+
+    Server 403 ``detail`` payloads usually surface non-sensitive reasons
+    (scope, deactivation, plan limit) that are valuable to operators —
+    forwarding them helps debugging. But the detail field is operator-
+    facing text the server controls; a future server bug echoing back
+    the Bearer header or api_key would otherwise be passed straight to
+    the user. Drop the detail entirely when it carries any marker that
+    looks credential-shaped. Returns ``None`` when the detail is empty
+    or unsafe to display.
+    """
+    if not detail:
+        return None
+    lowered = detail.lower()
+    # ``api_key=`` covers ``api_key=<value>`` style; ``bearer`` catches
+    # ``Bearer <token>`` echoes; ``authorization`` catches header reflections.
+    if "bearer" in lowered or "authorization" in lowered or "api_key=" in lowered:
+        return None
+    return detail
+
+
 def _format_workspace_403_hint(
     *,
     auth_source: _AuthSource | None,
     source_workspace_hint: str | None,
     requested_workspace: str | None,
+    server_detail: str | None = None,
 ) -> str:
     """Compose the actionable 403 message for issue #115.
 
@@ -622,24 +648,47 @@ def _format_workspace_403_hint(
     threaded through construction) so the message stays compatible
     with existing CLI error-string assertions until they migrate.
 
+    The hint shape adapts to the failing request:
+
+    - When ``requested_workspace`` is set (upload / list endpoints), use
+      workspace-mismatch language and the ``--context-id`` recovery hint.
+    - When ``requested_workspace`` is ``None`` (file-id-based endpoints
+      like download-url / delete), use a generic "access denied"
+      heading and omit the ``--context-id`` hint — those commands do
+      not accept ``--context-id`` and the recovery path is different.
+
+    ``server_detail`` is appended (when non-empty and free of
+    credential-shaped markers) so scope / deactivation / plan-limit
+    reasons surfaced by the server are not lost.
+
     The hint never includes the api_key value or
     ``Authorization: Bearer ...`` header — only the source label and
     the UUID prefixes (per python.md "Never store API keys as instance
     attributes": the api_key is not on the client either).
     """
     if auth_source is None:
-        return "HTTP 403"
+        # Even the bare path can carry a sanitized server detail.
+        safe_detail = _sanitize_server_detail(server_detail)
+        return f"HTTP 403: {safe_detail}" if safe_detail else "HTTP 403"
     # Use .get() with the raw value as fallback so an unexpected source tag
     # (shouldn't happen — _auth_source is set by internal resolver code only)
     # can never raise KeyError mid-403-handling and mask the real HTTP error.
     source_label = _SOURCE_LABEL.get(auth_source, str(auth_source))
+    heading = (
+        "HTTP 403 — workspace not accessible with current credentials."
+        if requested_workspace
+        else "HTTP 403 — access denied with current credentials."
+    )
     lines = [
-        "HTTP 403 — workspace not accessible with current credentials.",
+        heading,
         f"  api_key source: {source_label} (workspace={_short_workspace(source_workspace_hint)})",
     ]
     if requested_workspace:
         lines.append(f"  workspace requested: {_short_workspace(requested_workspace)}")
-    lines.append("  Hint: --context-id may not match the workspace bound to your api_key.")
+        lines.append("  Hint: --context-id may not match the workspace bound to your api_key.")
+    safe_detail = _sanitize_server_detail(server_detail)
+    if safe_detail:
+        lines.append(f"  server detail: {safe_detail}")
     return "\n".join(lines)
 
 
