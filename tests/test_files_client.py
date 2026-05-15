@@ -803,6 +803,35 @@ async def test_request_403_with_source_emits_workspace_hint():
     assert "--context-id" in msg
 
 
+def test_short_workspace_returns_none_for_empty():
+    """`_short_workspace` returns the ``<none>`` sentinel for empty/None input."""
+    from kagura_memory.files_client import _short_workspace
+
+    assert _short_workspace(None) == "<none>"
+    assert _short_workspace("") == "<none>"
+
+
+def test_extract_requested_workspace_handles_no_workspace_path():
+    """``_extract_requested_workspace`` returns None when no workspace_id is carried.
+
+    Covers the file-id-based request path (download-url / delete / confirm)
+    where the 403 hint must render without a "workspace requested:" line.
+    """
+    from kagura_memory.files_client import _extract_requested_workspace
+
+    assert _extract_requested_workspace(None, None) is None
+    assert _extract_requested_workspace({}, None) is None
+    assert _extract_requested_workspace(None, {}) is None
+    # Non-string workspace_id (defensive against malformed payloads) → None.
+    assert _extract_requested_workspace({"workspace_id": None}, None) is None
+    assert _extract_requested_workspace(None, {"workspace_id": 42}) is None
+    # Happy paths: string workspace_id is recovered from either body or params.
+    assert _extract_requested_workspace({"workspace_id": "ws-from-json"}, None) == "ws-from-json"
+    assert (
+        _extract_requested_workspace(None, {"workspace_id": "ws-from-params"}) == "ws-from-params"
+    )
+
+
 @pytest.mark.asyncio
 async def test_request_403_config_source_emits_workspace_hint():
     """Static api_key from ``.kagura.json`` → 403 hint shows the bound workspace.
