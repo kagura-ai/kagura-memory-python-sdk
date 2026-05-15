@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from typing import Literal
 
 from .auth.credentials import KaguraOAuth, get_shared_state
 from .config import load_config
@@ -31,21 +32,43 @@ from .exceptions import KaguraAuthError
 
 _DEFAULT_MCP_URL = "https://memory.kagura-ai.com/mcp"
 
+# Which precedence branch produced a ``_StaticAuth``. CLI-layer code uses
+# this to resolve ``workspace_id`` from the same source as ``api_key`` —
+# api_key and workspace_id form an inseparable pair (an api_key is
+# provisioned for one specific workspace), so cross-source mixing is the
+# class of bug we are preventing (see issue #115).
+_StaticSource = Literal["explicit", "env", "config"]
+
 
 @dataclass
 class _StaticAuth:
-    """Long-lived API key resolution result."""
+    """Long-lived API key resolution result.
+
+    ``source`` records which branch of :func:`_resolve_auth`'s precedence
+    chain produced this result. The CLI layer reads it to pick the
+    matching ``workspace_id`` source (e.g. ``source="config"`` ⇒
+    ``workspace_id`` must come from the same ``.kagura.json``).
+    """
 
     api_key: str
     mcp_url: str
+    source: _StaticSource
 
 
 @dataclass
 class _OAuthAuth:
-    """OAuth credentials.json resolution result."""
+    """OAuth credentials.json resolution result.
+
+    ``workspace_id`` is a snapshot from the OAuth profile at resolution
+    time (i.e. what ``kagura auth login`` last stored). It is the
+    workspace bound to this api_key/token pair — the CLI layer uses it
+    directly so it cannot accidentally mix with an api_key from a
+    different source (issue #115).
+    """
 
     oauth: KaguraOAuth
     mcp_url: str
+    workspace_id: str | None
 
 
 def _resolve_auth(
@@ -64,7 +87,7 @@ def _resolve_auth(
     # `Authorization: Bearer ` would always 401 and is never what the caller
     # intended; fall through to the env / OAuth / .kagura.json chain instead.
     if api_key is not None and api_key.strip():
-        return _StaticAuth(api_key=api_key, mcp_url=mcp_url or _DEFAULT_MCP_URL)
+        return _StaticAuth(api_key=api_key, mcp_url=mcp_url or _DEFAULT_MCP_URL, source="explicit")
 
     # 2. KAGURA_API_KEY env var (highest auto-resolution priority).
     # Strip-check mirrors the explicit-arg path above: a whitespace-only
@@ -74,6 +97,7 @@ def _resolve_auth(
         return _StaticAuth(
             api_key=env_key,
             mcp_url=mcp_url or os.getenv("KAGURA_MCP_URL") or _DEFAULT_MCP_URL,
+            source="env",
         )
 
     # 3. OAuth profile from credentials.json: explicit > KAGURA_PROFILE > default.
@@ -83,6 +107,7 @@ def _resolve_auth(
         return _OAuthAuth(
             oauth=KaguraOAuth(state),
             mcp_url=mcp_url or state.credentials.mcp_url,
+            workspace_id=state.credentials.workspace_id,
         )
     if target_profile:
         # An explicit profile name (via arg or KAGURA_PROFILE env) was
@@ -106,6 +131,7 @@ def _resolve_auth(
         return _StaticAuth(
             api_key=cfg_key,
             mcp_url=mcp_url or cfg.get("mcp_url") or _DEFAULT_MCP_URL,
+            source="config",
         )
 
     raise KaguraAuthError(
