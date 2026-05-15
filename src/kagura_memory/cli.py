@@ -11,7 +11,6 @@ from typing import Any
 import click
 
 from ._auth import (
-    _DEFAULT_MCP_URL,
     _SOURCE_LABEL,
     _OAuthAuth,
     _resolve_auth,
@@ -1623,36 +1622,6 @@ def _resolve_workspace_from_source(
     )
 
 
-def _resolve_files_auth(config: dict[str, Any]) -> _StaticAuth | _OAuthAuth:
-    """Resolve credentials for the Files CLI with accurate source tagging.
-
-    Preserves the historic CLI precedence — ``.kagura.json`` api_key
-    wins over the env/OAuth chain — but tags the resolved auth as
-    ``source="config"`` instead of routing through ``_resolve_auth``'s
-    priority-1 (explicit) branch. That distinction is what
-    :func:`_resolve_workspace_from_source` reads to pair workspace_id
-    correctly (issue #115): if the api_key came from ``.kagura.json``,
-    the workspace_id must come from the same ``.kagura.json``.
-    """
-    cfg_key = (config.get("api_key") or "").strip()
-    if cfg_key:
-        return _StaticAuth(
-            api_key=cfg_key,
-            mcp_url=(config.get("mcp_url") or _DEFAULT_MCP_URL),
-            source="config",
-        )
-    # No config api_key — walk the rest of the resolver chain
-    # (env → OAuth profile → terminal raise). ``api_key=None`` keeps
-    # priority 1 unused; priority 4 (.kagura.json fallback inside
-    # _resolve_auth) is dead code here because we just confirmed
-    # config has no api_key.
-    return _resolve_auth(
-        api_key=None,
-        mcp_url=config.get("mcp_url") or None,
-        profile=os.getenv("KAGURA_PROFILE"),
-    )
-
-
 def _bound_workspace_for_hint(auth: _StaticAuth | _OAuthAuth, config: dict[str, Any]) -> str | None:
     """The workspace BOUND to the api_key source — for 403 hint display only.
 
@@ -1683,17 +1652,22 @@ def _run_files_command(
 ) -> None:
     """Execute a FilesClient operation with standard boilerplate.
 
-    When ``needs_context=True`` (the default), credential and
-    workspace_id are resolved together so they come from the same
-    source via :func:`_resolve_files_auth` +
-    :func:`_resolve_workspace_from_source`. When ``needs_context=False``
-    (file-id-based operations like ``download-url`` / ``delete``) only
-    the client is built; ``ctx_id`` is the empty string and operations
-    must ignore it.
+    Resolves credentials via :func:`_resolve_auth` (the canonical SDK
+    chain ``env > OAuth profile > .kagura.json``). When
+    ``needs_context=True`` (the default), workspace_id is resolved
+    from the same source via :func:`_resolve_workspace_from_source`.
+    When ``needs_context=False`` (file-id-based operations like
+    ``download-url`` / ``delete``) only the client is built; ``ctx_id``
+    is the empty string and operations must ignore it.
     """
     try:
         config = load_config()
-        auth = _resolve_files_auth(config)
+        auth = _resolve_auth(
+            api_key=None,
+            mcp_url=config.get("mcp_url") or None,
+            profile=os.getenv("KAGURA_PROFILE"),
+            config=config,
+        )
 
         ctx_id = ""
         if needs_context:
