@@ -29,7 +29,7 @@ from typing import Any, Literal
 
 import httpx
 
-from ._auth import _resolve_auth, _StaticAuth
+from ._auth import _OAuthAuth, _resolve_auth, _StaticAuth, _StaticSource
 from ._http import SDK_VERSION, base_url_from_mcp, extract_detail, validate_https_url
 from .auth.credentials import KaguraOAuth
 from .exceptions import (
@@ -72,6 +72,8 @@ class FilesClient:
         upload_timeout: float = 300.0,
         *,
         _oauth: KaguraOAuth | None = None,
+        _auth_source: _StaticSource | Literal["oauth"] | None = None,
+        _workspace_id_hint: str | None = None,
     ) -> None:
         """Initialize FilesClient with a static API key.
 
@@ -89,6 +91,14 @@ class FilesClient:
             _oauth: Private. ``from_mcp_url`` passes a ``KaguraOAuth``
                 instance for OAuth profile authentication. Public
                 callers should not set this.
+            _auth_source: Private. Provenance tag describing which
+                ``_resolve_auth`` branch produced the credentials.
+                When set, drives the actionable 403 hint that surfaces
+                cross-source workspace mismatches (issue #115).
+            _workspace_id_hint: Private. The workspace UUID associated
+                with the credential source — used only for the 403
+                hint, never sent on the wire. Sending workspace_id is
+                still the caller's responsibility via ``context_id=``.
 
         Raises:
             ValueError: If neither ``api_key`` nor ``_oauth`` is given.
@@ -134,6 +144,14 @@ class FilesClient:
             timeout=upload_timeout,
             headers={"User-Agent": f"kagura-memory-sdk/{SDK_VERSION}"},
         )
+        # Provenance for the 403 cross-source hint. Neither field is sent
+        # on the wire — they only flavor error messages so a workspace
+        # mismatch surfaces as something actionable instead of a bare
+        # "HTTP 403". Storing the source label and a workspace UUID is
+        # not sensitive (no api_key value is retained — see python.md
+        # "Never store API keys as instance attributes").
+        self._auth_source = _auth_source
+        self._workspace_id_hint = _workspace_id_hint
 
     @classmethod
     def from_mcp_url(
@@ -170,20 +188,40 @@ class FilesClient:
                 ``default_profile``).
         """
         resolved = _resolve_auth(api_key=api_key, mcp_url=mcp_url, profile=profile)
-        base_url = base_url_from_mcp(resolved.mcp_url.rstrip("/"))
+        return cls._from_resolved_auth(resolved, timeout=timeout, upload_timeout=upload_timeout)
 
+    @classmethod
+    def _from_resolved_auth(
+        cls,
+        resolved: _StaticAuth | _OAuthAuth,
+        *,
+        timeout: float = 30.0,
+        upload_timeout: float = 300.0,
+    ) -> FilesClient:
+        """Construct from a pre-resolved auth — internal CLI helper.
+
+        Shared by :meth:`from_mcp_url` (SDK entry) and the CLI
+        (``cli._build_files_client``). The CLI resolves once so api_key
+        and workspace_id can be paired from the same source (#115);
+        threading the resolved auth through here keeps construction in
+        one place and lets the 403 hint carry the source provenance.
+        """
+        base_url = base_url_from_mcp(resolved.mcp_url.rstrip("/"))
         if isinstance(resolved, _StaticAuth):
             return cls(
                 api_key=resolved.api_key,
                 base_url=base_url,
                 timeout=timeout,
                 upload_timeout=upload_timeout,
+                _auth_source=resolved.source,
             )
         return cls(
             base_url=base_url,
             timeout=timeout,
             upload_timeout=upload_timeout,
             _oauth=resolved.oauth,
+            _auth_source="oauth",
+            _workspace_id_hint=resolved.workspace_id,
         )
 
     # -------------------------------------------------------------------
@@ -208,6 +246,21 @@ class FilesClient:
             status = e.response.status_code
             if status == 401:
                 raise KaguraAuthError("Authentication failed. Check your API key.") from e
+            if status == 403:
+                # Issue #115: a workspace-mismatch 403 is the operator's most
+                # common 403 cause (api_key bound to workspace A, request
+                # targets workspace B). Surface the credential source and
+                # requested workspace prefix so the cause is visible without
+                # leaking the api_key value or Bearer header. The hint is
+                # advisory — other 403 causes (scope, deactivation) read the
+                # same message and the operator interprets in context.
+                raise KaguraConnectionError(
+                    _format_workspace_403_hint(
+                        auth_source=self._auth_source,
+                        source_workspace_hint=self._workspace_id_hint,
+                        requested_workspace=_extract_requested_workspace(json, params),
+                    )
+                ) from e
             if status == 404:
                 raise KaguraNotFoundError(extract_detail(e.response) or "Not found") from e
             if status == 429:
@@ -506,6 +559,75 @@ class FilesClient:
 # ---------------------------------------------------------------------------
 # Module-level helpers
 # ---------------------------------------------------------------------------
+
+
+def _short_workspace(uuid_str: str | None) -> str:
+    """Truncate a UUID to its 8-char prefix for log-friendly display.
+
+    Workspace UUIDs are not secret, but the full UUID adds noise to
+    error messages — a prefix is enough to compare against the source's
+    workspace at a glance. Returns ``"<none>"`` for falsy input.
+    """
+    if not uuid_str:
+        return "<none>"
+    return f"{uuid_str[:8]}…"
+
+
+def _extract_requested_workspace(
+    json: dict[str, Any] | None, params: dict[str, Any] | None
+) -> str | None:
+    """Recover the ``workspace_id`` the failing request was targeting.
+
+    File endpoints carry workspace_id in either the JSON body (reserve)
+    or the query string (list). Returns ``None`` when the request was
+    file-id based (download-url / delete / confirm) and no workspace
+    information is on the wire.
+    """
+    if json is not None:
+        ws = json.get("workspace_id")
+        if isinstance(ws, str):
+            return ws
+    if params is not None:
+        ws = params.get("workspace_id")
+        if isinstance(ws, str):
+            return ws
+    return None
+
+
+def _format_workspace_403_hint(
+    *,
+    auth_source: str | None,
+    source_workspace_hint: str | None,
+    requested_workspace: str | None,
+) -> str:
+    """Compose the actionable 403 message for issue #115.
+
+    Always emits a structured hint when ``auth_source`` is set; falls
+    back to the bare ``"HTTP 403"`` for legacy callers (no source
+    threaded through construction) so the message stays compatible
+    with existing CLI error-string assertions until they migrate.
+
+    The hint never includes the api_key value or
+    ``Authorization: Bearer ...`` header — only the source label and
+    the UUID prefixes (per python.md "Never store API keys as instance
+    attributes": the api_key is not on the client either).
+    """
+    if auth_source is None:
+        return "HTTP 403"
+    source_label = {
+        "config": ".kagura.json",
+        "env": "KAGURA_API_KEY env",
+        "explicit": "explicit api_key argument",
+        "oauth": "OAuth profile (~/.kagura/credentials.json)",
+    }.get(auth_source, auth_source)
+    lines = [
+        "HTTP 403 — workspace not accessible with current credentials.",
+        f"  api_key source: {source_label} (workspace={_short_workspace(source_workspace_hint)})",
+    ]
+    if requested_workspace:
+        lines.append(f"  workspace requested: {_short_workspace(requested_workspace)}")
+    lines.append("  Hint: --context-id may not match the workspace bound to your api_key.")
+    return "\n".join(lines)
 
 
 def _extract_existing_file(error: KaguraConnectionError) -> FileObject | None:

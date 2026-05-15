@@ -41,6 +41,19 @@ def _mock_files_client(method_name: str, return_value) -> MagicMock:
     return client
 
 
+def _wire_files_client_mock(mock_client_cls: MagicMock, mock_client: MagicMock) -> None:
+    """Route every CLI entry point on the patched FilesClient to ``mock_client``.
+
+    The CLI may construct via ``FilesClient(...)`` (direct) or
+    ``FilesClient._from_resolved_auth(...)`` (the internal classmethod
+    shared with ``from_mcp_url``). Configure all entry points so test
+    setup stays insensitive to which one the CLI happens to pick.
+    """
+    mock_client_cls.return_value = mock_client
+    mock_client_cls._from_resolved_auth.return_value = mock_client
+    mock_client_cls.from_mcp_url.return_value = mock_client
+
+
 @patch("kagura_memory.cli.load_config")
 @patch("kagura_memory.cli.FilesClient")
 def test_files_upload(mock_client_cls, mock_config, tmp_path):
@@ -53,7 +66,7 @@ def test_files_upload(mock_client_cls, mock_config, tmp_path):
     mock_client = _mock_files_client("upload", _file_object())
     # The CLI constructs FilesClient(...) directly via _build_files_client_from_auth;
     # set return_value so any call to the patched class returns the mock client.
-    mock_client_cls.return_value = mock_client
+    _wire_files_client_mock(mock_client_cls, mock_client)
 
     p = tmp_path / "hello.txt"
     p.write_text("hello kagura files")
@@ -121,7 +134,7 @@ def test_files_upload_missing_context(mock_config, monkeypatch, tmp_path):
 def test_files_download_url(mock_client_cls, mock_config):
     mock_config.return_value = {"api_key": "key", "mcp_url": "https://test.com/mcp"}
     mock_client = _mock_files_client("download_url", "https://r2.example.com/get/key?sig=...")
-    mock_client_cls.return_value = mock_client
+    _wire_files_client_mock(mock_client_cls, mock_client)
 
     runner = CliRunner()
     result = runner.invoke(main, ["files", "download-url", SAMPLE_FILE_ID])
@@ -136,7 +149,7 @@ def test_files_download_url(mock_client_cls, mock_config):
 def test_files_delete(mock_client_cls, mock_config):
     mock_config.return_value = {"api_key": "key", "mcp_url": "https://test.com/mcp"}
     mock_client = _mock_files_client("delete", None)
-    mock_client_cls.return_value = mock_client
+    _wire_files_client_mock(mock_client_cls, mock_client)
 
     runner = CliRunner()
     result = runner.invoke(main, ["files", "delete", SAMPLE_FILE_ID])
@@ -155,8 +168,8 @@ def test_files_unexpected_exception_wrapped_as_click(mock_client_cls, mock_confi
         "mcp_url": "https://test.com/mcp",
         "context_id": SAMPLE_CTX_ID,
     }
-    # The CLI calls FilesClient(...) directly; have construction raise.
-    mock_client_cls.side_effect = RuntimeError("boom from factory")
+    # The CLI builds via FilesClient._from_resolved_auth(); have it raise.
+    mock_client_cls._from_resolved_auth.side_effect = RuntimeError("boom from factory")
 
     p = tmp_path / "hello.txt"
     p.write_text("hi")
@@ -179,7 +192,7 @@ def test_files_list(mock_client_cls, mock_config):
         "list",
         FileListResponse(files=[_file_object()], next_cursor=None),
     )
-    mock_client_cls.return_value = mock_client
+    _wire_files_client_mock(mock_client_cls, mock_client)
 
     runner = CliRunner()
     result = runner.invoke(main, ["files", "list"])
@@ -242,7 +255,7 @@ def test_files_upload_with_explicit_context_id_flag(monkeypatch, tmp_path):
         patch("kagura_memory.cli.FilesClient") as mock_client_cls,
     ):
         mock_client = _mock_files_client("upload", _file_object())
-        mock_client_cls.return_value = mock_client
+        _wire_files_client_mock(mock_client_cls, mock_client)
 
         p = tmp_path / "hello.txt"
         p.write_text("hi")
@@ -282,7 +295,7 @@ def test_files_upload_uses_oauth_workspace_id_when_no_context(monkeypatch, tmp_p
         patch("kagura_memory.cli.FilesClient") as mock_client_cls,
     ):
         mock_client = _mock_files_client("upload", _file_object())
-        mock_client_cls.return_value = mock_client
+        _wire_files_client_mock(mock_client_cls, mock_client)
 
         p = tmp_path / "hello.txt"
         p.write_text("hi")
@@ -387,7 +400,7 @@ def test_files_upload_env_api_key_with_explicit_context_succeeds(monkeypatch, tm
         patch("kagura_memory.cli.FilesClient") as mock_client_cls,
     ):
         mock_client = _mock_files_client("upload", _file_object())
-        mock_client_cls.return_value = mock_client
+        _wire_files_client_mock(mock_client_cls, mock_client)
 
         p = tmp_path / "hello.txt"
         p.write_text("hi")

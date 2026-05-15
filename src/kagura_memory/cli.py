@@ -1611,21 +1611,6 @@ def _resolve_workspace_from_source(
     )
 
 
-def _build_files_client_from_auth(auth: _StaticAuth | _OAuthAuth) -> FilesClient:
-    """Construct a :class:`FilesClient` from a pre-resolved auth result.
-
-    Mirrors the construction logic of :meth:`FilesClient.from_mcp_url`
-    but takes an already-resolved auth (so the CLI can resolve once and
-    derive both ``api_key`` and ``workspace_id`` from the same source).
-    """
-    from ._http import base_url_from_mcp
-
-    base_url = base_url_from_mcp(auth.mcp_url.rstrip("/"))
-    if isinstance(auth, _StaticAuth):
-        return FilesClient(api_key=auth.api_key, base_url=base_url)
-    return FilesClient(base_url=base_url, _oauth=auth.oauth)
-
-
 def _resolve_files_auth(config: dict[str, Any]) -> _StaticAuth | _OAuthAuth:
     """Resolve credentials for the Files CLI with accurate source tagging.
 
@@ -1673,7 +1658,7 @@ def _build_files_client(
     """
     auth = _resolve_files_auth(config)
     workspace_id = _resolve_workspace_from_source(auth, config, explicit_ctx)
-    return _build_files_client_from_auth(auth), workspace_id
+    return FilesClient._from_resolved_auth(auth), workspace_id
 
 
 def _run_files_command(
@@ -1698,7 +1683,7 @@ def _run_files_command(
         if needs_context:
             client, ctx_id = _build_files_client(config, context_id)
         else:
-            client = _build_files_client_from_auth(_resolve_files_auth(config))
+            client = FilesClient._from_resolved_auth(_resolve_files_auth(config))
 
         async def _run() -> Any:
             async with client:
