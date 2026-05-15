@@ -753,6 +753,230 @@ async def test_request_401_raises_auth_error():
 
 
 @pytest.mark.asyncio
+async def test_request_403_without_source_includes_sanitized_detail():
+    """Direct ``FilesClient(api_key=...)`` (no resolver) → ``HTTP 403`` + server detail.
+
+    SDK callers who construct ``FilesClient`` without going through
+    ``_from_resolved_auth`` haven't told us their credential source, so
+    we cannot produce the workspace-specific hint. But the server's
+    ``detail`` field still flows through (after sanitization), so
+    operators can see "forbidden" / scope-related reasons even on the
+    bare path.
+    """
+    client = FilesClient(api_key="test-key", base_url="https://example.com")
+    err_resp = _error_response(403, {"detail": "forbidden"})
+    with patch.object(client._client, "request", new_callable=AsyncMock) as mock_req:
+        mock_req.return_value = err_resp
+        with pytest.raises(KaguraConnectionError) as exc_info:
+            await client.delete("some-file-id")
+        msg = str(exc_info.value)
+    await client.close()
+
+    assert msg == "HTTP 403: forbidden"
+
+
+@pytest.mark.asyncio
+async def test_request_403_without_workspace_uses_generic_heading():
+    """File-id endpoints (no workspace_id on the wire) → generic 403 heading.
+
+    download-url / delete don't accept ``--context-id``, so the
+    workspace-mismatch language and the ``--context-id`` recovery hint
+    are misleading for those commands. The hint adapts: keep the
+    source label, drop the workspace-specific lines.
+    """
+    client = FilesClient(
+        api_key="test-key",
+        base_url="https://example.com",
+        _auth_source="config",
+        _workspace_id_hint="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+    )
+    err_resp = _error_response(403, {"detail": "insufficient_scope"})
+    with patch.object(client._client, "request", new_callable=AsyncMock) as mock_req:
+        mock_req.return_value = err_resp
+        with pytest.raises(KaguraConnectionError) as exc_info:
+            await client.delete("some-file-id")
+        msg = str(exc_info.value)
+    await client.close()
+
+    assert "HTTP 403" in msg
+    assert "access denied" in msg
+    # workspace-specific language must NOT appear for file-id endpoints.
+    assert "workspace not accessible" not in msg
+    assert "workspace requested:" not in msg
+    assert "--context-id" not in msg
+    # The source provenance and server detail still surface.
+    assert ".kagura.json" in msg
+    assert "aaaaaaaa" in msg
+    assert "insufficient_scope" in msg
+
+
+@pytest.mark.asyncio
+async def test_request_403_with_source_emits_workspace_hint():
+    """OAuth-sourced client → 403 message names the source and workspace prefix.
+
+    Same-source pairing (#115) attaches ``_auth_source="oauth"`` and
+    the OAuth profile's ``workspace_id`` to the client. On 403 the SDK
+    emits a multi-line hint citing the source label and both the
+    bound and requested workspace prefixes.
+    """
+    client = FilesClient(
+        api_key="test-key",
+        base_url="https://example.com",
+        _auth_source="oauth",
+        _workspace_id_hint="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+    )
+    err_resp = _error_response(403, {"detail": "forbidden"})
+    with patch.object(client._client, "request", new_callable=AsyncMock) as mock_req:
+        mock_req.return_value = err_resp
+        with pytest.raises(KaguraConnectionError) as exc_info:
+            # files list sends workspace_id in query params.
+            await client.list(context_id="11111111-2222-3333-4444-555555555555")
+        msg = str(exc_info.value)
+    await client.close()
+
+    assert "HTTP 403" in msg
+    assert "workspace not accessible" in msg
+    assert "OAuth profile" in msg
+    assert "aaaaaaaa" in msg
+    assert "workspace requested: 11111111" in msg
+    assert "--context-id" in msg
+
+
+def test_sanitize_server_detail_drops_credential_markers():
+    """A server detail string containing credential markers must be dropped.
+
+    ``detail`` is operator-facing text the server controls. A future server
+    bug echoing back the Bearer header or api_key value would otherwise
+    flow straight through to the user. The sanitizer drops any detail
+    that contains common credential-shaped markers.
+    """
+    from kagura_memory.files_client import _sanitize_server_detail
+
+    # Safe details pass through unchanged.
+    assert _sanitize_server_detail("forbidden") == "forbidden"
+    assert _sanitize_server_detail("insufficient_scope") == "insufficient_scope"
+    assert _sanitize_server_detail("account deactivated") == "account deactivated"
+    # Empty / None → None.
+    assert _sanitize_server_detail("") is None
+    assert _sanitize_server_detail(None) is None
+    # Credential markers → drop (case-insensitive).
+    assert _sanitize_server_detail("Bearer rotk-leaked-value") is None
+    assert _sanitize_server_detail("bearer xxx") is None
+    assert _sanitize_server_detail("Authorization: Bearer xxx") is None
+    assert _sanitize_server_detail("api_key=plaintext-bad") is None
+
+
+def test_format_workspace_403_hint_handles_unknown_source_tag():
+    """Defensive: an unexpected ``auth_source`` value never raises KeyError.
+
+    ``_auth_source`` is set only by internal resolver code so this path
+    shouldn't fire in practice — but 403 handling must not crash mid-error,
+    or the real HTTP failure would be masked by a KeyError.
+    """
+    from kagura_memory.files_client import _format_workspace_403_hint
+
+    msg = _format_workspace_403_hint(
+        auth_source="unexpected-source-tag",  # type: ignore[arg-type]
+        source_workspace_hint=None,
+        requested_workspace=None,
+    )
+    assert "HTTP 403" in msg
+    assert "unexpected-source-tag" in msg
+
+
+def test_short_workspace_returns_none_for_empty():
+    """`_short_workspace` returns the ``<none>`` sentinel for empty/None input."""
+    from kagura_memory.files_client import _short_workspace
+
+    assert _short_workspace(None) == "<none>"
+    assert _short_workspace("") == "<none>"
+
+
+def test_extract_requested_workspace_handles_no_workspace_path():
+    """``_extract_requested_workspace`` returns None when no workspace_id is carried.
+
+    Covers the file-id-based request path (download-url / delete / confirm)
+    where the 403 hint must render without a "workspace requested:" line.
+    """
+    from kagura_memory.files_client import _extract_requested_workspace
+
+    assert _extract_requested_workspace(None, None) is None
+    assert _extract_requested_workspace({}, None) is None
+    assert _extract_requested_workspace(None, {}) is None
+    # Non-string workspace_id (defensive against malformed payloads) → None.
+    assert _extract_requested_workspace({"workspace_id": None}, None) is None
+    assert _extract_requested_workspace(None, {"workspace_id": 42}) is None
+    # Happy paths: string workspace_id is recovered from either body or params.
+    assert _extract_requested_workspace({"workspace_id": "ws-from-json"}, None) == "ws-from-json"
+    assert (
+        _extract_requested_workspace(None, {"workspace_id": "ws-from-params"}) == "ws-from-params"
+    )
+
+
+@pytest.mark.asyncio
+async def test_request_403_config_source_emits_workspace_hint():
+    """Static api_key from ``.kagura.json`` → 403 hint shows the bound workspace.
+
+    After the /simplify refactor the CLI threads
+    ``workspace_id_hint`` into ``FilesClient._from_resolved_auth`` for
+    the ``_StaticAuth(source="config")`` path, so a config-source 403
+    no longer surfaces ``workspace=<none>`` — it shows the workspace
+    UUID prefix the api_key was bound to.
+    """
+    client = FilesClient(
+        api_key="test-key",
+        base_url="https://example.com",
+        _auth_source="config",
+        _workspace_id_hint="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+    )
+    err_resp = _error_response(403, {"detail": "forbidden"})
+    with patch.object(client._client, "request", new_callable=AsyncMock) as mock_req:
+        mock_req.return_value = err_resp
+        with pytest.raises(KaguraConnectionError) as exc_info:
+            await client.list(context_id="11111111-2222-3333-4444-555555555555")
+        msg = str(exc_info.value)
+    await client.close()
+
+    assert ".kagura.json" in msg
+    # Bound workspace prefix surfaces — not "<none>".
+    assert "aaaaaaaa" in msg
+    assert "workspace=<none>" not in msg
+    # Request workspace is distinct from the bound one (the mismatch the
+    # hint is meant to clarify).
+    assert "workspace requested: 11111111" in msg
+
+
+@pytest.mark.asyncio
+async def test_request_403_hint_does_not_leak_api_key_or_bearer():
+    """The 403 hint must not include the api_key value or Authorization header.
+
+    python.md rule: never store api_keys as instance attributes. The
+    hint is built from the source label and workspace UUIDs only —
+    this test pins that promise so a future refactor cannot
+    accidentally embed the secret in the operator-facing message.
+    """
+    secret = "kagura_super_secret_api_key_value"
+    client = FilesClient(
+        api_key=secret,
+        base_url="https://example.com",
+        _auth_source="config",
+        _workspace_id_hint="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+    )
+    err_resp = _error_response(403, {"detail": "forbidden"})
+    with patch.object(client._client, "request", new_callable=AsyncMock) as mock_req:
+        mock_req.return_value = err_resp
+        with pytest.raises(KaguraConnectionError) as exc_info:
+            await client.list(context_id="11111111-2222-3333-4444-555555555555")
+        msg = str(exc_info.value)
+    await client.close()
+
+    assert secret not in msg
+    assert "Bearer" not in msg
+    assert "api_key=" not in msg  # no key=value pair surfacing the value
+    assert "Authorization" not in msg
+
+
+@pytest.mark.asyncio
 async def test_request_404_raises_not_found():
     client = FilesClient(api_key="test", base_url="https://example.com")
     err_resp = _error_response(404, {"detail": "file gone"})

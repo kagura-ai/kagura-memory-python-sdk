@@ -41,6 +41,19 @@ def _mock_files_client(method_name: str, return_value) -> MagicMock:
     return client
 
 
+def _wire_files_client_mock(mock_client_cls: MagicMock, mock_client: MagicMock) -> None:
+    """Route every CLI entry point on the patched FilesClient to ``mock_client``.
+
+    The CLI may construct via ``FilesClient(...)`` (direct) or
+    ``FilesClient._from_resolved_auth(...)`` (the internal classmethod
+    shared with ``from_mcp_url``). Configure all entry points so test
+    setup stays insensitive to which one the CLI happens to pick.
+    """
+    mock_client_cls.return_value = mock_client
+    mock_client_cls._from_resolved_auth.return_value = mock_client
+    mock_client_cls.from_mcp_url.return_value = mock_client
+
+
 @patch("kagura_memory.cli.load_config")
 @patch("kagura_memory.cli.FilesClient")
 def test_files_upload(mock_client_cls, mock_config, tmp_path):
@@ -51,8 +64,9 @@ def test_files_upload(mock_client_cls, mock_config, tmp_path):
         "context_id": SAMPLE_CTX_ID,
     }
     mock_client = _mock_files_client("upload", _file_object())
-    # FilesClient.from_mcp_url is a classmethod — patch it too
-    mock_client_cls.from_mcp_url.return_value = mock_client
+    # The CLI constructs FilesClient(...) directly via _build_files_client_from_auth;
+    # set return_value so any call to the patched class returns the mock client.
+    _wire_files_client_mock(mock_client_cls, mock_client)
 
     p = tmp_path / "hello.txt"
     p.write_text("hello kagura files")
@@ -92,9 +106,15 @@ def test_files_upload_missing_credentials(mock_config, monkeypatch, tmp_path):
 
 @patch("kagura_memory.cli.load_config")
 def test_files_upload_missing_context(mock_config, monkeypatch, tmp_path):
-    """upload without --context-id and without any workspace source → context_id required."""
+    """upload with config api_key but no context_id and no -c → same-source error.
+
+    After issue #115, falling through to the OAuth profile's
+    workspace_id is no longer allowed when api_key comes from a
+    different source. With api_key in ``.kagura.json`` and no
+    ``context_id``, the CLI raises an actionable error pointing to
+    ``.kagura.json``'s ``context_id`` field or ``--context-id``.
+    """
     mock_config.return_value = {"api_key": "key", "mcp_url": "https://test.com/mcp"}
-    # Block the OAuth profile workspace_id fallback so context_id stays empty.
     monkeypatch.delenv("KAGURA_PROFILE", raising=False)
     monkeypatch.setattr(
         "kagura_memory.auth.credentials.DEFAULT_CREDENTIALS_PATH",
@@ -105,7 +125,8 @@ def test_files_upload_missing_context(mock_config, monkeypatch, tmp_path):
     runner = CliRunner()
     result = runner.invoke(main, ["files", "upload", str(p)])
     assert result.exit_code != 0
-    assert "context_id required" in result.output
+    assert "context_id is missing" in result.output
+    assert "--context-id" in result.output
 
 
 @patch("kagura_memory.cli.load_config")
@@ -113,7 +134,7 @@ def test_files_upload_missing_context(mock_config, monkeypatch, tmp_path):
 def test_files_download_url(mock_client_cls, mock_config):
     mock_config.return_value = {"api_key": "key", "mcp_url": "https://test.com/mcp"}
     mock_client = _mock_files_client("download_url", "https://r2.example.com/get/key?sig=...")
-    mock_client_cls.from_mcp_url.return_value = mock_client
+    _wire_files_client_mock(mock_client_cls, mock_client)
 
     runner = CliRunner()
     result = runner.invoke(main, ["files", "download-url", SAMPLE_FILE_ID])
@@ -128,7 +149,7 @@ def test_files_download_url(mock_client_cls, mock_config):
 def test_files_delete(mock_client_cls, mock_config):
     mock_config.return_value = {"api_key": "key", "mcp_url": "https://test.com/mcp"}
     mock_client = _mock_files_client("delete", None)
-    mock_client_cls.from_mcp_url.return_value = mock_client
+    _wire_files_client_mock(mock_client_cls, mock_client)
 
     runner = CliRunner()
     result = runner.invoke(main, ["files", "delete", SAMPLE_FILE_ID])
@@ -147,7 +168,8 @@ def test_files_unexpected_exception_wrapped_as_click(mock_client_cls, mock_confi
         "mcp_url": "https://test.com/mcp",
         "context_id": SAMPLE_CTX_ID,
     }
-    mock_client_cls.from_mcp_url.side_effect = RuntimeError("boom from factory")
+    # The CLI builds via FilesClient._from_resolved_auth(); have it raise.
+    mock_client_cls._from_resolved_auth.side_effect = RuntimeError("boom from factory")
 
     p = tmp_path / "hello.txt"
     p.write_text("hi")
@@ -170,7 +192,7 @@ def test_files_list(mock_client_cls, mock_config):
         "list",
         FileListResponse(files=[_file_object()], next_cursor=None),
     )
-    mock_client_cls.from_mcp_url.return_value = mock_client
+    _wire_files_client_mock(mock_client_cls, mock_client)
 
     runner = CliRunner()
     result = runner.invoke(main, ["files", "list"])
@@ -205,13 +227,51 @@ def _oauth_creds_with_workspace(workspace_id: str) -> OAuthCredentials:
     )
 
 
+def test_files_upload_strips_whitespace_from_explicit_context_id(monkeypatch, tmp_path):
+    """``--context-id`` with surrounding whitespace is normalized before resolution.
+
+    Defends against a class of subtle bugs where a whitespace-padded UUID
+    (e.g. copy-paste from a chat client) would pass the truthy check but
+    then either fail UUID validation downstream or, worse, pass through
+    the ``"auto"`` sentinel comparison without matching the sentinel.
+    """
+    ws = "20000000-0000-0000-0000-000000000003"
+    monkeypatch.delenv("KAGURA_API_KEY", raising=False)
+    monkeypatch.delenv("KAGURA_PROFILE", raising=False)
+    monkeypatch.setattr(
+        "kagura_memory.auth.credentials.DEFAULT_CREDENTIALS_PATH",
+        tmp_path / "missing-credentials.json",
+    )
+    reset_state_cache()
+
+    with (
+        patch(
+            "kagura_memory.cli.load_config",
+            return_value={"api_key": "key", "mcp_url": "https://test.com/mcp"},
+        ),
+        patch("kagura_memory.cli.FilesClient") as mock_client_cls,
+    ):
+        mock_client = _mock_files_client("upload", _file_object())
+        _wire_files_client_mock(mock_client_cls, mock_client)
+
+        p = tmp_path / "hello.txt"
+        p.write_text("hi")
+        runner = CliRunner()
+        result = runner.invoke(main, ["files", "upload", str(p), "--context-id", f"  {ws}  "])
+
+    reset_state_cache()
+
+    assert result.exit_code == 0, result.output
+    # Whitespace was stripped before reaching FilesClient.upload.
+    assert mock_client.upload.call_args.kwargs["context_id"] == ws
+
+
 def test_files_upload_with_explicit_context_id_flag(monkeypatch, tmp_path):
     """``--context-id`` flag is the highest-priority source and bypasses every fallback.
 
-    Covers the first branch of ``_resolve_files_context_id``: when the
-    user passes an explicit UUID via ``-c`` / ``--context-id``, neither
-    ``.kagura.json.context_id`` nor the OAuth profile's ``workspace_id``
-    is consulted.
+    The first branch of :func:`_resolve_workspace_from_source`: an
+    explicit UUID via ``-c`` / ``--context-id`` wins over the
+    api_key's same-source workspace and over the OAuth profile.
     """
     explicit_ctx = "20000000-0000-0000-0000-000000000003"
     monkeypatch.delenv("KAGURA_API_KEY", raising=False)
@@ -234,7 +294,7 @@ def test_files_upload_with_explicit_context_id_flag(monkeypatch, tmp_path):
         patch("kagura_memory.cli.FilesClient") as mock_client_cls,
     ):
         mock_client = _mock_files_client("upload", _file_object())
-        mock_client_cls.from_mcp_url.return_value = mock_client
+        _wire_files_client_mock(mock_client_cls, mock_client)
 
         p = tmp_path / "hello.txt"
         p.write_text("hi")
@@ -254,8 +314,10 @@ def test_files_upload_uses_oauth_workspace_id_when_no_context(monkeypatch, tmp_p
 
     Headline scenario from #110: ``kagura auth login`` populates the
     profile's ``workspace_id``; subsequent ``kagura files upload`` with
-    neither ``--context-id`` nor ``.kagura.json.context_id`` must resolve
-    the workspace via the OAuth profile and succeed.
+    neither ``--context-id`` nor ``.kagura.json.context_id`` must
+    resolve the workspace via the OAuth profile and succeed. With #115
+    this is the OAuth same-source pair — api_key + workspace_id both
+    come from the OAuth profile.
     """
     fake_creds_path = tmp_path / "credentials.json"
     monkeypatch.setattr("kagura_memory.auth.credentials.DEFAULT_CREDENTIALS_PATH", fake_creds_path)
@@ -272,7 +334,7 @@ def test_files_upload_uses_oauth_workspace_id_when_no_context(monkeypatch, tmp_p
         patch("kagura_memory.cli.FilesClient") as mock_client_cls,
     ):
         mock_client = _mock_files_client("upload", _file_object())
-        mock_client_cls.from_mcp_url.return_value = mock_client
+        _wire_files_client_mock(mock_client_cls, mock_client)
 
         p = tmp_path / "hello.txt"
         p.write_text("hi")
@@ -286,13 +348,15 @@ def test_files_upload_uses_oauth_workspace_id_when_no_context(monkeypatch, tmp_p
     assert mock_client.upload.call_args.kwargs["context_id"] == SAMPLE_CTX_ID
 
 
-def test_files_upload_treats_context_id_auto_as_unset(monkeypatch, tmp_path):
-    """`.kagura.json` with ``context_id: "auto"`` should not reach the SDK.
+def test_files_upload_rejects_auto_sentinel_with_config_api_key(monkeypatch, tmp_path):
+    """``.kagura.json:context_id == "auto"`` + config api_key + OAuth profile → reject.
 
-    The CLI converts the ``"auto"`` sentinel to the OAuth profile's
-    workspace_id before calling ``FilesClient.upload``. Previously this
-    would forward ``"auto"`` straight to the server and hit a 422
-    ``workspace_id`` validation error.
+    Before issue #115 the CLI silently fell through to the OAuth
+    profile's ``workspace_id`` when ``context_id`` was ``"auto"``,
+    even though the api_key came from a different source. That
+    cross-source pairing is the bug; with #115, this scenario now
+    raises a clear error pointing the operator at ``--context-id`` or
+    ``.kagura.json``'s ``context_id`` field.
     """
     fake_creds_path = tmp_path / "credentials.json"
     monkeypatch.setattr("kagura_memory.auth.credentials.DEFAULT_CREDENTIALS_PATH", fake_creds_path)
@@ -306,16 +370,10 @@ def test_files_upload_treats_context_id_auto_as_unset(monkeypatch, tmp_path):
 
     from kagura_memory.cli import _CONTEXT_ID_AUTO
 
-    with (
-        patch(
-            "kagura_memory.cli.load_config",
-            return_value={"api_key": "key", "context_id": _CONTEXT_ID_AUTO},
-        ),
-        patch("kagura_memory.cli.FilesClient") as mock_client_cls,
+    with patch(
+        "kagura_memory.cli.load_config",
+        return_value={"api_key": "key", "context_id": _CONTEXT_ID_AUTO},
     ):
-        mock_client = _mock_files_client("upload", _file_object())
-        mock_client_cls.from_mcp_url.return_value = mock_client
-
         p = tmp_path / "hello.txt"
         p.write_text("hi")
         runner = CliRunner()
@@ -323,6 +381,104 @@ def test_files_upload_treats_context_id_auto_as_unset(monkeypatch, tmp_path):
 
     reset_state_cache()
 
+    assert result.exit_code != 0, result.output
+    assert "context_id is missing" in result.output or '"auto"' in result.output
+    assert "--context-id" in result.output
+
+
+def test_files_upload_rejects_env_api_key_without_context(monkeypatch, tmp_path):
+    """``KAGURA_API_KEY`` env + OAuth profile + no ``-c`` → reject (no associated workspace).
+
+    Same-source pairing (issue #115): api_key from ``KAGURA_API_KEY``
+    env has no workspace source attached, and falling through to the
+    OAuth profile's ``workspace_id`` would mix sources. The CLI must
+    require ``--context-id`` explicitly.
+    """
+    fake_creds_path = tmp_path / "credentials.json"
+    monkeypatch.setattr("kagura_memory.auth.credentials.DEFAULT_CREDENTIALS_PATH", fake_creds_path)
+    monkeypatch.setenv("KAGURA_API_KEY", "env-key")
+    monkeypatch.delenv("KAGURA_PROFILE", raising=False)
+
+    cf = CredentialsFile()
+    cf.set_profile("default", _oauth_creds_with_workspace(SAMPLE_CTX_ID))
+    save_credentials_file(cf, fake_creds_path)
+    reset_state_cache()
+
+    with patch("kagura_memory.cli.load_config", return_value={}):
+        p = tmp_path / "hello.txt"
+        p.write_text("hi")
+        runner = CliRunner()
+        result = runner.invoke(main, ["files", "upload", str(p)])
+
+    reset_state_cache()
+
+    assert result.exit_code != 0, result.output
+    assert "KAGURA_API_KEY env" in result.output
+    assert "--context-id" in result.output
+
+
+def test_files_upload_oauth_profile_without_workspace_id_errors(monkeypatch, tmp_path):
+    """OAuth profile resolved but ``workspace_id`` is empty → actionable error.
+
+    Pre-issue-#170 OAuth profiles did not record ``workspace_id`` (the
+    field was added later). An operator upgrading from such a profile
+    has a valid login but no bound workspace; the CLI must point them
+    at ``kagura auth login`` or ``--context-id``, not produce a 422 at
+    request time.
+    """
+    fake_creds_path = tmp_path / "credentials.json"
+    monkeypatch.setattr("kagura_memory.auth.credentials.DEFAULT_CREDENTIALS_PATH", fake_creds_path)
+    monkeypatch.delenv("KAGURA_API_KEY", raising=False)
+    monkeypatch.delenv("KAGURA_PROFILE", raising=False)
+
+    cf = CredentialsFile()
+    # workspace_id="" simulates the legacy profile shape.
+    cf.set_profile("default", _oauth_creds_with_workspace(""))
+    save_credentials_file(cf, fake_creds_path)
+    reset_state_cache()
+
+    with patch("kagura_memory.cli.load_config", return_value={}):
+        p = tmp_path / "hello.txt"
+        p.write_text("hi")
+        runner = CliRunner()
+        result = runner.invoke(main, ["files", "upload", str(p)])
+
+    reset_state_cache()
+
+    assert result.exit_code != 0, result.output
+    assert "kagura auth login" in result.output or "--context-id" in result.output
+
+
+def test_files_upload_env_api_key_with_explicit_context_succeeds(monkeypatch, tmp_path):
+    """``KAGURA_API_KEY`` env + ``-c`` → succeed (operator override).
+
+    The mirror of :func:`test_files_upload_rejects_env_api_key_without_context`:
+    once the operator supplies ``--context-id`` explicitly, env-derived
+    api_key is fine — the explicit flag is the highest-priority
+    workspace source regardless of api_key source.
+    """
+    explicit_ctx = "30000000-0000-0000-0000-000000000004"
+    monkeypatch.setattr(
+        "kagura_memory.auth.credentials.DEFAULT_CREDENTIALS_PATH",
+        tmp_path / "missing-credentials.json",
+    )
+    monkeypatch.setenv("KAGURA_API_KEY", "env-key")
+    monkeypatch.delenv("KAGURA_PROFILE", raising=False)
+    reset_state_cache()
+
+    with (
+        patch("kagura_memory.cli.load_config", return_value={}),
+        patch("kagura_memory.cli.FilesClient") as mock_client_cls,
+    ):
+        mock_client = _mock_files_client("upload", _file_object())
+        _wire_files_client_mock(mock_client_cls, mock_client)
+
+        p = tmp_path / "hello.txt"
+        p.write_text("hi")
+        runner = CliRunner()
+        result = runner.invoke(main, ["files", "upload", str(p), "--context-id", explicit_ctx])
+
+    reset_state_cache()
+
     assert result.exit_code == 0, result.output
-    assert mock_client.upload.call_args.kwargs["context_id"] == SAMPLE_CTX_ID
-    assert mock_client.upload.call_args.kwargs["context_id"] != _CONTEXT_ID_AUTO
+    assert mock_client.upload.call_args.kwargs["context_id"] == explicit_ctx
