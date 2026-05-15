@@ -10,9 +10,9 @@ from typing import Any
 
 import click
 
+from ._auth import _DEFAULT_MCP_URL, _OAuthAuth, _resolve_auth, _StaticAuth
 from .agent import KaguraAgent
 from .auth.cli import auth as _auth_group
-from .auth.credentials import get_shared_state
 from .client import KaguraClient
 from .config import load_config
 from .files_client import FilesClient
@@ -1546,54 +1546,134 @@ def resource_import(resource_id, api_key, input_file, fmt, id_column, version, v
 # =============================================================================
 
 # Sentinel for `kagura setup claude`-generated `.kagura.json` — means
-# "fill in workspace_id from the OAuth profile or --context-id at runtime."
-# Defined as a constant so the CLI, tests, and any future config writer
-# share one source of truth and cannot drift.
+# "fill in workspace_id from the credential source the resolver picks
+# at runtime." Defined as a constant so the CLI, tests, and any future
+# config writer share one source of truth and cannot drift.
 _CONTEXT_ID_AUTO = "auto"
 
 
-def _build_files_client(config: dict[str, Any]) -> FilesClient:
-    """Build a FilesClient using the shared credential resolution chain.
+def _resolve_workspace_from_source(
+    auth: _StaticAuth | _OAuthAuth,
+    config: dict[str, Any],
+    explicit_ctx: str | None,
+) -> str:
+    """Resolve workspace_id from the SAME source as ``api_key`` (issue #115).
 
-    Delegates to :meth:`FilesClient.from_mcp_url`, which runs
-    ``_resolve_auth`` (explicit api_key > ``KAGURA_API_KEY`` env > OAuth
-    profile in ``~/.kagura/credentials.json`` > ``.kagura.json``). When
-    no source produces credentials the resolver raises ``KaguraAuthError``,
-    which ``_run_files_command`` reformats as a ``click.ClickException``.
+    An api_key is provisioned for one specific workspace; mixing one
+    source's api_key with another source's workspace_id is never
+    correct (best case: 403; worst case: silently writing to the wrong
+    workspace). This function pairs the two so the resolver picks both
+    from the same branch:
+
+    1. ``--context-id <uuid>`` always wins — operator override.
+    2. ``_OAuthAuth`` → ``workspace_id`` snapshot from the OAuth
+       profile (i.e. what ``kagura auth login`` stored).
+    3. ``_StaticAuth(source="config")`` → ``.kagura.json``'s
+       ``context_id`` (skipping the :data:`_CONTEXT_ID_AUTO` sentinel).
+    4. ``_StaticAuth(source="env" | "explicit")`` → error, because env
+       / explicit api_keys carry no associated workspace source. The
+       operator must pass ``--context-id``.
+
+    Raises ``click.ClickException`` with an actionable message when no
+    same-source workspace can be formed.
     """
-    return FilesClient.from_mcp_url(
-        api_key=config.get("api_key") or None,
-        mcp_url=config.get("mcp_url") or None,
+    # 1. Explicit -c always wins, regardless of source.
+    if explicit_ctx and explicit_ctx.strip() and explicit_ctx != _CONTEXT_ID_AUTO:
+        return explicit_ctx
+
+    # 2. OAuth path: workspace is a snapshot from the profile.
+    if isinstance(auth, _OAuthAuth):
+        if auth.workspace_id:
+            return auth.workspace_id
+        raise click.ClickException(
+            "OAuth profile has no workspace bound. Re-run `kagura auth login` "
+            "or pass --context-id <uuid>."
+        )
+
+    # 3. Static api_key from .kagura.json → workspace must come from the
+    #    same .kagura.json (context_id field, not the "auto" sentinel).
+    if auth.source == "config":
+        cfg_ctx = (config.get("context_id") or "").strip()
+        if cfg_ctx and cfg_ctx != _CONTEXT_ID_AUTO:
+            return cfg_ctx
+        raise click.ClickException(
+            '.kagura.json has api_key but context_id is missing or "auto". '
+            "Set context_id to the workspace UUID bound to this api_key, "
+            "or pass --context-id. (Falling back to the OAuth profile would "
+            "mix credential sources — see issue #115.)"
+        )
+
+    # 4. env / explicit api_key: no associated workspace source.
+    src_label = "KAGURA_API_KEY env" if auth.source == "env" else "explicit api_key argument"
+    raise click.ClickException(
+        f"api_key from {src_label} has no associated workspace; pass --context-id "
+        "(mixing api_key and OAuth profile's workspace is not allowed — see issue #115)."
     )
 
 
-def _resolve_files_context_id(config: dict[str, Any], context_id: str | None) -> str:
-    """Resolve the workspace UUID for a Files CLI command.
+def _build_files_client_from_auth(auth: _StaticAuth | _OAuthAuth) -> FilesClient:
+    """Construct a :class:`FilesClient` from a pre-resolved auth result.
 
-    Order: explicit ``--context-id`` flag > ``.kagura.json`` (skipping the
-    :data:`_CONTEXT_ID_AUTO` sentinel) > OAuth profile's ``workspace_id``
-    from ``~/.kagura/credentials.json``. Returns ``""`` when every source
-    is empty or the sentinel; the caller surfaces a single actionable error.
-
-    The sentinel is a CLI-level concern: the SDK only accepts real UUIDs
-    (``FilesClient`` validates at the entry point per issue #110). This
-    function converts ``"auto"`` to the right UUID before any SDK call.
+    Mirrors the construction logic of :meth:`FilesClient.from_mcp_url`
+    but takes an already-resolved auth (so the CLI can resolve once and
+    derive both ``api_key`` and ``workspace_id`` from the same source).
     """
-    if context_id and context_id.strip() and context_id != _CONTEXT_ID_AUTO:
-        return context_id
+    from ._http import base_url_from_mcp
 
-    cfg_ctx = (config.get("context_id") or "").strip()
-    if cfg_ctx and cfg_ctx != _CONTEXT_ID_AUTO:
-        return cfg_ctx
+    base_url = base_url_from_mcp(auth.mcp_url.rstrip("/"))
+    if isinstance(auth, _StaticAuth):
+        return FilesClient(api_key=auth.api_key, base_url=base_url)
+    return FilesClient(base_url=base_url, _oauth=auth.oauth)
 
-    # OAuth profile path: kagura auth login stored the workspace_id during
-    # /device consent. This is the natural fallback for users who logged in
-    # but never edited .kagura.json.
-    state = get_shared_state(profile=os.getenv("KAGURA_PROFILE"))
-    if state is not None and state.credentials.workspace_id:
-        return state.credentials.workspace_id
 
-    return ""
+def _resolve_files_auth(config: dict[str, Any]) -> _StaticAuth | _OAuthAuth:
+    """Resolve credentials for the Files CLI with accurate source tagging.
+
+    Preserves the historic CLI precedence — ``.kagura.json`` api_key
+    wins over the env/OAuth chain — but tags the resolved auth as
+    ``source="config"`` instead of routing through ``_resolve_auth``'s
+    priority-1 (explicit) branch. That distinction is what
+    :func:`_resolve_workspace_from_source` reads to pair workspace_id
+    correctly (issue #115): if the api_key came from ``.kagura.json``,
+    the workspace_id must come from the same ``.kagura.json``.
+    """
+    cfg_key = (config.get("api_key") or "").strip()
+    if cfg_key:
+        return _StaticAuth(
+            api_key=cfg_key,
+            mcp_url=(config.get("mcp_url") or _DEFAULT_MCP_URL),
+            source="config",
+        )
+    # No config api_key — walk the rest of the resolver chain
+    # (env → OAuth profile → terminal raise). ``api_key=None`` keeps
+    # priority 1 unused; priority 4 (.kagura.json fallback inside
+    # _resolve_auth) is dead code here because we just confirmed
+    # config has no api_key.
+    return _resolve_auth(
+        api_key=None,
+        mcp_url=config.get("mcp_url") or None,
+        profile=os.getenv("KAGURA_PROFILE"),
+    )
+
+
+def _build_files_client(
+    config: dict[str, Any], explicit_ctx: str | None
+) -> tuple[FilesClient, str]:
+    """Build a (FilesClient, workspace_id) pair from the same credential source.
+
+    Resolves the credential chain once via :func:`_resolve_files_auth`
+    and pairs ``workspace_id`` to it via
+    :func:`_resolve_workspace_from_source`. Returning the pair lets the
+    caller use the resolved workspace directly instead of re-running an
+    independent resolution chain (the bug fixed by issue #115).
+
+    Raises ``click.ClickException`` when no same-source pair can be
+    formed; raises :class:`KaguraAuthError` (via ``_resolve_auth``)
+    when no credentials exist at all.
+    """
+    auth = _resolve_files_auth(config)
+    workspace_id = _resolve_workspace_from_source(auth, config, explicit_ctx)
+    return _build_files_client_from_auth(auth), workspace_id
 
 
 def _run_files_command(
@@ -1604,23 +1684,21 @@ def _run_files_command(
 ) -> None:
     """Execute a FilesClient operation with standard boilerplate.
 
-    Credential and context resolution both delegate to the shared chain
-    (env > OAuth profile > .kagura.json). The operator sees a single
-    error message that points at all three sources when nothing resolves.
+    When ``needs_context=True`` (the default), credential and
+    workspace_id are resolved together so they come from the same
+    source — see :func:`_build_files_client`. When ``needs_context=False``
+    (file-id-based operations like ``download-url`` / ``delete``) only
+    the client is built; ``ctx_id`` is the empty string and operations
+    must ignore it.
     """
     try:
         config = load_config()
 
         ctx_id = ""
         if needs_context:
-            ctx_id = _resolve_files_context_id(config, context_id)
-            if not ctx_id:
-                raise click.ClickException(
-                    "context_id required. Use --context-id, set context_id in "
-                    ".kagura.json, or run `kagura auth login` to bind a workspace."
-                )
-
-        client = _build_files_client(config)
+            client, ctx_id = _build_files_client(config, context_id)
+        else:
+            client = _build_files_client_from_auth(_resolve_files_auth(config))
 
         async def _run() -> Any:
             async with client:
