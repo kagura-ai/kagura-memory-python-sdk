@@ -629,7 +629,10 @@ def _format_workspace_403_hint(
     """
     if auth_source is None:
         return "HTTP 403"
-    source_label = _SOURCE_LABEL[auth_source]
+    # Use .get() with the raw value as fallback so an unexpected source tag
+    # (shouldn't happen — _auth_source is set by internal resolver code only)
+    # can never raise KeyError mid-403-handling and mask the real HTTP error.
+    source_label = _SOURCE_LABEL.get(auth_source, str(auth_source))
     lines = [
         "HTTP 403 — workspace not accessible with current credentials.",
         f"  api_key source: {source_label} (workspace={_short_workspace(source_workspace_hint)})",

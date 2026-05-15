@@ -803,6 +803,24 @@ async def test_request_403_with_source_emits_workspace_hint():
     assert "--context-id" in msg
 
 
+def test_format_workspace_403_hint_handles_unknown_source_tag():
+    """Defensive: an unexpected ``auth_source`` value never raises KeyError.
+
+    ``_auth_source`` is set only by internal resolver code so this path
+    shouldn't fire in practice — but 403 handling must not crash mid-error,
+    or the real HTTP failure would be masked by a KeyError.
+    """
+    from kagura_memory.files_client import _format_workspace_403_hint
+
+    msg = _format_workspace_403_hint(
+        auth_source="unexpected-source-tag",  # type: ignore[arg-type]
+        source_workspace_hint=None,
+        requested_workspace=None,
+    )
+    assert "HTTP 403" in msg
+    assert "unexpected-source-tag" in msg
+
+
 def test_short_workspace_returns_none_for_empty():
     """`_short_workspace` returns the ``<none>`` sentinel for empty/None input."""
     from kagura_memory.files_client import _short_workspace

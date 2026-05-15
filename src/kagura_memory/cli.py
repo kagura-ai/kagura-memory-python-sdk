@@ -1583,9 +1583,15 @@ def _resolve_workspace_from_source(
     Raises ``click.ClickException`` with an actionable message when no
     same-source workspace can be formed.
     """
-    # 1. Explicit -c always wins, regardless of source.
-    if explicit_ctx and explicit_ctx.strip() and explicit_ctx != _CONTEXT_ID_AUTO:
-        return explicit_ctx
+    # 1. Explicit -c always wins, regardless of source. Normalize via .strip()
+    #    so that whitespace-padded inputs (e.g. ``--context-id "  auto  "`` or
+    #    a UUID with surrounding spaces) are treated consistently: the
+    #    sentinel comparison ignores padding, and the returned value never
+    #    carries spaces downstream to FilesClient's UUID validator.
+    if explicit_ctx:
+        stripped_ctx = explicit_ctx.strip()
+        if stripped_ctx and stripped_ctx != _CONTEXT_ID_AUTO:
+            return stripped_ctx
 
     # 2. OAuth path: workspace is a snapshot from the profile.
     if isinstance(auth, _OAuthAuth):
