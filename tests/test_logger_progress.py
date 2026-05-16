@@ -19,8 +19,32 @@ import pytest
 from click.testing import CliRunner
 from rich.console import Console
 
+from kagura_memory.auth.credentials import reset_state_cache
 from kagura_memory.cli import _resolve_progress_logger, main
 from kagura_memory.logger import _NULL_LOGGER, VerboseLogger
+
+
+@pytest.fixture(autouse=True)
+def _isolate_credential_state(tmp_path, monkeypatch):
+    """Isolate every test from real ``~/.kagura/credentials.json`` and env vars.
+
+    The ``test_resource_import_*`` tests now route through
+    ``_get_resource_client`` → ``_resolve_auth``, which consults
+    OAuth credentials before the mocked config fallback. Without this
+    isolation, a developer's stored OAuth profile or ``KAGURA_PROFILE``
+    would pre-empt the test fixtures.
+    """
+    monkeypatch.setattr(
+        "kagura_memory.auth.credentials.DEFAULT_CREDENTIALS_PATH",
+        tmp_path / "default-credentials.json",
+    )
+    monkeypatch.delenv("KAGURA_API_KEY", raising=False)
+    monkeypatch.delenv("KAGURA_PROFILE", raising=False)
+    monkeypatch.delenv("KAGURA_MCP_URL", raising=False)
+    reset_state_cache()
+    yield
+    reset_state_cache()
+
 
 # ---------------------------------------------------------------------------
 # _NULL_LOGGER + output_format=none

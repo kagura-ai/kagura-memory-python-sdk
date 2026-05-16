@@ -2,10 +2,35 @@
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from click.testing import CliRunner
 
+from kagura_memory.auth.credentials import reset_state_cache
 from kagura_memory.cli import _parse_tags, main
 from tests.conftest import sleep_report_summary_dict
+
+
+@pytest.fixture(autouse=True)
+def _isolate_credential_state(tmp_path, monkeypatch):
+    """Isolate every test from real ``~/.kagura/credentials.json`` and env vars.
+
+    Several CLI helpers (``_get_resource_client``, ``_run_files_command``)
+    now walk the canonical SDK chain (``env > OAuth profile > .kagura.json``)
+    via ``_resolve_auth``. Without this isolation, a developer's stored
+    OAuth profile or a stale ``KAGURA_PROFILE`` could pre-empt the
+    config-only fixtures used by the resource / context tests below
+    and make them flaky across machines.
+    """
+    monkeypatch.setattr(
+        "kagura_memory.auth.credentials.DEFAULT_CREDENTIALS_PATH",
+        tmp_path / "default-credentials.json",
+    )
+    monkeypatch.delenv("KAGURA_API_KEY", raising=False)
+    monkeypatch.delenv("KAGURA_PROFILE", raising=False)
+    monkeypatch.delenv("KAGURA_MCP_URL", raising=False)
+    reset_state_cache()
+    yield
+    reset_state_cache()
 
 
 def test_parse_tags():
