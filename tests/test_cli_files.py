@@ -415,6 +415,18 @@ def test_files_upload_oauth_wins_over_config_when_both_present(monkeypatch, tmp_
     assert result.exit_code == 0, result.output
     mock_client.upload.assert_awaited_once()
     assert mock_client.upload.call_args.kwargs["context_id"] == SAMPLE_CTX_ID
+    # Pin the credential source explicitly — an `upload(context_id=…)`
+    # assertion alone could pass even if config silently won the api_key
+    # race, because the OAuth profile and config both target
+    # ``SAMPLE_CTX_ID`` in this fixture. Inspecting the resolved auth
+    # locks "OAuth wins entirely" rather than "the right workspace
+    # happened to be selected" (per PR #119 review feedback).
+    from kagura_memory._auth import _OAuthAuth
+
+    resolved = mock_client_cls._from_resolved_auth.call_args.args[0]
+    assert isinstance(resolved, _OAuthAuth), (
+        f"OAuth profile should win; got {type(resolved).__name__}"
+    )
 
 
 def test_files_upload_env_wins_over_config_api_key(monkeypatch, tmp_path):

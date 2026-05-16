@@ -45,11 +45,14 @@ from .models import (
 _SETUP_OAUTH_NOT_SUPPORTED_MSG = (
     "setup_resource() is not yet available in OAuth mode. "
     "To run it, switch to a credential source that outranks OAuth: "
-    "set KAGURA_API_KEY (env wins over OAuth) and retry, or remove "
-    "the active OAuth profile (e.g. `kagura auth logout`, or "
-    "`kagura auth logout --profile <name>` for named profiles "
-    "selected via KAGURA_PROFILE) so .kagura.json is consulted. "
-    "The CRUD/ingest endpoints continue to work in OAuth mode."
+    "set KAGURA_API_KEY (and KAGURA_MCP_URL too if your api_key is "
+    "not for the default cloud server — the env branch uses "
+    "KAGURA_MCP_URL or the default URL, not the OAuth profile's "
+    "stored mcp_url) and retry, or remove the active OAuth profile "
+    "(e.g. `kagura auth logout`, or `kagura auth logout --profile <name>` "
+    "for named profiles selected via KAGURA_PROFILE) so .kagura.json "
+    "is consulted. The CRUD/ingest endpoints continue to work in "
+    "OAuth mode."
 )
 
 
