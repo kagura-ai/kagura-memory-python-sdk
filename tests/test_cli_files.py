@@ -3,6 +3,7 @@
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from click.testing import CliRunner
 
 from kagura_memory.auth.credentials import (
@@ -13,6 +14,28 @@ from kagura_memory.auth.credentials import (
 )
 from kagura_memory.cli import main
 from kagura_memory.models import FileListResponse, FileObject
+
+
+@pytest.fixture(autouse=True)
+def _isolate_oauth_state(tmp_path, monkeypatch):
+    """Isolate every test from real ``~/.kagura/credentials.json`` and env.
+
+    Post-issue #118 the Files CLI walks the canonical SDK chain
+    (``env > OAuth profile > .kagura.json``), so any OAuth profile a
+    developer has stored on their machine would otherwise pre-empt the
+    config-only test fixtures and silently change behavior. Each test
+    starts from a clean credentials path and clean env; tests that need
+    OAuth state set it up explicitly.
+    """
+    fake_path = tmp_path / "default-credentials.json"
+    monkeypatch.setattr("kagura_memory.auth.credentials.DEFAULT_CREDENTIALS_PATH", fake_path)
+    monkeypatch.delenv("KAGURA_API_KEY", raising=False)
+    monkeypatch.delenv("KAGURA_PROFILE", raising=False)
+    monkeypatch.delenv("KAGURA_MCP_URL", raising=False)
+    reset_state_cache()
+    yield
+    reset_state_cache()
+
 
 SAMPLE_CTX_ID = "00000000-0000-0000-0000-000000000001"
 SAMPLE_FILE_ID = "10000000-0000-0000-0000-000000000002"
@@ -348,20 +371,23 @@ def test_files_upload_uses_oauth_workspace_id_when_no_context(monkeypatch, tmp_p
     assert mock_client.upload.call_args.kwargs["context_id"] == SAMPLE_CTX_ID
 
 
-def test_files_upload_rejects_auto_sentinel_with_config_api_key(monkeypatch, tmp_path):
-    """``.kagura.json:context_id == "auto"`` + config api_key + OAuth profile → reject.
+def test_files_upload_oauth_wins_over_config_when_both_present(monkeypatch, tmp_path):
+    """``.kagura.json`` api_key + OAuth profile (no env, no -c) → OAuth wins entirely.
 
-    Before issue #115 the CLI silently fell through to the OAuth
-    profile's ``workspace_id`` when ``context_id`` was ``"auto"``,
-    even though the api_key came from a different source. That
-    cross-source pairing is the bug; with #115, this scenario now
-    raises a clear error pointing the operator at ``--context-id`` or
-    ``.kagura.json``'s ``context_id`` field.
+    Issue #118 aligned the Files CLI with the SDK chain
+    ``env > OAuth > .kagura.json``. When both config api_key and an
+    OAuth profile exist, OAuth wins entirely for the credential
+    triple: ``api_key`` (Bearer via ``KaguraOAuth``), ``workspace_id``,
+    and ``mcp_url`` all come from the same OAuth profile (the
+    same-source invariant from #115, preserved structurally).
+
+    The CLI passes ``mcp_url=None`` to the resolver so each priority
+    branch pairs its credential with its own URL source — see
+    ``test_cli_resource.py::test_resource_list_oauth_profile_mcp_url_not_overridden_by_config``
+    for the dedicated regression test on the URL pairing.
     """
     fake_creds_path = tmp_path / "credentials.json"
     monkeypatch.setattr("kagura_memory.auth.credentials.DEFAULT_CREDENTIALS_PATH", fake_creds_path)
-    monkeypatch.delenv("KAGURA_API_KEY", raising=False)
-    monkeypatch.delenv("KAGURA_PROFILE", raising=False)
 
     cf = CredentialsFile()
     cf.set_profile("default", _oauth_creds_with_workspace(SAMPLE_CTX_ID))
@@ -370,10 +396,15 @@ def test_files_upload_rejects_auto_sentinel_with_config_api_key(monkeypatch, tmp
 
     from kagura_memory.cli import _CONTEXT_ID_AUTO
 
-    with patch(
-        "kagura_memory.cli.load_config",
-        return_value={"api_key": "key", "context_id": _CONTEXT_ID_AUTO},
+    mock_client = _mock_files_client("upload", _file_object())
+    with (
+        patch(
+            "kagura_memory.cli.load_config",
+            return_value={"api_key": "key", "context_id": _CONTEXT_ID_AUTO},
+        ),
+        patch("kagura_memory.cli.FilesClient") as mock_client_cls,
     ):
+        _wire_files_client_mock(mock_client_cls, mock_client)
         p = tmp_path / "hello.txt"
         p.write_text("hi")
         runner = CliRunner()
@@ -381,9 +412,58 @@ def test_files_upload_rejects_auto_sentinel_with_config_api_key(monkeypatch, tmp
 
     reset_state_cache()
 
-    assert result.exit_code != 0, result.output
-    assert "context_id is missing" in result.output or '"auto"' in result.output
-    assert "--context-id" in result.output
+    assert result.exit_code == 0, result.output
+    mock_client.upload.assert_awaited_once()
+    assert mock_client.upload.call_args.kwargs["context_id"] == SAMPLE_CTX_ID
+    # Pin the credential source explicitly — an `upload(context_id=…)`
+    # assertion alone could pass even if config silently won the api_key
+    # race, because the OAuth profile and config both target
+    # ``SAMPLE_CTX_ID`` in this fixture. Inspecting the resolved auth
+    # locks "OAuth wins entirely" rather than "the right workspace
+    # happened to be selected" (per PR #119 review feedback).
+    from kagura_memory._auth import _OAuthAuth
+
+    resolved = mock_client_cls._from_resolved_auth.call_args.args[0]
+    assert isinstance(resolved, _OAuthAuth), (
+        f"OAuth profile should win; got {type(resolved).__name__}"
+    )
+
+
+def test_files_upload_env_wins_over_config_api_key(monkeypatch, tmp_path):
+    """``KAGURA_API_KEY`` env + ``.kagura.json`` api_key + ``-c`` → env wins (#118 BREAKING).
+
+    Pre-#118 the Files CLI used a ``config > env > OAuth`` precedence,
+    so a session with both env and config api_key set would silently
+    pick config. Post-#118 the Files CLI walks the canonical SDK chain
+    (``env > OAuth > config``), aligning with ``KaguraClient``. The
+    env api_key has no workspace source, so ``-c`` is required —
+    asserting it explicitly threads through and the upload proceeds
+    locks the new precedence in place against a future revert.
+    """
+    monkeypatch.setenv("KAGURA_API_KEY", "env-key")
+
+    mock_client = _mock_files_client("upload", _file_object())
+    with (
+        patch(
+            "kagura_memory.cli.load_config",
+            return_value={"api_key": "config-key", "context_id": "should-be-ignored"},
+        ),
+        patch("kagura_memory.cli.FilesClient") as mock_client_cls,
+    ):
+        _wire_files_client_mock(mock_client_cls, mock_client)
+        p = tmp_path / "hello.txt"
+        p.write_text("hi")
+        runner = CliRunner()
+        result = runner.invoke(main, ["files", "upload", str(p), "-c", SAMPLE_CTX_ID])
+
+    assert result.exit_code == 0, result.output
+    mock_client.upload.assert_awaited_once()
+    assert mock_client.upload.call_args.kwargs["context_id"] == SAMPLE_CTX_ID
+    # FilesClient was constructed via _from_resolved_auth — inspect the
+    # _StaticAuth that flowed through to verify the env path won.
+    resolved = mock_client_cls._from_resolved_auth.call_args.args[0]
+    assert resolved.source == "env"
+    assert resolved.api_key == "env-key"
 
 
 def test_files_upload_rejects_env_api_key_without_context(monkeypatch, tmp_path):

@@ -2,10 +2,35 @@
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from click.testing import CliRunner
 
+from kagura_memory.auth.credentials import reset_state_cache
 from kagura_memory.cli import _parse_tags, main
 from tests.conftest import sleep_report_summary_dict
+
+
+@pytest.fixture(autouse=True)
+def _isolate_credential_state(tmp_path, monkeypatch):
+    """Isolate every test from real ``~/.kagura/credentials.json`` and env vars.
+
+    Several CLI helpers (``_get_resource_client``, ``_run_files_command``)
+    now walk the canonical SDK chain (``env > OAuth profile > .kagura.json``)
+    via ``_resolve_auth``. Without this isolation, a developer's stored
+    OAuth profile or a stale ``KAGURA_PROFILE`` could pre-empt the
+    config-only fixtures used by the resource / context tests below
+    and make them flaky across machines.
+    """
+    monkeypatch.setattr(
+        "kagura_memory.auth.credentials.DEFAULT_CREDENTIALS_PATH",
+        tmp_path / "default-credentials.json",
+    )
+    monkeypatch.delenv("KAGURA_API_KEY", raising=False)
+    monkeypatch.delenv("KAGURA_PROFILE", raising=False)
+    monkeypatch.delenv("KAGURA_MCP_URL", raising=False)
+    reset_state_cache()
+    yield
+    reset_state_cache()
 
 
 def test_parse_tags():
@@ -485,6 +510,7 @@ def test_resource_stats(mock_rc_cls, mock_config):
     mock_rc.__aenter__ = AsyncMock(return_value=mock_rc)
     mock_rc.__aexit__ = AsyncMock(return_value=None)
     mock_rc_cls.from_mcp_url.return_value = mock_rc
+    mock_rc_cls._from_resolved_auth.return_value = mock_rc
 
     runner = CliRunner()
     result = runner.invoke(main, ["resource", "stats", "-r", "products"])
@@ -507,6 +533,7 @@ def test_resource_schema(mock_rc_cls, mock_config):
     mock_rc.__aenter__ = AsyncMock(return_value=mock_rc)
     mock_rc.__aexit__ = AsyncMock(return_value=None)
     mock_rc_cls.from_mcp_url.return_value = mock_rc
+    mock_rc_cls._from_resolved_auth.return_value = mock_rc
 
     runner = CliRunner()
     result = runner.invoke(main, ["resource", "schema", "-r", "products"])
@@ -526,6 +553,7 @@ def test_resource_schema_not_registered(mock_rc_cls, mock_config):
     mock_rc.__aenter__ = AsyncMock(return_value=mock_rc)
     mock_rc.__aexit__ = AsyncMock(return_value=None)
     mock_rc_cls.from_mcp_url.return_value = mock_rc
+    mock_rc_cls._from_resolved_auth.return_value = mock_rc
 
     runner = CliRunner()
     result = runner.invoke(main, ["resource", "schema", "-r", "no-schema"])
@@ -546,6 +574,7 @@ def test_resource_setup(mock_rc_cls, mock_config):
     mock_rc.__aenter__ = AsyncMock(return_value=mock_rc)
     mock_rc.__aexit__ = AsyncMock(return_value=None)
     mock_rc_cls.from_mcp_url.return_value = mock_rc
+    mock_rc_cls._from_resolved_auth.return_value = mock_rc
 
     runner = CliRunner()
     result = runner.invoke(main, ["resource", "setup", "-r", "products", "-s", "catalog"])
@@ -565,6 +594,7 @@ def test_resource_list(mock_rc_cls, mock_config):
     mock_rc.__aenter__ = AsyncMock(return_value=mock_rc)
     mock_rc.__aexit__ = AsyncMock(return_value=None)
     mock_rc_cls.from_mcp_url.return_value = mock_rc
+    mock_rc_cls._from_resolved_auth.return_value = mock_rc
 
     runner = CliRunner()
     result = runner.invoke(main, ["resource", "list"])
@@ -587,6 +617,7 @@ def test_resource_indexer_status(mock_rc_cls, mock_config):
     mock_rc.__aenter__ = AsyncMock(return_value=mock_rc)
     mock_rc.__aexit__ = AsyncMock(return_value=None)
     mock_rc_cls.from_mcp_url.return_value = mock_rc
+    mock_rc_cls._from_resolved_auth.return_value = mock_rc
 
     runner = CliRunner()
     result = runner.invoke(main, ["resource", "indexer-status", "-r", "products"])
@@ -606,6 +637,7 @@ def test_resource_import_csv(mock_rc_cls, mock_config):
     mock_rc.__aenter__ = AsyncMock(return_value=mock_rc)
     mock_rc.__aexit__ = AsyncMock(return_value=None)
     mock_rc_cls.from_mcp_url.return_value = mock_rc
+    mock_rc_cls._from_resolved_auth.return_value = mock_rc
 
     csv_content = "name,price\nWidget,9.99\nGadget,19.99\nThing,29.99"
     runner = CliRunner()
@@ -629,6 +661,7 @@ def test_resource_import_jsonl(mock_rc_cls, mock_config):
     mock_rc.__aenter__ = AsyncMock(return_value=mock_rc)
     mock_rc.__aexit__ = AsyncMock(return_value=None)
     mock_rc_cls.from_mcp_url.return_value = mock_rc
+    mock_rc_cls._from_resolved_auth.return_value = mock_rc
 
     jsonl = '{"name":"A"}\n{"name":"B"}'
     runner = CliRunner()
@@ -688,6 +721,7 @@ def test_resource_import_json(mock_rc_cls, mock_config):
     mock_rc.__aenter__ = AsyncMock(return_value=mock_rc)
     mock_rc.__aexit__ = AsyncMock(return_value=None)
     mock_rc_cls.from_mcp_url.return_value = mock_rc
+    mock_rc_cls._from_resolved_auth.return_value = mock_rc
 
     runner = CliRunner()
     result = runner.invoke(

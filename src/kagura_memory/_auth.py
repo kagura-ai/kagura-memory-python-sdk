@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 from .auth.credentials import KaguraOAuth, get_shared_state
 from .config import load_config
@@ -94,11 +94,19 @@ def _resolve_auth(
     api_key: str | None,
     mcp_url: str | None,
     profile: str | None,
+    config: dict[str, Any] | None = None,
 ) -> _StaticAuth | _OAuthAuth:
     """Pick a credential source per the documented precedence chain.
 
     See :meth:`KaguraClient.__init__` for the full order. Raises
     :class:`KaguraAuthError` when no source produces credentials.
+
+    ``config`` is an optional pre-loaded ``.kagura.json`` dict. When
+    provided, the priority-4 fallback uses it directly instead of
+    re-invoking :func:`load_config`, so callers that have already
+    loaded the config (e.g. CLI commands needing ``context_id`` for
+    workspace pairing) avoid a redundant disk read. When ``None``,
+    :func:`load_config` is called as before.
     """
     # 1. Explicit constructor argument wins absolutely.
     # Empty / whitespace-only api_key is treated the same as None — sending
@@ -143,7 +151,7 @@ def _resolve_auth(
     # Apply the same whitespace-only strip check used for the explicit
     # arg and KAGURA_API_KEY env paths so a stray-whitespace config file
     # doesn't produce a guaranteed-401 `Authorization: Bearer ` header.
-    cfg = load_config()
+    cfg = config if config is not None else load_config()
     cfg_key = cfg.get("api_key", "")
     if cfg_key and cfg_key.strip():
         return _StaticAuth(
