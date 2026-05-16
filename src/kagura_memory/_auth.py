@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 from .auth.credentials import KaguraOAuth, get_shared_state
 from .config import load_config
@@ -94,7 +94,7 @@ def _resolve_auth(
     api_key: str | None,
     mcp_url: str | None,
     profile: str | None,
-    config: dict | None = None,
+    config: dict[str, Any] | None = None,
 ) -> _StaticAuth | _OAuthAuth:
     """Pick a credential source per the documented precedence chain.
 

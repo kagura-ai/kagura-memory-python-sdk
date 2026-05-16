@@ -34,6 +34,16 @@ from .models import (
     ResourceTokenUpdate,
 )
 
+# Message surfaced when ``setup_resource`` is called on an OAuth-resolved
+# client. Defined at module scope so the CLI test can assert against the
+# stable constant instead of pinning a substring of the rendered output.
+_SETUP_OAUTH_NOT_SUPPORTED_MSG = (
+    "setup_resource() is not yet available in OAuth mode. "
+    "Re-authenticate with a static api_key (set KAGURA_API_KEY "
+    "or run `kagura setup claude` to seed .kagura.json) and "
+    "retry. The CRUD/ingest endpoints work in OAuth mode."
+)
+
 
 class ResourceClient:
     """REST API client for Kagura Memory Cloud Resource Tokens.
@@ -153,9 +163,7 @@ class ResourceClient:
                 ``default_profile``).
         """
         resolved = _resolve_auth(api_key=api_key, mcp_url=mcp_url, profile=profile)
-        instance = cls._from_resolved_auth(resolved, timeout=timeout)
-        instance._mcp_url = resolved.mcp_url.rstrip("/")
-        return instance
+        return cls._from_resolved_auth(resolved, timeout=timeout)
 
     @classmethod
     def _from_resolved_auth(
@@ -170,21 +178,28 @@ class ResourceClient:
         :meth:`FilesClient._from_resolved_auth` so the two REST clients
         share one construction shape; downstream code (including the
         CLI's ``_run_resource_command``) can treat them symmetrically.
+
+        Stores ``mcp_url`` on the instance so :meth:`setup_resource` can
+        reach the MCP endpoint — the resolved auth always carries one,
+        whether sourced from the OAuth profile or the priority-4 config.
         """
         base_url = base_url_from_mcp(resolved.mcp_url.rstrip("/"))
         if isinstance(resolved, _StaticAuth):
-            return cls(
+            instance = cls(
                 api_key=resolved.api_key,
                 base_url=base_url,
                 timeout=timeout,
                 _auth_source=resolved.source,
             )
-        return cls(
-            base_url=base_url,
-            timeout=timeout,
-            _oauth=resolved.oauth,
-            _auth_source="oauth",
-        )
+        else:
+            instance = cls(
+                base_url=base_url,
+                timeout=timeout,
+                _oauth=resolved.oauth,
+                _auth_source="oauth",
+            )
+        instance._mcp_url = resolved.mcp_url.rstrip("/")
+        return instance
 
     async def _request(
         self,
@@ -377,17 +392,12 @@ class ResourceClient:
             )
 
         if self._oauth is not None:
-            # OAuth-mode setup is intentionally out of scope for #117 —
             # ``KaguraClient`` does not yet accept the resolved
-            # ``KaguraOAuth`` httpx.Auth, and threading it through is a
-            # larger surface change. Surface an actionable message so
-            # the operator knows the workaround.
-            raise NotImplementedError(
-                "setup_resource() is not yet available in OAuth mode. "
-                "Re-authenticate with a static api_key (set KAGURA_API_KEY "
-                "or run `kagura setup claude` to seed .kagura.json) and "
-                "retry. The CRUD/ingest endpoints work in OAuth mode."
-            )
+            # ``KaguraOAuth`` httpx.Auth, so the underlying MCP call
+            # in this method cannot be authenticated without a static
+            # api_key. Surface the workaround instead of failing with
+            # a header-scraping error a few lines down.
+            raise NotImplementedError(_SETUP_OAUTH_NOT_SUPPORTED_MSG)
 
         auth = self._client.headers.get("authorization", "")
         if not auth.startswith("Bearer "):

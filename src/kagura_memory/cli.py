@@ -1052,22 +1052,24 @@ def _get_resource_client() -> ResourceClient:
     """Load config and create ResourceClient via the canonical SDK chain.
 
     Walks :func:`_resolve_auth`'s precedence (``env > OAuth profile >
-    .kagura.json``), matching the Files CLI (#118) and :class:`KaguraClient`.
-    OAuth-only operators can now run ``kagura resource ...`` end-to-end
-    except for ``kagura resource setup``, which currently requires a
-    static api_key (see :meth:`ResourceClient.setup_resource`).
+    .kagura.json``), matching :class:`FilesClient` and :class:`KaguraClient`.
+    OAuth-only operators can run all ``kagura resource`` commands except
+    ``kagura resource setup``, which currently requires a static api_key
+    (see :meth:`ResourceClient.setup_resource`).
     """
     from .exceptions import KaguraAuthError
 
     config = load_config()
     try:
-        return ResourceClient.from_mcp_url(
+        resolved = _resolve_auth(
             api_key=None,
             mcp_url=config.get("mcp_url") or None,
             profile=os.getenv("KAGURA_PROFILE"),
+            config=config,
         )
     except KaguraAuthError as e:
         raise click.ClickException(str(e)) from e
+    return ResourceClient._from_resolved_auth(resolved)
 
 
 def _get_kagura_client() -> KaguraClient:

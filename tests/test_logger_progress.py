@@ -363,6 +363,7 @@ def test_resource_import_emits_single_terminal_success(mock_rc_cls, mock_config)
     mock_rc.__aenter__ = AsyncMock(return_value=mock_rc)
     mock_rc.__aexit__ = AsyncMock(return_value=None)
     mock_rc_cls.from_mcp_url.return_value = mock_rc
+    mock_rc_cls._from_resolved_auth.return_value = mock_rc
 
     jsonl = "\n".join(f'{{"name": "row{i}"}}' for i in range(250))
     # Click 8.2+ separates stdout / stderr on CliRunner.invoke by default
@@ -417,6 +418,7 @@ def test_resource_import_emits_terminal_error_on_batch_failure(mock_rc_cls, mock
     mock_rc.__aenter__ = AsyncMock(return_value=mock_rc)
     mock_rc.__aexit__ = AsyncMock(return_value=None)
     mock_rc_cls.from_mcp_url.return_value = mock_rc
+    mock_rc_cls._from_resolved_auth.return_value = mock_rc
 
     jsonl = "\n".join(f'{{"name": "row{i}"}}' for i in range(200))
     runner = CliRunner()
