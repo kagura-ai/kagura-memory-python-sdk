@@ -242,7 +242,12 @@ class ResourceClient:
         except httpx.HTTPStatusError as e:
             status = e.response.status_code
             if status == 401:
-                raise KaguraAuthError("Authentication failed. Check your API key.") from e
+                hint = (
+                    "Re-run `kagura auth login` or inspect ~/.kagura/credentials.json."
+                    if self._oauth is not None
+                    else "Check your API key."
+                )
+                raise KaguraAuthError(f"Authentication failed. {hint}") from e
             if status == 404:
                 raise KaguraNotFoundError(extract_detail(e.response) or "Not found") from e
             if status == 429:

@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-import os
 import sys
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -1064,7 +1063,7 @@ def _get_resource_client() -> ResourceClient:
         resolved = _resolve_auth(
             api_key=None,
             mcp_url=config.get("mcp_url") or None,
-            profile=os.getenv("KAGURA_PROFILE"),
+            profile=None,
             config=config,
         )
     except KaguraAuthError as e:
@@ -1678,7 +1677,7 @@ def _run_files_command(
         auth = _resolve_auth(
             api_key=None,
             mcp_url=config.get("mcp_url") or None,
-            profile=os.getenv("KAGURA_PROFILE"),
+            profile=None,
             config=config,
         )
 

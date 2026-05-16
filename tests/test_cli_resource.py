@@ -24,10 +24,11 @@ from tests.conftest import make_oauth_creds
 def _isolate_oauth_state(tmp_path, monkeypatch):
     """Isolate every test from real ``~/.kagura/credentials.json`` and env.
 
-    Mirrors the autouse isolation added in ``test_cli_files.py`` for the
-    same reason: the post-#117 resolver consults the OAuth profile before
+    The post-issue-#117 resolver consults the OAuth profile before
     ``.kagura.json``, so a developer's stored profile would otherwise
-    pre-empt config-only fixtures.
+    pre-empt config-only fixtures. Yields the redirected credentials path
+    so tests that need to write an OAuth profile can target it without
+    re-importing the patched module attribute.
     """
     fake_path = tmp_path / "default-credentials.json"
     monkeypatch.setattr("kagura_memory.auth.credentials.DEFAULT_CREDENTIALS_PATH", fake_path)
@@ -35,7 +36,7 @@ def _isolate_oauth_state(tmp_path, monkeypatch):
     monkeypatch.delenv("KAGURA_PROFILE", raising=False)
     monkeypatch.delenv("KAGURA_MCP_URL", raising=False)
     reset_state_cache()
-    yield
+    yield fake_path
     reset_state_cache()
 
 
@@ -86,16 +87,21 @@ def test_resource_list_uses_env_api_key(monkeypatch):
     assert resolved.api_key == "env-key"
 
 
-def test_resource_list_uses_oauth_profile():
-    """OAuth profile on disk + no env + no config → ResourceClient built via OAuth path."""
-    # The autouse fixture redirected DEFAULT_CREDENTIALS_PATH; write the
-    # profile there so the resolver finds it during priority-3.
-    import kagura_memory.auth.credentials as _creds
+def test_resource_list_uses_oauth_profile(_isolate_oauth_state):
+    """OAuth profile on disk + no env + no config → ResourceClient built via OAuth path.
+
+    Pins that api_key + workspace_id come from the OAuth profile (the
+    same-source pairing invariant from #115). The ``mcp_url`` paired
+    with the resolved credential follows the project-wide override
+    convention shared with ``KaguraClient`` (``config.mcp_url`` wins if
+    set; this test leaves it unset, so the OAuth profile's stored
+    ``mcp_url`` is what reaches the wire).
+    """
     from kagura_memory._auth import _OAuthAuth
 
     cf = CredentialsFile()
     cf.set_profile("default", make_oauth_creds())
-    save_credentials_file(cf, _creds.DEFAULT_CREDENTIALS_PATH)
+    save_credentials_file(cf, _isolate_oauth_state)
     reset_state_cache()
 
     mock_client = _mock_resource_client()
@@ -146,20 +152,18 @@ def test_resource_list_no_credentials_errors():
     assert "No credentials" in result.output or "kagura auth login" in result.output
 
 
-def test_resource_setup_in_oauth_mode_errors():
+def test_resource_setup_in_oauth_mode_errors(_isolate_oauth_state):
     """OAuth-mode ``kagura resource setup`` surfaces the NotImplementedError as a clean CLI error.
 
     ``ResourceClient.setup_resource`` raises ``NotImplementedError`` in
-    OAuth mode (intentionally out of scope for #117). ``_run_resource_command``
-    wraps unexpected exceptions in ``ClickException`` so the operator
-    sees a clean error message and an actionable hint instead of a
-    traceback.
+    OAuth mode (the underlying ``KaguraClient`` MCP call does not yet
+    accept an OAuth httpx.Auth). ``_run_resource_command`` wraps
+    unexpected exceptions in ``ClickException`` so the operator sees a
+    clean error message and an actionable hint instead of a traceback.
     """
-    import kagura_memory.auth.credentials as _creds
-
     cf = CredentialsFile()
     cf.set_profile("default", make_oauth_creds())
-    save_credentials_file(cf, _creds.DEFAULT_CREDENTIALS_PATH)
+    save_credentials_file(cf, _isolate_oauth_state)
     reset_state_cache()
 
     with patch("kagura_memory.cli.load_config", return_value={}):
