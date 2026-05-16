@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from kagura_memory import KaguraClient
+from kagura_memory._auth import _resolve_auth, _StaticAuth
 from kagura_memory.auth.credentials import (
     CredentialsFile,
     KaguraOAuth,
@@ -317,3 +318,30 @@ def test_kagura_json_fallback_static_path(tmp_path: Path, monkeypatch):
     assert client._client.auth is None  # static path, no httpx.Auth attached
     assert client.mcp_url == "https://legacy.example.com/mcp"
     reset_state_cache()
+
+
+def test_resolve_auth_uses_passed_config_without_disk_read(isolated_credentials, monkeypatch):
+    """_resolve_auth(config=...) honors a caller-supplied .kagura.json dict.
+
+    Callers that have already loaded the config (the CLI's
+    ``_run_files_command`` and ``_get_resource_client``) pass it through
+    so the priority-4 fallback never re-reads from disk. Verify the
+    contract directly: stub ``load_config`` to fail loudly, then call
+    ``_resolve_auth`` with an explicit ``config``. If the kwarg is
+    honored, the test passes without the stub firing.
+    """
+    monkeypatch.setattr(
+        "kagura_memory._auth.load_config",
+        lambda: pytest.fail("_resolve_auth must not re-read .kagura.json when config= is passed"),
+    )
+
+    resolved = _resolve_auth(
+        api_key=None,
+        mcp_url=None,
+        profile=None,
+        config={"api_key": "from-passed-config", "mcp_url": "https://passed.example.com/mcp"},
+    )
+    assert isinstance(resolved, _StaticAuth)
+    assert resolved.source == "config"
+    assert resolved.api_key == "from-passed-config"
+    assert resolved.mcp_url == "https://passed.example.com/mcp"
