@@ -1060,9 +1060,15 @@ def _get_resource_client() -> ResourceClient:
 
     config = load_config()
     try:
+        # mcp_url=None so each resolver branch pairs its credential with
+        # its own URL source (env → KAGURA_MCP_URL, OAuth → profile's
+        # stored mcp_url, config → .kagura.json's mcp_url). Forwarding
+        # ``config.get("mcp_url")`` here would override every branch
+        # with the config / env-default URL — including OAuth profiles
+        # bound to a non-default server (see PR #119 review).
         resolved = _resolve_auth(
             api_key=None,
-            mcp_url=config.get("mcp_url") or None,
+            mcp_url=None,
             profile=None,
             config=config,
         )
@@ -1674,9 +1680,14 @@ def _run_files_command(
     """
     try:
         config = load_config()
+        # mcp_url=None — let the resolver pair each credential source
+        # with its matching URL. Forwarding ``config.get("mcp_url")``
+        # would override OAuth profile's stored mcp_url with the
+        # config / env-default URL, routing OAuth users on a
+        # non-default server to the wrong host (see PR #119 review).
         auth = _resolve_auth(
             api_key=None,
-            mcp_url=config.get("mcp_url") or None,
+            mcp_url=None,
             profile=None,
             config=config,
         )

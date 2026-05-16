@@ -372,20 +372,19 @@ def test_files_upload_uses_oauth_workspace_id_when_no_context(monkeypatch, tmp_p
 
 
 def test_files_upload_oauth_wins_over_config_when_both_present(monkeypatch, tmp_path):
-    """``.kagura.json`` api_key + OAuth profile (no env, no -c) → OAuth wins for credential pairing.
+    """``.kagura.json`` api_key + OAuth profile (no env, no -c) → OAuth wins entirely.
 
     Issue #118 aligned the Files CLI with the SDK chain
     ``env > OAuth > .kagura.json``. When both config api_key and an
-    OAuth profile exist, OAuth wins for the **credential pairing**:
-    api_key comes from OAuth (Bearer header via ``KaguraOAuth``) and
-    workspace_id comes from the same OAuth profile, so #115's
-    same-source invariant is preserved structurally.
+    OAuth profile exist, OAuth wins entirely for the credential
+    triple: ``api_key`` (Bearer via ``KaguraOAuth``), ``workspace_id``,
+    and ``mcp_url`` all come from the same OAuth profile (the
+    same-source invariant from #115, preserved structurally).
 
-    Note: ``mcp_url`` follows the project-wide override convention
-    shared with ``KaguraClient`` — if ``config.mcp_url`` were set, it
-    would still win regardless of which credential source applied.
-    This test leaves ``config.mcp_url`` unset, so OAuth's stored
-    ``mcp_url`` reaches the wire as expected.
+    The CLI passes ``mcp_url=None`` to the resolver so each priority
+    branch pairs its credential with its own URL source — see
+    ``test_cli_resource.py::test_resource_list_oauth_profile_mcp_url_not_overridden_by_config``
+    for the dedicated regression test on the URL pairing.
     """
     fake_creds_path = tmp_path / "credentials.json"
     monkeypatch.setattr("kagura_memory.auth.credentials.DEFAULT_CREDENTIALS_PATH", fake_creds_path)

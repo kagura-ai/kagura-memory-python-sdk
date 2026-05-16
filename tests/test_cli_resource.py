@@ -90,12 +90,11 @@ def test_resource_list_uses_env_api_key(monkeypatch):
 def test_resource_list_uses_oauth_profile(_isolate_oauth_state):
     """OAuth profile on disk + no env + no config → ResourceClient built via OAuth path.
 
-    Pins that api_key + workspace_id come from the OAuth profile (the
-    same-source pairing invariant from #115). The ``mcp_url`` paired
-    with the resolved credential follows the project-wide override
-    convention shared with ``KaguraClient`` (``config.mcp_url`` wins if
-    set; this test leaves it unset, so the OAuth profile's stored
-    ``mcp_url`` is what reaches the wire).
+    Pins that api_key + workspace_id + mcp_url all come from the OAuth
+    profile (the same-source pairing invariant from #115). The CLI
+    passes ``mcp_url=None`` to the resolver so each priority branch
+    pairs its credential with its own URL source — for the OAuth
+    branch that's the profile's stored ``mcp_url``.
     """
     from kagura_memory._auth import _OAuthAuth
 
@@ -178,6 +177,52 @@ def test_resource_setup_in_oauth_mode_errors(_isolate_oauth_state):
     # ``_run_resource_command`` wraps exceptions in ``ClickException(str(e))``
     # so the operator sees the full message verbatim in the output.
     assert _SETUP_OAUTH_NOT_SUPPORTED_MSG in result.output
+
+
+def test_resource_list_oauth_profile_mcp_url_not_overridden_by_config(_isolate_oauth_state):
+    """OAuth profile's stored ``mcp_url`` must reach the wire when the
+    OAuth branch resolves the credential, even when ``.kagura.json``
+    (or its env-default fallback) supplies a different ``mcp_url``.
+
+    Regression test for a bug surfaced in PR #119 review: the CLI used
+    to forward ``config.get("mcp_url") or None`` as the explicit
+    ``mcp_url`` argument to ``_resolve_auth``. Because ``load_config()``
+    returns the default cloud URL when ``.kagura.json`` is absent, the
+    override path fired on every OAuth-only invocation — routing
+    OAuth users bound to a non-default server to the default cloud
+    host. The fix passes ``mcp_url=None`` so each resolver branch
+    pairs its credential with its own URL source.
+    """
+    custom_url = "https://custom.example.com/mcp"
+    cf = CredentialsFile()
+    cf.set_profile(
+        "default",
+        make_oauth_creds(server="https://custom.example.com"),
+    )
+    save_credentials_file(cf, _isolate_oauth_state)
+    reset_state_cache()
+
+    mock_client = _mock_resource_client()
+    mock_client.list_resources.return_value = MagicMock(model_dump_json=lambda **_: "{}")
+
+    # Config supplies a DIFFERENT mcp_url to ensure the OAuth branch
+    # wins by URL — not just by api_key.
+    with (
+        patch(
+            "kagura_memory.cli.load_config",
+            return_value={"mcp_url": "https://stale-config.example.com/mcp"},
+        ),
+        patch("kagura_memory.cli.ResourceClient") as mock_cls,
+    ):
+        _wire_resource_client_mock(mock_cls, mock_client)
+        runner = CliRunner()
+        result = runner.invoke(main, ["resource", "list"])
+
+    assert result.exit_code == 0, result.output
+    resolved = _resolved_from_call(mock_cls)
+    assert resolved.mcp_url == custom_url, (
+        f"OAuth profile's stored mcp_url should win, got {resolved.mcp_url}"
+    )
 
 
 def test_resource_list_env_wins_over_config_api_key(monkeypatch):
