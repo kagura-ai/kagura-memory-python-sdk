@@ -37,11 +37,18 @@ from .models import (
 # Message surfaced when ``setup_resource`` is called on an OAuth-resolved
 # client. Defined at module scope so the CLI test can assert against the
 # stable constant instead of pinning a substring of the rendered output.
+#
+# The hint MUST point at a credential source that outranks OAuth in the
+# resolver chain (``env > OAuth profile > .kagura.json``). Suggesting
+# ``.kagura.json`` is misleading — it ranks BELOW OAuth and would still
+# be skipped while the OAuth profile is present.
 _SETUP_OAUTH_NOT_SUPPORTED_MSG = (
     "setup_resource() is not yet available in OAuth mode. "
-    "Re-authenticate with a static api_key (set KAGURA_API_KEY "
-    "or run `kagura setup claude` to seed .kagura.json) and "
-    "retry. The CRUD/ingest endpoints work in OAuth mode."
+    "To run it, switch to a credential source that outranks OAuth: "
+    "set KAGURA_API_KEY (env wins over OAuth) and retry, or run "
+    "`kagura auth logout` first to remove the OAuth profile so "
+    ".kagura.json is consulted. The CRUD/ingest endpoints continue "
+    "to work in OAuth mode."
 )
 
 
