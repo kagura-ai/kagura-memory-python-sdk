@@ -34,6 +34,35 @@ _DEFAULT_OVERVIEW_TOKENS = 400
 _DEFAULT_SECTION_TOKENS = 200
 _DEFAULT_CONCURRENCY = 4
 
+# Keys stamped by the SDK in _write_overview. Callers must not pass these in
+# details_extra — collisions are rejected with ValueError at ingest() entry.
+_OVERVIEW_RESERVED: frozenset[str] = frozenset(
+    {
+        "format",
+        "source_uri",
+        "section_count",
+        "extracted_at",
+        "pages",
+        "file_id",
+        "sha256",
+        "size_bytes",
+    }
+)
+
+# Keys stamped by the SDK in _write_sections → write_one. Same policy.
+_SECTION_RESERVED: frozenset[str] = frozenset(
+    {
+        "parent_id",
+        "role",
+        "section_index",
+        "depth",
+        "anchor",
+        "page_range",
+    }
+)
+
+_ALL_RESERVED: frozenset[str] = _OVERVIEW_RESERVED | _SECTION_RESERVED
+
 
 class FileIngestor:
     """Orchestrate URL/file → Memory Cloud ingestion."""
@@ -104,6 +133,7 @@ class FileIngestor:
         allow_http: bool = False,
         allow_system_paths: bool = False,
         archive_original: bool = True,
+        details_extra: dict[str, Any] | None = None,
         logger: VerboseLogger | None = None,
     ) -> IngestResult:
         """Run a full ingestion against ``source``.
@@ -117,6 +147,33 @@ class FileIngestor:
                 archival (saves R2 storage; the memory then has no
                 back-reference to the original bytes). No effect when
                 ``files_client`` is None.
+            details_extra: Optional caller-supplied key/value pairs to
+                stamp onto ``memory.details`` for both the overview
+                memory and every section memory. Use this to bind
+                context-specific metadata (e.g. ``connector_id``,
+                ``team_id``) that is not available to the SDK itself.
+                The keys are merged in *after* the SDK has built its
+                own ``details`` dict, so they are purely additive —
+                they never overwrite SDK-stamped keys.
+
+                Reserved keys that the SDK stamps on the overview are:
+                ``format``, ``source_uri``, ``section_count``,
+                ``extracted_at``, ``pages``, ``file_id``, ``sha256``,
+                ``size_bytes``.
+
+                Reserved keys that the SDK stamps on each section are:
+                ``parent_id``, ``role``, ``section_index``, ``depth``,
+                ``anchor``, ``page_range``.
+
+                (Canonical source: the module-level constants
+                :data:`_OVERVIEW_RESERVED` and :data:`_SECTION_RESERVED`.
+                If the lists above ever diverge from those, the constants
+                are authoritative — the runtime check reads from them.)
+
+                Passing any of these reserved keys raises
+                :exc:`ValueError` at ``ingest()`` entry, before any
+                fetch or write operation is performed. Non-``str`` keys
+                raise :exc:`TypeError` at the same point.
             logger: Optional :class:`VerboseLogger` for progress events
                 (Rich for human stderr, NDJSON for AI consumers). When
                 omitted, the no-op :data:`_NULL_LOGGER` is used and no
@@ -126,6 +183,27 @@ class FileIngestor:
                 an unhandled exception escapes the body.
         """
         log = normalize_logger(logger)
+        # Use `is not None` (not truthiness) so an empty dict still goes through
+        # the validate-and-seal path. Otherwise a caller passing `{}` would skip
+        # the shallow copy below and keep a live reference into the SDK, which
+        # they could mutate across the awaits to add reserved keys after the
+        # gate had passed.
+        if details_extra is not None:
+            # The type hint `dict[str, Any]` is not enforced at runtime, so a
+            # caller can still hand us non-str keys. The downstream `sorted(...)`
+            # and `', '.join(...)` would then die with a cryptic TypeError; raise
+            # an explicit one here so the caller's error path is unambiguous.
+            non_str = [type(k).__name__ for k in details_extra if not isinstance(k, str)]
+            if non_str:
+                raise TypeError(f"details_extra keys must be str, got {sorted(set(non_str))}")
+            conflicts = sorted(details_extra.keys() & _ALL_RESERVED)
+            if conflicts:
+                raise ValueError(f"details_extra contains reserved keys: {', '.join(conflicts)}")
+            # Shallow-copy to seal the validated key set. Without this, a caller
+            # holding the original dict could mutate it across the awaits below
+            # (fetch, extract, summarize) and slip reserved keys past the gate
+            # into the downstream `details.update()` calls.
+            details_extra = dict(details_extra)
         log.action("Fetching source", source, stage="fetch")
         try:
             fetched = await self._fetch(
@@ -153,6 +231,7 @@ class FileIngestor:
                 tags=tags,
                 importance=importance,
                 archive_original=archive_original,
+                details_extra=details_extra,
                 logger=log,
             )
         except BaseException as e:
@@ -297,6 +376,7 @@ class FileIngestor:
         tags: list[str] | None,
         importance: float,
         archive_original: bool,
+        details_extra: dict[str, Any] | None = None,
         logger: VerboseLogger | None = None,
     ) -> IngestResult:
         log = normalize_logger(logger)
@@ -375,6 +455,7 @@ class FileIngestor:
             tags=tags,
             importance=importance,
             archived=archived,
+            details_extra=details_extra,
             errors=errors,
         )
 
@@ -388,6 +469,7 @@ class FileIngestor:
                 context_id=context_id,
                 tags=tags,
                 importance=importance,
+                details_extra=details_extra,
                 errors=errors,
             )
 
@@ -483,6 +565,7 @@ class FileIngestor:
         tags: list[str] | None,
         importance: float,
         archived: FileObject | None,
+        details_extra: dict[str, Any] | None = None,
         errors: list[IngestErrorRecord],
     ) -> str | None:
         title = content.title or _infer_title(fetched.source_uri)
@@ -498,6 +581,8 @@ class FileIngestor:
             details["file_id"] = archived.id
             details["sha256"] = archived.sha256
             details["size_bytes"] = archived.size_bytes
+        if details_extra is not None:
+            details.update(details_extra)
 
         try:
             result = await self._client.remember(
@@ -550,6 +635,7 @@ class FileIngestor:
         context_id: str,
         tags: list[str] | None,
         importance: float,
+        details_extra: dict[str, Any] | None = None,
         errors: list[IngestErrorRecord],
     ) -> list[str]:
         sem = asyncio.Semaphore(self._concurrency)
@@ -571,6 +657,8 @@ class FileIngestor:
                 details["anchor"] = chunk_obj.anchor
             if chunk_obj.page_range:
                 details["page_range"] = list(chunk_obj.page_range)
+            if details_extra is not None:
+                details.update(details_extra)
             heading = chunk_obj.heading or f"section {idx + 1}"
 
             async with sem:
