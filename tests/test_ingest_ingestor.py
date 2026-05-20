@@ -439,3 +439,153 @@ async def test_archive_no_files_client_skips_silently() -> None:
     assert result.success is True
     assert not any(e.step == "archive" for e in result.errors)
     await client.close()
+
+
+# ---------------------------------------------------------------------------
+# details_extra (#120)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_details_extra_stamped_on_overview_and_sections() -> None:
+    """Happy path: details_extra keys appear in every remember() call."""
+    client = _make_client()
+    provider = FakeProvider()
+    ingestor = FileIngestor(
+        client=client,
+        text_provider=provider,
+        vision_provider=None,
+    )
+
+    counter = {"n": 0}
+    captured: list[dict[str, Any]] = []
+
+    async def capture_remember(*, context_id: str, **kwargs: Any) -> dict[str, Any]:
+        captured.append({"context_id": context_id, **kwargs})
+        counter["n"] += 1
+        return {"memory_id": f"mem-{counter['n']}"}
+
+    with patch.object(client, "remember", side_effect=capture_remember):
+        result = await ingestor.ingest(
+            str(FIXTURE),
+            context_id="ctx-uuid",
+            details_extra={"connector_id": "C1", "platform": "slack"},
+        )
+
+    assert result.success is True
+    # All remember() calls (overview + sections) must carry the extra keys.
+    assert len(captured) >= 2
+    for call in captured:
+        assert call["details"]["connector_id"] == "C1"
+        assert call["details"]["platform"] == "slack"
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_details_extra_none_default_no_extra_keys() -> None:
+    """Omitting details_extra (None) produces no extra keys on details — regression guard."""
+    client = _make_client()
+    provider = FakeProvider()
+    ingestor = FileIngestor(
+        client=client,
+        text_provider=provider,
+        vision_provider=None,
+    )
+
+    counter = {"n": 0}
+    captured: list[dict[str, Any]] = []
+
+    async def capture_remember(*, context_id: str, **kwargs: Any) -> dict[str, Any]:
+        captured.append({"context_id": context_id, **kwargs})
+        counter["n"] += 1
+        return {"memory_id": f"mem-{counter['n']}"}
+
+    with patch.object(client, "remember", side_effect=capture_remember):
+        result = await ingestor.ingest(str(FIXTURE), context_id="ctx-uuid")
+
+    assert result.success is True
+    overview_details = captured[0]["details"]
+    sdk_keys = {"format", "source_uri", "section_count", "extracted_at"}
+    assert sdk_keys <= set(overview_details.keys())
+    # No extra keys beyond what the SDK stamps.
+    assert "connector_id" not in overview_details
+    assert "platform" not in overview_details
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_details_extra_overview_reserved_collision_raises() -> None:
+    """Passing a key reserved by the overview (file_id) raises ValueError before any remember."""
+    client = _make_client()
+    provider = FakeProvider()
+    ingestor = FileIngestor(
+        client=client,
+        text_provider=provider,
+        vision_provider=None,
+    )
+
+    with patch.object(client, "remember", new_callable=AsyncMock) as mock_remember:
+        with pytest.raises(ValueError, match="file_id"):
+            await ingestor.ingest(
+                str(FIXTURE),
+                context_id="ctx-uuid",
+                details_extra={"file_id": "fake"},
+            )
+        mock_remember.assert_not_called()
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_details_extra_section_reserved_collision_raises() -> None:
+    """Passing a key reserved by section writes (parent_id) raises ValueError before any write."""
+    client = _make_client()
+    provider = FakeProvider()
+    ingestor = FileIngestor(
+        client=client,
+        text_provider=provider,
+        vision_provider=None,
+    )
+
+    with patch.object(client, "remember", new_callable=AsyncMock) as mock_remember:
+        with pytest.raises(ValueError, match="parent_id"):
+            await ingestor.ingest(
+                str(FIXTURE),
+                context_id="ctx-uuid",
+                details_extra={"parent_id": "fake"},
+            )
+        mock_remember.assert_not_called()
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_details_extra_multiple_reserved_collisions_sorted() -> None:
+    """Multiple reserved key collisions are reported together in sorted order."""
+    client = _make_client()
+    provider = FakeProvider()
+    ingestor = FileIngestor(
+        client=client,
+        text_provider=provider,
+        vision_provider=None,
+    )
+
+    with patch.object(client, "remember", new_callable=AsyncMock) as mock_remember:
+        with pytest.raises(ValueError, match="file_id") as exc_info:
+            await ingestor.ingest(
+                str(FIXTURE),
+                context_id="ctx-uuid",
+                details_extra={"file_id": "x", "parent_id": "y"},
+            )
+        # Both keys must appear in the error message, in sorted order.
+        msg = str(exc_info.value)
+        assert "file_id" in msg
+        assert "parent_id" in msg
+        file_id_pos = msg.index("file_id")
+        parent_id_pos = msg.index("parent_id")
+        assert file_id_pos < parent_id_pos, "keys must appear in sorted order (file_id < parent_id)"
+        mock_remember.assert_not_called()
+
+    await client.close()
