@@ -18,7 +18,7 @@ pytest.importorskip("pymupdf", reason="pymupdf not installed — install [ingest
 
 from kagura_memory.client import KaguraClient  # noqa: E402
 from kagura_memory.ingest import FileIngestor  # noqa: E402
-from kagura_memory.ingest.ingestor import _OVERVIEW_RESERVED  # noqa: E402
+from kagura_memory.ingest.ingestor import _OVERVIEW_RESERVED, _SECTION_RESERVED  # noqa: E402
 from kagura_memory.ingest.providers.base import Provider  # noqa: E402
 
 FIXTURE = Path(__file__).parent / "fixtures" / "sample.pdf"
@@ -512,6 +512,13 @@ async def test_details_extra_none_default_no_extra_keys() -> None:
     # No extra keys beyond what the SDK stamps.
     assert "connector_id" not in overview_details
     assert "platform" not in overview_details
+
+    # Same drift guard for every section (Copilot #121 review).
+    for section_call in captured[1:]:
+        section_details = section_call["details"]
+        assert set(section_details.keys()) <= _SECTION_RESERVED
+        assert "connector_id" not in section_details
+        assert "platform" not in section_details
 
     await client.close()
 
