@@ -16,20 +16,17 @@ This project is developed with [Claude Code](https://claude.com/claude-code). Sl
 
 | Command | Description |
 |---------|-------------|
-| `/onboarding` | Interactive setup — verify config, test connection, create context |
-| `/workflow` | Show current state and next step |
 | `/quality` | Run lint, format, type check, tests |
 | `/simplify` | Review for code reuse and efficiency |
 | `/self-review` | Pre-PR review (correctness, security, coverage, etc.) |
 | `/self-maint` | Audit `.claude/` config against codebase |
+| `/test` | Run the test suite |
 | `/release patch\|minor\|major` | Bump version, tag, publish, create GitHub Release |
-| `/kagura-guide` | SDK usage reference (clients, models, CLI) |
+| `/kagura-memory:guide` | SDK usage reference (clients, models, CLI) |
 
 ### Recommended flow
 
 ```
-/onboarding        # First time? Set up config and verify connection
-/workflow           # Where am I? What's next?
 # ... implement ...
 /quality            # All checks pass?
 /simplify           # Any improvements?
@@ -86,3 +83,5 @@ All PRs must pass codecov/patch — every changed line needs a test.
 | `KaguraClient` | MCP (JSON-RPC) | Memory + context operations |
 | `KaguraAgent` | MCP + LLM | AI-powered session analysis with hooks/skills |
 | `ResourceClient` | REST API | Resource token management + data ingestion |
+| `FilesClient` | REST + presigned PUT | File uploads with R2 sha256 checksum binding |
+| `FileIngestor` | CLI + SDK | Document ingestion (PDF → memory graph + R2 archive) |

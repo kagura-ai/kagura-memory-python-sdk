@@ -241,12 +241,10 @@ Re-uploading bytes whose sha256 already exists in the workspace returns the **ex
 
 | SDK | Min memory-cloud | Notes |
 |---|---|---|
-| 0.14.0 | 0.15.1 | `FilesClient` + R2 checksum binding (`x-amz-checksum-sha256` on PUT) |
+| 0.14.0+ | 0.15.1 | `FilesClient` + R2 checksum binding (`x-amz-checksum-sha256` on PUT) |
 | 0.13.x | 0.13.0 | Pre-`FilesClient` |
 
-When pointing the SDK at a backend with `R2_CHECKSUM_BINDING_ENABLED=true`, the SDK must be v0.14.0+ — older versions don't send the signed checksum header and uploads fail with `HTTP 403 SignatureDoesNotMatch`.
-
-> The `0.14.0` row above describes the next minor release; `__version__` is bumped from `0.13.0` to `0.14.0` by `/release minor` (see `.claude/rules/versioning.md`) at tag time, not in this feature branch.
+`MIN_SERVER_VERSION` in `src/kagura_memory/client.py` is the authoritative floor — the SDK refuses to call newer MCP tools against an older server. When pointing the SDK at a backend with `R2_CHECKSUM_BINDING_ENABLED=true`, the SDK must be v0.14.0+; older versions don't send the signed checksum header and uploads fail with `HTTP 403 SignatureDoesNotMatch`.
 
 ## CLI
 
@@ -411,14 +409,13 @@ uv run pytest tests/ -v          # Test
 This project is developed with [Claude Code](https://claude.com/claude-code):
 
 ```
-/onboarding      # Interactive setup — verify config, test connection
-/workflow        # Check current state and next step
-/quality         # Run all quality checks
-/simplify        # Review for reuse, quality, efficiency
-/self-review     # Pre-PR self-review
-/self-maint      # Audit .claude/ config against codebase
-/release <level> # Bump version, tag, push, create GitHub Release
-/kagura-guide    # SDK usage reference
+/quality                # Run lint, format, type check, tests
+/simplify               # Review for reuse, quality, efficiency
+/self-review            # Pre-PR self-review
+/self-maint             # Audit .claude/ config against codebase
+/test                   # Run the test suite
+/release <level>        # Bump version, tag, push, create GitHub Release
+/kagura-memory:guide    # SDK usage reference (kagura-memory plugin)
 ```
 
 **Typical flow:** Issue → Branch → Implement → `/quality` → `/simplify` → `/self-review` → PR → Merge → `/release`
