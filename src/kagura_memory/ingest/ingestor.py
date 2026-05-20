@@ -61,6 +61,8 @@ _SECTION_RESERVED: frozenset[str] = frozenset(
     }
 )
 
+_ALL_RESERVED: frozenset[str] = _OVERVIEW_RESERVED | _SECTION_RESERVED
+
 
 class FileIngestor:
     """Orchestrate URL/file → Memory Cloud ingestion."""
@@ -176,10 +178,9 @@ class FileIngestor:
         """
         log = normalize_logger(logger)
         if details_extra:
-            reserved = _OVERVIEW_RESERVED | _SECTION_RESERVED
-            conflicts = sorted(set(details_extra.keys()) & reserved)
+            conflicts = sorted(details_extra.keys() & _ALL_RESERVED)
             if conflicts:
-                raise ValueError(f"details_extra contains reserved keys: {conflicts}")
+                raise ValueError(f"details_extra contains reserved keys: {', '.join(conflicts)}")
         log.action("Fetching source", source, stage="fetch")
         try:
             fetched = await self._fetch(
