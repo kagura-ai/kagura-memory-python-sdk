@@ -177,7 +177,12 @@ class FileIngestor:
                 an unhandled exception escapes the body.
         """
         log = normalize_logger(logger)
-        if details_extra:
+        # Use `is not None` (not truthiness) so an empty dict still goes through
+        # the validate-and-seal path. Otherwise a caller passing `{}` would skip
+        # the shallow copy below and keep a live reference into the SDK, which
+        # they could mutate across the awaits to add reserved keys after the
+        # gate had passed.
+        if details_extra is not None:
             conflicts = sorted(details_extra.keys() & _ALL_RESERVED)
             if conflicts:
                 raise ValueError(f"details_extra contains reserved keys: {', '.join(conflicts)}")
@@ -563,7 +568,7 @@ class FileIngestor:
             details["file_id"] = archived.id
             details["sha256"] = archived.sha256
             details["size_bytes"] = archived.size_bytes
-        if details_extra:
+        if details_extra is not None:
             details.update(details_extra)
 
         try:
@@ -639,7 +644,7 @@ class FileIngestor:
                 details["anchor"] = chunk_obj.anchor
             if chunk_obj.page_range:
                 details["page_range"] = list(chunk_obj.page_range)
-            if details_extra:
+            if details_extra is not None:
                 details.update(details_extra)
             heading = chunk_obj.heading or f"section {idx + 1}"
 

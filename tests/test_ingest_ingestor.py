@@ -610,3 +610,49 @@ async def test_details_extra_multiple_reserved_collisions_sorted() -> None:
         mock_fetch.assert_not_called()
 
     await client.close()
+
+
+@pytest.mark.asyncio
+async def test_details_extra_empty_dict_seals_against_post_call_mutation() -> None:
+    """Empty dict still triggers the seal; caller post-call mutation cannot inject reserved keys.
+
+    Regression guard for the TOCTOU window between validation and per-writer
+    update() calls. With `if details_extra is not None`, the empty-dict path
+    goes through the shallow-copy seal — so when the caller later mutates
+    their original reference (here, during the overview remember() call),
+    the section writes do NOT see the spoofed key.
+    """
+    client = _make_client()
+    provider = FakeProvider()
+    ingestor = FileIngestor(
+        client=client,
+        text_provider=provider,
+        vision_provider=None,
+    )
+
+    caller_dict: dict[str, Any] = {}
+    counter = {"n": 0}
+    captured: list[dict[str, Any]] = []
+
+    async def capture_remember(*, context_id: str, **kwargs: Any) -> dict[str, Any]:
+        # Mutate the caller-owned dict mid-ingest. With the seal this has no
+        # effect on the SDK's internal copy; without the seal the section
+        # writes would pick up the spoofed file_id and corrupt graph state.
+        caller_dict["file_id"] = "spoofed-by-caller"
+        captured.append({"context_id": context_id, **kwargs})
+        counter["n"] += 1
+        return {"memory_id": f"mem-{counter['n']}"}
+
+    with patch.object(client, "remember", side_effect=capture_remember):
+        result = await ingestor.ingest(
+            str(FIXTURE),
+            context_id="ctx-uuid",
+            details_extra=caller_dict,
+        )
+
+    assert result.success is True
+    # No captured remember() call may carry the spoofed value.
+    for call in captured:
+        assert call["details"].get("file_id") != "spoofed-by-caller"
+
+    await client.close()
