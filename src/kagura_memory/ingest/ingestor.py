@@ -183,6 +183,13 @@ class FileIngestor:
         # they could mutate across the awaits to add reserved keys after the
         # gate had passed.
         if details_extra is not None:
+            # The type hint `dict[str, Any]` is not enforced at runtime, so a
+            # caller can still hand us non-str keys. The downstream `sorted(...)`
+            # and `', '.join(...)` would then die with a cryptic TypeError; raise
+            # an explicit one here so the caller's error path is unambiguous.
+            non_str = [type(k).__name__ for k in details_extra if not isinstance(k, str)]
+            if non_str:
+                raise TypeError(f"details_extra keys must be str, got {sorted(set(non_str))}")
             conflicts = sorted(details_extra.keys() & _ALL_RESERVED)
             if conflicts:
                 raise ValueError(f"details_extra contains reserved keys: {', '.join(conflicts)}")

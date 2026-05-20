@@ -656,3 +656,30 @@ async def test_details_extra_empty_dict_seals_against_post_call_mutation() -> No
         assert call["details"].get("file_id") != "spoofed-by-caller"
 
     await client.close()
+
+
+@pytest.mark.asyncio
+async def test_details_extra_non_str_keys_raise_type_error() -> None:
+    """Non-str keys raise TypeError at entry, not a cryptic one from sorted() downstream."""
+    client = _make_client()
+    provider = FakeProvider()
+    ingestor = FileIngestor(
+        client=client,
+        text_provider=provider,
+        vision_provider=None,
+    )
+
+    with (
+        patch.object(client, "remember", new_callable=AsyncMock) as mock_remember,
+        patch.object(ingestor, "_fetch", new_callable=AsyncMock) as mock_fetch,
+    ):
+        with pytest.raises(TypeError, match="details_extra keys must be str"):
+            await ingestor.ingest(
+                str(FIXTURE),
+                context_id="ctx-uuid",
+                details_extra={42: "int-key-is-invalid"},  # type: ignore[dict-item]
+            )
+        mock_remember.assert_not_called()
+        mock_fetch.assert_not_called()
+
+    await client.close()
