@@ -534,14 +534,19 @@ async def test_details_extra_overview_reserved_collision_raises() -> None:
         vision_provider=None,
     )
 
-    with patch.object(client, "remember", new_callable=AsyncMock) as mock_remember:
+    with (
+        patch.object(client, "remember", new_callable=AsyncMock) as mock_remember,
+        patch.object(ingestor, "_fetch", new_callable=AsyncMock) as mock_fetch,
+    ):
         with pytest.raises(ValueError, match="file_id"):
             await ingestor.ingest(
                 str(FIXTURE),
                 context_id="ctx-uuid",
                 details_extra={"file_id": "fake"},
             )
+        # "before any fetch or write" contract — both halves verified.
         mock_remember.assert_not_called()
+        mock_fetch.assert_not_called()
 
     await client.close()
 
@@ -557,7 +562,10 @@ async def test_details_extra_section_reserved_collision_raises() -> None:
         vision_provider=None,
     )
 
-    with patch.object(client, "remember", new_callable=AsyncMock) as mock_remember:
+    with (
+        patch.object(client, "remember", new_callable=AsyncMock) as mock_remember,
+        patch.object(ingestor, "_fetch", new_callable=AsyncMock) as mock_fetch,
+    ):
         with pytest.raises(ValueError, match="parent_id"):
             await ingestor.ingest(
                 str(FIXTURE),
@@ -565,6 +573,7 @@ async def test_details_extra_section_reserved_collision_raises() -> None:
                 details_extra={"parent_id": "fake"},
             )
         mock_remember.assert_not_called()
+        mock_fetch.assert_not_called()
 
     await client.close()
 
@@ -580,7 +589,10 @@ async def test_details_extra_multiple_reserved_collisions_sorted() -> None:
         vision_provider=None,
     )
 
-    with patch.object(client, "remember", new_callable=AsyncMock) as mock_remember:
+    with (
+        patch.object(client, "remember", new_callable=AsyncMock) as mock_remember,
+        patch.object(ingestor, "_fetch", new_callable=AsyncMock) as mock_fetch,
+    ):
         with pytest.raises(ValueError, match="file_id") as exc_info:
             await ingestor.ingest(
                 str(FIXTURE),
@@ -595,5 +607,6 @@ async def test_details_extra_multiple_reserved_collisions_sorted() -> None:
         parent_id_pos = msg.index("parent_id")
         assert file_id_pos < parent_id_pos, "keys must appear in sorted order (file_id < parent_id)"
         mock_remember.assert_not_called()
+        mock_fetch.assert_not_called()
 
     await client.close()

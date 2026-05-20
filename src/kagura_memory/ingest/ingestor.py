@@ -181,6 +181,11 @@ class FileIngestor:
             conflicts = sorted(details_extra.keys() & _ALL_RESERVED)
             if conflicts:
                 raise ValueError(f"details_extra contains reserved keys: {', '.join(conflicts)}")
+            # Shallow-copy to seal the validated key set. Without this, a caller
+            # holding the original dict could mutate it across the awaits below
+            # (fetch, extract, summarize) and slip reserved keys past the gate
+            # into the downstream `details.update()` calls.
+            details_extra = dict(details_extra)
         log.action("Fetching source", source, stage="fetch")
         try:
             fetched = await self._fetch(
