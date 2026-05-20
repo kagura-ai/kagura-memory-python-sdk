@@ -165,9 +165,15 @@ class FileIngestor:
                 ``parent_id``, ``role``, ``section_index``, ``depth``,
                 ``anchor``, ``page_range``.
 
+                (Canonical source: the module-level constants
+                :data:`_OVERVIEW_RESERVED` and :data:`_SECTION_RESERVED`.
+                If the lists above ever diverge from those, the constants
+                are authoritative — the runtime check reads from them.)
+
                 Passing any of these reserved keys raises
                 :exc:`ValueError` at ``ingest()`` entry, before any
-                fetch or write operation is performed.
+                fetch or write operation is performed. Non-``str`` keys
+                raise :exc:`TypeError` at the same point.
             logger: Optional :class:`VerboseLogger` for progress events
                 (Rich for human stderr, NDJSON for AI consumers). When
                 omitted, the no-op :data:`_NULL_LOGGER` is used and no
