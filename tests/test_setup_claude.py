@@ -479,6 +479,42 @@ def test_setup_claude_generic_connection_error(
     assert "Connection failed" in result.output
 
 
+@patch("kagura_memory.setup_claude._test_connection")
+def test_setup_claude_connection_failed_unmessaged_exception(
+    mock_conn: AsyncMock,
+    runner: CliRunner,
+    tmp_path: Path,
+) -> None:
+    # str(e) is "" for a no-arg exception; the wrapper must still surface a
+    # diagnostic (the class name) instead of "Connection failed: " (#127).
+    mock_conn.side_effect = RuntimeError()
+
+    result = runner.invoke(main, _setup_args(tmp_path))
+
+    assert result.exit_code != 0
+    assert "Connection failed: RuntimeError" in result.output
+    assert "Connection failed: \n" not in result.output
+    assert "Connection failed:\n" not in result.output
+
+
+@patch("kagura_memory.cli.run_setup_claude")
+def test_setup_claude_setup_failed_unmessaged_exception(
+    mock_run: MagicMock,
+    runner: CliRunner,
+    tmp_path: Path,
+) -> None:
+    # Outer cli.py wrapper: anything run_setup_claude raises without a
+    # message must still print a non-empty "Setup failed: <ClassName>" (#127).
+    mock_run.side_effect = RuntimeError()
+
+    result = runner.invoke(main, _setup_args(tmp_path))
+
+    assert result.exit_code != 0
+    assert "Setup failed: RuntimeError" in result.output
+    assert "Setup failed: \n" not in result.output
+    assert "Setup failed:\n" not in result.output
+
+
 @patch("kagura_memory.setup_claude._create_context")
 @patch("kagura_memory.setup_claude._test_connection")
 def test_setup_claude_config_load_error(
