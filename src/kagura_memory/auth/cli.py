@@ -226,7 +226,7 @@ def _try_open_browser(url: str) -> bool:
     """Open ``url`` in the user's default browser.
 
     On WSL, skip the stdlib :mod:`webbrowser` module entirely and hand
-    the URL to a Windows binary (``wslview`` or ``explorer.exe``):
+    the URL to a Windows binary (``wslview`` or ``rundll32.exe``):
     Python's webbrowser can report success on WSL even when no Windows
     browser actually launches. On other platforms, try the stdlib first
     and fall back if it reports failure.
@@ -236,7 +236,10 @@ def _try_open_browser(url: str) -> bool:
     etc.) cannot be reinterpreted as command chaining. We intentionally
     do NOT fall back to ``cmd.exe /c start`` — cmd.exe re-parses its
     argv as a shell, and an allowlist tight enough to be safe would
-    also reject normal URL characters like ``&``.
+    also reject normal URL characters like ``&``. We also avoid
+    ``explorer.exe URL`` because Windows Explorer resolves the argument
+    as a path and opens a folder window instead of delegating to the
+    URL handler.
 
     Returns ``True`` if any opener was dispatched successfully.
     """
@@ -253,10 +256,13 @@ def _try_open_browser(url: str) -> bool:
     if on_wsl:
         if shutil.which("wslview"):
             fallback_commands.append(["wslview", url])
-        # explorer.exe is a Windows GUI binary (not a shell); it hands
-        # the URL to the registered protocol handler via ShellExecute,
-        # so shell metacharacters in the URL stay literal.
-        fallback_commands.append(["explorer.exe", url])
+        # rundll32 calls url.dll's FileProtocolHandler, which hands the
+        # URL to ShellExecute — the canonical Windows API for opening
+        # the registered protocol handler. rundll32 is not a shell, so
+        # shell metacharacters in the URL stay literal, and unlike
+        # explorer.exe it never falls back to treating the argument
+        # as a filesystem path.
+        fallback_commands.append(["rundll32.exe", "url.dll,FileProtocolHandler", url])
     elif sys.platform == "darwin":
         fallback_commands.append(["open", url])
     elif sys.platform.startswith("linux") and shutil.which("xdg-open"):
