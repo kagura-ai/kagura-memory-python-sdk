@@ -1039,8 +1039,6 @@ def setup_claude(api_key, mcp_url, context_id, project_dir, non_interactive):
     except click.ClickException:
         raise
     except Exception as e:
-        # Fall back to the class name so an unmessaged exception still produces
-        # a non-empty diagnostic — bare "Setup failed:" leaves the user blind.
         msg = str(e) or e.__class__.__name__
         raise click.ClickException(f"Setup failed: {msg}") from e
 
