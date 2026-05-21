@@ -124,6 +124,46 @@ async def test_connection_error_on_missing_session_id():
     await client.close()
 
 
+@pytest.mark.asyncio
+async def test_initialize_session_non_401_http_error_surfaces_class_name():
+    """5xx HTTPStatusError → wrapped via _exc_message so empty str(e) still renders (#130)."""
+    client = KaguraClient(api_key="test", mcp_url="https://test.com/mcp")
+
+    mock_response = MagicMock()
+    mock_response.status_code = 503
+    mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
+        "", request=MagicMock(), response=mock_response
+    )
+
+    with patch.object(client._client, "post", new_callable=AsyncMock) as mock_post:
+        mock_post.return_value = mock_response
+
+        with pytest.raises(KaguraConnectionError, match=r"HTTP 503:") as exc_info:
+            await client._initialize_session()
+
+    # The wrapper must not strand the prefix when str(e) is empty.
+    msg = str(exc_info.value)
+    assert msg != "HTTP 503: "
+    assert msg.endswith("HTTPStatusError") or "HTTP 503: " in msg and len(msg.split(": ", 1)[1]) > 0
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_make_jsonrpc_request_connection_error_surfaces():
+    """httpx.RequestError on JSON-RPC post → KaguraConnectionError via _exc_message (#130)."""
+    client = KaguraClient(api_key="test", mcp_url="https://test.com/mcp")
+    client._session_id = "stub-session"  # bypass initialize
+
+    with patch.object(client._client, "post", new_callable=AsyncMock) as mock_post:
+        mock_post.side_effect = httpx.ConnectError("network down")
+
+        with pytest.raises(KaguraConnectionError, match="Connection failed: network down"):
+            await client._make_jsonrpc_request("tools/list", {})
+
+    await client.close()
+
+
 # ============================================================================
 # Tool definitions (existing tests)
 # ============================================================================
