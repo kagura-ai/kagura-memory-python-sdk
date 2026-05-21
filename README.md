@@ -256,7 +256,7 @@ Log in once with `kagura auth login` — the SDK stores credentials at
 
 ```bash
 kagura auth login                                    # default: memory:read + memory:write
-kagura auth login --read-only                        # read-only profile
+kagura auth login --read-only                        # read-only scope
 kagura auth login --scope "memory:read profile:read" # custom scope set
 kagura auth login --no-browser                       # SSH / headless
 kagura auth login --profile work                     # named profile for a second workspace

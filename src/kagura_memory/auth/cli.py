@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -203,13 +204,12 @@ def _print_device_prompt(device: DeviceAuthorizationResponse, *, attempt_browser
     """
     click.echo()
     click.echo(f"! First copy your one-time code: {device.user_code}")
-    click.echo("  Open this URL in your browser to approve:")
-    click.echo(f"    {device.verification_uri_complete}")
-    click.echo()
     click.echo(
         "  Tip: sign in to the Kagura web UI in the same browser first — "
         "the consent page assumes you're already logged in."
     )
+    click.echo("  Open this URL in your browser to approve:")
+    click.echo(f"    {device.verification_uri_complete}")
     click.echo()
 
     if not attempt_browser:
@@ -226,30 +226,37 @@ def _print_device_prompt(device: DeviceAuthorizationResponse, *, attempt_browser
 def _try_open_browser(url: str) -> bool:
     """Open ``url`` in the user's default browser.
 
-    Tries the stdlib :mod:`webbrowser` first, then falls back to a
-    platform-specific opener for environments where the stdlib path
-    returns ``True`` but no browser actually launches (WSL2, some
-    minimal Linux setups, macOS via SSH, etc.).
+    On WSL, skip the stdlib :mod:`webbrowser` module entirely and go
+    straight to the Windows-side opener: Python's webbrowser can report
+    success on WSL even when no Windows browser actually launches
+    (the registered handler exists in the Linux env but the redirect
+    never reaches Windows). On other platforms, try the stdlib first
+    and fall back if it reports failure.
 
-    All fallback commands are invoked with argv (never ``shell=True``)
-    to avoid command-injection if the URL ever carries shell
-    metacharacters from an attacker-controlled server response.
+    All fallback commands are invoked with argv (never ``shell=True``).
+    For ``cmd.exe`` specifically — which is itself a shell and re-parses
+    its arguments — the URL is rejected if it contains characters that
+    cmd.exe treats as metacharacters; current OAuth ``verification_uri``
+    values always satisfy this constraint, but the check is defensive
+    against future server-side changes.
 
     Returns ``True`` if any opener was dispatched successfully.
     """
-    try:
-        if webbrowser.open(url):
-            return True
-    except (webbrowser.Error, OSError):
-        # Fall through to the platform-specific openers below.
-        pass
+    if not _is_wsl():
+        try:
+            if webbrowser.open(url):
+                return True
+        except (webbrowser.Error, OSError):
+            # Fall through to the platform-specific openers below.
+            pass
 
     fallback_commands: list[list[str]] = []
     if _is_wsl():
         if shutil.which("wslview"):
             fallback_commands.append(["wslview", url])
-        # cmd.exe `start` needs an empty title positional when the URL is quoted.
-        fallback_commands.append(["cmd.exe", "/c", "start", "", url])
+        if _is_url_safe_for_cmd_exe(url):
+            # cmd.exe `start` needs an empty title positional when the URL is quoted.
+            fallback_commands.append(["cmd.exe", "/c", "start", "", url])
     elif sys.platform == "darwin":
         fallback_commands.append(["open", url])
     elif sys.platform.startswith("linux") and shutil.which("xdg-open"):
@@ -268,6 +275,17 @@ def _try_open_browser(url: str) -> bool:
             continue
 
     return False
+
+
+# cmd.exe parses these as command separators / redirection / escapes even when
+# passed as a single argv element. Anything outside the allowed set is rejected
+# so a malicious server-supplied URL can't chain commands via the cmd.exe path.
+_CMD_EXE_URL_ALLOWED = re.compile(r"\A[A-Za-z0-9._~/?:=&+%#@!$*,;()\[\]'-]+\Z")
+
+
+def _is_url_safe_for_cmd_exe(url: str) -> bool:
+    """Return True when ``url`` contains no cmd.exe metacharacters."""
+    return bool(_CMD_EXE_URL_ALLOWED.match(url))
 
 
 def _is_wsl() -> bool:
