@@ -305,8 +305,8 @@ def test_try_open_browser_skips_stdlib_on_wsl_even_when_it_would_succeed(monkeyp
     assert popen_calls[0][0] == "wslview"
 
 
-def test_try_open_browser_passes_url_with_shell_metas_safely_via_explorer(monkeypatch):
-    """A URL with shell metacharacters is passed to explorer.exe verbatim — argv
+def test_try_open_browser_passes_url_with_shell_metas_safely_via_rundll32(monkeypatch):
+    """A URL with shell metacharacters is passed to rundll32 verbatim — argv
     delivery to a non-shell Windows binary keeps the characters literal."""
     from kagura_memory.auth import cli as cli_mod
 
@@ -318,14 +318,14 @@ def test_try_open_browser_passes_url_with_shell_metas_safely_via_explorer(monkey
         popen_calls.append(cmd)
         return MagicMock()
 
-    # URL contains '&' (cmd.exe command chaining) — explorer.exe is not a shell so this is safe.
+    # URL contains '&' (cmd.exe command chaining) — rundll32 is not a shell so this is safe.
     url_with_amp = "https://example.com/device?user_code=AB&next=/foo"
     with (
         patch.object(cli_mod.webbrowser, "open", return_value=False),
         patch.object(cli_mod.subprocess, "Popen", side_effect=fake_popen),
     ):
         assert cli_mod._try_open_browser(url_with_amp) is True
-    assert popen_calls[0] == ["explorer.exe", url_with_amp]
+    assert popen_calls[0] == ["rundll32.exe", "url.dll,FileProtocolHandler", url_with_amp]
 
 
 def test_try_open_browser_falls_back_to_wsl_opener_when_stdlib_fails(monkeypatch):
@@ -350,7 +350,7 @@ def test_try_open_browser_falls_back_to_wsl_opener_when_stdlib_fails(monkeypatch
     assert "https://example.com/d?u=ABC" in popen_calls[0]
 
 
-def test_try_open_browser_falls_back_to_explorer_when_wslview_missing(monkeypatch):
+def test_try_open_browser_falls_back_to_rundll32_when_wslview_missing(monkeypatch):
     from kagura_memory.auth import cli as cli_mod
 
     monkeypatch.setattr(cli_mod, "_is_wsl", lambda: True)
@@ -366,7 +366,11 @@ def test_try_open_browser_falls_back_to_explorer_when_wslview_missing(monkeypatc
         patch.object(cli_mod.subprocess, "Popen", side_effect=fake_popen),
     ):
         assert cli_mod._try_open_browser("https://example.com/d?u=ABC") is True
-    assert popen_calls[0] == ["explorer.exe", "https://example.com/d?u=ABC"]
+    assert popen_calls[0] == [
+        "rundll32.exe",
+        "url.dll,FileProtocolHandler",
+        "https://example.com/d?u=ABC",
+    ]
 
 
 def test_try_open_browser_returns_false_when_no_fallback_available(monkeypatch):
@@ -461,8 +465,8 @@ def test_try_open_browser_continues_to_next_fallback_when_popen_fails(monkeypatc
         patch.object(cli_mod.subprocess, "Popen", side_effect=fake_popen),
     ):
         assert cli_mod._try_open_browser("https://example.com/d?u=ABC") is True
-    # First attempt (wslview) raised; second attempt (explorer.exe) succeeded.
-    assert [c[0] for c in popen_calls] == ["wslview", "explorer.exe"]
+    # First attempt (wslview) raised; second attempt (rundll32.exe) succeeded.
+    assert [c[0] for c in popen_calls] == ["wslview", "rundll32.exe"]
 
 
 def test_is_wsl_detects_via_env(monkeypatch):
