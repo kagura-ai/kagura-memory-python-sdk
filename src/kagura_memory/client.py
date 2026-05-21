@@ -10,7 +10,13 @@ from pydantic import BaseModel as _BaseModel
 
 from ._auth import _resolve_auth, _StaticAuth
 from ._http import SDK_VERSION, base_url_from_mcp, validate_https_url
-from .exceptions import KaguraAuthError, KaguraConnectionError, KaguraError, KaguraNotFoundError
+from .exceptions import (
+    KaguraAuthError,
+    KaguraConnectionError,
+    KaguraError,
+    KaguraNotFoundError,
+    _exc_message,
+)
 from .models import (
     ContextInfo,
     DuplicatesResponse,
@@ -146,9 +152,9 @@ class KaguraClient:
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 401:
                 raise KaguraAuthError("Authentication failed. Check your API key.") from e
-            raise KaguraConnectionError(f"HTTP {e.response.status_code}: {e}") from e
+            raise KaguraConnectionError(f"HTTP {e.response.status_code}: {_exc_message(e)}") from e
         except httpx.RequestError as e:
-            raise KaguraConnectionError(f"Connection failed: {e}") from e
+            raise KaguraConnectionError(f"Connection failed: {_exc_message(e)}") from e
 
     async def _make_jsonrpc_request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         """
@@ -192,7 +198,7 @@ class KaguraClient:
                 raise KaguraAuthError("Authentication failed") from e
             raise KaguraConnectionError(f"HTTP {e.response.status_code}") from e
         except httpx.RequestError as e:
-            raise KaguraConnectionError(f"Connection failed: {e}") from e
+            raise KaguraConnectionError(f"Connection failed: {_exc_message(e)}") from e
 
     async def _rest_get(
         self,
@@ -220,9 +226,9 @@ class KaguraClient:
                 raise KaguraAuthError("Authentication failed. Check your API key.") from e
             raise KaguraConnectionError(f"HTTP {e.response.status_code}") from e
         except httpx.RequestError as e:
-            raise KaguraConnectionError(f"Connection failed: {e}") from e
+            raise KaguraConnectionError(f"Connection failed: {_exc_message(e)}") from e
         except (ValueError, TypeError) as e:
-            raise KaguraConnectionError(f"Invalid response format: {e}") from e
+            raise KaguraConnectionError(f"Invalid response format: {_exc_message(e)}") from e
 
     async def _call_tool(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         """
@@ -251,7 +257,7 @@ class KaguraClient:
                 text = content[0].get("text", "{}")
                 return json.loads(text)
             except json.JSONDecodeError as e:
-                raise KaguraConnectionError(f"Invalid response format: {e}") from e
+                raise KaguraConnectionError(f"Invalid response format: {_exc_message(e)}") from e
 
         return {}
 

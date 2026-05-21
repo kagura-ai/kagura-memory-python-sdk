@@ -33,6 +33,7 @@ from ..exceptions import (
     KaguraAuthError,
     KaguraAuthExpiredError,
     KaguraConnectionError,
+    _exc_message,
 )
 from .credentials import (
     DEFAULT_CREDENTIALS_PATH,
@@ -155,13 +156,15 @@ def auth_login(
     except click.ClickException:
         raise
     except KaguraAuthDeniedError as e:
-        raise click.ClickException(f"{e}\n  Re-run: kagura auth login --profile {profile}") from e
+        raise click.ClickException(
+            f"{_exc_message(e)}\n  Re-run: kagura auth login --profile {profile}"
+        ) from e
     except KaguraAuthExpiredError as e:
-        raise click.ClickException(f"{e}") from e
+        raise click.ClickException(_exc_message(e)) from e
     except KaguraConnectionError as e:
-        raise click.ClickException(f"{e}") from e
+        raise click.ClickException(_exc_message(e)) from e
     except Exception as e:
-        raise click.ClickException(str(e)) from e
+        raise click.ClickException(_exc_message(e)) from e
 
 
 async def _run_login(
@@ -468,11 +471,11 @@ def auth_refresh(profile: str | None, scope: str | None) -> None:
     except click.ClickException:
         raise
     except KaguraAuthExpiredError as e:
-        raise click.ClickException(f"{e}") from e
+        raise click.ClickException(_exc_message(e)) from e
     except KaguraConnectionError as e:
-        raise click.ClickException(f"{e}") from e
+        raise click.ClickException(_exc_message(e)) from e
     except Exception as e:
-        raise click.ClickException(str(e)) from e
+        raise click.ClickException(_exc_message(e)) from e
 
     update_profile(target, new_creds)
     reset_state_cache()
@@ -557,11 +560,11 @@ def auth_token(profile: str | None) -> None:
         try:
             new_creds = asyncio.run(_run_refresh(creds, scope=None))
         except KaguraAuthExpiredError as e:
-            raise click.ClickException(f"{e}") from e
+            raise click.ClickException(_exc_message(e)) from e
         except KaguraConnectionError as e:
-            raise click.ClickException(f"{e}") from e
+            raise click.ClickException(_exc_message(e)) from e
         except Exception as e:
-            raise click.ClickException(str(e)) from e
+            raise click.ClickException(_exc_message(e)) from e
         update_profile(target, new_creds)
         reset_state_cache()
         creds = new_creds

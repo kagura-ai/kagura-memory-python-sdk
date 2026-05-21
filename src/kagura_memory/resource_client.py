@@ -15,6 +15,7 @@ from .exceptions import (
     KaguraConnectionError,
     KaguraNotFoundError,
     KaguraQuotaError,
+    _exc_message,
 )
 from .logger import VerboseLogger, normalize_logger
 from .models import (
@@ -271,7 +272,7 @@ class ResourceClient:
             msg = f"HTTP {status}: {detail}" if detail else f"HTTP {status}"
             raise KaguraConnectionError(msg) from e
         except httpx.RequestError as e:
-            raise KaguraConnectionError(f"Connection failed: {e}") from e
+            raise KaguraConnectionError(f"Connection failed: {_exc_message(e)}") from e
 
     # -------------------------------------------------------------------
     # Token CRUD (Bearer auth)
