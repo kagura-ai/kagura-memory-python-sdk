@@ -485,8 +485,7 @@ def test_setup_claude_connection_failed_unmessaged_exception(
     runner: CliRunner,
     tmp_path: Path,
 ) -> None:
-    # str(e) is "" for a no-arg exception; the wrapper must still surface a
-    # diagnostic (the class name) instead of "Connection failed: " (#127).
+    """Unmessaged exception in _test_connection must surface the class name (#127)."""
     mock_conn.side_effect = RuntimeError()
 
     result = runner.invoke(main, _setup_args(tmp_path))
@@ -503,8 +502,7 @@ def test_setup_claude_setup_failed_unmessaged_exception(
     runner: CliRunner,
     tmp_path: Path,
 ) -> None:
-    # Outer cli.py wrapper: anything run_setup_claude raises without a
-    # message must still print a non-empty "Setup failed: <ClassName>" (#127).
+    """Unmessaged exception escaping run_setup_claude must surface the class name (#127)."""
     mock_run.side_effect = RuntimeError()
 
     result = runner.invoke(main, _setup_args(tmp_path))
