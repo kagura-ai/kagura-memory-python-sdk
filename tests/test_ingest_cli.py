@@ -189,6 +189,31 @@ def test_ingest_human_default_uses_rich_glyphs_not_json(
 
 @patch("kagura_memory.cli.load_config")
 @patch("kagura_memory.cli.KaguraClient")
+def test_ingest_unmessaged_exception_falls_back_to_class_name(
+    mock_client_cls: MagicMock, mock_config: MagicMock
+) -> None:
+    """`ingest` Exception fallthrough must surface the class name via _exc_message (#130)."""
+    mock_config.return_value = {
+        "api_key": "test-key",
+        "mcp_url": "https://test.com/mcp",
+        "context_id": "ctx-uuid",
+    }
+    mock_client_cls.return_value = MagicMock(spec=type(MagicMock()))
+
+    with patch("kagura_memory.ingest.FileIngestor") as mock_ingestor_cls:
+        mock_ingestor = MagicMock()
+        mock_ingestor.ingest = AsyncMock(side_effect=RuntimeError())
+        mock_ingestor_cls.return_value = mock_ingestor
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["ingest", str(FIXTURE)])
+        assert result.exit_code != 0
+        assert "RuntimeError" in result.output
+        assert "Error: \n" not in result.output
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
 def test_ingest_failure_exits_nonzero(mock_client_cls: MagicMock, mock_config: MagicMock) -> None:
     """When the ingestor returns success=False, CLI exits 1."""
     mock_config.return_value = {

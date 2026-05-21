@@ -174,8 +174,11 @@ def test_resource_setup_in_oauth_mode_errors(_isolate_oauth_state):
 
     assert result.exit_code != 0, result.output
     # Assert against the canonical message constant rather than substrings —
-    # ``_run_resource_command`` surfaces the wrapped exception's message
-    # verbatim, so the full sentence reaches the operator's output.
+    # ``_run_resource_command`` wraps via ``_exc_message(e)`` which returns
+    # ``str(e)`` when non-empty, so the full sentence reaches the operator
+    # for any wrapper whose inner exception carries a message (the empty-
+    # ``str(e)`` fallback to class name is tested separately in
+    # ``tests/test_exceptions.py``).
     assert _SETUP_OAUTH_NOT_SUPPORTED_MSG in result.output
 
 
