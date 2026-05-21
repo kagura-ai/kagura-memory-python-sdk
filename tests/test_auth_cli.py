@@ -305,8 +305,9 @@ def test_try_open_browser_skips_stdlib_on_wsl_even_when_it_would_succeed(monkeyp
     assert popen_calls[0][0] == "wslview"
 
 
-def test_try_open_browser_skips_cmd_exe_for_url_with_shell_metas(monkeypatch):
-    """A URL with cmd.exe metacharacters must not be passed to cmd.exe."""
+def test_try_open_browser_passes_url_with_shell_metas_safely_via_explorer(monkeypatch):
+    """A URL with shell metacharacters is passed to explorer.exe verbatim — argv
+    delivery to a non-shell Windows binary keeps the characters literal."""
     from kagura_memory.auth import cli as cli_mod
 
     monkeypatch.setattr(cli_mod, "_is_wsl", lambda: True)
@@ -317,32 +318,14 @@ def test_try_open_browser_skips_cmd_exe_for_url_with_shell_metas(monkeypatch):
         popen_calls.append(cmd)
         return MagicMock()
 
-    # URL contains '|' which cmd.exe interprets as a pipe.
-    unsafe_url = "https://example.com/device?user_code=AB|whoami"
+    # URL contains '&' (cmd.exe command chaining) — explorer.exe is not a shell so this is safe.
+    url_with_amp = "https://example.com/device?user_code=AB&next=/foo"
     with (
         patch.object(cli_mod.webbrowser, "open", return_value=False),
         patch.object(cli_mod.subprocess, "Popen", side_effect=fake_popen),
     ):
-        assert cli_mod._try_open_browser(unsafe_url) is False
-    # No cmd.exe (or any other) opener was tried.
-    assert popen_calls == []
-
-
-def test_is_url_safe_for_cmd_exe_accepts_typical_oauth_url():
-    from kagura_memory.auth import cli as cli_mod
-
-    assert (
-        cli_mod._is_url_safe_for_cmd_exe("https://memory.kagura-ai.com/device?user_code=ABCD-1234")
-        is True
-    )
-
-
-def test_is_url_safe_for_cmd_exe_rejects_shell_metas():
-    from kagura_memory.auth import cli as cli_mod
-
-    for meta in ["|", "<", ">", "^", '"', " ", "`"]:
-        url = f"https://example.com/device?u=ABC{meta}whoami"
-        assert cli_mod._is_url_safe_for_cmd_exe(url) is False, f"meta={meta!r} not rejected"
+        assert cli_mod._try_open_browser(url_with_amp) is True
+    assert popen_calls[0] == ["explorer.exe", url_with_amp]
 
 
 def test_try_open_browser_falls_back_to_wsl_opener_when_stdlib_fails(monkeypatch):
@@ -367,7 +350,7 @@ def test_try_open_browser_falls_back_to_wsl_opener_when_stdlib_fails(monkeypatch
     assert "https://example.com/d?u=ABC" in popen_calls[0]
 
 
-def test_try_open_browser_falls_back_to_cmd_exe_when_wslview_missing(monkeypatch):
+def test_try_open_browser_falls_back_to_explorer_when_wslview_missing(monkeypatch):
     from kagura_memory.auth import cli as cli_mod
 
     monkeypatch.setattr(cli_mod, "_is_wsl", lambda: True)
@@ -383,9 +366,7 @@ def test_try_open_browser_falls_back_to_cmd_exe_when_wslview_missing(monkeypatch
         patch.object(cli_mod.subprocess, "Popen", side_effect=fake_popen),
     ):
         assert cli_mod._try_open_browser("https://example.com/d?u=ABC") is True
-    assert popen_calls[0][0] == "cmd.exe"
-    assert popen_calls[0][1] == "/c"
-    assert popen_calls[0][2] == "start"
+    assert popen_calls[0] == ["explorer.exe", "https://example.com/d?u=ABC"]
 
 
 def test_try_open_browser_returns_false_when_no_fallback_available(monkeypatch):
@@ -480,8 +461,8 @@ def test_try_open_browser_continues_to_next_fallback_when_popen_fails(monkeypatc
         patch.object(cli_mod.subprocess, "Popen", side_effect=fake_popen),
     ):
         assert cli_mod._try_open_browser("https://example.com/d?u=ABC") is True
-    # First attempt (wslview) raised; second attempt (cmd.exe) succeeded.
-    assert [c[0] for c in popen_calls] == ["wslview", "cmd.exe"]
+    # First attempt (wslview) raised; second attempt (explorer.exe) succeeded.
+    assert [c[0] for c in popen_calls] == ["wslview", "explorer.exe"]
 
 
 def test_is_wsl_detects_via_env(monkeypatch):

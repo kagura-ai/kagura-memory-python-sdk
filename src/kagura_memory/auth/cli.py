@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -226,19 +225,18 @@ def _print_device_prompt(device: DeviceAuthorizationResponse, *, attempt_browser
 def _try_open_browser(url: str) -> bool:
     """Open ``url`` in the user's default browser.
 
-    On WSL, skip the stdlib :mod:`webbrowser` module entirely and go
-    straight to the Windows-side opener: Python's webbrowser can report
-    success on WSL even when no Windows browser actually launches
-    (the registered handler exists in the Linux env but the redirect
-    never reaches Windows). On other platforms, try the stdlib first
+    On WSL, skip the stdlib :mod:`webbrowser` module entirely and hand
+    the URL to a Windows binary (``wslview`` or ``explorer.exe``):
+    Python's webbrowser can report success on WSL even when no Windows
+    browser actually launches. On other platforms, try the stdlib first
     and fall back if it reports failure.
 
-    All fallback commands are invoked with argv (never ``shell=True``).
-    For ``cmd.exe`` specifically — which is itself a shell and re-parses
-    its arguments — the URL is rejected if it contains characters that
-    cmd.exe treats as metacharacters; current OAuth ``verification_uri``
-    values always satisfy this constraint, but the check is defensive
-    against future server-side changes.
+    All fallback openers are non-shell binaries invoked via argv, so a
+    URL containing shell metacharacters (``&``, ``|``, ``%``, ``!``,
+    etc.) cannot be reinterpreted as command chaining. We intentionally
+    do NOT fall back to ``cmd.exe /c start`` — cmd.exe re-parses its
+    argv as a shell, and an allowlist tight enough to be safe would
+    also reject normal URL characters like ``&``.
 
     Returns ``True`` if any opener was dispatched successfully.
     """
@@ -254,9 +252,10 @@ def _try_open_browser(url: str) -> bool:
     if _is_wsl():
         if shutil.which("wslview"):
             fallback_commands.append(["wslview", url])
-        if _is_url_safe_for_cmd_exe(url):
-            # cmd.exe `start` needs an empty title positional when the URL is quoted.
-            fallback_commands.append(["cmd.exe", "/c", "start", "", url])
+        # explorer.exe is a Windows GUI binary (not a shell); it hands
+        # the URL to the registered protocol handler via ShellExecute,
+        # so shell metacharacters in the URL stay literal.
+        fallback_commands.append(["explorer.exe", url])
     elif sys.platform == "darwin":
         fallback_commands.append(["open", url])
     elif sys.platform.startswith("linux") and shutil.which("xdg-open"):
@@ -275,17 +274,6 @@ def _try_open_browser(url: str) -> bool:
             continue
 
     return False
-
-
-# cmd.exe parses these as command separators / redirection / escapes even when
-# passed as a single argv element. Anything outside the allowed set is rejected
-# so a malicious server-supplied URL can't chain commands via the cmd.exe path.
-_CMD_EXE_URL_ALLOWED = re.compile(r"\A[A-Za-z0-9._~/?:=&+%#@!$*,;()\[\]'-]+\Z")
-
-
-def _is_url_safe_for_cmd_exe(url: str) -> bool:
-    """Return True when ``url`` contains no cmd.exe metacharacters."""
-    return bool(_CMD_EXE_URL_ALLOWED.match(url))
 
 
 def _is_wsl() -> bool:
