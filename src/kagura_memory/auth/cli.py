@@ -240,7 +240,8 @@ def _try_open_browser(url: str) -> bool:
 
     Returns ``True`` if any opener was dispatched successfully.
     """
-    if not _is_wsl():
+    on_wsl = _is_wsl()
+    if not on_wsl:
         try:
             if webbrowser.open(url):
                 return True
@@ -249,7 +250,7 @@ def _try_open_browser(url: str) -> bool:
             pass
 
     fallback_commands: list[list[str]] = []
-    if _is_wsl():
+    if on_wsl:
         if shutil.which("wslview"):
             fallback_commands.append(["wslview", url])
         # explorer.exe is a Windows GUI binary (not a shell); it hands
