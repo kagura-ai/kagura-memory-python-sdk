@@ -241,6 +241,7 @@ def _try_open_browser(url: str) -> bool:
         if webbrowser.open(url):
             return True
     except (webbrowser.Error, OSError):
+        # Fall through to the platform-specific openers below.
         pass
 
     fallback_commands: list[list[str]] = []

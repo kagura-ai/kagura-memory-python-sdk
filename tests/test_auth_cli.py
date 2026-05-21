@@ -420,6 +420,44 @@ def test_is_wsl_detects_via_env(monkeypatch):
     assert cli_mod._is_wsl() is True
 
 
+def test_is_wsl_detects_via_proc_osrelease(monkeypatch, tmp_path):
+    """When WSL_DISTRO_NAME is unset, fall back to reading /proc/sys/kernel/osrelease."""
+    from kagura_memory.auth import cli as cli_mod
+
+    monkeypatch.delenv("WSL_DISTRO_NAME", raising=False)
+    fake_release = tmp_path / "osrelease"
+    fake_release.write_text("5.15.167.4-microsoft-standard-WSL2\n")
+
+    real_open = open
+
+    def fake_open(path, *args, **kwargs):
+        if path == "/proc/sys/kernel/osrelease":
+            return real_open(fake_release, *args, **kwargs)
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", fake_open)
+    assert cli_mod._is_wsl() is True
+
+
+def test_is_wsl_returns_false_for_native_linux_kernel(monkeypatch, tmp_path):
+    """A native Linux kernel string contains neither 'wsl' nor 'microsoft'."""
+    from kagura_memory.auth import cli as cli_mod
+
+    monkeypatch.delenv("WSL_DISTRO_NAME", raising=False)
+    fake_release = tmp_path / "osrelease"
+    fake_release.write_text("6.6.0-generic\n")
+
+    real_open = open
+
+    def fake_open(path, *args, **kwargs):
+        if path == "/proc/sys/kernel/osrelease":
+            return real_open(fake_release, *args, **kwargs)
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", fake_open)
+    assert cli_mod._is_wsl() is False
+
+
 def test_is_wsl_returns_false_when_no_signal(monkeypatch):
     from kagura_memory.auth import cli as cli_mod
 
