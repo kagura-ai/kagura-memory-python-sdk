@@ -260,7 +260,7 @@ def test_login_does_not_print_pre_login_tip(
     assert result.exit_code == 0
     output = result.output
     assert "sign in to the Kagura web UI" not in output
-    assert "Tip:" not in output
+    assert "the consent page assumes" not in output
     assert "https://test.example.com/device?user_code=" in output
 
 

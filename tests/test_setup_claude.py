@@ -513,6 +513,22 @@ def test_setup_claude_setup_failed_unmessaged_exception(
     assert "Setup failed:\n" not in result.output
 
 
+@patch("kagura_memory.cli.run_setup_claude")
+def test_setup_claude_user_abort_propagates_as_aborted(
+    mock_run: MagicMock,
+    runner: CliRunner,
+    tmp_path: Path,
+) -> None:
+    """Ctrl+D during a prompt (click.Abort) must yield Click's default 'Aborted!' UX, not 'Setup failed: Abort'."""
+    mock_run.side_effect = click.Abort()
+
+    result = runner.invoke(main, _setup_args(tmp_path))
+
+    assert result.exit_code != 0
+    assert "Setup failed" not in result.output
+    assert "Aborted" in result.output
+
+
 @patch("kagura_memory.setup_claude._create_context")
 @patch("kagura_memory.setup_claude._test_connection")
 def test_setup_claude_config_load_error(
