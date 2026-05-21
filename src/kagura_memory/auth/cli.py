@@ -203,10 +203,6 @@ def _print_device_prompt(device: DeviceAuthorizationResponse, *, attempt_browser
     """
     click.echo()
     click.echo(f"! First copy your one-time code: {device.user_code}")
-    click.echo(
-        "  Tip: sign in to the Kagura web UI in the same browser first — "
-        "the consent page assumes you're already logged in."
-    )
     click.echo("  Open this URL in your browser to approve:")
     click.echo(f"    {device.verification_uri_complete}")
     click.echo()

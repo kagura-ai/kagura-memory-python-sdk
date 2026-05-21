@@ -479,6 +479,56 @@ def test_setup_claude_generic_connection_error(
     assert "Connection failed" in result.output
 
 
+@patch("kagura_memory.setup_claude._test_connection")
+def test_setup_claude_connection_failed_unmessaged_exception(
+    mock_conn: AsyncMock,
+    runner: CliRunner,
+    tmp_path: Path,
+) -> None:
+    """Unmessaged exception in _test_connection must surface the class name (#127)."""
+    mock_conn.side_effect = RuntimeError()
+
+    result = runner.invoke(main, _setup_args(tmp_path))
+
+    assert result.exit_code != 0
+    assert "Connection failed: RuntimeError" in result.output
+    assert "Connection failed: \n" not in result.output
+    assert "Connection failed:\n" not in result.output
+
+
+@patch("kagura_memory.cli.run_setup_claude")
+def test_setup_claude_setup_failed_unmessaged_exception(
+    mock_run: MagicMock,
+    runner: CliRunner,
+    tmp_path: Path,
+) -> None:
+    """Unmessaged exception escaping run_setup_claude must surface the class name (#127)."""
+    mock_run.side_effect = RuntimeError()
+
+    result = runner.invoke(main, _setup_args(tmp_path))
+
+    assert result.exit_code != 0
+    assert "Setup failed: RuntimeError" in result.output
+    assert "Setup failed: \n" not in result.output
+    assert "Setup failed:\n" not in result.output
+
+
+@patch("kagura_memory.cli.run_setup_claude")
+def test_setup_claude_user_abort_propagates_as_aborted(
+    mock_run: MagicMock,
+    runner: CliRunner,
+    tmp_path: Path,
+) -> None:
+    """click.Abort (Ctrl+D) must yield Click's default 'Aborted!' UX, not 'Setup failed: Abort'."""
+    mock_run.side_effect = click.Abort()
+
+    result = runner.invoke(main, _setup_args(tmp_path))
+
+    assert result.exit_code != 0
+    assert "Setup failed" not in result.output
+    assert "Aborted" in result.output
+
+
 @patch("kagura_memory.setup_claude._create_context")
 @patch("kagura_memory.setup_claude._test_connection")
 def test_setup_claude_config_load_error(

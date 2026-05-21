@@ -244,14 +244,14 @@ def test_login_explicit_scope_is_honored(
 @patch("kagura_memory.auth.cli.poll_for_token", new_callable=AsyncMock)
 @patch("kagura_memory.auth.cli.authorize_device", new_callable=AsyncMock)
 @patch("kagura_memory.auth.cli.make_oauth_client")
-def test_login_prints_pre_login_tip(
+def test_login_does_not_print_pre_login_tip(
     mock_client_factory,
     mock_authorize,
     mock_poll,
     mock_open,
     patched_default_path: Path,
 ):
-    """The device prompt nudges the user to sign in to the web UI first."""
+    # memory-cloud#772 login-gated /device — the client-side workaround must not reappear.
     mock_client_factory.return_value = _async_ctx()
     mock_authorize.return_value = _mock_device_response()
     mock_poll.return_value = _mock_token_response()
@@ -259,12 +259,9 @@ def test_login_prints_pre_login_tip(
     result = CliRunner().invoke(main, ["auth", "login"])
     assert result.exit_code == 0
     output = result.output
-    tip_index = output.find("sign in to the Kagura web UI")
-    url_index = output.find("https://test.example.com/device?user_code=")
-    assert tip_index != -1
-    assert url_index != -1
-    # The tip MUST appear before the URL so users see it before clicking.
-    assert tip_index < url_index
+    assert "sign in to the Kagura web UI" not in output
+    assert "the consent page assumes" not in output
+    assert "https://test.example.com/device?user_code=" in output
 
 
 # ---------------------------------------------------------------------------

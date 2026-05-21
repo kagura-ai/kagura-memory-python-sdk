@@ -1036,10 +1036,13 @@ def setup_claude(api_key, mcp_url, context_id, project_dir, non_interactive):
             project_dir=project_dir,
             non_interactive=non_interactive,
         )
-    except click.ClickException:
+    except (click.Abort, click.ClickException):
+        # click.Abort fires on Ctrl+D / explicit abort during prompts — let Click
+        # render its default "Aborted!" UX instead of reporting "Setup failed: Abort".
         raise
     except Exception as e:
-        raise click.ClickException(f"Setup failed: {e}") from e
+        msg = str(e) or e.__class__.__name__
+        raise click.ClickException(f"Setup failed: {msg}") from e
 
 
 # =============================================================================

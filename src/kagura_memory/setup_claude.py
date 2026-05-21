@@ -343,7 +343,8 @@ def run_setup_claude(
             "  Is the server running? Try: docker compose up -d"
         ) from e
     except Exception as e:
-        raise click.ClickException(f"Connection failed: {e}") from e
+        msg = str(e) or e.__class__.__name__
+        raise click.ClickException(f"Connection failed: {msg}") from e
 
     count = contexts_response.get("count", 0)
     click.echo(f"  Connected! ({count} contexts available)")
