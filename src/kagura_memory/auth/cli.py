@@ -226,10 +226,12 @@ def _try_open_browser(url: str) -> bool:
     """Open ``url`` in the user's default browser.
 
     On WSL, skip the stdlib :mod:`webbrowser` module entirely and hand
-    the URL to a Windows binary (``wslview`` or ``rundll32.exe``):
-    Python's webbrowser can report success on WSL even when no Windows
-    browser actually launches. On other platforms, try the stdlib first
-    and fall back if it reports failure.
+    the URL to a dedicated opener — either ``wslview`` (a Linux-side
+    helper from the ``wslu`` package, preferred when available) or
+    ``rundll32.exe`` from the Windows side (always available). Python's
+    webbrowser can report success on WSL even when no Windows browser
+    actually launches, so we don't trust it there. On other platforms,
+    try the stdlib first and fall back if it reports failure.
 
     All fallback openers are non-shell binaries invoked via argv, so a
     URL containing shell metacharacters (``&``, ``|``, ``%``, ``!``,
