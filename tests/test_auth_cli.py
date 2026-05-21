@@ -98,7 +98,7 @@ def _mock_token_response(**overrides):
     return TokenResponse(**defaults)
 
 
-@patch("kagura_memory.auth.cli.webbrowser.open", return_value=True)
+@patch("kagura_memory.auth.cli._try_open_browser", return_value=True)
 @patch("kagura_memory.auth.cli.poll_for_token", new_callable=AsyncMock)
 @patch("kagura_memory.auth.cli.authorize_device", new_callable=AsyncMock)
 @patch("kagura_memory.auth.cli.make_oauth_client")
@@ -127,11 +127,11 @@ def test_login_happy_path(
     assert cf.get_profile("default").access_token == "atok-fresh"
 
 
-@patch("kagura_memory.auth.cli.webbrowser.open")
+@patch("kagura_memory.auth.cli._try_open_browser")
 @patch("kagura_memory.auth.cli.poll_for_token", new_callable=AsyncMock)
 @patch("kagura_memory.auth.cli.authorize_device", new_callable=AsyncMock)
 @patch("kagura_memory.auth.cli.make_oauth_client")
-def test_login_no_browser_does_not_call_webbrowser(
+def test_login_no_browser_does_not_call_browser_opener(
     mock_client_factory,
     mock_authorize,
     mock_poll,
@@ -150,17 +150,18 @@ def test_login_no_browser_does_not_call_webbrowser(
     assert "ABCD-1234" in result.output
 
 
-@patch("kagura_memory.auth.cli.webbrowser.open", return_value=False)
+@patch("kagura_memory.auth.cli._try_open_browser", return_value=False)
 @patch("kagura_memory.auth.cli.poll_for_token", new_callable=AsyncMock)
 @patch("kagura_memory.auth.cli.authorize_device", new_callable=AsyncMock)
 @patch("kagura_memory.auth.cli.make_oauth_client")
-def test_login_falls_back_when_webbrowser_returns_false(
+def test_login_falls_back_when_browser_open_fails(
     mock_client_factory,
     mock_authorize,
     mock_poll,
-    mock_browser,
+    mock_open,
     patched_default_path: Path,
 ):
+    """When every browser-open path fails, print the manual hint."""
     mock_client_factory.return_value = _async_ctx()
     mock_authorize.return_value = _mock_device_response()
     mock_poll.return_value = _mock_token_response()
@@ -168,6 +169,355 @@ def test_login_falls_back_when_webbrowser_returns_false(
     result = CliRunner().invoke(main, ["auth", "login"])
     assert result.exit_code == 0
     assert "Could not auto-open" in result.output
+    mock_open.assert_called_once()
+
+
+@patch("kagura_memory.auth.cli.poll_for_token", new_callable=AsyncMock)
+@patch("kagura_memory.auth.cli.authorize_device", new_callable=AsyncMock)
+@patch("kagura_memory.auth.cli.make_oauth_client")
+def test_login_default_scope_is_read_plus_write(
+    mock_client_factory,
+    mock_authorize,
+    mock_poll,
+    patched_default_path: Path,
+):
+    """No flags → request 'memory:read memory:write' (the CLI's main use case)."""
+    mock_client_factory.return_value = _async_ctx()
+    mock_authorize.return_value = _mock_device_response()
+    mock_poll.return_value = _mock_token_response()
+
+    with patch("kagura_memory.auth.cli._try_open_browser", return_value=True):
+        result = CliRunner().invoke(main, ["auth", "login"])
+    assert result.exit_code == 0, result.output
+    # authorize_device was called with the read+write scope.
+    _, kwargs = mock_authorize.call_args
+    assert kwargs.get("scope") == "memory:read memory:write"
+
+
+@patch("kagura_memory.auth.cli.poll_for_token", new_callable=AsyncMock)
+@patch("kagura_memory.auth.cli.authorize_device", new_callable=AsyncMock)
+@patch("kagura_memory.auth.cli.make_oauth_client")
+def test_login_read_only_flag_requests_read_scope(
+    mock_client_factory,
+    mock_authorize,
+    mock_poll,
+    patched_default_path: Path,
+):
+    mock_client_factory.return_value = _async_ctx()
+    mock_authorize.return_value = _mock_device_response()
+    mock_poll.return_value = _mock_token_response()
+
+    with patch("kagura_memory.auth.cli._try_open_browser", return_value=True):
+        result = CliRunner().invoke(main, ["auth", "login", "--read-only"])
+    assert result.exit_code == 0, result.output
+    _, kwargs = mock_authorize.call_args
+    assert kwargs.get("scope") == "memory:read"
+
+
+def test_login_read_only_and_scope_are_mutually_exclusive(patched_default_path: Path):
+    result = CliRunner().invoke(main, ["auth", "login", "--read-only", "--scope", "memory:read"])
+    assert result.exit_code != 0
+    assert "mutually exclusive" in result.output
+
+
+@patch("kagura_memory.auth.cli.poll_for_token", new_callable=AsyncMock)
+@patch("kagura_memory.auth.cli.authorize_device", new_callable=AsyncMock)
+@patch("kagura_memory.auth.cli.make_oauth_client")
+def test_login_explicit_scope_is_honored(
+    mock_client_factory,
+    mock_authorize,
+    mock_poll,
+    patched_default_path: Path,
+):
+    mock_client_factory.return_value = _async_ctx()
+    mock_authorize.return_value = _mock_device_response()
+    mock_poll.return_value = _mock_token_response()
+
+    with patch("kagura_memory.auth.cli._try_open_browser", return_value=True):
+        result = CliRunner().invoke(main, ["auth", "login", "--scope", "memory:read profile:read"])
+    assert result.exit_code == 0, result.output
+    _, kwargs = mock_authorize.call_args
+    assert kwargs.get("scope") == "memory:read profile:read"
+
+
+@patch("kagura_memory.auth.cli._try_open_browser", return_value=True)
+@patch("kagura_memory.auth.cli.poll_for_token", new_callable=AsyncMock)
+@patch("kagura_memory.auth.cli.authorize_device", new_callable=AsyncMock)
+@patch("kagura_memory.auth.cli.make_oauth_client")
+def test_login_prints_pre_login_tip(
+    mock_client_factory,
+    mock_authorize,
+    mock_poll,
+    mock_open,
+    patched_default_path: Path,
+):
+    """The device prompt nudges the user to sign in to the web UI first."""
+    mock_client_factory.return_value = _async_ctx()
+    mock_authorize.return_value = _mock_device_response()
+    mock_poll.return_value = _mock_token_response()
+
+    result = CliRunner().invoke(main, ["auth", "login"])
+    assert result.exit_code == 0
+    output = result.output
+    tip_index = output.find("sign in to the Kagura web UI")
+    url_index = output.find("https://test.example.com/device?user_code=")
+    assert tip_index != -1
+    assert url_index != -1
+    # The tip MUST appear before the URL so users see it before clicking.
+    assert tip_index < url_index
+
+
+# ---------------------------------------------------------------------------
+# _try_open_browser + _is_wsl helpers
+# ---------------------------------------------------------------------------
+
+
+def test_try_open_browser_returns_true_when_stdlib_succeeds(monkeypatch):
+    from kagura_memory.auth import cli as cli_mod
+
+    monkeypatch.setattr(cli_mod, "_is_wsl", lambda: False)
+    with patch.object(cli_mod.webbrowser, "open", return_value=True) as mock_open:
+        assert cli_mod._try_open_browser("https://example.com/d?u=ABC") is True
+    mock_open.assert_called_once()
+
+
+def test_try_open_browser_skips_stdlib_on_wsl_even_when_it_would_succeed(monkeypatch):
+    """Regression: on WSL, webbrowser.open's True return is not trusted —
+    Python sees a registered handler but no Windows browser actually launches.
+    The platform fallback must run regardless.
+    """
+    from kagura_memory.auth import cli as cli_mod
+
+    monkeypatch.setattr(cli_mod, "_is_wsl", lambda: True)
+    monkeypatch.setattr(cli_mod.shutil, "which", lambda name: f"/usr/bin/{name}")
+    popen_calls: list[list[str]] = []
+
+    def fake_popen(cmd, **kwargs):
+        popen_calls.append(cmd)
+        return MagicMock()
+
+    with (
+        patch.object(cli_mod.webbrowser, "open", return_value=True) as mock_open,
+        patch.object(cli_mod.subprocess, "Popen", side_effect=fake_popen),
+    ):
+        assert cli_mod._try_open_browser("https://example.com/d?u=ABC") is True
+    mock_open.assert_not_called()
+    assert popen_calls[0][0] == "wslview"
+
+
+def test_try_open_browser_passes_url_with_shell_metas_safely_via_explorer(monkeypatch):
+    """A URL with shell metacharacters is passed to explorer.exe verbatim — argv
+    delivery to a non-shell Windows binary keeps the characters literal."""
+    from kagura_memory.auth import cli as cli_mod
+
+    monkeypatch.setattr(cli_mod, "_is_wsl", lambda: True)
+    monkeypatch.setattr(cli_mod.shutil, "which", lambda name: None)  # no wslview
+    popen_calls: list[list[str]] = []
+
+    def fake_popen(cmd, **kwargs):
+        popen_calls.append(cmd)
+        return MagicMock()
+
+    # URL contains '&' (cmd.exe command chaining) — explorer.exe is not a shell so this is safe.
+    url_with_amp = "https://example.com/device?user_code=AB&next=/foo"
+    with (
+        patch.object(cli_mod.webbrowser, "open", return_value=False),
+        patch.object(cli_mod.subprocess, "Popen", side_effect=fake_popen),
+    ):
+        assert cli_mod._try_open_browser(url_with_amp) is True
+    assert popen_calls[0] == ["explorer.exe", url_with_amp]
+
+
+def test_try_open_browser_falls_back_to_wsl_opener_when_stdlib_fails(monkeypatch):
+    from kagura_memory.auth import cli as cli_mod
+
+    monkeypatch.setattr(cli_mod, "_is_wsl", lambda: True)
+    monkeypatch.setattr(cli_mod.shutil, "which", lambda name: f"/usr/bin/{name}")
+    popen_calls: list[list[str]] = []
+
+    def fake_popen(cmd, **kwargs):
+        popen_calls.append(cmd)
+        return MagicMock()
+
+    with (
+        patch.object(cli_mod.webbrowser, "open", return_value=False),
+        patch.object(cli_mod.subprocess, "Popen", side_effect=fake_popen),
+    ):
+        assert cli_mod._try_open_browser("https://example.com/d?u=ABC") is True
+    # wslview was the first fallback tried.
+    assert popen_calls[0][0] == "wslview"
+    # URL is passed as a separate argv element — never via shell.
+    assert "https://example.com/d?u=ABC" in popen_calls[0]
+
+
+def test_try_open_browser_falls_back_to_explorer_when_wslview_missing(monkeypatch):
+    from kagura_memory.auth import cli as cli_mod
+
+    monkeypatch.setattr(cli_mod, "_is_wsl", lambda: True)
+    monkeypatch.setattr(cli_mod.shutil, "which", lambda name: None)
+    popen_calls: list[list[str]] = []
+
+    def fake_popen(cmd, **kwargs):
+        popen_calls.append(cmd)
+        return MagicMock()
+
+    with (
+        patch.object(cli_mod.webbrowser, "open", return_value=False),
+        patch.object(cli_mod.subprocess, "Popen", side_effect=fake_popen),
+    ):
+        assert cli_mod._try_open_browser("https://example.com/d?u=ABC") is True
+    assert popen_calls[0] == ["explorer.exe", "https://example.com/d?u=ABC"]
+
+
+def test_try_open_browser_returns_false_when_no_fallback_available(monkeypatch):
+    """Linux native without xdg-open: nothing to fall back to."""
+    from kagura_memory.auth import cli as cli_mod
+
+    monkeypatch.setattr(cli_mod, "_is_wsl", lambda: False)
+    monkeypatch.setattr(cli_mod.sys, "platform", "linux")
+    monkeypatch.setattr(cli_mod.shutil, "which", lambda name: None)
+
+    with patch.object(cli_mod.webbrowser, "open", return_value=False):
+        assert cli_mod._try_open_browser("https://example.com/d?u=ABC") is False
+
+
+def test_try_open_browser_macos_uses_open(monkeypatch):
+    from kagura_memory.auth import cli as cli_mod
+
+    monkeypatch.setattr(cli_mod, "_is_wsl", lambda: False)
+    monkeypatch.setattr(cli_mod.sys, "platform", "darwin")
+    popen_calls: list[list[str]] = []
+
+    def fake_popen(cmd, **kwargs):
+        popen_calls.append(cmd)
+        return MagicMock()
+
+    with (
+        patch.object(cli_mod.webbrowser, "open", return_value=False),
+        patch.object(cli_mod.subprocess, "Popen", side_effect=fake_popen),
+    ):
+        assert cli_mod._try_open_browser("https://example.com/d?u=ABC") is True
+    assert popen_calls[0][0] == "open"
+
+
+def test_try_open_browser_linux_uses_xdg_open(monkeypatch):
+    from kagura_memory.auth import cli as cli_mod
+
+    monkeypatch.setattr(cli_mod, "_is_wsl", lambda: False)
+    monkeypatch.setattr(cli_mod.sys, "platform", "linux")
+    monkeypatch.setattr(cli_mod.shutil, "which", lambda name: "/usr/bin/xdg-open")
+    popen_calls: list[list[str]] = []
+
+    def fake_popen(cmd, **kwargs):
+        popen_calls.append(cmd)
+        return MagicMock()
+
+    with (
+        patch.object(cli_mod.webbrowser, "open", return_value=False),
+        patch.object(cli_mod.subprocess, "Popen", side_effect=fake_popen),
+    ):
+        assert cli_mod._try_open_browser("https://example.com/d?u=ABC") is True
+    assert popen_calls[0][0] == "xdg-open"
+
+
+def test_try_open_browser_recovers_when_webbrowser_raises(monkeypatch):
+    """webbrowser.open raising webbrowser.Error must not crash the device flow."""
+    from kagura_memory.auth import cli as cli_mod
+
+    monkeypatch.setattr(cli_mod, "_is_wsl", lambda: False)
+    monkeypatch.setattr(cli_mod.sys, "platform", "darwin")
+    popen_calls: list[list[str]] = []
+
+    def fake_popen(cmd, **kwargs):
+        popen_calls.append(cmd)
+        return MagicMock()
+
+    with (
+        patch.object(
+            cli_mod.webbrowser, "open", side_effect=cli_mod.webbrowser.Error("no browser")
+        ),
+        patch.object(cli_mod.subprocess, "Popen", side_effect=fake_popen),
+    ):
+        assert cli_mod._try_open_browser("https://example.com/d?u=ABC") is True
+    assert popen_calls[0][0] == "open"
+
+
+def test_try_open_browser_continues_to_next_fallback_when_popen_fails(monkeypatch):
+    """First fallback raising OSError must not stop the loop — try the next one."""
+    from kagura_memory.auth import cli as cli_mod
+
+    monkeypatch.setattr(cli_mod, "_is_wsl", lambda: True)
+    monkeypatch.setattr(cli_mod.shutil, "which", lambda name: f"/usr/bin/{name}")
+    popen_calls: list[list[str]] = []
+
+    def fake_popen(cmd, **kwargs):
+        popen_calls.append(cmd)
+        if cmd[0] == "wslview":
+            raise FileNotFoundError("wslview not actually installed")
+        return MagicMock()
+
+    with (
+        patch.object(cli_mod.webbrowser, "open", return_value=False),
+        patch.object(cli_mod.subprocess, "Popen", side_effect=fake_popen),
+    ):
+        assert cli_mod._try_open_browser("https://example.com/d?u=ABC") is True
+    # First attempt (wslview) raised; second attempt (explorer.exe) succeeded.
+    assert [c[0] for c in popen_calls] == ["wslview", "explorer.exe"]
+
+
+def test_is_wsl_detects_via_env(monkeypatch):
+    from kagura_memory.auth import cli as cli_mod
+
+    monkeypatch.setenv("WSL_DISTRO_NAME", "Ubuntu-22.04")
+    assert cli_mod._is_wsl() is True
+
+
+def test_is_wsl_detects_via_proc_osrelease(monkeypatch, tmp_path):
+    """When WSL_DISTRO_NAME is unset, fall back to reading /proc/sys/kernel/osrelease."""
+    from kagura_memory.auth import cli as cli_mod
+
+    monkeypatch.delenv("WSL_DISTRO_NAME", raising=False)
+    fake_release = tmp_path / "osrelease"
+    fake_release.write_text("5.15.167.4-microsoft-standard-WSL2\n")
+
+    real_open = open
+
+    def fake_open(path, *args, **kwargs):
+        if path == "/proc/sys/kernel/osrelease":
+            return real_open(fake_release, *args, **kwargs)
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", fake_open)
+    assert cli_mod._is_wsl() is True
+
+
+def test_is_wsl_returns_false_for_native_linux_kernel(monkeypatch, tmp_path):
+    """A native Linux kernel string contains neither 'wsl' nor 'microsoft'."""
+    from kagura_memory.auth import cli as cli_mod
+
+    monkeypatch.delenv("WSL_DISTRO_NAME", raising=False)
+    fake_release = tmp_path / "osrelease"
+    fake_release.write_text("6.6.0-generic\n")
+
+    real_open = open
+
+    def fake_open(path, *args, **kwargs):
+        if path == "/proc/sys/kernel/osrelease":
+            return real_open(fake_release, *args, **kwargs)
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", fake_open)
+    assert cli_mod._is_wsl() is False
+
+
+def test_is_wsl_returns_false_when_no_signal(monkeypatch):
+    from kagura_memory.auth import cli as cli_mod
+
+    monkeypatch.delenv("WSL_DISTRO_NAME", raising=False)
+    # Force open() to raise so we exit the function via the fallback path.
+    fake_open = MagicMock(side_effect=OSError("no /proc/sys/kernel/osrelease"))
+    monkeypatch.setattr("builtins.open", fake_open)
+    assert cli_mod._is_wsl() is False
 
 
 # ---------------------------------------------------------------------------
@@ -280,7 +630,7 @@ def test_refresh_rotates_access_token(
 @patch("kagura_memory.auth.cli.poll_for_token", new_callable=AsyncMock)
 @patch("kagura_memory.auth.cli.authorize_device", new_callable=AsyncMock)
 @patch("kagura_memory.auth.cli.refresh_access_token", new_callable=AsyncMock)
-@patch("kagura_memory.auth.cli.webbrowser.open", return_value=True)
+@patch("kagura_memory.auth.cli._try_open_browser", return_value=True)
 @patch("kagura_memory.auth.cli.make_oauth_client")
 def test_refresh_scope_widening_triggers_device_flow(
     mock_client_factory,

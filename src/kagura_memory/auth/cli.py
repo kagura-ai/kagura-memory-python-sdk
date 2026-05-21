@@ -19,6 +19,9 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
+import subprocess
+import sys
 import webbrowser
 from datetime import UTC, datetime
 from pathlib import Path
@@ -55,7 +58,10 @@ from .device_flow import (
 )
 
 DEFAULT_SERVER = "https://memory.kagura-ai.com"
-DEFAULT_SCOPE = "memory:read"
+_SCOPE_READ = "memory:read"
+_SCOPE_WRITE = "memory:write"
+DEFAULT_SCOPE = f"{_SCOPE_READ} {_SCOPE_WRITE}"
+READ_ONLY_SCOPE = _SCOPE_READ
 
 
 # ---------------------------------------------------------------------------
@@ -97,32 +103,52 @@ def auth():
 )
 @click.option(
     "--scope",
-    default=DEFAULT_SCOPE,
-    help=f"OAuth scope (default: '{DEFAULT_SCOPE}'). "
-    "Pass 'memory:read memory:write' to request write access at login.",
+    default=None,
+    help=f"OAuth scope (default: '{DEFAULT_SCOPE}'). Override only if you need a custom scope set.",
+)
+@click.option(
+    "--read-only",
+    "read_only",
+    is_flag=True,
+    help=f"Request read-only scope ('{READ_ONLY_SCOPE}') instead of the default read+write.",
 )
 @click.option(
     "--no-browser",
     is_flag=True,
     help="Don't try to open a browser — just print the URL and code.",
 )
-def auth_login(profile: str, server: str | None, scope: str, no_browser: bool) -> None:
+def auth_login(
+    profile: str,
+    server: str | None,
+    scope: str | None,
+    read_only: bool,
+    no_browser: bool,
+) -> None:
     """Authenticate via OAuth2 device flow.
 
     \b
     Examples:
-      kagura auth login
-      kagura auth login --scope "memory:read memory:write"
+      kagura auth login                      # read + write (default)
+      kagura auth login --read-only          # read-only
+      kagura auth login --scope "memory:read memory:write profile:read"  # custom
       kagura auth login --profile work
-      kagura auth login --no-browser    # for SSH / WSL2 / headless
+      kagura auth login --no-browser         # for SSH / headless
     """
+    if read_only and scope is not None:
+        raise click.ClickException("--read-only and --scope are mutually exclusive; pick one.")
+    if scope is not None:
+        resolved_scope = scope
+    elif read_only:
+        resolved_scope = READ_ONLY_SCOPE
+    else:
+        resolved_scope = DEFAULT_SCOPE
     resolved_server = _resolve_server(server)
     try:
         asyncio.run(
             _run_login(
                 server=resolved_server,
                 profile=profile,
-                scope=scope,
+                scope=resolved_scope,
                 open_browser=not no_browser,
             )
         )
@@ -169,7 +195,7 @@ async def _run_login(
 
 
 def _print_device_prompt(device: DeviceAuthorizationResponse, *, attempt_browser: bool) -> None:
-    """Print URL + code FIRST, then optionally try webbrowser.open.
+    """Print URL + code FIRST, then optionally try to open a browser.
 
     The URL+code lines come out unconditionally so that even when the
     browser opens silently, the operator can still copy the code by
@@ -177,6 +203,10 @@ def _print_device_prompt(device: DeviceAuthorizationResponse, *, attempt_browser
     """
     click.echo()
     click.echo(f"! First copy your one-time code: {device.user_code}")
+    click.echo(
+        "  Tip: sign in to the Kagura web UI in the same browser first — "
+        "the consent page assumes you're already logged in."
+    )
     click.echo("  Open this URL in your browser to approve:")
     click.echo(f"    {device.verification_uri_complete}")
     click.echo()
@@ -185,16 +215,78 @@ def _print_device_prompt(device: DeviceAuthorizationResponse, *, attempt_browser
         click.echo("  (--no-browser: not opening a browser; polling will continue here.)")
         return
 
-    try:
-        opened = webbrowser.open(device.verification_uri_complete)
-    except Exception:
-        opened = False
-
-    if not opened:
+    if not _try_open_browser(device.verification_uri_complete):
         click.echo(
             "  Could not auto-open the browser. Open the URL above manually. "
             "Polling will continue here."
         )
+
+
+def _try_open_browser(url: str) -> bool:
+    """Open ``url`` in the user's default browser.
+
+    On WSL, skip the stdlib :mod:`webbrowser` module entirely and hand
+    the URL to a Windows binary (``wslview`` or ``explorer.exe``):
+    Python's webbrowser can report success on WSL even when no Windows
+    browser actually launches. On other platforms, try the stdlib first
+    and fall back if it reports failure.
+
+    All fallback openers are non-shell binaries invoked via argv, so a
+    URL containing shell metacharacters (``&``, ``|``, ``%``, ``!``,
+    etc.) cannot be reinterpreted as command chaining. We intentionally
+    do NOT fall back to ``cmd.exe /c start`` — cmd.exe re-parses its
+    argv as a shell, and an allowlist tight enough to be safe would
+    also reject normal URL characters like ``&``.
+
+    Returns ``True`` if any opener was dispatched successfully.
+    """
+    on_wsl = _is_wsl()
+    if not on_wsl:
+        try:
+            if webbrowser.open(url):
+                return True
+        except (webbrowser.Error, OSError):
+            # Fall through to the platform-specific openers below.
+            pass
+
+    fallback_commands: list[list[str]] = []
+    if on_wsl:
+        if shutil.which("wslview"):
+            fallback_commands.append(["wslview", url])
+        # explorer.exe is a Windows GUI binary (not a shell); it hands
+        # the URL to the registered protocol handler via ShellExecute,
+        # so shell metacharacters in the URL stay literal.
+        fallback_commands.append(["explorer.exe", url])
+    elif sys.platform == "darwin":
+        fallback_commands.append(["open", url])
+    elif sys.platform.startswith("linux") and shutil.which("xdg-open"):
+        fallback_commands.append(["xdg-open", url])
+
+    for cmd in fallback_commands:
+        try:
+            subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            return True
+        except OSError:
+            continue
+
+    return False
+
+
+def _is_wsl() -> bool:
+    """Detect Windows Subsystem for Linux (WSL1/WSL2)."""
+    if os.environ.get("WSL_DISTRO_NAME"):
+        return True
+    try:
+        with open("/proc/sys/kernel/osrelease", encoding="ascii", errors="ignore") as f:
+            release = f.read().lower()
+        return "wsl" in release or "microsoft" in release
+    except OSError:
+        return False
 
 
 def _print_login_success(creds: OAuthCredentials, profile: str) -> None:
