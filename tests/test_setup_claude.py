@@ -519,7 +519,7 @@ def test_setup_claude_user_abort_propagates_as_aborted(
     runner: CliRunner,
     tmp_path: Path,
 ) -> None:
-    """Ctrl+D during a prompt (click.Abort) must yield Click's default 'Aborted!' UX, not 'Setup failed: Abort'."""
+    """click.Abort (Ctrl+D) must yield Click's default 'Aborted!' UX, not 'Setup failed: Abort'."""
     mock_run.side_effect = click.Abort()
 
     result = runner.invoke(main, _setup_args(tmp_path))
