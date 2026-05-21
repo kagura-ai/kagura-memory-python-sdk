@@ -44,6 +44,7 @@ from .exceptions import (
     KaguraIntegrityError,
     KaguraNotFoundError,
     KaguraQuotaError,
+    _exc_message,
 )
 from .logger import VerboseLogger, normalize_logger
 from .models import (
@@ -291,7 +292,7 @@ class FilesClient:
             msg = f"HTTP {status}: {detail}" if detail else f"HTTP {status}"
             raise KaguraConnectionError(msg) from e
         except httpx.RequestError as e:
-            raise KaguraConnectionError(f"Connection failed: {e}") from e
+            raise KaguraConnectionError(f"Connection failed: {_exc_message(e)}") from e
 
     async def _put_to_object_store(
         self,
@@ -338,9 +339,9 @@ class FilesClient:
                 f"Object store PUT failed: HTTP {e.response.status_code}"
             ) from e
         except httpx.TimeoutException as e:
-            raise KaguraConnectionError(f"Object store PUT timed out: {e}") from e
+            raise KaguraConnectionError(f"Object store PUT timed out: {_exc_message(e)}") from e
         except httpx.RequestError as e:
-            raise KaguraConnectionError(f"Object store PUT failed: {e}") from e
+            raise KaguraConnectionError(f"Object store PUT failed: {_exc_message(e)}") from e
 
     # -------------------------------------------------------------------
     # Public API

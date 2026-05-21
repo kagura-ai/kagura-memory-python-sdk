@@ -396,6 +396,26 @@ async def test_poll_non_json_5xx_includes_http_status_and_body():
 
 
 @pytest.mark.asyncio
+async def test_refresh_request_error_surfaces_class_name():
+    """httpx.RequestError on refresh POST → KaguraConnectionError via _exc_message (#130)."""
+    client = MagicMock()
+    client.post = AsyncMock(side_effect=httpx.ConnectError(""))
+
+    with pytest.raises(
+        KaguraConnectionError, match=r"Could not reach .*: ConnectError"
+    ) as exc_info:
+        await refresh_access_token(
+            client,
+            SERVER,
+            client_id=DEFAULT_CLIENT_ID,
+            refresh_token="rtok-old",
+        )
+    # The wrapper must not strand the prefix when str(e) is empty.
+    msg = str(exc_info.value)
+    assert msg.split(": ", 1)[-1] != ""
+
+
+@pytest.mark.asyncio
 async def test_refresh_insufficient_scope_raises_auth_error():
     """``insufficient_scope`` → generic KaguraAuthError so CLI can detect+retry."""
     client = MagicMock()

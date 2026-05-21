@@ -9,7 +9,7 @@ from typing import Any
 import click
 
 from .client import KaguraClient
-from .exceptions import KaguraAuthError, KaguraConnectionError
+from .exceptions import KaguraAuthError, KaguraConnectionError, _exc_message
 
 DEFAULT_MCP_URL = "http://localhost:8080/mcp"
 
@@ -334,17 +334,16 @@ def run_setup_claude(
         contexts_response = asyncio.run(_test_connection(resolved_api_key, resolved_mcp_url))
     except KaguraAuthError as e:
         raise click.ClickException(
-            f"Authentication failed: {e}\n"
+            f"Authentication failed: {_exc_message(e)}\n"
             "  Check your API key at: Kagura Web UI > Integrations > API Keys"
         ) from e
     except KaguraConnectionError as e:
         raise click.ClickException(
-            f"Cannot connect to {resolved_mcp_url}: {e}\n"
+            f"Cannot connect to {resolved_mcp_url}: {_exc_message(e)}\n"
             "  Is the server running? Try: docker compose up -d"
         ) from e
     except Exception as e:
-        msg = str(e) or e.__class__.__name__
-        raise click.ClickException(f"Connection failed: {msg}") from e
+        raise click.ClickException(f"Connection failed: {_exc_message(e)}") from e
 
     count = contexts_response.get("count", 0)
     click.echo(f"  Connected! ({count} contexts available)")

@@ -385,6 +385,29 @@ def test_process_command(mock_agent_cls, mock_config):
 
 
 @patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraAgent")
+def test_process_unmessaged_exception_falls_back_to_class_name(mock_agent_cls, mock_config):
+    """`process` Exception fallthrough must surface the class name via _exc_message (#130)."""
+    mock_config.return_value = {
+        "api_key": "key",
+        "mcp_url": "https://test.com/mcp",
+        "model": "gpt-test",
+        "context_id": "ctx",
+    }
+    mock_agent = AsyncMock()
+    mock_agent.process.side_effect = RuntimeError()
+    mock_agent.__aenter__ = AsyncMock(return_value=mock_agent)
+    mock_agent.__aexit__ = AsyncMock(return_value=None)
+    mock_agent_cls.return_value = mock_agent
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["process", "-m", "test"])
+    assert result.exit_code != 0
+    assert "RuntimeError" in result.output
+    assert "Error: \n" not in result.output
+
+
+@patch("kagura_memory.cli.load_config")
 @patch("kagura_memory.cli.sys")
 def test_process_no_input_on_tty_exits_with_usage_hint(mock_sys, mock_config):
     """`kagura process` (no -m / -f) on an interactive TTY must refuse to block
@@ -731,6 +754,70 @@ def test_resource_import_json(mock_rc_cls, mock_config):
     )
     assert result.exit_code == 0
     assert '"created": 2' in result.output
+
+
+def test_resource_ingest_invalid_payload_surfaces_json_error():
+    """`resource ingest -p '<not json>'` translates JSONDecodeError via _exc_message (#130)."""
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        [
+            "resource",
+            "ingest",
+            "-r",
+            "products",
+            "-k",
+            "TOKEN",
+            "--doc-id",
+            "SKU-1",
+            "-p",
+            "not json",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "Invalid JSON payload" in result.output
+
+
+def test_resource_ingest_batch_invalid_json_file_surfaces_error(tmp_path):
+    """`resource ingest-batch -f <bad json>` translates JSONDecodeError via _exc_message (#130)."""
+    bad = tmp_path / "events.json"
+    bad.write_text("not json")
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        ["resource", "ingest-batch", "-r", "res", "-k", "TOKEN", "-f", str(bad)],
+    )
+    assert result.exit_code != 0
+    assert "Invalid JSON file" in result.output
+
+
+def test_resource_import_read_failure_surfaces_class_name(monkeypatch):
+    """`resource import` translates a read() OSError into ClickException via _exc_message (#130)."""
+    import io
+
+    class _RaisingFile(io.StringIO):
+        def read(self, *_args, **_kwargs):
+            raise OSError("disk gone")
+
+    runner = CliRunner()
+    # Inject a file-like that raises on read by monkeypatching click.File.convert
+    # to swap the wrapped file just before resource_import reads it.
+    real_convert = __import__("click").File.convert
+
+    def _fake_convert(self, value, param, ctx):
+        if isinstance(value, str):
+            return _RaisingFile("placeholder")
+        return real_convert(self, value, param, ctx)
+
+    monkeypatch.setattr("click.File.convert", _fake_convert)
+
+    result = runner.invoke(
+        main,
+        ["resource", "import", "-r", "res", "-k", "TOKEN", "--format", "json", "-f", "any.json"],
+    )
+    assert result.exit_code != 0
+    assert "Failed to read input" in result.output
+    assert "disk gone" in result.output
 
 
 def test_resource_import_invalid_json():

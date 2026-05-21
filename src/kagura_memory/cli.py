@@ -19,6 +19,7 @@ from .agent import KaguraAgent
 from .auth.cli import auth as _auth_group
 from .client import KaguraClient
 from .config import load_config
+from .exceptions import _exc_message
 from .files_client import FilesClient
 from .logger import VerboseLogger
 from .models import Message, ProcessResult, ResourceEventRequest, Session
@@ -113,7 +114,7 @@ def _run_client_command(
     except click.ClickException:
         raise
     except Exception as e:
-        raise click.ClickException(str(e)) from e
+        raise click.ClickException(_exc_message(e)) from e
 
 
 @click.group()
@@ -181,7 +182,7 @@ def process(message, file, deep, verbose):
     except click.ClickException:
         raise
     except Exception as e:
-        raise click.ClickException(str(e)) from e
+        raise click.ClickException(_exc_message(e)) from e
 
 
 @main.group()
@@ -532,7 +533,7 @@ def ingest_file(
         # ClickException's __str__ already prefixes "Error: " when printed,
         # so wrapping the message with another "Error: " would render as
         # "Error: Error: <msg>". Pass the raw exception message instead.
-        raise click.ClickException(str(e) or type(e).__name__) from e
+        raise click.ClickException(_exc_message(e)) from e
 
 
 @main.command()
@@ -997,7 +998,7 @@ def sleep_rollback(context_id, report_id, yes):
     except (click.Abort, click.ClickException):
         raise
     except Exception as e:
-        raise click.ClickException(str(e)) from e
+        raise click.ClickException(_exc_message(e)) from e
 
 
 # =============================================================================
@@ -1041,8 +1042,7 @@ def setup_claude(api_key, mcp_url, context_id, project_dir, non_interactive):
         # render its default "Aborted!" UX instead of reporting "Setup failed: Abort".
         raise
     except Exception as e:
-        msg = str(e) or e.__class__.__name__
-        raise click.ClickException(f"Setup failed: {msg}") from e
+        raise click.ClickException(f"Setup failed: {_exc_message(e)}") from e
 
 
 # =============================================================================
@@ -1076,7 +1076,7 @@ def _get_resource_client() -> ResourceClient:
             config=config,
         )
     except KaguraAuthError as e:
-        raise click.ClickException(str(e)) from e
+        raise click.ClickException(_exc_message(e)) from e
     return ResourceClient._from_resolved_auth(resolved)
 
 
@@ -1099,7 +1099,7 @@ def _get_kagura_client() -> KaguraClient:
             mcp_url=config.get("mcp_url") or None,
         )
     except KaguraAuthError as e:
-        raise click.ClickException(str(e)) from e
+        raise click.ClickException(_exc_message(e)) from e
 
 
 def _run_resource_command(
@@ -1119,7 +1119,7 @@ def _run_resource_command(
     except click.ClickException:
         raise
     except Exception as e:
-        raise click.ClickException(str(e)) from e
+        raise click.ClickException(_exc_message(e)) from e
 
 
 @main.group()
@@ -1241,7 +1241,7 @@ def ingest(resource_id, api_key, doc_id, op, version, payload, importance):
     try:
         parsed_payload = json.loads(payload) if payload else None
     except json.JSONDecodeError as e:
-        raise click.ClickException(f"Invalid JSON payload: {e}") from e
+        raise click.ClickException(f"Invalid JSON payload: {_exc_message(e)}") from e
 
     event = ResourceEventRequest(
         op=op,
@@ -1274,7 +1274,7 @@ def ingest_batch(resource_id, api_key, file):
     try:
         data = json.load(file)
     except json.JSONDecodeError as e:
-        raise click.ClickException(f"Invalid JSON file: {e}") from e
+        raise click.ClickException(f"Invalid JSON file: {_exc_message(e)}") from e
 
     if not isinstance(data, list):
         raise click.ClickException("JSON file must contain an array of events")
@@ -1443,7 +1443,7 @@ def resource_import(resource_id, api_key, input_file, fmt, id_column, version, v
     try:
         raw = input_file.read()
     except Exception as e:
-        raise click.ClickException(f"Failed to read input: {e}") from e
+        raise click.ClickException(f"Failed to read input: {_exc_message(e)}") from e
 
     rows: list[dict] = []
     if fmt == "csv":
@@ -1453,7 +1453,7 @@ def resource_import(resource_id, api_key, input_file, fmt, id_column, version, v
         try:
             data = json.loads(raw)
         except json.JSONDecodeError as e:
-            raise click.ClickException(f"Invalid JSON: {e}") from e
+            raise click.ClickException(f"Invalid JSON: {_exc_message(e)}") from e
         if not isinstance(data, list):
             raise click.ClickException("JSON must be an array of objects")
         for i, item in enumerate(data):
@@ -1468,7 +1468,9 @@ def resource_import(resource_id, api_key, input_file, fmt, id_column, version, v
             try:
                 obj = json.loads(line)
             except json.JSONDecodeError as e:
-                raise click.ClickException(f"Invalid JSONL at line {line_num}: {e}") from e
+                raise click.ClickException(
+                    f"Invalid JSONL at line {line_num}: {_exc_message(e)}"
+                ) from e
             if not isinstance(obj, dict):
                 raise click.ClickException(f"JSONL line {line_num} is not an object")
             rows.append(obj)
@@ -1714,7 +1716,7 @@ def _run_files_command(
     except click.ClickException:
         raise
     except Exception as e:
-        raise click.ClickException(str(e)) from e
+        raise click.ClickException(_exc_message(e)) from e
 
 
 @main.group()

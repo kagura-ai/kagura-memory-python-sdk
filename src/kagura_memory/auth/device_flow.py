@@ -29,6 +29,7 @@ from ..exceptions import (
     KaguraAuthError,
     KaguraAuthExpiredError,
     KaguraConnectionError,
+    _exc_message,
 )
 
 # OAuth2 endpoint paths under {server}.
@@ -130,7 +131,7 @@ async def authorize_device(
             f"  Verify the server URL and that '{client_id}' is registered."
         ) from e
     except httpx.RequestError as e:
-        raise KaguraConnectionError(f"Could not reach {url}: {e}") from e
+        raise KaguraConnectionError(f"Could not reach {url}: {_exc_message(e)}") from e
 
     body = _safe_json_object(response, "Device authorization")
     try:
@@ -205,7 +206,7 @@ async def poll_for_token(
             )
         except httpx.RequestError as e:
             raise KaguraConnectionError(
-                f"Lost connection while waiting for approval: {e}\n"
+                f"Lost connection while waiting for approval: {_exc_message(e)}\n"
                 f"  The login session may still be valid; re-run: kagura auth login"
             ) from e
 
@@ -282,7 +283,7 @@ async def refresh_access_token(
     try:
         response = await client.post(url, data=data)
     except httpx.RequestError as e:
-        raise KaguraConnectionError(f"Could not reach {url}: {e}") from e
+        raise KaguraConnectionError(f"Could not reach {url}: {_exc_message(e)}") from e
 
     if response.status_code == 200:
         return _token_response_from_response(response)

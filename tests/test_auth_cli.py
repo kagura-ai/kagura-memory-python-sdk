@@ -843,6 +843,150 @@ def test_token_no_profile_errors(patched_default_path: Path):
     assert "kagura auth login" in result.output
 
 
+@patch("kagura_memory.auth.cli.poll_for_token", new_callable=AsyncMock)
+@patch("kagura_memory.auth.cli.authorize_device", new_callable=AsyncMock)
+@patch("kagura_memory.auth.cli.make_oauth_client")
+def test_login_expired_error_surfaces(
+    mock_client_factory,
+    mock_authorize,
+    mock_poll,
+    patched_default_path: Path,
+):
+    """`auth login` translates a KaguraAuthExpiredError from device-flow into ClickException."""
+    from kagura_memory.exceptions import KaguraAuthExpiredError
+
+    mock_client_factory.return_value = _async_ctx()
+    mock_authorize.return_value = _mock_device_response()
+    mock_poll.side_effect = KaguraAuthExpiredError("Token expired during device flow.")
+
+    result = CliRunner().invoke(main, ["auth", "login", "--no-browser"])
+    assert result.exit_code != 0
+    assert "Token expired during device flow" in result.output
+
+
+@patch("kagura_memory.auth.cli.poll_for_token", new_callable=AsyncMock)
+@patch("kagura_memory.auth.cli.authorize_device", new_callable=AsyncMock)
+@patch("kagura_memory.auth.cli.make_oauth_client")
+def test_login_unmessaged_exception_falls_back_to_class_name(
+    mock_client_factory,
+    mock_authorize,
+    mock_poll,
+    patched_default_path: Path,
+):
+    """Generic Exception with no args must surface the class name via _exc_message (#130)."""
+    mock_client_factory.return_value = _async_ctx()
+    mock_authorize.return_value = _mock_device_response()
+    mock_poll.side_effect = RuntimeError()
+
+    result = CliRunner().invoke(main, ["auth", "login", "--no-browser"])
+    assert result.exit_code != 0
+    assert "RuntimeError" in result.output
+    assert "Error: \n" not in result.output
+
+
+@patch("kagura_memory.auth.cli.refresh_access_token", new_callable=AsyncMock)
+@patch("kagura_memory.auth.cli.make_oauth_client")
+def test_refresh_connection_error_surfaces(
+    mock_client_factory,
+    mock_refresh,
+    patched_default_path: Path,
+):
+    """`auth refresh` translates KaguraConnectionError into a ClickException."""
+    from kagura_memory.exceptions import KaguraConnectionError
+
+    mock_client_factory.return_value = _async_ctx()
+    mock_refresh.side_effect = KaguraConnectionError("Unable to reach OAuth server.")
+    _seed_credentials(patched_default_path.parent.parent, _make_creds())
+
+    result = CliRunner().invoke(main, ["auth", "refresh"])
+    assert result.exit_code != 0
+    assert "Unable to reach OAuth server" in result.output
+
+
+@patch("kagura_memory.auth.cli.refresh_access_token", new_callable=AsyncMock)
+@patch("kagura_memory.auth.cli.make_oauth_client")
+def test_refresh_unmessaged_exception_falls_back_to_class_name(
+    mock_client_factory,
+    mock_refresh,
+    patched_default_path: Path,
+):
+    """Generic Exception with no args must surface the class name via _exc_message (#130)."""
+    mock_client_factory.return_value = _async_ctx()
+    mock_refresh.side_effect = RuntimeError()
+    _seed_credentials(patched_default_path.parent.parent, _make_creds())
+
+    result = CliRunner().invoke(main, ["auth", "refresh"])
+    assert result.exit_code != 0
+    assert "RuntimeError" in result.output
+    assert "Error: \n" not in result.output
+
+
+@patch("kagura_memory.auth.cli.refresh_access_token", new_callable=AsyncMock)
+@patch("kagura_memory.auth.cli.make_oauth_client")
+def test_token_auto_refresh_unmessaged_exception_falls_back_to_class_name(
+    mock_client_factory,
+    mock_refresh,
+    patched_default_path: Path,
+):
+    """`auth token` auto-refresh path translates an unmessaged failure via _exc_message (#130).
+
+    Also covers the KaguraAuthExpiredError and KaguraConnectionError branches via parametrize
+    below; this case nails the generic Exception fallthrough.
+    """
+    mock_client_factory.return_value = _async_ctx()
+    mock_refresh.side_effect = RuntimeError()
+    near_expiry = datetime.now(UTC) + timedelta(minutes=2)
+    _seed_credentials(
+        patched_default_path.parent.parent,
+        _make_creds(access_token="atok-old", expires_at=near_expiry),
+    )
+
+    result = CliRunner().invoke(main, ["auth", "token"])
+    assert result.exit_code != 0
+    assert "RuntimeError" in result.output
+    assert "Error: \n" not in result.output
+
+
+@pytest.mark.parametrize(
+    "exc_factory, expected_substr",
+    [
+        (
+            lambda: __import__(
+                "kagura_memory.exceptions", fromlist=["KaguraAuthExpiredError"]
+            ).KaguraAuthExpiredError("Login expired."),
+            "Login expired",
+        ),
+        (
+            lambda: __import__(
+                "kagura_memory.exceptions", fromlist=["KaguraConnectionError"]
+            ).KaguraConnectionError("Unable to reach refresh endpoint."),
+            "Unable to reach refresh endpoint",
+        ),
+    ],
+)
+@patch("kagura_memory.auth.cli.refresh_access_token", new_callable=AsyncMock)
+@patch("kagura_memory.auth.cli.make_oauth_client")
+def test_token_auto_refresh_typed_errors_surface(
+    mock_client_factory,
+    mock_refresh,
+    exc_factory,
+    expected_substr,
+    patched_default_path: Path,
+):
+    """`auth token` auto-refresh path translates typed errors into a ClickException with msg."""
+    mock_client_factory.return_value = _async_ctx()
+    mock_refresh.side_effect = exc_factory()
+    near_expiry = datetime.now(UTC) + timedelta(minutes=2)
+    _seed_credentials(
+        patched_default_path.parent.parent,
+        _make_creds(access_token="atok-old", expires_at=near_expiry),
+    )
+
+    result = CliRunner().invoke(main, ["auth", "token"])
+    assert result.exit_code != 0
+    assert expected_substr in result.output
+
+
 @patch("kagura_memory.auth.cli.refresh_access_token", new_callable=AsyncMock)
 @patch("kagura_memory.auth.cli.make_oauth_client")
 def test_token_refreshes_when_near_expiry(

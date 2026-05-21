@@ -3,6 +3,19 @@
 from datetime import datetime
 
 
+def _exc_message(e: BaseException) -> str:
+    """Return ``str(e)`` when non-empty, otherwise the class name.
+
+    Defensive fallback so an unmessaged exception (e.g. ``raise
+    RuntimeError()``) still produces a non-empty diagnostic when
+    interpolated into a user-facing error string. Used by the SDK
+    wherever a ``ClickException`` or ``KaguraConnectionError`` wrapper
+    interpolates ``{e}`` / ``str(e)`` into the message it raises.
+    Originating bug: #127.
+    """
+    return str(e) or e.__class__.__name__
+
+
 class KaguraError(Exception):
     """Base exception for Kagura SDK."""
 
