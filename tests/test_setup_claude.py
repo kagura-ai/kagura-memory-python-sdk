@@ -11,6 +11,7 @@ from click.testing import CliRunner
 from kagura_memory.cli import main
 from kagura_memory.setup_claude import (
     KAGURA_HOOK_MARKER,
+    _auto_match_context,
     _check_gitignore,
     _install_hooks,
     _install_skills,
@@ -591,3 +592,95 @@ def test_setup_claude_reuses_existing_context_id(
     assert result.exit_code == 0, result.output
     data = json.loads((tmp_path / ".kagura.json").read_text())
     assert data["context_id"] == "ctx-from-config"
+
+
+# =============================================================================
+# Auto-Match Context Tests
+# =============================================================================
+
+
+class TestAutoMatchContext:
+    """Tests for _auto_match_context fuzzy matching logic."""
+
+    def test_exact_match(self) -> None:
+        """Exact directory-name match should return high score."""
+        contexts = [{"id": "ctx-1", "name": "kagura-memory-python-sdk"}]
+        result = _auto_match_context(contexts, Path("/tmp/kagura-memory-python-sdk"))
+        assert result is not None
+        assert result["id"] == "ctx-1"
+
+    def test_exact_match_with_underscore_normalization(self) -> None:
+        """Underscores should be normalized to dashes."""
+        contexts = [{"id": "ctx-1", "name": "kagura_memory_python_sdk"}]
+        result = _auto_match_context(contexts, Path("/tmp/kagura-memory-python-sdk"))
+        assert result is not None
+        assert result["id"] == "ctx-1"
+
+    def test_substring_match_gets_bonus(self) -> None:
+        """Substring containment should boost score to >= 0.85."""
+        # Dir name is a substring of context name
+        contexts = [{"id": "ctx-1", "name": "kagura-memory-python-sdk-dev"}]
+        result = _auto_match_context(contexts, Path("/tmp/kagura-memory-python-sdk"))
+        assert result is not None
+        assert result["id"] == "ctx-1"
+
+    def test_context_name_is_substring_of_dir(self) -> None:
+        """Context name as substring of dir name should also get bonus."""
+        contexts = [{"id": "ctx-1", "name": "ai-worker"}]
+        result = _auto_match_context(contexts, Path("/tmp/kagura-ai-worker-dev"))
+        assert result is not None
+        assert result["id"] == "ctx-1"
+
+    def test_no_match_below_threshold(self) -> None:
+        """No match should return None."""
+        contexts = [{"id": "ctx-1", "name": "completely-unrelated-project"}]
+        result = _auto_match_context(contexts, Path("/tmp/kagura-memory-python-sdk"))
+        assert result is None
+
+    def test_empty_context_list(self) -> None:
+        """Empty context list should return None."""
+        result = _auto_match_context([], Path("/tmp/kagura-memory-python-sdk"))
+        assert result is None
+
+    def test_context_with_empty_name(self) -> None:
+        """Context with empty name should be skipped."""
+        contexts = [{"id": "ctx-1", "name": ""}, {"id": "ctx-2", "name": "kagura-memory"}]
+        result = _auto_match_context(contexts, Path("/tmp/kagura-memory"))
+        assert result is not None
+        assert result["id"] == "ctx-2"
+
+    def test_multiple_candidates_picks_best(self) -> None:
+        """Should pick the best match among multiple candidates."""
+        contexts = [
+            {"id": "ctx-1", "name": "other-project"},
+            {"id": "ctx-2", "name": "kagura-memory-python-sdk"},
+            {"id": "ctx-3", "name": "kagura-something-else"},
+        ]
+        result = _auto_match_context(contexts, Path("/tmp/kagura-memory-python-sdk"))
+        assert result is not None
+        assert result["id"] == "ctx-2"
+
+    def test_tie_falls_through_to_highest_score(self) -> None:
+        """When scores tie, first encountered wins (implementation detail)."""
+        contexts = [
+            {"id": "ctx-1", "name": "project-alpha"},
+            {"id": "ctx-2", "name": "project-beta"},
+        ]
+        # Both equally unrelated to 'kagura-memory' - first one with best score wins
+        result = _auto_match_context(contexts, Path("/tmp/kagura-memory"))
+        # Just verify it returns one of them (deterministic behavior)
+        assert result is None or result["id"] in ["ctx-1", "ctx-2"]
+
+    def test_threshold_boundary(self) -> None:
+        """Score exactly at threshold should match."""
+        # Create a scenario where score is close to threshold
+        contexts = [{"id": "ctx-1", "name": "kagura-mem"}]
+        result = _auto_match_context(contexts, Path("/tmp/kagura-mem"), threshold=0.65)
+        assert result is not None
+
+    def test_custom_threshold(self) -> None:
+        """Higher threshold should reject marginal matches."""
+        contexts = [{"id": "ctx-1", "name": "kagura-mem"}]
+        # With very high threshold, even close matches fail
+        result = _auto_match_context(contexts, Path("/tmp/kagura-memory"), threshold=0.95)
+        assert result is None

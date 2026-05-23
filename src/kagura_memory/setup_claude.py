@@ -142,6 +142,30 @@ async def _create_context(
         return await client.create_context(name=name, summary=summary)
 
 
+def _auto_match_context(
+    contexts: list[dict[str, Any]], project_dir: Path, threshold: float = 0.65
+) -> dict[str, Any] | None:
+    """Return the context whose name best matches the project dir name,
+    or None if no candidate clears the threshold."""
+    from difflib import SequenceMatcher
+
+    target = project_dir.name.lower().replace("_", "-")
+    best: tuple[float, dict[str, Any]] | None = None
+    for ctx in contexts:
+        name = (ctx.get("name") or "").lower().replace("_", "-")
+        if not name:
+            continue
+        score = SequenceMatcher(None, target, name).ratio()
+        # Bonus for substring containment in either direction
+        if target in name or name in target:
+            score = max(score, 0.85)
+        if best is None or score > best[0]:
+            best = (score, ctx)
+    if best and best[0] >= threshold:
+        return best[1]
+    return None
+
+
 def _select_or_create_context(
     contexts_response: dict[str, Any],
     api_key: str,
@@ -149,6 +173,7 @@ def _select_or_create_context(
     preselected: str | None,
     project_dir: Path,
     non_interactive: bool,
+    no_auto_context: bool = False,
 ) -> str:
     """Select existing context or create a new one. Returns context_id."""
     contexts = contexts_response.get("contexts", [])
@@ -170,6 +195,15 @@ def _select_or_create_context(
         ctx_id = result.get("context_id") or result.get("id", "")
         click.echo(f"  Created context: {default_name} ({ctx_id[:8]}...)")
         return ctx_id
+
+    if contexts and not no_auto_context:
+        auto = _auto_match_context(contexts, project_dir)
+        if auto:
+            click.echo(f"\nAuto-selected context: {auto['name']} ({auto['id'][:8]}...)")
+            click.echo("  (use --no-auto-context to disable, or pick a different one below)")
+            if click.confirm("Use this context?", default=True):
+                return auto["id"]
+        # Fall through to manual selection if auto-match declined
 
     if contexts:
         click.echo("\nExisting contexts:")
@@ -307,6 +341,7 @@ def run_setup_claude(
     context_id: str | None,
     project_dir: str,
     non_interactive: bool,
+    no_auto_context: bool = False,
 ) -> None:
     """Run the full setup flow for Claude Code integration."""
     project = Path(project_dir).resolve()
@@ -357,6 +392,7 @@ def run_setup_claude(
         effective_context_id,
         project,
         non_interactive,
+        no_auto_context,
     )
 
     # 5. Validate context_id before interpolating into shell commands
