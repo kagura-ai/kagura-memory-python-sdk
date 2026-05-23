@@ -76,8 +76,9 @@ class Fetcher:
         async with Fetcher() as fetcher:
             result = await fetcher.fetch("https://example.com/doc.pdf")
 
-    All limits are constructor-tunable; defaults match the design spec
-    in ``docs/design/80-ingest.md`` §8.1.
+    All limits are constructor-tunable; defaults were derived from the
+    Phase 1 ingest design review (issue #80 / PR #109) — see the commit
+    history for the rationale behind each value.
     """
 
     def __init__(
