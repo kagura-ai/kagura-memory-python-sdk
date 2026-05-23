@@ -146,11 +146,16 @@ def _auto_match_context(
     contexts: list[dict[str, Any]], project_dir: Path, threshold: float = 0.65
 ) -> dict[str, Any] | None:
     """Return the context whose name best matches the project dir name,
-    or None if no candidate clears the threshold."""
+    or None if no candidate clears the threshold or there is an ambiguous tie."""
     from difflib import SequenceMatcher
 
     target = project_dir.name.lower().replace("_", "-")
+    if not target:
+        # Empty target (e.g., Path("/") or Path(".") with no resolved name) would
+        # cause `target in name` to be True for every candidate. Bail early.
+        return None
     best: tuple[float, dict[str, Any]] | None = None
+    tied = False
     for ctx in contexts:
         name = (ctx.get("name") or "").lower().replace("_", "-")
         if not name:
@@ -161,7 +166,11 @@ def _auto_match_context(
             score = max(score, 0.85)
         if best is None or score > best[0]:
             best = (score, ctx)
-    if best and best[0] >= threshold:
+            tied = False
+        elif score == best[0]:
+            tied = True
+    # Reject ambiguous matches (top score ties — fall through to manual prompt)
+    if best and best[0] >= threshold and not tied:
         return best[1]
     return None
 
@@ -200,9 +209,9 @@ def _select_or_create_context(
         auto = _auto_match_context(contexts, project_dir)
         if auto:
             auto_id = auto.get("id", "")
-            click.echo(f"\nAuto-selected context: {auto.get('name', '?')} ({auto_id[:8]}...)")
+            click.echo(f"\nSuggested context: {auto.get('name', '?')} ({auto_id[:8]}...)")
             click.echo("  (use --no-auto-context to disable, or pick a different one below)")
-            if click.confirm("Use this context?", default=True):
+            if click.confirm("Use this suggested context?", default=True):
                 return auto_id
         # Fall through to manual selection if auto-match declined
 

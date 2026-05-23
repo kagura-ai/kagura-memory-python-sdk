@@ -84,7 +84,7 @@ class TestPromptMcpUrl:
 class TestSelectOrCreateContext:
     @patch("kagura_memory.setup_claude._create_context")
     def test_interactive_select_existing(self, mock_create: AsyncMock) -> None:
-        """Interactive: user selects an existing context."""
+        """Interactive: user selects an existing context (manual list path)."""
         with patch("kagura_memory.setup_claude.click") as mock_click:
             mock_click.prompt.return_value = 1
             mock_click.echo = MagicMock()
@@ -95,6 +95,7 @@ class TestSelectOrCreateContext:
                 None,
                 Path("/tmp/test"),
                 non_interactive=False,
+                no_auto_context=True,
             )
             assert result == "ctx-abc"
 
@@ -113,6 +114,7 @@ class TestSelectOrCreateContext:
                 None,
                 Path("/tmp/test"),
                 non_interactive=False,
+                no_auto_context=True,
             )
             assert result == "ctx-new"
 
@@ -134,8 +136,68 @@ class TestSelectOrCreateContext:
                 None,
                 Path("/tmp/test"),
                 non_interactive=False,
+                no_auto_context=True,
             )
             assert result == "ctx-brand-new"
+
+    def test_auto_match_confirm_true_returns_matched_id(self) -> None:
+        """Interactive: auto-match suggests a context, user confirms → matched id is returned."""
+        with patch("kagura_memory.setup_claude.click") as mock_click:
+            mock_click.confirm.return_value = True
+            mock_click.echo = MagicMock()
+            # Dir name 'kagura-memory' exactly matches context name → ratio == 1.0
+            result = _select_or_create_context(
+                {"contexts": [{"id": "ctx-match", "name": "kagura-memory"}]},
+                "key",
+                "url",
+                None,
+                Path("/tmp/kagura-memory"),
+                non_interactive=False,
+            )
+            assert result == "ctx-match"
+            mock_click.confirm.assert_called_once()
+
+    def test_auto_match_confirm_false_falls_through_to_manual(self) -> None:
+        """Interactive: auto-match suggests, user declines → manual list prompt is shown."""
+        with patch("kagura_memory.setup_claude.click") as mock_click:
+            mock_click.confirm.return_value = False
+            mock_click.prompt.return_value = 1  # pick first item from manual list
+            mock_click.echo = MagicMock()
+            mock_click.IntRange = click.IntRange
+            result = _select_or_create_context(
+                {"contexts": [{"id": "ctx-match", "name": "kagura-memory"}]},
+                "key",
+                "url",
+                None,
+                Path("/tmp/kagura-memory"),
+                non_interactive=False,
+            )
+            # Same id, but via the manual prompt path — verify confirm was asked and prompt followed
+            assert result == "ctx-match"
+            mock_click.confirm.assert_called_once()
+            mock_click.prompt.assert_called_once()
+
+    def test_no_auto_context_skips_auto_match(self) -> None:
+        """Interactive: no_auto_context=True bypasses _auto_match_context entirely."""
+        with (
+            patch("kagura_memory.setup_claude.click") as mock_click,
+            patch("kagura_memory.setup_claude._auto_match_context") as mock_auto_match,
+        ):
+            mock_click.prompt.return_value = 1
+            mock_click.echo = MagicMock()
+            mock_click.IntRange = click.IntRange
+            result = _select_or_create_context(
+                {"contexts": [{"id": "ctx-match", "name": "kagura-memory"}]},
+                "key",
+                "url",
+                None,
+                Path("/tmp/kagura-memory"),
+                non_interactive=False,
+                no_auto_context=True,
+            )
+            assert result == "ctx-match"
+            mock_auto_match.assert_not_called()
+            mock_click.confirm.assert_not_called()
 
 
 # =============================================================================
@@ -660,21 +722,19 @@ class TestAutoMatchContext:
         assert result is not None
         assert result["id"] == "ctx-2"
 
-    def test_tie_first_encountered_wins(self) -> None:
-        """When scores tie, the first candidate encountered wins (strict `>`)."""
+    def test_tie_at_top_score_returns_none(self) -> None:
+        """Ambiguous tie at top score should fall back to manual selection (None)."""
         # Both names are substrings of the dir name → both forced to 0.85 → tie.
-        # The strict `>` comparison in the loop keeps the first one seen.
+        # Per issue #129 spec ("Reject ambiguous matches"), tie must return None.
         contexts = [
             {"id": "ctx-1", "name": "alpha"},
             {"id": "ctx-2", "name": "beta"},
         ]
         result = _auto_match_context(contexts, Path("/tmp/alpha-beta-mix"))
-        assert result is not None
-        assert result["id"] == "ctx-1"
+        assert result is None
 
-    def test_threshold_boundary(self) -> None:
-        """Score exactly at threshold should match."""
-        # Create a scenario where score is close to threshold
+    def test_exact_match_passes_default_threshold(self) -> None:
+        """Exact name match should clear the default 0.65 threshold."""
         contexts = [{"id": "ctx-1", "name": "kagura-mem"}]
         result = _auto_match_context(contexts, Path("/tmp/kagura-mem"), threshold=0.65)
         assert result is not None
@@ -684,4 +744,15 @@ class TestAutoMatchContext:
         contexts = [{"id": "ctx-1", "name": "kagura-mem"}]
         # With very high threshold, even close matches fail
         result = _auto_match_context(contexts, Path("/tmp/kagura-memory"), threshold=0.95)
+        assert result is None
+
+    def test_empty_project_dir_name_returns_none(self) -> None:
+        """An empty project_dir.name must not trigger the substring bonus for every candidate."""
+        # Path("/") has .name == "". Without the guard, `"" in name` would be True
+        # for every context, boosting every candidate to 0.85 and producing arbitrary matches.
+        contexts = [
+            {"id": "ctx-1", "name": "alpha"},
+            {"id": "ctx-2", "name": "beta"},
+        ]
+        result = _auto_match_context(contexts, Path("/"))
         assert result is None
