@@ -660,16 +660,17 @@ class TestAutoMatchContext:
         assert result is not None
         assert result["id"] == "ctx-2"
 
-    def test_tie_falls_through_to_highest_score(self) -> None:
-        """When scores tie, first encountered wins (implementation detail)."""
+    def test_tie_first_encountered_wins(self) -> None:
+        """When scores tie, the first candidate encountered wins (strict `>`)."""
+        # Both names are substrings of the dir name → both forced to 0.85 → tie.
+        # The strict `>` comparison in the loop keeps the first one seen.
         contexts = [
-            {"id": "ctx-1", "name": "project-alpha"},
-            {"id": "ctx-2", "name": "project-beta"},
+            {"id": "ctx-1", "name": "alpha"},
+            {"id": "ctx-2", "name": "beta"},
         ]
-        # Both equally unrelated to 'kagura-memory' - first one with best score wins
-        result = _auto_match_context(contexts, Path("/tmp/kagura-memory"))
-        # Just verify it returns one of them (deterministic behavior)
-        assert result is None or result["id"] in ["ctx-1", "ctx-2"]
+        result = _auto_match_context(contexts, Path("/tmp/alpha-beta-mix"))
+        assert result is not None
+        assert result["id"] == "ctx-1"
 
     def test_threshold_boundary(self) -> None:
         """Score exactly at threshold should match."""

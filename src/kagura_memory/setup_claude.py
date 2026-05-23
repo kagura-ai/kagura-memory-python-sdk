@@ -199,10 +199,11 @@ def _select_or_create_context(
     if contexts and not no_auto_context:
         auto = _auto_match_context(contexts, project_dir)
         if auto:
-            click.echo(f"\nAuto-selected context: {auto['name']} ({auto['id'][:8]}...)")
+            auto_id = auto.get("id", "")
+            click.echo(f"\nAuto-selected context: {auto.get('name', '?')} ({auto_id[:8]}...)")
             click.echo("  (use --no-auto-context to disable, or pick a different one below)")
             if click.confirm("Use this context?", default=True):
-                return auto["id"]
+                return auto_id
         # Fall through to manual selection if auto-match declined
 
     if contexts:
