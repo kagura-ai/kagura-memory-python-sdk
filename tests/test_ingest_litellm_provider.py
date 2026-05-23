@@ -81,11 +81,15 @@ def test_ollama_provider_migrates_legacy_vision_prefix_with_warning() -> None:
 
 
 def test_ollama_provider_no_warning_for_chat_prefix() -> None:
-    """Explicit ollama_chat/ prefix passes through silently."""
+    """Explicit ollama_chat/ prefix passes through without a kagura DeprecationWarning."""
     import warnings
 
     with warnings.catch_warnings():
-        warnings.simplefilter("error")
+        # Promote only SDK-emitted DeprecationWarnings to errors so an
+        # unrelated warning from litellm or another dep doesn't fail this test.
+        warnings.filterwarnings(
+            "error", category=DeprecationWarning, module=r"kagura_memory(\..*)?"
+        )
         p = OllamaProvider(text_model="ollama_chat/llama3:8b")
     assert p.text_model == "ollama_chat/llama3:8b"
 

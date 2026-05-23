@@ -84,14 +84,21 @@ class KaguraAgent:
         self.max_retries = max_retries
         self._llm_api_key = llm_api_key
         self._is_ollama = model.startswith("ollama/")
-        # Use `is not None` (not `or`) so an explicit empty string from the caller
-        # or environment surfaces as a configuration error at request time rather
-        # than silently falling back to a default.
+        # `is not None` (not `or`) so an explicit empty string from the caller
+        # is treated as misconfiguration rather than silently overridden by the
+        # default. Empty OLLAMA_HOST env collapses to default via the `or`
+        # chain (consistent with how shells often pass unset variables).
         resolved_base_url = (
             ollama_base_url
             if ollama_base_url is not None
             else (os.getenv("OLLAMA_HOST") or "http://localhost:11434")
         )
+        if not resolved_base_url:
+            raise ValueError(
+                "ollama_base_url must be a non-empty URL "
+                "(received empty string). Pass a real URL, omit the kwarg to "
+                "use the default, or set OLLAMA_HOST."
+            )
         self._ollama_base_url = resolved_base_url.rstrip("/")
         self._ollama_api_key = (
             ollama_api_key if ollama_api_key is not None else os.getenv("OLLAMA_API_KEY")
