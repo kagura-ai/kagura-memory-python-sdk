@@ -1018,7 +1018,8 @@ def setup():
 @click.option("--context-id", help="Context ID or name (skip prompt)")
 @click.option("--project-dir", default=".", help="Project directory (default: current)")
 @click.option("--non-interactive", "-y", is_flag=True, help="No prompts, use defaults/flags")
-def setup_claude(api_key, mcp_url, context_id, project_dir, non_interactive):
+@click.option("--no-auto-context", is_flag=True, help="Disable auto-select by directory name")
+def setup_claude(api_key, mcp_url, context_id, project_dir, non_interactive, no_auto_context):
     """
     Set up Kagura Memory integration for Claude Code.
 
@@ -1028,6 +1029,7 @@ def setup_claude(api_key, mcp_url, context_id, project_dir, non_interactive):
       kagura setup claude
       kagura setup claude --api-key kagura_xxx --mcp-url http://localhost:8080/mcp/w/{workspace_id}
       kagura setup claude -y --api-key kagura_xxx --context-id my-project
+      kagura setup claude --no-auto-context  # always show full context list
     """
     try:
         run_setup_claude(
@@ -1036,6 +1038,7 @@ def setup_claude(api_key, mcp_url, context_id, project_dir, non_interactive):
             context_id=context_id,
             project_dir=project_dir,
             non_interactive=non_interactive,
+            no_auto_context=no_auto_context,
         )
     except (click.Abort, click.ClickException):
         # click.Abort fires on Ctrl+D / explicit abort during prompts — let Click
