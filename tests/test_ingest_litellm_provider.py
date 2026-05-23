@@ -57,6 +57,39 @@ def test_ollama_provider_presets_are_set() -> None:
     assert isinstance(OllamaProvider(), Provider)
 
 
+def test_ollama_provider_uses_ollama_chat_prefix() -> None:
+    """OllamaProvider must use ollama_chat/ so litellm routes via /api/chat
+    (system messages preserved). The legacy ollama/ prefix flattens system +
+    user into a single prompt via /api/generate."""
+    assert OllamaProvider.default_text_model.startswith("ollama_chat/")
+    assert OllamaProvider.default_vision_model is not None
+    assert OllamaProvider.default_vision_model.startswith("ollama_chat/")
+
+
+def test_ollama_provider_migrates_legacy_prefix_with_warning() -> None:
+    """Explicit text_model='ollama/...' auto-rewrites to 'ollama_chat/...' + warns."""
+    with pytest.warns(DeprecationWarning, match="ollama/' is deprecated"):
+        p = OllamaProvider(text_model="ollama/qwen3:30b")
+    assert p.text_model == "ollama_chat/qwen3:30b"
+
+
+def test_ollama_provider_migrates_legacy_vision_prefix_with_warning() -> None:
+    """vision_model='ollama/...' is also rewritten with a DeprecationWarning."""
+    with pytest.warns(DeprecationWarning, match="ollama/' is deprecated"):
+        p = OllamaProvider(vision_model="ollama/qwen2.5vl:7b")
+    assert p.vision_model == "ollama_chat/qwen2.5vl:7b"
+
+
+def test_ollama_provider_no_warning_for_chat_prefix() -> None:
+    """Explicit ollama_chat/ prefix passes through silently."""
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        p = OllamaProvider(text_model="ollama_chat/llama3:8b")
+    assert p.text_model == "ollama_chat/llama3:8b"
+
+
 # ---------------------------------------------------------------------------
 # get_provider() factory
 # ---------------------------------------------------------------------------

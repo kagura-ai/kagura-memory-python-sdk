@@ -3,6 +3,7 @@
 import asyncio
 import copy
 import json
+import os
 import time
 from collections.abc import Callable
 from typing import Any
@@ -44,7 +45,8 @@ class KaguraAgent:
         timeout: float = 30.0,
         max_retries: int = 3,
         llm_api_key: str | None = None,
-        ollama_base_url: str = "http://localhost:11434",
+        ollama_base_url: str | None = None,
+        ollama_api_key: str | None = None,
         ollama_think: bool = False,
         ollama_stream: bool = False,
     ):
@@ -59,12 +61,21 @@ class KaguraAgent:
             mcp_url: MCP server URL. When None, the underlying
                 ``KaguraClient`` derives it from the resolved
                 credential source.
-            model: LLM model to use (e.g., "gpt-5.4-nano", "ollama/qwen3:30b")
+            model: LLM model to use (e.g., "gpt-5.4-nano", "ollama/qwen3:30b").
+                For Ollama Cloud, pass ``ollama_base_url="https://ollama.com"``
+                and set ``OLLAMA_API_KEY`` in the environment (or pass
+                ``ollama_api_key`` explicitly).
             context_id: Default context ID (None or "auto" for auto-selection)
             timeout: Request timeout in seconds
             max_retries: Maximum LLM retry attempts
             llm_api_key: LLM provider API key (passed explicitly, not via env var)
-            ollama_base_url: Ollama API base URL (only used with ollama/ models)
+            ollama_base_url: Ollama API base URL. When ``None`` (default),
+                falls back to ``OLLAMA_HOST`` env var, then to
+                ``http://localhost:11434``. Set to ``https://ollama.com`` for
+                Ollama Cloud.
+            ollama_api_key: Bearer token for Ollama Cloud. When ``None``
+                (default), falls back to ``OLLAMA_API_KEY`` env var. Leave
+                unset for local Ollama (no auth needed).
             ollama_think: Enable thinking mode for Ollama models (default: False)
             ollama_stream: Enable streaming for Ollama models (default: False)
         """
@@ -73,7 +84,18 @@ class KaguraAgent:
         self.max_retries = max_retries
         self._llm_api_key = llm_api_key
         self._is_ollama = model.startswith("ollama/")
-        self._ollama_base_url = ollama_base_url.rstrip("/")
+        # Use `is not None` (not `or`) so an explicit empty string from the caller
+        # or environment surfaces as a configuration error at request time rather
+        # than silently falling back to a default.
+        resolved_base_url = (
+            ollama_base_url
+            if ollama_base_url is not None
+            else (os.getenv("OLLAMA_HOST") or "http://localhost:11434")
+        )
+        self._ollama_base_url = resolved_base_url.rstrip("/")
+        self._ollama_api_key = (
+            ollama_api_key if ollama_api_key is not None else os.getenv("OLLAMA_API_KEY")
+        )
         self._ollama_think = ollama_think
         self._ollama_stream = ollama_stream
         self._ollama_client: httpx.AsyncClient | None = None
@@ -412,9 +434,17 @@ class KaguraAgent:
         return self._ollama_client
 
     async def _call_ollama(self, messages: list[dict], temperature: float) -> tuple[dict, Any]:
-        """Call LLM via Ollama API directly (local models, thinking disabled for speed)."""
+        """Call LLM via Ollama API directly (local or Ollama Cloud).
+
+        When ``self._ollama_api_key`` is set (from ``ollama_api_key`` kwarg or
+        ``OLLAMA_API_KEY`` env var), sends ``Authorization: Bearer <key>`` for
+        Ollama Cloud. Local Ollama (no key) sends no auth header.
+        """
         model_name = self.model.removeprefix("ollama/")
         client = self._get_ollama_client()
+        headers = (
+            {"Authorization": f"Bearer {self._ollama_api_key}"} if self._ollama_api_key else None
+        )
         try:
             resp = await client.post(
                 f"{self._ollama_base_url}/api/chat",
@@ -426,11 +456,17 @@ class KaguraAgent:
                     "think": self._ollama_think,
                     "options": {"temperature": temperature},
                 },
+                headers=headers,
             )
             resp.raise_for_status()
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 429:
                 raise KaguraRateLimitError("Ollama rate limit exceeded") from e
+            if e.response.status_code in (401, 403):
+                raise KaguraAuthError(
+                    f"Ollama auth failed: HTTP {e.response.status_code} "
+                    "(check OLLAMA_API_KEY or ollama_api_key)"
+                ) from e
             raise KaguraLLMError(f"Ollama API error: HTTP {e.response.status_code}") from e
         except httpx.RequestError as e:
             raise KaguraLLMError(f"Ollama connection failed: {e}") from e
