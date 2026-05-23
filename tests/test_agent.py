@@ -360,8 +360,12 @@ async def test_call_litellm_passes_api_key():
 
 
 @pytest.mark.asyncio
-async def test_ollama_model_detection():
+async def test_ollama_model_detection(monkeypatch):
     """Agent should detect ollama/ prefix and set _is_ollama flag."""
+    # KaguraAgent.__init__ now reads OLLAMA_HOST as a fallback for
+    # ollama_base_url, so dev/CI machines with that env var set would
+    # break the default-URL assertion below. Clear it for this test.
+    monkeypatch.delenv("OLLAMA_HOST", raising=False)
     agent = KaguraAgent(api_key="test", model="ollama/qwen3:30b")
     assert agent._is_ollama is True
     assert agent._ollama_base_url == "http://localhost:11434"
@@ -492,6 +496,143 @@ async def test_call_ollama_connection_error():
         await agent._call_llm([{"role": "user", "content": "test"}])
 
     await agent.close()
+
+
+# =============================================================================
+# Ollama Cloud auth tests (issue #124)
+# =============================================================================
+
+
+def _build_ollama_mock_client() -> AsyncMock:
+    """Helper: build an AsyncMock client returning a benign Ollama-shaped response."""
+    mock_client = AsyncMock()
+    mock_resp = MagicMock()
+    mock_resp.json.return_value = {
+        "message": {"role": "assistant", "content": '{"should_remember": false}'},
+        "prompt_eval_count": 10,
+        "eval_count": 5,
+    }
+    mock_resp.raise_for_status = MagicMock()
+    mock_client.post.return_value = mock_resp
+    return mock_client
+
+
+@pytest.mark.asyncio
+async def test_call_ollama_sends_bearer_header_when_api_key_kwarg(monkeypatch):
+    """Explicit ollama_api_key kwarg should produce Authorization: Bearer header."""
+    monkeypatch.delenv("OLLAMA_API_KEY", raising=False)
+    monkeypatch.delenv("OLLAMA_HOST", raising=False)
+    agent = KaguraAgent(api_key="test", model="ollama/qwen3:30b", ollama_api_key="cloud-key-kwarg")
+    mock_client = _build_ollama_mock_client()
+    agent._ollama_client = mock_client
+
+    await agent._call_ollama([{"role": "user", "content": "test"}], 0.3)
+
+    headers = mock_client.post.call_args.kwargs["headers"]
+    assert headers == {"Authorization": "Bearer cloud-key-kwarg"}
+    await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_call_ollama_sends_bearer_header_from_env(monkeypatch):
+    """OLLAMA_API_KEY env var should be picked up when no kwarg is provided."""
+    monkeypatch.setenv("OLLAMA_API_KEY", "cloud-key-env")
+    monkeypatch.delenv("OLLAMA_HOST", raising=False)
+    agent = KaguraAgent(api_key="test", model="ollama/qwen3:30b")
+    mock_client = _build_ollama_mock_client()
+    agent._ollama_client = mock_client
+
+    await agent._call_ollama([{"role": "user", "content": "test"}], 0.3)
+
+    headers = mock_client.post.call_args.kwargs["headers"]
+    assert headers == {"Authorization": "Bearer cloud-key-env"}
+    await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_call_ollama_no_auth_header_when_no_key(monkeypatch):
+    """Local Ollama path (no kwarg, no env) sends no Authorization header."""
+    monkeypatch.delenv("OLLAMA_API_KEY", raising=False)
+    monkeypatch.delenv("OLLAMA_HOST", raising=False)
+    agent = KaguraAgent(api_key="test", model="ollama/qwen3:30b")
+    mock_client = _build_ollama_mock_client()
+    agent._ollama_client = mock_client
+
+    await agent._call_ollama([{"role": "user", "content": "test"}], 0.3)
+
+    # When no key is available, headers=None is passed (httpx treats it as no extra headers).
+    assert mock_client.post.call_args.kwargs["headers"] is None
+    await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_call_ollama_kwarg_overrides_env(monkeypatch):
+    """Explicit ollama_api_key kwarg must win over OLLAMA_API_KEY env var."""
+    monkeypatch.setenv("OLLAMA_API_KEY", "env-key-should-lose")
+    monkeypatch.delenv("OLLAMA_HOST", raising=False)
+    agent = KaguraAgent(api_key="test", model="ollama/qwen3:30b", ollama_api_key="kwarg-key-wins")
+    mock_client = _build_ollama_mock_client()
+    agent._ollama_client = mock_client
+
+    await agent._call_ollama([{"role": "user", "content": "test"}], 0.3)
+
+    assert mock_client.post.call_args.kwargs["headers"]["Authorization"] == "Bearer kwarg-key-wins"
+    await agent.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status_code", [401, 403])
+async def test_call_ollama_auth_status_raises_auth_error(monkeypatch, status_code):
+    """HTTP 401/403 from Ollama Cloud must raise KaguraAuthError (not generic LLMError)."""
+    import httpx
+
+    monkeypatch.setenv("OLLAMA_API_KEY", "rejected-key")
+    monkeypatch.delenv("OLLAMA_HOST", raising=False)
+    agent = KaguraAgent(api_key="test", model="ollama/qwen3:30b")
+    mock_client = AsyncMock()
+    mock_response = MagicMock()
+    mock_response.status_code = status_code
+    mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
+        f"{status_code} auth", request=MagicMock(), response=mock_response
+    )
+    mock_client.post.return_value = mock_response
+    agent._ollama_client = mock_client
+
+    try:
+        with pytest.raises(KaguraAuthError, match="Ollama auth failed"):
+            await agent._call_ollama([{"role": "user", "content": "test"}], 0.3)
+    finally:
+        await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_ollama_base_url_falls_back_to_ollama_host_env(monkeypatch):
+    """OLLAMA_HOST env should be used when ollama_base_url kwarg is unset."""
+    monkeypatch.setenv("OLLAMA_HOST", "https://my-ollama.example.com")
+    agent = KaguraAgent(api_key="test", model="ollama/qwen3:30b")
+    assert agent._ollama_base_url == "https://my-ollama.example.com"
+    await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_ollama_base_url_kwarg_overrides_ollama_host_env(monkeypatch):
+    """Explicit ollama_base_url kwarg must win over OLLAMA_HOST env."""
+    monkeypatch.setenv("OLLAMA_HOST", "https://env-host.example.com")
+    agent = KaguraAgent(
+        api_key="test",
+        model="ollama/qwen3:30b",
+        ollama_base_url="https://kwarg-host.example.com",
+    )
+    assert agent._ollama_base_url == "https://kwarg-host.example.com"
+    await agent.close()
+
+
+def test_ollama_base_url_empty_string_raises_value_error(monkeypatch):
+    """Explicit ollama_base_url='' must raise ValueError, not silently degrade
+    to a relative '/api/chat' URL that surfaces as a cryptic connection error."""
+    monkeypatch.delenv("OLLAMA_HOST", raising=False)
+    with pytest.raises(ValueError, match="ollama_base_url must be a non-empty"):
+        KaguraAgent(api_key="test", model="ollama/qwen3:30b", ollama_base_url="")
 
 
 @pytest.mark.asyncio

@@ -123,6 +123,35 @@ agent = KaguraAgent(api_key="kagura_...", model="ollama/qwen3:30b")
 
 Smaller models (< 30B parameters) may produce lower quality memory analysis — summaries may lack searchable keywords, and recall query generation may be less precise.
 
+#### Using Ollama Cloud
+
+For [Ollama Cloud](https://ollama.com/cloud) (hosted, Bearer-authenticated), set the API key in the environment (the `ollama signin` CLI flow does this automatically) and point `ollama_base_url` at the cloud endpoint:
+
+```bash
+export OLLAMA_API_KEY="..."          # or run `ollama signin`
+```
+
+```python
+# KaguraAgent — Ollama Cloud
+agent = KaguraAgent(
+    api_key="kagura_...",
+    model="ollama/qwen3:30b",
+    ollama_base_url="https://ollama.com",
+    # ollama_api_key picks up OLLAMA_API_KEY from env by default;
+    # pass it explicitly to override.
+)
+```
+
+For ingestion, `kagura ingest` reads `OLLAMA_API_KEY` and `OLLAMA_API_BASE` from the environment (litellm picks them up directly for the `ollama_chat/` route):
+
+```bash
+export OLLAMA_API_KEY="..."
+export OLLAMA_API_BASE="https://ollama.com"
+kagura ingest report.pdf --text-provider ollama
+```
+
+The ingest provider uses litellm's `ollama_chat/` route (system messages preserved), so cloud and local share the same code path.
+
 ### KaguraClient — Direct Memory Operations
 
 For programmatic control without LLM:

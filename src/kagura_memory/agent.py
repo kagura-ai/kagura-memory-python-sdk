@@ -3,6 +3,7 @@
 import asyncio
 import copy
 import json
+import os
 import time
 from collections.abc import Callable
 from typing import Any
@@ -44,9 +45,10 @@ class KaguraAgent:
         timeout: float = 30.0,
         max_retries: int = 3,
         llm_api_key: str | None = None,
-        ollama_base_url: str = "http://localhost:11434",
+        ollama_base_url: str | None = None,
         ollama_think: bool = False,
         ollama_stream: bool = False,
+        ollama_api_key: str | None = None,
     ):
         """
         Initialize Kagura Agent.
@@ -59,21 +61,68 @@ class KaguraAgent:
             mcp_url: MCP server URL. When None, the underlying
                 ``KaguraClient`` derives it from the resolved
                 credential source.
-            model: LLM model to use (e.g., "gpt-5.4-nano", "ollama/qwen3:30b")
+            model: LLM model to use (e.g., "gpt-5.4-nano", "ollama/qwen3:30b").
+                For Ollama Cloud, pass ``ollama_base_url="https://ollama.com"``
+                and set ``OLLAMA_API_KEY`` in the environment (or pass
+                ``ollama_api_key`` explicitly).
             context_id: Default context ID (None or "auto" for auto-selection)
             timeout: Request timeout in seconds
             max_retries: Maximum LLM retry attempts
             llm_api_key: LLM provider API key (passed explicitly, not via env var)
-            ollama_base_url: Ollama API base URL (only used with ollama/ models)
+            ollama_base_url: Ollama API base URL. When ``None`` (default),
+                falls back to ``OLLAMA_HOST`` env var, then to
+                ``http://localhost:11434``. Set to ``https://ollama.com`` for
+                Ollama Cloud.
             ollama_think: Enable thinking mode for Ollama models (default: False)
             ollama_stream: Enable streaming for Ollama models (default: False)
+            ollama_api_key: Bearer token for Ollama Cloud. When ``None``
+                (default), falls back to ``OLLAMA_API_KEY`` env var. Leave
+                unset for local Ollama (no auth needed). The key is captured
+                in a closure (``self._get_ollama_api_key``) rather than as a
+                plain instance attribute, so it does not leak via casual
+                introspection (``vars(agent)`` / ``repr(agent)`` /
+                serialization) — only via explicit closure-cell inspection.
         """
         self.model = model
         self.context_id = context_id
         self.max_retries = max_retries
-        self._llm_api_key = llm_api_key
+        # Capture llm_api_key in a closure — mirrors the Ollama key handling
+        # below to satisfy .claude/rules/python.md §Security ("Never store API
+        # keys as instance attributes").
+        _captured_llm_api_key = llm_api_key
+
+        def _get_llm_api_key() -> str | None:
+            return _captured_llm_api_key
+
+        self._get_llm_api_key = _get_llm_api_key
         self._is_ollama = model.startswith("ollama/")
-        self._ollama_base_url = ollama_base_url.rstrip("/")
+        # `is not None` (not `or`) so an explicit empty string from the caller
+        # is treated as misconfiguration rather than silently overridden by the
+        # default. Empty OLLAMA_HOST env collapses to default via the `or`
+        # chain (consistent with how shells often pass unset variables).
+        resolved_base_url = (
+            ollama_base_url
+            if ollama_base_url is not None
+            else (os.getenv("OLLAMA_HOST") or "http://localhost:11434")
+        )
+        if not resolved_base_url:
+            raise ValueError(
+                "ollama_base_url must be a non-empty URL "
+                "(received empty string). Pass a real URL, omit the kwarg to "
+                "use the default, or set OLLAMA_HOST."
+            )
+        self._ollama_base_url = resolved_base_url.rstrip("/")
+        # Capture the Ollama API key in a closure rather than as a plain
+        # instance attribute so it does not leak via casual introspection
+        # (vars / repr / serialization) — see .claude/rules/python.md §Security.
+        _resolved_ollama_api_key = (
+            ollama_api_key if ollama_api_key is not None else os.getenv("OLLAMA_API_KEY")
+        )
+
+        def _get_ollama_api_key() -> str | None:
+            return _resolved_ollama_api_key
+
+        self._get_ollama_api_key = _get_ollama_api_key
         self._ollama_think = ollama_think
         self._ollama_stream = ollama_stream
         self._ollama_client: httpx.AsyncClient | None = None
@@ -389,8 +438,9 @@ class KaguraAgent:
             "response_format": {"type": "json_object"},
             "timeout": 30.0,
         }
-        if self._llm_api_key:
-            kwargs["api_key"] = self._llm_api_key
+        llm_api_key = self._get_llm_api_key()
+        if llm_api_key:
+            kwargs["api_key"] = llm_api_key
 
         try:
             response = await litellm.acompletion(**kwargs)
@@ -412,9 +462,18 @@ class KaguraAgent:
         return self._ollama_client
 
     async def _call_ollama(self, messages: list[dict], temperature: float) -> tuple[dict, Any]:
-        """Call LLM via Ollama API directly (local models, thinking disabled for speed)."""
+        """Call LLM via Ollama API directly (local or Ollama Cloud).
+
+        When an Ollama API key is configured (from ``ollama_api_key`` kwarg or
+        ``OLLAMA_API_KEY`` env var), sends ``Authorization: Bearer <key>`` for
+        Ollama Cloud. Local Ollama (no key) sends no auth header. The key is
+        resolved via the closure ``self._get_ollama_api_key()`` so the raw
+        secret is not retained as a named instance attribute.
+        """
         model_name = self.model.removeprefix("ollama/")
         client = self._get_ollama_client()
+        api_key = self._get_ollama_api_key()
+        headers = {"Authorization": f"Bearer {api_key}"} if api_key else None
         try:
             resp = await client.post(
                 f"{self._ollama_base_url}/api/chat",
@@ -426,11 +485,17 @@ class KaguraAgent:
                     "think": self._ollama_think,
                     "options": {"temperature": temperature},
                 },
+                headers=headers,
             )
             resp.raise_for_status()
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 429:
                 raise KaguraRateLimitError("Ollama rate limit exceeded") from e
+            if e.response.status_code in (401, 403):
+                raise KaguraAuthError(
+                    f"Ollama auth failed: HTTP {e.response.status_code} "
+                    "(check OLLAMA_API_KEY or ollama_api_key)"
+                ) from e
             raise KaguraLLMError(f"Ollama API error: HTTP {e.response.status_code}") from e
         except httpx.RequestError as e:
             raise KaguraLLMError(f"Ollama connection failed: {e}") from e
