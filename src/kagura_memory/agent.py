@@ -46,9 +46,9 @@ class KaguraAgent:
         max_retries: int = 3,
         llm_api_key: str | None = None,
         ollama_base_url: str | None = None,
-        ollama_api_key: str | None = None,
         ollama_think: bool = False,
         ollama_stream: bool = False,
+        ollama_api_key: str | None = None,
     ):
         """
         Initialize Kagura Agent.
@@ -73,11 +73,15 @@ class KaguraAgent:
                 falls back to ``OLLAMA_HOST`` env var, then to
                 ``http://localhost:11434``. Set to ``https://ollama.com`` for
                 Ollama Cloud.
-            ollama_api_key: Bearer token for Ollama Cloud. When ``None``
-                (default), falls back to ``OLLAMA_API_KEY`` env var. Leave
-                unset for local Ollama (no auth needed).
             ollama_think: Enable thinking mode for Ollama models (default: False)
             ollama_stream: Enable streaming for Ollama models (default: False)
+            ollama_api_key: Bearer token for Ollama Cloud. When ``None``
+                (default), falls back to ``OLLAMA_API_KEY`` env var. Leave
+                unset for local Ollama (no auth needed). The key is captured
+                in a closure (``self._get_ollama_api_key``) rather than as a
+                plain instance attribute, so it does not leak via casual
+                introspection (``vars(agent)`` / ``repr(agent)`` /
+                serialization) — only via explicit closure-cell inspection.
         """
         self.model = model
         self.context_id = context_id
@@ -100,9 +104,17 @@ class KaguraAgent:
                 "use the default, or set OLLAMA_HOST."
             )
         self._ollama_base_url = resolved_base_url.rstrip("/")
-        self._ollama_api_key = (
+        # Capture the Ollama API key in a closure rather than as a plain
+        # instance attribute so it does not leak via casual introspection
+        # (vars / repr / serialization) — see .claude/rules/python.md §Security.
+        _resolved_ollama_api_key = (
             ollama_api_key if ollama_api_key is not None else os.getenv("OLLAMA_API_KEY")
         )
+
+        def _get_ollama_api_key() -> str | None:
+            return _resolved_ollama_api_key
+
+        self._get_ollama_api_key = _get_ollama_api_key
         self._ollama_think = ollama_think
         self._ollama_stream = ollama_stream
         self._ollama_client: httpx.AsyncClient | None = None
@@ -443,15 +455,16 @@ class KaguraAgent:
     async def _call_ollama(self, messages: list[dict], temperature: float) -> tuple[dict, Any]:
         """Call LLM via Ollama API directly (local or Ollama Cloud).
 
-        When ``self._ollama_api_key`` is set (from ``ollama_api_key`` kwarg or
+        When an Ollama API key is configured (from ``ollama_api_key`` kwarg or
         ``OLLAMA_API_KEY`` env var), sends ``Authorization: Bearer <key>`` for
-        Ollama Cloud. Local Ollama (no key) sends no auth header.
+        Ollama Cloud. Local Ollama (no key) sends no auth header. The key is
+        resolved via the closure ``self._get_ollama_api_key()`` so the raw
+        secret is not retained as a named instance attribute.
         """
         model_name = self.model.removeprefix("ollama/")
         client = self._get_ollama_client()
-        headers = (
-            {"Authorization": f"Bearer {self._ollama_api_key}"} if self._ollama_api_key else None
-        )
+        api_key = self._get_ollama_api_key()
+        headers = {"Authorization": f"Bearer {api_key}"} if api_key else None
         try:
             resp = await client.post(
                 f"{self._ollama_base_url}/api/chat",
