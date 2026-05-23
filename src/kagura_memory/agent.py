@@ -86,7 +86,15 @@ class KaguraAgent:
         self.model = model
         self.context_id = context_id
         self.max_retries = max_retries
-        self._llm_api_key = llm_api_key
+        # Capture llm_api_key in a closure — mirrors the Ollama key handling
+        # below to satisfy .claude/rules/python.md §Security ("Never store API
+        # keys as instance attributes").
+        _captured_llm_api_key = llm_api_key
+
+        def _get_llm_api_key() -> str | None:
+            return _captured_llm_api_key
+
+        self._get_llm_api_key = _get_llm_api_key
         self._is_ollama = model.startswith("ollama/")
         # `is not None` (not `or`) so an explicit empty string from the caller
         # is treated as misconfiguration rather than silently overridden by the
@@ -430,8 +438,9 @@ class KaguraAgent:
             "response_format": {"type": "json_object"},
             "timeout": 30.0,
         }
-        if self._llm_api_key:
-            kwargs["api_key"] = self._llm_api_key
+        llm_api_key = self._get_llm_api_key()
+        if llm_api_key:
+            kwargs["api_key"] = llm_api_key
 
         try:
             response = await litellm.acompletion(**kwargs)

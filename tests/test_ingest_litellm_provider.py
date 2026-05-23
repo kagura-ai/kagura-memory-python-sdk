@@ -80,6 +80,27 @@ def test_ollama_provider_migrates_legacy_vision_prefix_with_warning() -> None:
     assert p.vision_model == "ollama_chat/qwen2.5vl:7b"
 
 
+def test_ollama_provider_migration_warning_stacklevel_points_to_caller() -> None:
+    """DeprecationWarning must attribute to the user's OllamaProvider(...) call site,
+    not to the internal __init__ or _migrate_legacy_ollama_prefix helper.
+
+    Regression guard: empirical proof that stacklevel=3 is correct given the
+    call chain (helper -> __init__ -> user). If anyone adds an extra wrapper
+    layer, this test will fail and signal the need to bump stacklevel.
+    """
+    import warnings
+
+    with warnings.catch_warnings(record=True) as record:
+        warnings.simplefilter("always")
+        # The next line is the user call site — the warning MUST point here:
+        OllamaProvider(text_model="ollama/qwen3:30b")  # capture this lineno
+
+    assert len(record) == 1
+    assert record[0].category is DeprecationWarning
+    # The warning's filename must be this test file (not agent.py / ollama.py).
+    assert record[0].filename == __file__
+
+
 def test_ollama_provider_no_warning_for_chat_prefix() -> None:
     """Explicit ollama_chat/ prefix passes through without a kagura DeprecationWarning."""
     import warnings
