@@ -165,56 +165,18 @@ async with KaguraClient(api_key="kagura_...", mcp_url="https://...") as client:
     results = await client.recall(context_id="dev", query="OAuth2", k=5)
     await client.explore(context_id="dev", memory_id="uuid", depth=3)
 
-    # Tag AND filter — match memories with ALL specified tags
+    # Filtered recall — ALL listed tags, optional date range
     results = await client.recall(
         context_id="dev", query="budget",
-        filters={"tags": ["予算", "2026"], "tags_match": "all"},
+        filters={"tags": ["予算", "2026"], "tags_match": "all",
+                 "created_after": "2026-03-01T00:00:00Z"},
     )
 
-    # Date range filter
-    results = await client.recall(
-        context_id="dev", query="recent decisions",
-        filters={"created_after": "2026-03-01T00:00:00Z", "created_before": "2026-03-31T23:59:59Z"},
-    )
-
-    # Cross-context recall — search across multiple contexts at once
-    results = await client.recall(
-        query="authentication",
-        context_ids=["ctx-uuid-1", "ctx-uuid-2"], k=10,
-    )
-
-    # Tag vocabulary — discover existing tag spellings before remember()/recall()
-    tags = await client.list_tags(context_id="dev", sort="recent", prefix="auth")
-    print([(t.tag, t.count) for t in tags.tags])
-
-    # Merge contexts — copy all memories from source to target
-    result = await client.merge_contexts(source_id="old-ctx", target_id="new-ctx")
-    print(f"Merged {result['merged']} memories")
-
-    # Merge and delete the source context
-    result = await client.merge_contexts(
-        source_id="old-ctx", target_id="new-ctx", delete_source=True,
-    )
-
-    # Workspace usage — check quota limits
-    usage = await client.get_usage()
-    print(f"Plan: {usage.plan}, Memories: {usage.memories.used}/{usage.memories.limit}")
-
-    # Context info — includes search_config
-    info = await client.get_context_info(context_id="dev")
-    print(f"Search config: {info.context.search_config}")
-
-    # Embedding status — check for failures
-    status = await client.get_embedding_status()
-    print(f"Embeddings: {status.total}, Failed: {len(status.failed_memories)}")
-
-    # Per-memory stats — recall frequency, access patterns
-    stats = await client.get_memory_stats(context_id="dev", sort_by="use_count", limit=10)
-
-    # Duplicate detection — find similar memory pairs
-    dupes = await client.find_duplicates(context_id="dev", threshold=0.90)
-    print(f"Found {dupes.total_pairs} duplicate pairs")
+    # Cross-context recall — search several contexts at once
+    results = await client.recall(query="auth", context_ids=["ctx-1", "ctx-2"], k=10)
 ```
+
+More operations — tag-vocabulary discovery (`list_tags`), `merge_contexts`, workspace `get_usage`, `get_memory_stats`, `find_duplicates`, `get_embedding_status` — are runnable in [`examples/client_advanced.py`](examples/client_advanced.py); the [API Coverage](#api-coverage) table lists the full surface.
 
 ### ResourceClient — External Data Ingestion
 
@@ -267,11 +229,14 @@ async with FilesClient.from_mcp_url(api_key="kagura_...", mcp_url="https://memor
 
 Re-uploading bytes whose sha256 already exists in the workspace returns the **existing `FileObject`** (idempotent dedup happy-path) — no exception.
 
+Runnable: [`examples/files_upload.py`](examples/files_upload.py).
+
 ## SDK ↔ memory-cloud Compatibility
 
 | SDK | Min memory-cloud | Notes |
 |---|---|---|
-| 0.14.0+ | 0.15.1 | `FilesClient` + R2 checksum binding (`x-amz-checksum-sha256` on PUT) |
+| 0.15.0 – 0.20.x | 0.15.1 | `FilesClient` + R2 checksum binding. `list_tags()` additionally needs **0.15.4** — `MIN_SERVER_VERSION` is intentionally not bumped, only that one method requires the newer server. |
+| 0.14.x | 0.15.1 | `FilesClient` + R2 checksum binding (`x-amz-checksum-sha256` on PUT) |
 | 0.13.x | 0.13.0 | Pre-`FilesClient` |
 
 `MIN_SERVER_VERSION` in `src/kagura_memory/client.py` is the authoritative floor — the SDK refuses to call newer MCP tools against an older server. When pointing the SDK at a backend with `R2_CHECKSUM_BINDING_ENABLED=true`, the SDK must be v0.14.0+; older versions don't send the signed checksum header and uploads fail with `HTTP 403 SignatureDoesNotMatch`.
@@ -377,6 +342,8 @@ kagura ingest ./report.pdf --json
 ```
 
 Exit codes: `0` when the overview memory is created (per-section errors are still `0`, they show up in `result.errors`); `1` when the overview itself fails (corrupted PDF, network error, etc.); `0` for any `--dry-run` invocation.
+
+For the SDK-level `FileIngestor` API, see [`examples/ingest_pdf.py`](examples/ingest_pdf.py).
 
 Provider configuration (env vars, picked up automatically via `litellm`):
 - `ANTHROPIC_API_KEY` — text summarization (default model `claude-sonnet-4-6` via the `claude` preset)
