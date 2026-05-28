@@ -136,9 +136,11 @@ def auth_login(
       kagura auth login --no-browser         # for SSH / headless
 
     \b
-    Known scopes:
+    Memory scopes:
       memory:read   — read memories, contexts, files
       memory:write  — create/update/delete memories, contexts, files
+      (additional scopes like profile:read may be accepted server-side;
+      pass them through --scope.)
     """
     if read_only and scope is not None:
         raise click.ClickException("--read-only and --scope are mutually exclusive; pick one.")
@@ -479,9 +481,11 @@ def auth_refresh(profile: str | None, scope: str | None) -> None:
       kagura auth refresh --profile work
 
     \b
-    Known scopes:
+    Memory scopes:
       memory:read   — read memories, contexts, files
       memory:write  — create/update/delete memories, contexts, files
+      (additional scopes like profile:read may be accepted server-side;
+      pass them through --scope.)
     """
     cf = load_credentials_file()
     target = profile or cf.default_profile
