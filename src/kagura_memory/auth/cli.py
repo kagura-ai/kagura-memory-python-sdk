@@ -134,6 +134,13 @@ def auth_login(
       kagura auth login --scope "memory:read memory:write profile:read"  # custom
       kagura auth login --profile work
       kagura auth login --no-browser         # for SSH / headless
+
+    \b
+    Memory scopes:
+      memory:read   — read memories, contexts, files
+      memory:write  — create/update/delete memories, contexts, files
+      (additional scopes like profile:read may be accepted server-side;
+      pass them through --scope.)
     """
     if read_only and scope is not None:
         raise click.ClickException("--read-only and --scope are mutually exclusive; pick one.")
@@ -456,10 +463,30 @@ async def _revoke_all_best_effort(cf: CredentialsFile) -> None:
 @click.option(
     "--scope",
     default=None,
-    help="Request this scope. If wider than the current grant, re-runs the device flow.",
+    help=(
+        "Request this scope (default: keep the current grant unchanged). "
+        "Pass space-separated values to ask for multiple "
+        "(e.g. 'memory:read memory:write'). "
+        "If wider than the current grant, re-runs the device flow."
+    ),
 )
 def auth_refresh(profile: str | None, scope: str | None) -> None:
-    """Rotate ``access_token`` (optionally requesting a new scope)."""
+    """Rotate ``access_token`` (optionally requesting a new scope).
+
+    \b
+    Examples:
+      kagura auth refresh
+      kagura auth refresh --scope "memory:read"                       # narrow to read-only
+      kagura auth refresh --scope "memory:read memory:write"          # widen (triggers device flow)
+      kagura auth refresh --profile work
+
+    \b
+    Memory scopes:
+      memory:read   — read memories, contexts, files
+      memory:write  — create/update/delete memories, contexts, files
+      (additional scopes like profile:read may be accepted server-side;
+      pass them through --scope.)
+    """
     cf = load_credentials_file()
     target = profile or cf.default_profile
     creds = cf.get_profile(target)
