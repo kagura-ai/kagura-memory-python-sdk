@@ -94,6 +94,20 @@ class XlsxExtractor:
         so a runaway sheet is rejected before its full table is materialized.
         Returns the table text and the updated running total.
         """
+        # Fast fail on a hostile DECLARED grid before iter_rows streams it: a
+        # far-flung cell (or formatting) can inflate max_column/max_row so the
+        # iterator allocates wide tuples row-by-row. This mirrors the post-loop
+        # width × rows cap (clamped to the row limit we'd actually read), so it
+        # rejects the same sheets — just earlier and in O(1). max_* may be None
+        # when the dimension is undeclared; skip the pre-check then.
+        max_col = sheet.max_column
+        max_row = sheet.max_row
+        if max_col and max_row and max_col * min(max_row, _MAX_ROWS_PER_SHEET) > _MAX_TABLE_CELLS:
+            raise KaguraIngestError(
+                f"XLSX sheet {sheet.title!r} declared grid {max_col}x{max_row} exceeds "
+                f"{_MAX_TABLE_CELLS} cells (decompression bomb?)"
+            )
+
         rows: list[list[str]] = []
         cell_count = 0
         for row_idx, row in enumerate(sheet.iter_rows(values_only=True)):

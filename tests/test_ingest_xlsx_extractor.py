@@ -92,6 +92,21 @@ def test_table_cell_cap_rejects_wide_sparse_table() -> None:
             XlsxExtractor().extract(data)
 
 
+def test_declared_grid_dimension_pre_check_rejects_bomb() -> None:
+    # A hostile DECLARED dimension is rejected fast (before streaming rows),
+    # mirroring the post-loop width×rows cap. Patch the cap low and stub the
+    # sheet's max_column/max_row.
+    from unittest.mock import MagicMock
+
+    sheet = MagicMock()
+    sheet.title = "Big"
+    sheet.max_column = 1000
+    sheet.max_row = 1000
+    with patch("kagura_memory.ingest.extractors.xlsx._MAX_TABLE_CELLS", 100):
+        with pytest.raises(KaguraIngestError, match="declared grid"):
+            XlsxExtractor._sheet_to_markdown(sheet, 0)
+
+
 def test_missing_openpyxl_raises_install_hint() -> None:
     def fake_import(name: str, *args, **kwargs):
         if name == "openpyxl":

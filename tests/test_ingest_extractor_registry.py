@@ -49,6 +49,12 @@ def test_get_extractor_is_case_insensitive_on_mime() -> None:
     assert "text/markdown" in extractor.supports
 
 
+def test_get_extractor_strips_content_type_parameters() -> None:
+    # A raw HTTP Content-Type with a charset param must still resolve.
+    extractor = get_extractor("text/html; charset=utf-8")
+    assert "text/html" in extractor.supports
+
+
 @pytest.mark.parametrize("mime", sorted(_REGISTRY))
 def test_registry_class_supports_includes_its_mime(mime: str) -> None:
     """Each registered class's ``supports`` set must contain its registry MIME.

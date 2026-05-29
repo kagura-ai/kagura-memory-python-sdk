@@ -62,11 +62,16 @@ def get_extractor(mime: str) -> Extractor:
     own loader (pointing at the right extras), not as an ``ImportError`` at
     package import time.
 
+    Accepts a raw HTTP Content-Type: parameters (e.g. ``; charset=utf-8``) and
+    surrounding whitespace are stripped before the registry lookup, while the
+    original value is preserved in the error message.
+
     Raises:
         ValueError: If no extractor handles the given MIME type. Callers
             should treat this as a terminal "format unsupported" error.
     """
-    entry = _REGISTRY.get(mime.lower())
+    normalized = mime.split(";", 1)[0].strip().lower()
+    entry = _REGISTRY.get(normalized)
     if entry is None:
         supported = ", ".join(sorted(supported_mimes()))
         raise ValueError(f"no extractor registered for MIME {mime!r}; supported types: {supported}")
