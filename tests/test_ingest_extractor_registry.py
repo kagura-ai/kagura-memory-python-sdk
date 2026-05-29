@@ -54,16 +54,15 @@ def test_registry_class_supports_includes_its_mime(mime: str) -> None:
     """Each registered class's ``supports`` set must contain its registry MIME.
 
     Guards against drift between the static ``_REGISTRY`` table and the
-    per-extractor ``supports`` declaration. Skips a format whose optional
-    parser dep is not importable in this environment.
+    per-extractor ``supports`` declaration. The extractor modules import their
+    parser dep lazily (inside ``extract``/``_load_*``), so importing the module
+    itself succeeds even when the optional dep is absent — no ``importorskip``
+    is needed, and a future eager top-level parser import would (correctly)
+    FAIL this drift guard instead of silently skipping it.
     """
-    module_name, class_name = _REGISTRY[mime]
-    pytest.importorskip(
-        f"kagura_memory.ingest.extractors.{module_name}",
-        reason=f"optional dep for {module_name} extractor not installed",
-    )
     from importlib import import_module
 
+    module_name, class_name = _REGISTRY[mime]
     module = import_module(f"kagura_memory.ingest.extractors.{module_name}")
     extractor_cls = getattr(module, class_name)
     assert mime in extractor_cls.supports

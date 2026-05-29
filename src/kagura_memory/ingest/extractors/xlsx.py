@@ -16,10 +16,13 @@ from .._types import ExtractedContent, ExtractedSection
 from ._util import MAX_TOTAL_TEXT_CHARS as _MAX_TOTAL_TEXT_CHARS
 from ._util import filename_title
 
-# XLSX is a ZIP container — cap sheets, rows-per-sheet, and total serialized
-# text to defuse decompression bombs and pathological grids.
+# XLSX is a ZIP container — cap sheets, rows-per-sheet, total serialized text,
+# and the materialized table size to defuse decompression bombs and pathological
+# grids. The cell cap bounds the width-padding allocation (one wide row would
+# otherwise force every row to be padded to that width).
 _MAX_SHEETS = 1_000
 _MAX_ROWS_PER_SHEET = 100_000
+_MAX_TABLE_CELLS = 2_000_000  # width × row count after padding
 
 
 def _load_openpyxl() -> Any:
@@ -117,6 +120,14 @@ class XlsxExtractor:
             return "", total_chars
 
         width = max(len(r) for r in rows)
+        # Bound the padded table BEFORE materializing it: a single wide row
+        # forces every row to be padded to `width`, so width × rows can explode
+        # even when total_chars (text only) stays under its cap.
+        if width * len(rows) > _MAX_TABLE_CELLS:
+            raise KaguraIngestError(
+                f"XLSX sheet {sheet.title!r} table size {width}x{len(rows)} exceeds "
+                f"{_MAX_TABLE_CELLS} cells (decompression bomb?)"
+            )
         rows = [r + [""] * (width - len(r)) for r in rows]
         header = rows[0]
         lines = [

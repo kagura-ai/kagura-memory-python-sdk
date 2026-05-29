@@ -17,13 +17,20 @@ from .._types import ExtractedContent, ExtractedSection
 from ._util import MAX_TOTAL_TEXT_CHARS as _MAX_TOTAL_TEXT_CHARS
 from ._util import filename_title
 
-# A decoded char is at most one source byte for UTF-8 (errors="replace" emits
-# one U+FFFD per bad byte), so capping the raw byte length also bounds the
-# decoded string and stops a multi-GB payload from being materialized first.
+# Every decoded character costs at least one UTF-8 byte (and errors="replace"
+# emits exactly one U+FFFD per undecodable byte), so the decoded length never
+# exceeds len(source). Capping the raw byte length therefore bounds the decoded
+# string and stops a multi-GB payload from being materialized first.
 _MAX_INPUT_BYTES = _MAX_TOTAL_TEXT_CHARS
 
-_ATX_HEADING = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
-_FENCE = re.compile(r"^\s*(```+|~~~+)")
+# ATX heading: 1-6 leading '#', a space, the text, then an OPTIONAL closing '#'
+# run that — per CommonMark — must be preceded by whitespace to count as a
+# closer. Without the leading `\s+`, a heading whose text ends in '#' (e.g.
+# "# C#") would lose that character.
+_ATX_HEADING = re.compile(r"^(#{1,6})\s+(.*?)(?:\s+#+)?\s*$")
+# Fenced code block delimiter: a run of >=3 backticks or tildes, capturing the
+# marker run (group 1) and any trailing info string (group 2).
+_FENCE = re.compile(r"^\s*(`{3,}|~{3,})\s*(.*)$")
 
 
 class TextExtractor:
@@ -58,7 +65,7 @@ class TextExtractor:
         heading: str | None = None
         depth = 1
         body: list[str] = []
-        in_fence = False
+        fence_marker: str | None = None  # the opening run (e.g. "```") while inside a fence
 
         def flush() -> None:
             joined = "\n".join(body).strip()
@@ -74,11 +81,26 @@ class TextExtractor:
                 )
 
         for line in text.splitlines():
-            if _FENCE.match(line):
-                in_fence = not in_fence
+            fence = _FENCE.match(line)
+            if fence_marker is None:
+                if fence:
+                    fence_marker = fence.group(1)
+                    body.append(line)
+                    continue
+            else:
+                # Inside a fence: only a run of the SAME char, at least as long
+                # as the opener and with no info string, closes it (CommonMark).
+                if fence:
+                    marker, info = fence.group(1), fence.group(2)
+                    if (
+                        marker[0] == fence_marker[0]
+                        and len(marker) >= len(fence_marker)
+                        and not info.strip()
+                    ):
+                        fence_marker = None
                 body.append(line)
                 continue
-            m = None if in_fence else _ATX_HEADING.match(line)
+            m = _ATX_HEADING.match(line)
             if m:
                 flush()
                 heading = m.group(2).strip() or None

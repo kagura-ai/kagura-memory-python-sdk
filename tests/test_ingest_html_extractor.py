@@ -54,6 +54,13 @@ def test_no_headings_yields_single_fallback_section() -> None:
     assert "only paragraph text" in content.sections[0].body_text
 
 
+def test_title_with_inline_child_tags_is_extracted() -> None:
+    # <title> containing an inline tag → .string is None; get_text must still
+    # recover the title rather than falling through to <h1>/filename.
+    html = b"<html><head><title>Hello <b>World</b></title></head><body><h1>H1</h1></body></html>"
+    assert HtmlExtractor().extract(html).title == "Hello World"
+
+
 def test_title_falls_back_to_first_h1_then_uri() -> None:
     html = b"<html><body><h1>The H1</h1><p>b</p></body></html>"
     assert HtmlExtractor().extract(html).title == "The H1"

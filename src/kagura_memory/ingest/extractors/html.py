@@ -102,8 +102,10 @@ class HtmlExtractor:
 
     @staticmethod
     def _title(soup: Any, source_uri: str | None) -> str | None:
-        if soup.title and soup.title.string:
-            title = soup.title.string.strip()
+        if soup.title:
+            # get_text (not .string) so a <title> containing inline tags or
+            # comments — where .string is None — still yields the title text.
+            title = soup.title.get_text(" ", strip=True)
             if title:
                 return title
         first_h1 = soup.find("h1")

@@ -53,6 +53,29 @@ def test_hash_inside_fenced_code_block_is_not_a_heading() -> None:
     assert "# not a heading" in content.sections[0].body_text
 
 
+def test_heading_text_ending_in_hash_is_preserved() -> None:
+    # CommonMark: a closing '#' run must be preceded by whitespace, so "C#" is
+    # heading text, not an ATX closer.
+    content = TextExtractor().extract(b"# C#\n\nbody\n")
+    assert content.sections[0].heading == "C#"
+    assert content.title == "C#"
+
+
+def test_atx_closing_hash_run_is_stripped() -> None:
+    content = TextExtractor().extract(b"## Heading ##\n\nbody\n")
+    assert content.sections[0].heading == "Heading"
+
+
+def test_mismatched_fence_marker_does_not_close_block() -> None:
+    # A ```-opened block containing a ~~~ line stays open; the '#' line inside
+    # must not be treated as a heading.
+    md = b"# Top\n\n```\n~~~\n# still code\n```\n\ntail\n"
+    content = TextExtractor().extract(md)
+    headings = [s.heading for s in content.sections]
+    assert headings == ["Top"]
+    assert "# still code" in content.sections[0].body_text
+
+
 def test_oversized_text_raises_ingest_error() -> None:
     huge = b"x" * (_MAX_TOTAL_TEXT_CHARS + 1)
     with pytest.raises(KaguraIngestError, match="decompression bomb"):

@@ -48,10 +48,12 @@ def test_one_section_per_sheet_with_markdown_table() -> None:
 
 
 def test_pipe_and_newline_in_cells_are_escaped() -> None:
-    data = _make_xlsx({"S": [["a|b", "c\nd"]]})
+    # Two rows so escaping is exercised in a body data row, not only the header.
+    data = _make_xlsx({"S": [["h1", "h2"], ["a|b", "c\nd"]]})
     table = XlsxExtractor().extract(data).sections[0].body_text
     assert r"a\|b" in table
     assert "c d" in table  # newline replaced by space
+    assert "\n" in table.split("c d")[0]  # the data row is a distinct table line
 
 
 def test_open_failure_becomes_ingest_error() -> None:
@@ -70,6 +72,23 @@ def test_row_cap_raises() -> None:
     data = _make_xlsx({"S": [["a"], ["b"], ["c"]]})
     with patch("kagura_memory.ingest.extractors.xlsx._MAX_ROWS_PER_SHEET", 1):
         with pytest.raises(KaguraIngestError, match="rows"):
+            XlsxExtractor().extract(data)
+
+
+def test_total_text_cap_triggers_decomp_bomb_error() -> None:
+    data = _make_xlsx({"S": [["aaaa", "bbbb"], ["cccc", "dddd"]]})
+    with patch("kagura_memory.ingest.extractors.xlsx._MAX_TOTAL_TEXT_CHARS", 5):
+        with pytest.raises(KaguraIngestError, match="total text exceeds"):
+            XlsxExtractor().extract(data)
+
+
+def test_table_cell_cap_rejects_wide_sparse_table() -> None:
+    # One wide row forces every row to pad to that width; the cell cap must
+    # reject it before the padding allocation, even though cell text is small.
+    wide = ["x"] + [None] * 8 + ["y"]  # 10 columns, mostly empty
+    data = _make_xlsx({"S": [wide, wide, wide]})
+    with patch("kagura_memory.ingest.extractors.xlsx._MAX_TABLE_CELLS", 5):
+        with pytest.raises(KaguraIngestError, match="exceeds .* cells"):
             XlsxExtractor().extract(data)
 
 

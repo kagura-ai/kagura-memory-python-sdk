@@ -788,8 +788,10 @@ def _detect_mime(fetched: FetchResult) -> str | None:
         if path.endswith(suffix):
             return mime
 
-    # Strip a leading UTF-8 BOM before sniffing so BOM-prefixed HTML is caught.
-    stripped = head.lstrip(b"\xef\xbb\xbf").lstrip().lower()
+    # Strip a leading UTF-8 BOM (exact 3-byte prefix only — lstrip(BOM_BYTES)
+    # would also eat a legitimate leading 0xEF/0xBB/0xBF) before HTML sniffing.
+    sniff = head[3:] if head[:3] == b"\xef\xbb\xbf" else head
+    stripped = sniff.lstrip().lower()
     if stripped.startswith(b"<!doctype html") or stripped.startswith(b"<html"):
         return "text/html"
     return None

@@ -66,7 +66,7 @@ def test_missing_python_docx_raises_install_hint() -> None:
             raise ImportError("No module named 'docx'")
         return __import__(name, *args, **kwargs)
 
-    # _load_docx uses importlib.import_module, which calls builtins.__import__.
+    # _load_docx uses a plain `import docx`, which routes through builtins.__import__.
     with patch("builtins.__import__", side_effect=fake_import):
         with pytest.raises(KaguraIngestError, match="ingest-docx"):
             DocxExtractor().extract(b"x")
@@ -75,5 +75,14 @@ def test_missing_python_docx_raises_install_hint() -> None:
 def test_paragraph_cap_triggers_decomp_bomb_error() -> None:
     data = _make_docx([("Normal", "body")])
     with patch("kagura_memory.ingest.extractors.docx._MAX_PARAGRAPHS", 0):
-        with pytest.raises(KaguraIngestError, match="decompression bomb"):
+        with pytest.raises(KaguraIngestError, match="paragraph count"):
+            DocxExtractor().extract(data)
+
+
+def test_total_text_cap_triggers_decomp_bomb_error() -> None:
+    # A doc within the paragraph-count cap but over the total-text cap must
+    # still be rejected (the anti-zip-bomb control for many short paragraphs).
+    data = _make_docx([("Normal", "some body text"), ("Normal", "more text")])
+    with patch("kagura_memory.ingest.extractors.docx._MAX_TOTAL_TEXT_CHARS", 5):
+        with pytest.raises(KaguraIngestError, match="total text exceeds"):
             DocxExtractor().extract(data)

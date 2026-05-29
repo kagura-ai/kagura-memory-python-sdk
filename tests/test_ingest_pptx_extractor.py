@@ -70,6 +70,13 @@ def test_slide_count_cap_raises() -> None:
             PptxExtractor().extract(data)
 
 
+def test_total_text_cap_triggers_decomp_bomb_error() -> None:
+    data = _make_pptx([("Intro", ["a lot of body text here"]), ("More", ["even more"])])
+    with patch("kagura_memory.ingest.extractors.pptx._MAX_TOTAL_TEXT_CHARS", 5):
+        with pytest.raises(KaguraIngestError, match="total text exceeds"):
+            PptxExtractor().extract(data)
+
+
 def test_missing_python_pptx_raises_install_hint() -> None:
     def fake_import(name: str, *args, **kwargs):
         if name == "pptx":

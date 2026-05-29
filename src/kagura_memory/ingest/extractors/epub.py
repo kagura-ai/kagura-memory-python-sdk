@@ -1,9 +1,10 @@
 """EPUB extractor — reuses PyMuPDF (no new dependency).
 
 PyMuPDF already opens EPUB files and exposes the same paginated, TOC-aware
-API as PDF, so :class:`EpubExtractor` delegates to
-:meth:`PdfExtractor._extract_from_doc`. The ``[ingest-epub]`` extra is an
-alias of ``[ingest-pdf]`` — installing either provides ``pymupdf``.
+API as PDF, so :class:`EpubExtractor` delegates to the shared module-level
+:func:`kagura_memory.ingest.extractors.pdf.extract_pymupdf_doc`. The
+``[ingest-epub]`` extra is an alias of ``[ingest-pdf]`` — installing either
+provides ``pymupdf``.
 """
 
 from __future__ import annotations

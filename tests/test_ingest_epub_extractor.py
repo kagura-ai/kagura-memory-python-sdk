@@ -1,7 +1,7 @@
 """Tests for ingest.extractors.epub — EpubExtractor (reuses PyMuPDF).
 
 These mock the PyMuPDF loader, so they run without ``pymupdf`` installed:
-EpubExtractor delegates to ``PdfExtractor._extract_from_doc`` with
+EpubExtractor delegates to the shared ``extract_pymupdf_doc()`` helper with
 ``label="EPUB"``, which is exercised here via a mock document.
 """
 
@@ -46,6 +46,21 @@ def test_epub_opens_with_epub_filetype_and_extracts_sections() -> None:
     assert kwargs["filetype"] == "epub"
     assert [s.heading for s in content.sections] == ["Chapter One", "Chapter Two"]
     assert content.page_count == 2
+
+
+def test_epub_without_toc_falls_back_to_single_section() -> None:
+    # Structureless EPUB (no navigation/TOC) → one fallback section over all
+    # pages, via the shared extract_pymupdf_doc fallback path.
+    fake_module = MagicMock()
+    fake_module.open.return_value = _make_mock_doc(
+        page_count=2, page_texts=["chapter text one", "chapter text two"], toc=[]
+    )
+    with patch("kagura_memory.ingest.extractors.epub._load_pymupdf", return_value=fake_module):
+        content = EpubExtractor().extract(b"PK\x03\x04 fake", source_uri="file:///x/book.epub")
+    assert len(content.sections) == 1
+    assert content.sections[0].heading is None
+    assert "chapter text one" in content.sections[0].body_text
+    assert "chapter text two" in content.sections[0].body_text
 
 
 def test_epub_open_failure_becomes_ingest_error() -> None:
