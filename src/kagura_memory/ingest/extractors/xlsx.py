@@ -110,7 +110,14 @@ class XlsxExtractor:
 
         rows: list[list[str]] = []
         cell_count = 0
-        for row_idx, row in enumerate(sheet.iter_rows(values_only=True)):
+        # Bound iteration at the source: openpyxl stops after _MAX_ROWS_PER_SHEET
+        # + 1 rows instead of streaming a hostile max_row. The "+1" still lets a
+        # genuinely over-limit sheet produce the row that trips the raise below
+        # (so oversized input fails with KaguraIngestError rather than silently
+        # truncating).
+        for row_idx, row in enumerate(
+            sheet.iter_rows(values_only=True, max_row=_MAX_ROWS_PER_SHEET + 1)
+        ):
             if row_idx >= _MAX_ROWS_PER_SHEET:
                 raise KaguraIngestError(
                     f"XLSX sheet {sheet.title!r} exceeds {_MAX_ROWS_PER_SHEET} rows "
