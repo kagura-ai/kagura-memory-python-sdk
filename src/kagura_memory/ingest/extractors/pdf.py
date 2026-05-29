@@ -52,12 +52,14 @@ class PdfExtractor:
         finally:
             doc.close()
 
-    def _extract_from_doc(self, doc: Any, source_uri: str | None) -> ExtractedContent:
+    def _extract_from_doc(
+        self, doc: Any, source_uri: str | None, *, label: str = "PDF"
+    ) -> ExtractedContent:
         page_count = doc.page_count
         if page_count <= 0:
-            raise KaguraIngestError("PDF has no pages")
+            raise KaguraIngestError(f"{label} has no pages")
         if page_count > _MAX_PAGES:
-            raise KaguraIngestError(f"PDF page count {page_count} exceeds limit {_MAX_PAGES}")
+            raise KaguraIngestError(f"{label} page count {page_count} exceeds limit {_MAX_PAGES}")
 
         title = self._get_title(doc, source_uri)
         toc = doc.get_toc(simple=True)  # list of [depth, title, page1based]
@@ -75,7 +77,8 @@ class PdfExtractor:
             total_chars += len(text)
             if total_chars > _MAX_TOTAL_TEXT_CHARS:
                 raise KaguraIngestError(
-                    f"PDF total text exceeds {_MAX_TOTAL_TEXT_CHARS} chars (decompression bomb?)"
+                    f"{label} total text exceeds {_MAX_TOTAL_TEXT_CHARS} chars "
+                    "(decompression bomb?)"
                 )
             page_texts.append(text)
 

@@ -213,15 +213,17 @@ async def test_overview_write_failure_aborts_section_writes() -> None:
 
 @pytest.mark.asyncio
 async def test_unsupported_format_returns_error_record(tmp_path: Any) -> None:
-    """Non-PDF body → extract step records error, no exception escapes."""
+    """Unrecognized format → extract step records error, no exception escapes."""
     client = _make_client()
     provider = FakeProvider()
     ingestor = FileIngestor(client=client, text_provider=provider)
 
-    txt = tmp_path / "notes.txt"
-    txt.write_bytes(b"not a pdf")
+    # An unknown extension with binary content the sniffer can't classify
+    # (not %PDF, not HTML, no registered suffix/Content-Type).
+    blob = tmp_path / "data.bin"
+    blob.write_bytes(b"\x00\x01\x02\x03\x04not a known format")
 
-    result = await ingestor.ingest(str(txt), context_id="ctx-uuid")
+    result = await ingestor.ingest(str(blob), context_id="ctx-uuid")
     assert result.overview_id is None
     assert result.errors
     assert result.errors[0].step == "extract"
