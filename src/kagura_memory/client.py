@@ -36,7 +36,7 @@ from .models import (
 _T = TypeVar("_T", bound=_BaseModel)
 
 
-MIN_SERVER_VERSION = "0.15.1"
+MIN_SERVER_VERSION = "0.17.1"
 """Minimum memory-cloud server version this SDK was tested against.
 
 This is the lowest server version where every parameter the SDK exposes
