@@ -12,11 +12,14 @@ from typing import Any, ClassVar
 
 from ...exceptions import KaguraIngestError
 from .._types import ExtractedContent, ExtractedSection
+from ._util import MAX_TOTAL_TEXT_CHARS as _MAX_TOTAL_TEXT_CHARS
 from ._util import filename_title
 
-# Cap on input bytes (HTML is not compressed, but a hostile page can still
-# be arbitrarily large). Mirrors the spirit of pdf's text cap.
-_MAX_INPUT_BYTES = 50_000_000  # ~50 MB of markup
+# Cap on input bytes (HTML is not compressed, but a hostile page can still be
+# arbitrarily large). Derived from the shared text ceiling so the safety cap
+# has a single source of truth — markup bytes are an upper bound on the text
+# the parser will surface.
+_MAX_INPUT_BYTES = _MAX_TOTAL_TEXT_CHARS
 _HEADING_NAMES = frozenset({"h1", "h2", "h3", "h4", "h5", "h6"})
 _HEADING_RE = re.compile(r"^h[1-6]$")
 _WS = re.compile(r"\s+")
