@@ -95,6 +95,7 @@ class XlsxExtractor:
         Returns the table text and the updated running total.
         """
         rows: list[list[str]] = []
+        cell_count = 0
         for row_idx, row in enumerate(sheet.iter_rows(values_only=True)):
             if row_idx >= _MAX_ROWS_PER_SHEET:
                 raise KaguraIngestError(
@@ -109,6 +110,16 @@ class XlsxExtractor:
             while cells and cells[-1] == "":
                 cells.pop()
             if cells:
+                # Cap the unpadded cell count DURING the loop so a wide-sparse
+                # sheet (each row carrying a trailing cell at a far column)
+                # cannot materialize a giant `rows` list before the post-loop
+                # padding check runs.
+                cell_count += len(cells)
+                if cell_count > _MAX_TABLE_CELLS:
+                    raise KaguraIngestError(
+                        f"XLSX sheet {sheet.title!r} exceeds {_MAX_TABLE_CELLS} cells "
+                        "(decompression bomb?)"
+                    )
                 total_chars += sum(len(c) for c in cells)
                 if total_chars > _MAX_TOTAL_TEXT_CHARS:
                     raise KaguraIngestError(
@@ -120,9 +131,9 @@ class XlsxExtractor:
             return "", total_chars
 
         width = max(len(r) for r in rows)
-        # Bound the padded table BEFORE materializing it: a single wide row
+        # Also bound the PADDED table before materializing it: a single wide row
         # forces every row to be padded to `width`, so width × rows can explode
-        # even when total_chars (text only) stays under its cap.
+        # even when the unpadded cell count and total_chars stay under their caps.
         if width * len(rows) > _MAX_TABLE_CELLS:
             raise KaguraIngestError(
                 f"XLSX sheet {sheet.title!r} table size {width}x{len(rows)} exceeds "
