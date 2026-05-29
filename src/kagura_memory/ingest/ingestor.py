@@ -730,9 +730,10 @@ def _uri_path_lower(source_uri: str) -> str:
     return (parsed.path or source_uri).lower()
 
 
-# Filename-suffix → canonical MIME. OOXML/EPUB containers can only be told
-# apart by suffix or Content-Type (their magic bytes are all the ZIP `PK`
-# header), so suffix detection is the primary signal for them.
+# Filename-suffix → canonical MIME. `_detect_mime` consults a registered
+# Content-Type first and falls back to this suffix table; for OOXML/EPUB
+# containers (whose magic bytes are all the ZIP `PK` header) the suffix is the
+# decisive signal whenever the Content-Type is absent or generic.
 _SUFFIX_MIME: dict[str, str] = {
     ".pdf": "application/pdf",
     ".txt": "text/plain",
@@ -808,17 +809,21 @@ def _infer_format(fetched: FetchResult) -> str:
 
 
 def _infer_mime(fetched: FetchResult) -> str:
-    """Decide which extractor to dispatch based on Content-Type and URI."""
+    """Decide which extractor to dispatch based on Content-Type and URI.
+
+    Always raises :class:`KaguraIngestError` (never returns an unsupported
+    MIME) when the format can't be resolved, so every ingest/estimate flow
+    fails with the same domain error — ``estimate_cost`` only catches
+    ``KaguraIngestError``, and a passed-through Content-Type would otherwise
+    surface as an unhandled ``ValueError`` from ``get_extractor``.
+    """
     mime = _detect_mime(fetched)
     if mime:
         return mime
-    # Preserve the legacy behavior: a present-but-unrecognized Content-Type is
-    # passed through so ``get_extractor`` raises a ValueError naming it.
-    if fetched.content_type:
-        return fetched.content_type
     supported = ", ".join(sorted(supported_mimes()))
+    detail = f" with Content-Type {fetched.content_type!r}" if fetched.content_type else ""
     raise KaguraIngestError(
-        f"could not determine MIME for {fetched.source_uri}; supported types: {supported}"
+        f"could not determine MIME for {fetched.source_uri}{detail}; supported types: {supported}"
     )
 
 

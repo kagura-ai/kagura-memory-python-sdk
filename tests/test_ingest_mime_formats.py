@@ -80,6 +80,15 @@ def test_html_magic_bytes_tolerate_utf8_bom() -> None:
     assert _infer_mime(fetched) == "text/html"
 
 
+def test_infer_mime_unsupported_content_type_raises_kagura_error() -> None:
+    # A present-but-unrecognized Content-Type must raise KaguraIngestError
+    # (not be passed through to get_extractor's ValueError), so dry-run /
+    # estimate_cost — which only catches KaguraIngestError — fails cleanly.
+    with pytest.raises(KaguraIngestError, match="could not determine MIME") as exc:
+        _infer_mime(_fetch("file:///tmp/data.bin", "application/zip", b"PK\x03\x04"))
+    assert "application/zip" in str(exc.value)
+
+
 def test_infer_format_short_labels() -> None:
     assert _infer_format(_fetch("file:///x/a.md")) == "markdown"
     assert _infer_format(_fetch("file:///x/a.docx")) == "docx"

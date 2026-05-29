@@ -50,9 +50,13 @@ class PptxExtractor:
         except Exception as e:  # noqa: BLE001 - re-raised as our domain error
             raise KaguraIngestError(f"failed to open PPTX: {e}") from e
 
+        # Check the slide count BEFORE materializing the list — python-pptx's
+        # slide collection is sized (counts <sldId> elements) without building
+        # Slide objects, so a hostile deck is rejected before allocation.
+        slide_count = len(presentation.slides)
+        if slide_count > _MAX_SLIDES:
+            raise KaguraIngestError(f"PPTX slide count {slide_count} exceeds limit {_MAX_SLIDES}")
         slides = list(presentation.slides)
-        if len(slides) > _MAX_SLIDES:
-            raise KaguraIngestError(f"PPTX slide count {len(slides)} exceeds limit {_MAX_SLIDES}")
 
         sections = self._sections(slides)
         # Use the first slide's *real* title placeholder for the document
