@@ -85,15 +85,19 @@ def _doc_title(doc: Any, source_uri: str | None) -> str | None:
 
 def _sections_from_toc(toc: list[list[Any]], page_texts: list[str]) -> list[ExtractedSection]:
     sections: list[ExtractedSection] = []
+    page_count = len(page_texts)
     for i, entry in enumerate(toc):
-        # Each toc entry is [depth, title, page_number_1based].
+        # Each toc entry is [depth, title, page_number_1based]. Clamp page
+        # numbers to the real page count — a bogus/hostile TOC entry (e.g. a
+        # next-page value in the millions) must not drive `range()` past EOF and
+        # turn into a CPU DoS. EPUB TOCs flow through here too and are untrusted.
         depth, heading, page_1based = entry[0], entry[1], entry[2]
-        start_page = max(1, int(page_1based))
+        start_page = min(max(1, int(page_1based)), page_count)
         # End just before the next entry's start page. Last entry runs to EOD.
         if i + 1 < len(toc):
-            end_page = max(start_page, int(toc[i + 1][2]) - 1)
+            end_page = max(start_page, min(int(toc[i + 1][2]) - 1, page_count))
         else:
-            end_page = len(page_texts)
+            end_page = page_count
 
         body_lines: list[str] = []
         for p in range(start_page, end_page + 1):
@@ -135,9 +139,9 @@ class PdfExtractor:
     """Structural PDF extractor.
 
     Sections are derived from the PDF outline (table of contents) when
-    present. When no outline is available, the document is returned as a
-    single section per page with ``heading=None``; the chunker may then
-    apply token-window splitting.
+    present. When no outline is available, the whole document is returned as
+    a single ``heading=None`` section spanning all pages; the chunker may
+    then apply token-window splitting.
     """
 
     supports: ClassVar[frozenset[str]] = frozenset({"application/pdf"})

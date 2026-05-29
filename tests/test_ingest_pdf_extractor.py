@@ -171,6 +171,27 @@ def test_pdf_toc_produces_section_per_entry() -> None:
     assert content.sections[1].page_range == (3, 4)
 
 
+def test_pdf_toc_with_bogus_page_number_is_clamped() -> None:
+    """A hostile TOC next-page value (millions) is clamped to the page count.
+
+    Guards against a CPU DoS where range(start, end+1) would iterate millions
+    of times. The section's page_range must stay within the real page count.
+    """
+    extractor = PdfExtractor()
+    fake_module = MagicMock()
+    toc = [[1, "Chapter 1", 1], [1, "Bogus", 9_999_999]]
+    fake_module.open.return_value = _make_mock_doc(
+        page_count=2, page_texts=["page one body", "page two body"], toc=toc
+    )
+
+    with patch("kagura_memory.ingest.extractors.pdf._load_pymupdf", return_value=fake_module):
+        content = extractor.extract(b"%PDF")
+
+    for section in content.sections:
+        assert section.page_range is not None
+        assert section.page_range[1] <= 2  # clamped to the real page count
+
+
 def test_pdf_empty_section_body_is_skipped() -> None:
     """TOC entries spanning blank pages don't emit empty sections."""
     extractor = PdfExtractor()
