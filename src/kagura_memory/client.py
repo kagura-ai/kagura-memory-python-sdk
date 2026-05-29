@@ -24,6 +24,7 @@ from .models import (
     EmbeddingModelsResponse,
     EmbeddingStatus,
     ListTagsResponse,
+    MemoryListResponse,
     MemoryStatsResponse,
     RollbackResult,
     ServerInfo,
@@ -1150,6 +1151,62 @@ class KaguraClient:
         return await self._rest_get(
             f"/api/v1/contexts/{context_id}/duplicates", DuplicatesResponse, params=params
         )
+
+    async def list_memories(
+        self,
+        context_id: str | None = None,
+        q: str | None = None,
+        scope: Literal["working", "persistent"] | None = None,
+        type: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> MemoryListResponse:
+        """List memories newest-first, with optional substring and facet filters.
+
+        Calls ``GET /api/v1/memory/list``. Without ``context_id`` this returns
+        the caller's own memories across all contexts; with ``context_id`` it
+        returns every memory in a shared context, or only the caller's own in a
+        private one (the server enforces this scoping).
+
+        Args:
+            context_id: Optional context UUID to scope results to one context.
+                Omit for the caller's cross-context "my memories" view.
+            q: Optional case-insensitive substring filter on memory summaries.
+                Surrounding whitespace is stripped and whitespace-only values
+                are treated as ``None`` (no filter), mirroring the server and
+                avoiding a wasted request. Matching targets ``summary`` only —
+                ``content`` and ``context_summary`` are deliberately not
+                searched (memory-cloud #580); use :meth:`recall` for semantic
+                or full-text search.
+            scope: Filter by scope — ``"working"`` or ``"persistent"``.
+            type: Filter by memory type. Server validates against its own
+                vocabulary; the SDK passes through.
+            limit: Maximum results (server accepts 1-500, default: 50).
+            offset: Pagination offset (default: 0).
+
+        Returns:
+            :class:`MemoryListResponse` with ``memories`` (newest-first),
+            ``total`` (matching rows across all pages), and ``has_more``.
+
+        Raises:
+            KaguraAuthError: Authentication failed.
+            KaguraConnectionError: Network failure or non-2xx response — e.g. a
+                ``context_id`` that does not exist or is not accessible
+                surfaces as ``HTTP 404``.
+        """
+        params: dict[str, Any] = {"limit": limit, "offset": offset}
+        if context_id is not None:
+            params["context_id"] = context_id
+        # Normalize like the server/frontend: strip and drop whitespace-only so
+        # an empty search box doesn't pin results to summaries containing spaces.
+        q_normalized = (q or "").strip()
+        if q_normalized:
+            params["q"] = q_normalized
+        if scope is not None:
+            params["scope"] = scope
+        if type is not None:
+            params["type"] = type
+        return await self._rest_get("/api/v1/memory/list", MemoryListResponse, params=params)
 
     @staticmethod
     def _raise_for_mcp_error(result: dict[str, Any], operation: str) -> None:

@@ -48,6 +48,8 @@ from .models import (
     LLMUsage,
     Memory,
     MemoryInfo,
+    MemoryListItem,
+    MemoryListResponse,
     MemoryStatItem,
     MemoryStatsResponse,
     MemoryToStore,
@@ -125,6 +127,9 @@ __all__ = [
     # Embedding status (v0.6.1)
     "EmbeddingStatus",
     "FailedMemoryInfo",
+    # Memory list (SDK issue #143)
+    "MemoryListItem",
+    "MemoryListResponse",
     # Memory stats & duplicates (v0.6.1)
     "MemoryStatItem",
     "MemoryStatsResponse",

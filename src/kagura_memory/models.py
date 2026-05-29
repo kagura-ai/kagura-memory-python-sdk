@@ -274,6 +274,40 @@ class MemoryStatsResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Memory list (SDK issue #143; server origin memory-cloud #580)
+# ---------------------------------------------------------------------------
+
+
+class MemoryListItem(BaseModel):
+    """A single memory row in a paginated ``list_memories`` response.
+
+    Mirrors the server's ``MemoryListItem`` wire shape. ``created_at`` /
+    ``updated_at`` arrive as ISO 8601 strings (``Z``-tagged) and are parsed
+    into ``datetime``, consistent with the other list models in this module.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    id: str
+    summary: str
+    type: str
+    scope: str
+    importance: float
+    created_at: datetime
+    updated_at: datetime
+
+
+class MemoryListResponse(BaseModel):
+    """Paginated response from ``list_memories`` (``GET /api/v1/memory/list``)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    memories: list[MemoryListItem] = Field(default_factory=list)
+    total: int
+    has_more: bool
+
+
+# ---------------------------------------------------------------------------
 # Duplicate detection models (v0.6.1)
 # ---------------------------------------------------------------------------
 
