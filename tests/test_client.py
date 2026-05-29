@@ -16,6 +16,7 @@ from kagura_memory import (
     KaguraError,
     KaguraNotFoundError,
     KaguraQuotaError,
+    MemoryListResponse,
     MemoryStatsResponse,
     RollbackResult,
     ServerInfo,
@@ -1616,6 +1617,98 @@ async def test_find_duplicates():
             "https://test.com/api/v1/contexts/ctx-1/duplicates",
             params={"threshold": 0.90, "limit": 25},
         )
+
+    await client.close()
+
+
+# ============================================================================
+# list_memories (REST)
+# ============================================================================
+
+
+def _memory_list_response_mock():
+    """A MagicMock httpx response shaped like GET /api/v1/memory/list."""
+    mock_response = MagicMock()
+    mock_response.json.return_value = {
+        "memories": [
+            {
+                "id": "mem-1",
+                "summary": "first memory",
+                "type": "note",
+                "scope": "persistent",
+                "importance": 0.7,
+                "created_at": "2026-03-01T00:00:00Z",
+                "updated_at": "2026-03-02T00:00:00Z",
+            }
+        ],
+        "total": 1,
+        "has_more": False,
+    }
+    mock_response.raise_for_status = MagicMock()
+    return mock_response
+
+
+@pytest.mark.asyncio
+async def test_list_memories_with_filters():
+    """list_memories() should return MemoryListResponse and forward filters."""
+    client = _make_initialized_client()
+
+    with patch.object(client._client, "get", new_callable=AsyncMock) as mock_get:
+        mock_get.return_value = _memory_list_response_mock()
+        result = await client.list_memories(
+            context_id="ctx-1", q="foo", scope="persistent", type="note", limit=10, offset=5
+        )
+        assert isinstance(result, MemoryListResponse)
+        assert result.total == 1
+        assert result.has_more is False
+        assert result.memories[0].id == "mem-1"
+        mock_get.assert_called_once_with(
+            "https://test.com/api/v1/memory/list",
+            params={
+                "limit": 10,
+                "offset": 5,
+                "context_id": "ctx-1",
+                "q": "foo",
+                "scope": "persistent",
+                "type": "note",
+            },
+        )
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_list_memories_defaults_omit_optional_params():
+    """With no optional args, only limit/offset are sent."""
+    client = _make_initialized_client()
+
+    with patch.object(client._client, "get", new_callable=AsyncMock) as mock_get:
+        mock_get.return_value = _memory_list_response_mock()
+        await client.list_memories()
+        mock_get.assert_called_once_with(
+            "https://test.com/api/v1/memory/list",
+            params={"limit": 50, "offset": 0},
+        )
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_list_memories_strips_q_and_omits_when_blank():
+    """q is stripped; whitespace-only q is treated as None (omitted)."""
+    client = _make_initialized_client()
+
+    # Whitespace-only -> omitted entirely.
+    with patch.object(client._client, "get", new_callable=AsyncMock) as mock_get:
+        mock_get.return_value = _memory_list_response_mock()
+        await client.list_memories(q="   ")
+        assert "q" not in mock_get.call_args.kwargs["params"]
+
+    # Surrounding whitespace -> stripped to the trimmed value.
+    with patch.object(client._client, "get", new_callable=AsyncMock) as mock_get:
+        mock_get.return_value = _memory_list_response_mock()
+        await client.list_memories(q="  foo  ")
+        assert mock_get.call_args.kwargs["params"]["q"] == "foo"
 
     await client.close()
 
