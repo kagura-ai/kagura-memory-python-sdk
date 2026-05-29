@@ -25,6 +25,15 @@ _MAX_ROWS_PER_SHEET = 100_000
 _MAX_TABLE_CELLS = 2_000_000  # width × row count after padding
 
 
+def _cell_str(value: Any) -> str:
+    """Stringify a cell for a Markdown table: escape pipes and flatten any
+    newline variant (``\\r\\n``, ``\\r``, ``\\n``) to a space so a multi-line
+    cell can't break the single-line table row."""
+    if value is None:
+        return ""
+    return str(value).replace("|", r"\|").replace("\r\n", " ").replace("\r", " ").replace("\n", " ")
+
+
 def _load_openpyxl() -> Any:
     try:
         import openpyxl  # type: ignore[import-untyped]
@@ -123,9 +132,7 @@ class XlsxExtractor:
                     f"XLSX sheet {sheet.title!r} exceeds {_MAX_ROWS_PER_SHEET} rows "
                     "(decompression bomb?)"
                 )
-            cells = [
-                "" if v is None else str(v).replace("|", r"\|").replace("\n", " ") for v in row
-            ]
+            cells = [_cell_str(v) for v in row]
             # Drop trailing empty cells so a sparse sheet does not emit a wall
             # of empty columns.
             while cells and cells[-1] == "":

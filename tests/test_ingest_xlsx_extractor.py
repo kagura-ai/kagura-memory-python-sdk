@@ -49,10 +49,13 @@ def test_one_section_per_sheet_with_markdown_table() -> None:
 
 def test_pipe_and_newline_in_cells_are_escaped() -> None:
     # Two rows so escaping is exercised in a body data row, not only the header.
-    data = _make_xlsx({"S": [["h1", "h2"], ["a|b", "c\nd"]]})
+    # Includes a Windows CRLF and a lone CR to confirm all newline variants flatten.
+    data = _make_xlsx({"S": [["h1", "h2", "h3"], ["a|b", "c\r\nd", "e\rf"]]})
     table = XlsxExtractor().extract(data).sections[0].body_text
     assert r"a\|b" in table
-    assert "c d" in table  # newline replaced by space
+    assert "c d" in table  # CRLF replaced by a single space
+    assert "e f" in table  # lone CR replaced by space
+    assert "\r" not in table  # no carriage returns leak into the table
     assert "\n" in table.split("c d")[0]  # the data row is a distinct table line
 
 
