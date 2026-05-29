@@ -17,7 +17,10 @@ uv run python examples/<script>.py
 | [`resource_tokens.py`](resource_tokens.py) | `ResourceClient` | resource setup, token lifecycle, single + batch event ingestion |
 | [`files_upload.py`](files_upload.py) | `FilesClient` | upload (bytes + dedup), `download_url`, `list`, `delete` |
 | [`ingest_pdf.py`](ingest_pdf.py) | `FileIngestor` | PDF → overview + section memories + R2 archive |
+| [`ingest_documents.py`](ingest_documents.py) | `FileIngestor` | text/Markdown/HTML/DOCX/XLSX/PPTX/EPUB → memory graph |
 
 `ingest_pdf.py` needs the ingest extras (`pip install 'kagura-memory[ingest-pdf]'`)
 and a text-LLM key (`ANTHROPIC_API_KEY` for the default `claude` provider).
+`ingest_documents.py` works with any supported format — install the matching
+extra (or `[ingest-all]`); plain text / Markdown need no extra.
 `client_advanced.py`'s `list_tags()` needs memory-cloud server v0.15.4+.

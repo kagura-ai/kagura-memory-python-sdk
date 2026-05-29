@@ -56,9 +56,34 @@ Phase 1 ingests **text only**. A vision provider (Gemini 2.5 Flash by default) i
 ```bash
 pip install kagura-memory                   # core SDK
 pip install 'kagura-memory[ingest-pdf]'     # adds PDF ingestion support
+pip install 'kagura-memory[ingest-all]'     # all document formats (see below)
 # or
 uv add kagura-memory
 ```
+
+### Supported document formats
+
+`kagura ingest` (and `FileIngestor`) dispatch to a structural extractor based
+on the file's MIME type / extension. Heavy parser dependencies are opt-in
+extras — install only what you need, or `ingest-all` for everything:
+
+| Format | Extensions | Extra | Parser |
+|---|---|---|---|
+| Plain text / Markdown | `.txt`, `.md` | _(none — base `[ingest]`)_ | stdlib |
+| HTML | `.html`, `.htm` | `[ingest-html]` | beautifulsoup4 |
+| PDF | `.pdf` | `[ingest-pdf]` | PyMuPDF |
+| Word | `.docx` | `[ingest-docx]` | python-docx |
+| Excel | `.xlsx` | `[ingest-xlsx]` | openpyxl |
+| PowerPoint | `.pptx` | `[ingest-pptx]` | python-pptx |
+| EPUB | `.epub` | `[ingest-epub]` | PyMuPDF (reused) |
+
+Each extractor is **pure-parse** — no network, no LLM. It maps the document
+into structural sections (Markdown/HTML headings, Word heading styles, one
+section per sheet/slide, PDF/EPUB outline) that the chunker and summarizer
+then turn into memories. Office and EPUB files are ZIP containers, so each
+extractor enforces decompression-bomb caps (max sheets/rows/slides/pages and
+total decoded text). A missing extra surfaces as a clear
+`KaguraIngestError` naming the package to install.
 
 ## Quick Start
 

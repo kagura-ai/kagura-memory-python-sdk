@@ -25,7 +25,14 @@ from ..logger import VerboseLogger, normalize_logger
 from ..models import CostBreakdown, FileObject, IngestErrorRecord, IngestResult
 from ._types import Chunk, ExtractedContent
 from .chunker import chunk as do_chunk
-from .extractors import get_extractor
+from .extractors import (
+    DOCX_MIME,
+    EPUB_MIME,
+    PPTX_MIME,
+    XLSX_MIME,
+    get_extractor,
+    supported_mimes,
+)
 from .fetcher import Fetcher, FetchResult
 from .providers import get_provider
 from .providers.base import Provider
@@ -723,29 +730,100 @@ def _uri_path_lower(source_uri: str) -> str:
     return (parsed.path or source_uri).lower()
 
 
+# Filename-suffix → canonical MIME. `_detect_mime` consults a registered
+# Content-Type first and falls back to this suffix table; for OOXML/EPUB
+# containers (whose magic bytes are all the ZIP `PK` header) the suffix is the
+# decisive signal whenever the Content-Type is absent or generic.
+_SUFFIX_MIME: dict[str, str] = {
+    ".pdf": "application/pdf",
+    ".txt": "text/plain",
+    ".text": "text/plain",
+    ".md": "text/markdown",
+    ".markdown": "text/markdown",
+    ".html": "text/html",
+    ".htm": "text/html",
+    ".docx": DOCX_MIME,
+    ".xlsx": XLSX_MIME,
+    ".pptx": PPTX_MIME,
+    ".epub": EPUB_MIME,
+}
+
+# Canonical MIME → short human-readable label stored on the memory's
+# ``details.format`` field.
+_MIME_LABEL: dict[str, str] = {
+    "application/pdf": "pdf",
+    "text/plain": "text",
+    "text/markdown": "markdown",
+    "text/html": "html",
+    DOCX_MIME: "docx",
+    XLSX_MIME: "xlsx",
+    PPTX_MIME: "pptx",
+    EPUB_MIME: "epub",
+}
+
+
+def _normalize_content_type(content_type: str) -> str:
+    """Strip parameters (e.g. ``; charset=utf-8``) and lowercase."""
+    return content_type.split(";", 1)[0].strip().lower()
+
+
+def _detect_mime(fetched: FetchResult) -> str | None:
+    """Best-effort canonical MIME for ``fetched``, or ``None`` if unknown.
+
+    The ``%PDF-`` magic byte signature is checked first because it is
+    authoritative: a real PDF served with a wrong-but-registered Content-Type
+    (e.g. ``text/html``) must still route to the PDF extractor, matching the
+    pre-#144 behavior. Otherwise: Content-Type → filename suffix → HTML magic.
+    Never raises — callers decide how to treat an undetected document.
+    """
+    head = fetched.body[:64]
+    if head[:5] == b"%PDF-":
+        return "application/pdf"
+
+    content_type = _normalize_content_type(fetched.content_type or "")
+    if content_type in supported_mimes():
+        return content_type
+
+    path = _uri_path_lower(fetched.source_uri)
+    for suffix, mime in _SUFFIX_MIME.items():
+        if path.endswith(suffix):
+            return mime
+
+    # Strip a leading UTF-8 BOM (exact 3-byte prefix only — lstrip(BOM_BYTES)
+    # would also eat a legitimate leading 0xEF/0xBB/0xBF) before HTML sniffing.
+    sniff = head[3:] if head[:3] == b"\xef\xbb\xbf" else head
+    stripped = sniff.lstrip().lower()
+    if stripped.startswith(b"<!doctype html") or stripped.startswith(b"<html"):
+        return "text/html"
+    return None
+
+
 def _infer_format(fetched: FetchResult) -> str:
-    if fetched.content_type == "application/pdf":
-        return "pdf"
-    if fetched.content_type.startswith("image/"):
+    """Short format label for ``details.format`` (never raises)."""
+    if _normalize_content_type(fetched.content_type or "").startswith("image/"):
         return "image"
-    if _uri_path_lower(fetched.source_uri).endswith(".pdf"):
-        return "pdf"
+    mime = _detect_mime(fetched)
+    if mime:
+        return _MIME_LABEL.get(mime, mime)
     return fetched.content_type or "unknown"
 
 
 def _infer_mime(fetched: FetchResult) -> str:
-    """Decide which extractor to dispatch based on Content-Type and URI."""
-    if fetched.content_type == "application/pdf":
-        return "application/pdf"
-    if _uri_path_lower(fetched.source_uri).endswith(".pdf"):
-        return "application/pdf"
-    # Magic-byte sniff for local files (no Content-Type).
-    if fetched.body[:5] == b"%PDF-":
-        return "application/pdf"
-    if fetched.content_type:
-        return fetched.content_type
+    """Decide which extractor to dispatch based on Content-Type and URI.
+
+    Always raises :class:`KaguraIngestError` (never returns an unsupported
+    MIME) when the format can't be resolved, so every ingest/estimate flow
+    fails with the same domain error — ``estimate_cost`` only catches
+    ``KaguraIngestError``, and a passed-through Content-Type would otherwise
+    surface as an unhandled ``ValueError`` from ``get_extractor``.
+    """
+    mime = _detect_mime(fetched)
+    if mime:
+        return mime
+    supported = ", ".join(sorted(supported_mimes()))
+    detail = f" with Content-Type {fetched.content_type!r}" if fetched.content_type else ""
     raise KaguraIngestError(
-        f"could not determine MIME for {fetched.source_uri}; supported types: application/pdf"
+        f"could not determine MIME for {fetched.source_uri}{detail}; supported types: {supported}"
     )
 
 

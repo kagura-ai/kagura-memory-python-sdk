@@ -56,8 +56,34 @@ ingest-pdf = [
     "kagura-memory[ingest]",
     "pymupdf>=1.24",
 ]
+ingest-html = [
+    "kagura-memory[ingest]",
+    "beautifulsoup4>=4.12",
+]
+ingest-docx = [
+    "kagura-memory[ingest]",
+    "python-docx>=1.1",
+]
+ingest-xlsx = [
+    "kagura-memory[ingest]",
+    "openpyxl>=3.1",
+]
+ingest-pptx = [
+    "kagura-memory[ingest]",
+    "python-pptx>=0.6.23",
+]
+# EPUB reuses PyMuPDF (no new dependency) — alias of the PDF extra.
+ingest-epub = [
+    "kagura-memory[ingest-pdf]",
+]
+# Plain text / Markdown need no extra (stdlib) — covered by base [ingest].
 ingest-all = [
     "kagura-memory[ingest-pdf]",
+    "kagura-memory[ingest-html]",
+    "kagura-memory[ingest-docx]",
+    "kagura-memory[ingest-xlsx]",
+    "kagura-memory[ingest-pptx]",
+    "kagura-memory[ingest-epub]",
 ]
 
 [project.scripts]
