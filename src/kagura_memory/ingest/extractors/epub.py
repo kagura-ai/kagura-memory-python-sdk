@@ -12,7 +12,7 @@ from typing import Any, ClassVar
 
 from ...exceptions import KaguraIngestError
 from .._types import ExtractedContent
-from .pdf import PdfExtractor, _load_pymupdf
+from .pdf import _load_pymupdf, extract_pymupdf_doc
 
 
 class EpubExtractor:
@@ -34,6 +34,6 @@ class EpubExtractor:
             raise KaguraIngestError(f"failed to open EPUB: {e}") from e
 
         try:
-            return PdfExtractor()._extract_from_doc(doc, source_uri, label="EPUB")
+            return extract_pymupdf_doc(doc, source_uri, label="EPUB")
         finally:
             doc.close()

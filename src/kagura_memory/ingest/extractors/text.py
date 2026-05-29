@@ -14,10 +14,13 @@ from typing import ClassVar
 
 from ...exceptions import KaguraIngestError
 from .._types import ExtractedContent, ExtractedSection
+from ._util import MAX_TOTAL_TEXT_CHARS as _MAX_TOTAL_TEXT_CHARS
+from ._util import filename_title
 
-# Cap on decoded character count (mirrors pdf._MAX_TOTAL_TEXT_CHARS). Text
-# files are not compressed, but a multi-GB log still needs a ceiling.
-_MAX_TOTAL_TEXT_CHARS = 50_000_000  # ~50 MB of text
+# A decoded char is at most one source byte for UTF-8 (errors="replace" emits
+# one U+FFFD per bad byte), so capping the raw byte length also bounds the
+# decoded string and stops a multi-GB payload from being materialized first.
+_MAX_INPUT_BYTES = _MAX_TOTAL_TEXT_CHARS
 
 _ATX_HEADING = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
 _FENCE = re.compile(r"^\s*(```+|~~~+)")
@@ -36,12 +39,14 @@ class TextExtractor:
     supports: ClassVar[frozenset[str]] = frozenset({"text/plain", "text/markdown"})
 
     def extract(self, source: bytes, source_uri: str | None = None) -> ExtractedContent:
-        text = source.decode("utf-8", errors="replace")
-        if len(text) > _MAX_TOTAL_TEXT_CHARS:
+        # Check the byte length BEFORE decoding so a huge payload is rejected
+        # without first allocating an equally huge str.
+        if len(source) > _MAX_INPUT_BYTES:
             raise KaguraIngestError(
-                f"text document exceeds {_MAX_TOTAL_TEXT_CHARS} chars "
-                f"(got {len(text)}; decompression bomb?)"
+                f"text document exceeds {_MAX_INPUT_BYTES} bytes "
+                f"(got {len(source)}; decompression bomb?)"
             )
+        text = source.decode("utf-8", errors="replace")
 
         sections = self._split_sections(text)
         title = self._title(sections, source_uri)
@@ -89,6 +94,4 @@ class TextExtractor:
         for section in sections:
             if section.depth == 1 and section.heading:
                 return section.heading
-        if source_uri:
-            return source_uri.rsplit("/", 1)[-1] or source_uri
-        return None
+        return filename_title(source_uri)

@@ -65,5 +65,11 @@ def test_empty_document_yields_no_sections() -> None:
     assert content.page_count is None
 
 
+def test_title_fallback_strips_query_string() -> None:
+    # No headings → title falls back to the URI basename, with ?query stripped.
+    content = TextExtractor().extract(b"plain body", source_uri="https://x/notes.txt?token=abc")
+    assert content.title == "notes.txt"
+
+
 def test_supports_declares_text_mimes() -> None:
     assert TextExtractor.supports == frozenset({"text/plain", "text/markdown"})

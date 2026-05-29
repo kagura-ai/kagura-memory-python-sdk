@@ -65,6 +65,21 @@ def test_infer_mime_unknown_lists_supported_types() -> None:
     assert DOCX_MIME in msg
 
 
+def test_pdf_magic_bytes_win_over_wrong_content_type() -> None:
+    """A real PDF mislabeled with a registered Content-Type still routes to PDF.
+
+    Regression guard: pre-#144 a `.pdf`/%PDF- file served as text/html went to
+    PdfExtractor; the new registry must not let the wrong Content-Type win.
+    """
+    fetched = _fetch("https://x/report", "text/html", b"%PDF-1.7\n...")
+    assert _infer_mime(fetched) == "application/pdf"
+
+
+def test_html_magic_bytes_tolerate_utf8_bom() -> None:
+    fetched = _fetch("file:///tmp/page", "", b"\xef\xbb\xbf<!DOCTYPE html><html>")
+    assert _infer_mime(fetched) == "text/html"
+
+
 def test_infer_format_short_labels() -> None:
     assert _infer_format(_fetch("file:///x/a.md")) == "markdown"
     assert _infer_format(_fetch("file:///x/a.docx")) == "docx"

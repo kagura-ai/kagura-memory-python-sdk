@@ -12,6 +12,7 @@ from typing import Any, ClassVar
 
 from ...exceptions import KaguraIngestError
 from .._types import ExtractedContent, ExtractedSection
+from ._util import filename_title
 
 # Cap on input bytes (HTML is not compressed, but a hostile page can still
 # be arbitrarily large). Mirrors the spirit of pdf's text cap.
@@ -110,6 +111,4 @@ class HtmlExtractor:
             heading = first_h1.get_text(" ", strip=True)
             if heading:
                 return heading
-        if source_uri:
-            return source_uri.rsplit("/", 1)[-1] or source_uri
-        return None
+        return filename_title(source_uri)

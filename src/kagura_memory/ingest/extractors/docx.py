@@ -13,11 +13,12 @@ from typing import Any, ClassVar
 
 from ...exceptions import KaguraIngestError
 from .._types import ExtractedContent, ExtractedSection
+from ._util import MAX_TOTAL_TEXT_CHARS as _MAX_TOTAL_TEXT_CHARS
+from ._util import filename_title
 
 # DOCX is a ZIP container — guard against zip bombs by capping the number of
 # paragraphs walked and the total decoded text length.
 _MAX_PARAGRAPHS = 500_000
-_MAX_TOTAL_TEXT_CHARS = 50_000_000  # ~50 MB of text
 _HEADING_STYLE = re.compile(r"^heading\s+(\d+)$", re.IGNORECASE)
 
 
@@ -130,6 +131,4 @@ class DocxExtractor:
         for section in sections:
             if section.heading:
                 return section.heading
-        if source_uri:
-            return source_uri.rsplit("/", 1)[-1] or source_uri
-        return None
+        return filename_title(source_uri)

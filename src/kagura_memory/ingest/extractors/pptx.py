@@ -12,11 +12,12 @@ from typing import Any, ClassVar
 
 from ...exceptions import KaguraIngestError
 from .._types import ExtractedContent, ExtractedSection
+from ._util import MAX_TOTAL_TEXT_CHARS as _MAX_TOTAL_TEXT_CHARS
+from ._util import filename_title
 
 # PPTX is a ZIP container — cap slides and total serialized text to defuse
 # decompression bombs.
 _MAX_SLIDES = 50_000
-_MAX_TOTAL_TEXT_CHARS = 50_000_000  # ~50 MB of text
 
 
 def _load_pptx() -> Any:
@@ -54,8 +55,11 @@ class PptxExtractor:
             raise KaguraIngestError(f"PPTX slide count {len(slides)} exceeds limit {_MAX_SLIDES}")
 
         sections = self._sections(slides)
-        title = sections[0].heading if sections else None
-        title = title or self._title(source_uri)
+        # Use the first slide's *real* title placeholder for the document
+        # title — not the synthetic "Slide N" heading, which would shadow the
+        # filename fallback for title-less decks.
+        real_first_title = self._slide_text(slides[0])[0] if slides else None
+        title = real_first_title or filename_title(source_uri)
         return ExtractedContent(title=title, sections=sections, images=[], page_count=None)
 
     @classmethod
@@ -102,9 +106,3 @@ class PptxExtractor:
             if text:
                 body_parts.append(text)
         return title_text, "\n".join(body_parts).strip()
-
-    @staticmethod
-    def _title(source_uri: str | None) -> str | None:
-        if source_uri:
-            return source_uri.rsplit("/", 1)[-1] or source_uri
-        return None

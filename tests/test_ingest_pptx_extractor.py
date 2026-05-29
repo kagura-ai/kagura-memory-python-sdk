@@ -50,9 +50,12 @@ def test_one_section_per_slide_title_is_heading() -> None:
 
 def test_untitled_slide_falls_back_to_slide_number() -> None:
     data = _make_pptx([(None, ["only body"])])
-    content = PptxExtractor().extract(data)
+    content = PptxExtractor().extract(data, source_uri="file:///x/deck.pptx")
     assert content.sections[0].heading == "Slide 1"
     assert "only body" in content.sections[0].body_text
+    # The synthetic "Slide 1" heading must NOT become the document title —
+    # a title-less deck falls back to the filename.
+    assert content.title == "deck.pptx"
 
 
 def test_open_failure_becomes_ingest_error() -> None:

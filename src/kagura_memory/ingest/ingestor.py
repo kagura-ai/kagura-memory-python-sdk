@@ -769,9 +769,16 @@ def _normalize_content_type(content_type: str) -> str:
 def _detect_mime(fetched: FetchResult) -> str | None:
     """Best-effort canonical MIME for ``fetched``, or ``None`` if unknown.
 
-    Resolution order: Content-Type → filename suffix → magic bytes. Never
-    raises — callers decide how to treat an undetected document.
+    The ``%PDF-`` magic byte signature is checked first because it is
+    authoritative: a real PDF served with a wrong-but-registered Content-Type
+    (e.g. ``text/html``) must still route to the PDF extractor, matching the
+    pre-#144 behavior. Otherwise: Content-Type → filename suffix → HTML magic.
+    Never raises — callers decide how to treat an undetected document.
     """
+    head = fetched.body[:64]
+    if head[:5] == b"%PDF-":
+        return "application/pdf"
+
     content_type = _normalize_content_type(fetched.content_type or "")
     if content_type in supported_mimes():
         return content_type
@@ -781,10 +788,8 @@ def _detect_mime(fetched: FetchResult) -> str | None:
         if path.endswith(suffix):
             return mime
 
-    head = fetched.body[:64]
-    if head[:5] == b"%PDF-":
-        return "application/pdf"
-    stripped = head.lstrip().lower()
+    # Strip a leading UTF-8 BOM before sniffing so BOM-prefixed HTML is caught.
+    stripped = head.lstrip(b"\xef\xbb\xbf").lstrip().lower()
     if stripped.startswith(b"<!doctype html") or stripped.startswith(b"<html"):
         return "text/html"
     return None

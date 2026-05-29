@@ -13,12 +13,13 @@ from typing import Any, ClassVar
 
 from ...exceptions import KaguraIngestError
 from .._types import ExtractedContent, ExtractedSection
+from ._util import MAX_TOTAL_TEXT_CHARS as _MAX_TOTAL_TEXT_CHARS
+from ._util import filename_title
 
 # XLSX is a ZIP container — cap sheets, rows-per-sheet, and total serialized
 # text to defuse decompression bombs and pathological grids.
 _MAX_SHEETS = 1_000
 _MAX_ROWS_PER_SHEET = 100_000
-_MAX_TOTAL_TEXT_CHARS = 50_000_000  # ~50 MB of serialized text
 
 
 def _load_openpyxl() -> Any:
@@ -68,12 +69,7 @@ class XlsxExtractor:
         sections: list[ExtractedSection] = []
         total_chars = 0
         for sheet in sheets:
-            table = cls._sheet_to_markdown(sheet)
-            total_chars += len(table)
-            if total_chars > _MAX_TOTAL_TEXT_CHARS:
-                raise KaguraIngestError(
-                    f"XLSX total text exceeds {_MAX_TOTAL_TEXT_CHARS} chars (decompression bomb?)"
-                )
+            table, total_chars = cls._sheet_to_markdown(sheet, total_chars)
             if not table.strip():
                 continue
             sections.append(
@@ -88,7 +84,13 @@ class XlsxExtractor:
         return sections
 
     @staticmethod
-    def _sheet_to_markdown(sheet: Any) -> str:
+    def _sheet_to_markdown(sheet: Any, total_chars: int) -> tuple[str, int]:
+        """Serialize a sheet to a Markdown table, accumulating ``total_chars``.
+
+        The document-wide character budget is checked per row (not per sheet)
+        so a runaway sheet is rejected before its full table is materialized.
+        Returns the table text and the updated running total.
+        """
         rows: list[list[str]] = []
         for row_idx, row in enumerate(sheet.iter_rows(values_only=True)):
             if row_idx >= _MAX_ROWS_PER_SHEET:
@@ -104,9 +106,15 @@ class XlsxExtractor:
             while cells and cells[-1] == "":
                 cells.pop()
             if cells:
+                total_chars += sum(len(c) for c in cells)
+                if total_chars > _MAX_TOTAL_TEXT_CHARS:
+                    raise KaguraIngestError(
+                        f"XLSX total text exceeds {_MAX_TOTAL_TEXT_CHARS} chars "
+                        "(decompression bomb?)"
+                    )
                 rows.append(cells)
         if not rows:
-            return ""
+            return "", total_chars
 
         width = max(len(r) for r in rows)
         rows = [r + [""] * (width - len(r)) for r in rows]
@@ -117,10 +125,8 @@ class XlsxExtractor:
         ]
         for r in rows[1:]:
             lines.append("| " + " | ".join(r) + " |")
-        return "\n".join(lines)
+        return "\n".join(lines), total_chars
 
     @staticmethod
     def _title(source_uri: str | None) -> str | None:
-        if source_uri:
-            return source_uri.rsplit("/", 1)[-1] or source_uri
-        return None
+        return filename_title(source_uri)
