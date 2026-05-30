@@ -76,11 +76,23 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Create GitHub Release
+        # Idempotent + race-safe: the /release skill also creates the release
+        # (with hand-written notes) right after pushing the tag, so a plain
+        # check-then-create here can lose the race and 422 with
+        # "Release.tag_name already exists". Re-check after a failed create and
+        # treat "already exists" as success — this job only needs to GUARANTEE a
+        # release exists, not to be the one that created it.
         run: |
-          if gh release view "${{ github.ref_name }}" >/dev/null 2>&1; then
-            echo "Release ${{ github.ref_name }} already exists, skipping."
+          if gh release view "$REF" >/dev/null 2>&1; then
+            echo "Release $REF already exists, skipping."
+          elif gh release create "$REF" --generate-notes; then
+            echo "Created release $REF."
+          elif gh release view "$REF" >/dev/null 2>&1; then
+            echo "Release $REF was created concurrently; treating as success."
           else
-            gh release create "${{ github.ref_name }}" --generate-notes
+            echo "Failed to create release $REF." >&2
+            exit 1
           fi
         env:
           GH_TOKEN: ${{ github.token }}
+          REF: ${{ github.ref_name }}
