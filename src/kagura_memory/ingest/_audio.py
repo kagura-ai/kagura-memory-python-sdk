@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 from dataclasses import dataclass
 from typing import Any
 
@@ -233,7 +234,6 @@ async def transcribe_audio(
     ]
 
     raw = ""
-    usage = AudioUsage()
     last_error: Exception | None = None
     # One initial attempt + one retry: a truncated JSON (output-token cap) is
     # the dominant failure mode for long media; a single retry is cheap
@@ -326,7 +326,13 @@ def _parse_segments(raw: str) -> list[_Segment]:
     if not text:
         raise _TranscriptParseError("empty response")
     try:
-        data = json.loads(text)
+        # ``parse_constant`` rejects the non-finite literals ``NaN``,
+        # ``Infinity`` and ``-Infinity`` that ``json.loads`` otherwise accepts
+        # by default. Left unchecked they would flow into ``_format_timestamp``
+        # as ``float('nan')``/``float('inf')`` and raise a raw
+        # ``ValueError``/``OverflowError`` from ``int(...)`` instead of our
+        # actionable :class:`KaguraIngestError`.
+        data = json.loads(text, parse_constant=_reject_non_finite)
     except (json.JSONDecodeError, ValueError) as e:
         raise _TranscriptParseError(f"invalid JSON: {e}") from e
 
@@ -357,6 +363,16 @@ def _parse_segments(raw: str) -> list[_Segment]:
     return segments
 
 
+def _reject_non_finite(constant: str) -> float:
+    """``json.loads`` hook: reject ``NaN``/``Infinity``/``-Infinity`` literals.
+
+    Raising here turns a non-finite numeric literal in the model's JSON into a
+    :class:`_TranscriptParseError` (one retry, then :class:`KaguraIngestError`)
+    rather than letting a non-finite float reach :func:`_format_timestamp`.
+    """
+    raise _TranscriptParseError(f"non-finite numeric literal in JSON: {constant}")
+
+
 def _strip_code_fence(text: str) -> str:
     """Remove a leading/trailing markdown code fence if the model added one."""
     stripped = text.strip()
@@ -376,13 +392,17 @@ def _as_float(value: Any) -> float | None:
     if isinstance(value, bool):  # bool is an int subclass — reject explicitly
         return None
     if isinstance(value, (int, float)):
-        return float(value)
-    if isinstance(value, str):
+        result = float(value)
+    elif isinstance(value, str):
         try:
-            return float(value.strip())
+            result = float(value.strip())
         except ValueError:
             return None
-    return None
+    else:
+        return None
+    # Reject NaN/Infinity (e.g. from a string literal "inf"/"nan" that float()
+    # accepts) so non-finite offsets never reach _format_timestamp.
+    return result if math.isfinite(result) else None
 
 
 def _build_content(segments: list[_Segment], *, source_uri: str) -> ExtractedContent:

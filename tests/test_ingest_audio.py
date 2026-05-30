@@ -251,6 +251,102 @@ async def test_retry_recovers_after_first_bad_response() -> None:
 
 
 @pytest.mark.asyncio
+async def test_non_finite_segment_raises_clean_ingest_error() -> None:
+    """NaN/Infinity literals in the model JSON must surface as KaguraIngestError.
+
+    json.loads accepts NaN/Infinity/-Infinity by default; left unchecked those
+    floats reach _format_timestamp where int(float('nan'))/int(float('inf'))
+    raises a raw ValueError/OverflowError. We reject them as a parse error
+    (one retry, then a clean KaguraIngestError — never a raw ValueError).
+    """
+    bad = _Response('{"segments": [{"start": NaN, "end": Infinity, "text": "hi"}]}')
+    mod = _mock_litellm([bad, bad])
+    with patch.object(_audio, "_load_litellm", return_value=mod):
+        with pytest.raises(KaguraIngestError, match="could not parse"):
+            await transcribe_audio(b"x", mime="audio/mpeg", source_uri="a.mp3")
+    assert mod.acompletion.await_count == 2
+
+
+def test_reject_non_finite_raises_parse_error() -> None:
+    with pytest.raises(_audio._TranscriptParseError, match="non-finite"):
+        _audio._reject_non_finite("NaN")
+
+
+def test_parse_segments_rejects_non_finite_literals() -> None:
+    for token in ("NaN", "Infinity", "-Infinity"):
+        with pytest.raises(_audio._TranscriptParseError, match="non-finite"):
+            _audio._parse_segments(f'{{"segments": [{{"start": {token}, "end": 1, "text": "x"}}]}}')
+
+
+def test_as_float_rejects_string_non_finite() -> None:
+    # float("inf")/float("nan") succeed, so guard with math.isfinite.
+    assert _audio._as_float("inf") is None
+    assert _audio._as_float("nan") is None
+    assert _audio._as_float("-inf") is None
+
+
+def test_as_float_rejects_bool_and_non_numeric() -> None:
+    assert _audio._as_float(True) is None  # bool is an int subclass — rejected
+    assert _audio._as_float(None) is None
+    assert _audio._as_float([1, 2]) is None  # non-numeric type
+    assert _audio._as_float("1.5") == 1.5
+
+
+def test_parse_segments_empty_response_raises() -> None:
+    with pytest.raises(_audio._TranscriptParseError, match="empty response"):
+        _audio._parse_segments("   ")
+
+
+def test_parse_segments_non_object_or_list_raises() -> None:
+    with pytest.raises(_audio._TranscriptParseError, match="not an object or list"):
+        _audio._parse_segments("42")
+
+
+def test_parse_segments_segments_not_a_list_raises() -> None:
+    with pytest.raises(_audio._TranscriptParseError, match="not a list"):
+        _audio._parse_segments('{"segments": {"start": 0}}')
+
+
+def test_parse_segments_skips_non_dict_items() -> None:
+    segs = _audio._parse_segments('{"segments": ["junk", {"start": 0, "end": 1, "text": "ok"}]}')
+    assert [s.text for s in segs] == ["ok"]
+
+
+def test_parse_segments_clamps_end_before_start() -> None:
+    segs = _audio._parse_segments('{"segments": [{"start": 5, "end": 2, "text": "x"}]}')
+    assert segs[0].start == 5.0
+    assert segs[0].end == 5.0  # end < start clamped to start
+
+
+def test_extract_content_handles_bad_response() -> None:
+    assert _audio._extract_content(object()) == ""  # no .choices → AttributeError path
+
+
+def test_extract_usage_handles_non_int_tokens() -> None:
+    class _BadUsage:
+        prompt_tokens = "oops"  # int() raises ValueError → defaults to zeros
+        completion_tokens = 5
+
+    class _Resp:
+        usage = _BadUsage()
+
+    usage = _audio._extract_usage(_Resp(), model="m")
+    assert usage.prompt_tokens == 0
+    assert usage.completion_tokens == 0
+    assert usage.model == "m"
+
+
+def test_format_timestamp_past_one_hour() -> None:
+    assert _audio._format_timestamp(3725.0) == "1:02:05"  # hh:mm:ss branch
+
+
+def test_load_litellm_returns_module_when_installed() -> None:
+    # litellm IS installed here, so the real lazy loader reaches its success
+    # line and returns the module (covers the non-error import path).
+    assert _audio._load_litellm() is not None
+
+
+@pytest.mark.asyncio
 async def test_no_speech_empty_segments_raises_actionable() -> None:
     mod = _mock_litellm(_Response(_segments_json([])))
     with patch.object(_audio, "_load_litellm", return_value=mod):
