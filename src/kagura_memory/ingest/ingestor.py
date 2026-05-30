@@ -23,6 +23,12 @@ from ..exceptions import KaguraFetchError, KaguraIngestError, KaguraLLMError
 from ..files_client import FilesClient
 from ..logger import VerboseLogger, normalize_logger
 from ..models import CostBreakdown, FileObject, IngestErrorRecord, IngestResult
+from ._audio import (
+    AudioUsage,
+    audio_format_label,
+    detect_audio_mime,
+    transcribe_audio,
+)
 from ._types import Chunk, ExtractedContent
 from .chunker import chunk as do_chunk
 from .extractors import (
@@ -296,8 +302,31 @@ class FileIngestor:
         except KaguraFetchError as e:
             return _fetch_failure_result(source, e, is_dry_run=True, ingestor=self)
 
+        # Dry-run must NOT call any LLM. Audio cost cannot be estimated without
+        # decoding the media duration (no pure-parse path), so the audio branch
+        # short-circuits to a zero/coarse is_estimate=True result instead of
+        # transcribing — mirroring how other no-text paths degrade gracefully.
+        audio_mime = detect_audio_mime(source_uri=fetched.source_uri, body=fetched.body)
+        if audio_mime is not None:
+            return IngestResult(
+                is_dry_run=True,
+                source_uri=fetched.source_uri,
+                source_type=fetched.source_type,
+                estimated_section_count=None,
+                cost=CostBreakdown(
+                    is_estimate=True,
+                    text_provider=self._text.name,
+                    vision_provider=self._vision.name if self._vision else None,
+                ),
+                warnings=[
+                    "audio/video transcription cost cannot be estimated without "
+                    "decoding duration; run without --dry-run for actual token usage"
+                ],
+            )
+
         try:
-            content, chunks = self._extract_and_chunk(fetched)
+            content = self._extract_and_chunk_sync(fetched)
+            chunks = do_chunk(content, model=getattr(self._text, "text_model", None))
         except KaguraIngestError as e:
             return IngestResult(
                 is_dry_run=True,
@@ -368,12 +397,42 @@ class FileIngestor:
         ) as fetcher:
             return await fetcher.fetch(source)
 
-    def _extract_and_chunk(self, fetched: FetchResult) -> tuple[ExtractedContent, list[Chunk]]:
+    async def _transcribe_or_extract_and_chunk(
+        self, fetched: FetchResult
+    ) -> tuple[ExtractedContent, list[Chunk], AudioUsage | None]:
+        """Produce ``ExtractedContent`` + chunks, forking on the detected MIME.
+
+        Audio/video MIMEs have no pure-parse extractor — a transcript must be
+        *generated* by an LLM (Provider-layer concern). For those the file is
+        routed to :func:`transcribe_audio`, which returns an
+        :class:`ExtractedContent` of time-windowed sections plus the provider
+        token :class:`AudioUsage`. Every other MIME flows through the normal
+        synchronous byte-:class:`Extractor`. Both paths converge on the SAME
+        chunker, keeping section/overview handling downstream uniform.
+
+        Returns:
+            ``(content, chunks, audio_usage)`` where ``audio_usage`` is the
+            transcription token usage on the audio path and ``None`` otherwise.
+        """
+        audio_mime = detect_audio_mime(source_uri=fetched.source_uri, body=fetched.body)
+        if audio_mime is not None:
+            content, usage = await transcribe_audio(
+                fetched.body,
+                mime=audio_mime,
+                source_uri=fetched.source_uri,
+            )
+            chunks = do_chunk(content, model=getattr(self._text, "text_model", None))
+            return content, chunks, usage
+
+        content = self._extract_and_chunk_sync(fetched)
+        chunks = do_chunk(content, model=getattr(self._text, "text_model", None))
+        return content, chunks, None
+
+    def _extract_and_chunk_sync(self, fetched: FetchResult) -> ExtractedContent:
+        """Pure-parse (non-audio) extraction path. Synchronous by design."""
         mime = _infer_mime(fetched)
         extractor = get_extractor(mime)
-        content = extractor.extract(fetched.body, source_uri=fetched.source_uri)
-        chunks = do_chunk(content, model=getattr(self._text, "text_model", None))
-        return content, chunks
+        return extractor.extract(fetched.body, source_uri=fetched.source_uri)
 
     async def _ingest_fetched(
         self,
@@ -392,7 +451,7 @@ class FileIngestor:
 
         log.action("Extracting and chunking", stage="chunk")
         try:
-            content, chunks = self._extract_and_chunk(fetched)
+            content, chunks, audio_usage = await self._transcribe_or_extract_and_chunk(fetched)
         except (KaguraIngestError, ValueError) as e:
             return IngestResult(
                 is_dry_run=False,
@@ -480,8 +539,15 @@ class FileIngestor:
                 errors=errors,
             )
 
+        # The audio path's transcription is itself a billed LLM call whose
+        # provider-reported token usage (audio is metered into prompt_tokens at
+        # ~32 tokens/sec under the hood) must surface to the caller. Thread it
+        # into the same CostBreakdown the summarize path populates so cost
+        # accounting stays single-shaped across formats.
         cost = CostBreakdown(
             is_estimate=False,
+            prompt_tokens=audio_usage.prompt_tokens if audio_usage is not None else None,
+            completion_tokens=audio_usage.completion_tokens if audio_usage is not None else None,
             text_provider=self._text.name,
             vision_provider=self._vision.name if self._vision else None,
         )
@@ -802,6 +868,9 @@ def _infer_format(fetched: FetchResult) -> str:
     """Short format label for ``details.format`` (never raises)."""
     if _normalize_content_type(fetched.content_type or "").startswith("image/"):
         return "image"
+    audio_mime = detect_audio_mime(source_uri=fetched.source_uri, body=fetched.body)
+    if audio_mime is not None:
+        return audio_format_label(audio_mime)
     mime = _detect_mime(fetched)
     if mime:
         return _MIME_LABEL.get(mime, mime)
