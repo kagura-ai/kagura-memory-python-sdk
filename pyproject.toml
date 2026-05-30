@@ -76,6 +76,14 @@ ingest-pptx = [
 ingest-epub = [
     "kagura-memory[ingest-pdf]",
 ]
+# Audio/video transcription (Issue #147) — Gemini via litellm. litellm is
+# already a core dependency, so this extra adds no new package; it exists so
+# audio support is opt-in (parity with the other ingest extras) and the lazy
+# loader can point a stripped install at the right install command. Requires
+# GEMINI_API_KEY at runtime.
+ingest-audio = [
+    "kagura-memory[ingest]",
+]
 # YouTube transcript ingestion (Issue #146) — captions-only, no API key.
 # `youtube-transcript-api` v1.0+ uses an instance-based API; oEmbed (title /
 # channel) goes through the core `httpx` dependency, so no extra dep there.
@@ -98,6 +106,7 @@ ingest-all = [
     "kagura-memory[ingest-xlsx]",
     "kagura-memory[ingest-pptx]",
     "kagura-memory[ingest-epub]",
+    "kagura-memory[ingest-audio]",
     "kagura-memory[ingest-youtube]",
     "kagura-memory[ingest-browser]",
 ]
@@ -134,6 +143,7 @@ asyncio_mode = "strict"
 markers = [
     "integration: requires a live memory-cloud backend (gated by KAGURA_INTEGRATION_URL, KAGURA_API_KEY, and KAGURA_INTEGRATION_CONTEXT_ID env vars)",
     "eval: ingestion quality eval against real LLMs (gated by ANTHROPIC_API_KEY / GEMINI_API_KEY env vars; default-skipped, run with `pytest -m eval`)",
+    "audio: requires GEMINI_API_KEY + network for real Gemini transcription; default-skipped, run with `pytest -m audio`",
     "youtube: requires network access to YouTube; default-skipped, run with `pytest -m youtube`",
     "browser: requires a real Chromium via `playwright install`; default-skipped, run with `pytest -m browser`",
 ]
