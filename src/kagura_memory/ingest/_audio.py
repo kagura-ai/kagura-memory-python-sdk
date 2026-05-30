@@ -365,7 +365,13 @@ def _parse_segments(raw: str) -> list[_Segment]:
         raise _TranscriptParseError(f"invalid JSON: {e}") from e
 
     if isinstance(data, dict):
-        items = data.get("segments", [])
+        # The model contract is ``{"segments": [...]}``; an explicit empty list
+        # means "no speech". A dict that OMITS the key entirely is a malformed
+        # response (not silence), so raise to trigger the one-shot retry rather
+        # than masquerading as the no-speech path.
+        if "segments" not in data:
+            raise _TranscriptParseError("response object is missing the 'segments' field")
+        items = data["segments"]
     elif isinstance(data, list):
         items = data
     else:

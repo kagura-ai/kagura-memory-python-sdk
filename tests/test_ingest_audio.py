@@ -312,6 +312,32 @@ def test_parse_segments_skips_non_dict_items() -> None:
     assert [s.text for s in segs] == ["ok"]
 
 
+def test_parse_segments_missing_segments_field_raises() -> None:
+    # A dict that OMITS the required "segments" key is a malformed response,
+    # not silence — it must raise (→ one-shot retry) rather than be silently
+    # treated as an empty/no-speech result.
+    with pytest.raises(_audio._TranscriptParseError, match="missing the 'segments'"):
+        _audio._parse_segments('{"foo": "bar"}')
+
+
+def test_parse_segments_explicit_empty_segments_is_no_speech() -> None:
+    # An explicit empty list IS the no-speech contract — a valid parse that
+    # yields zero segments (transcribe_audio then raises the no-speech error).
+    assert _audio._parse_segments('{"segments": []}') == []
+
+
+@pytest.mark.asyncio
+async def test_missing_segments_field_retries_then_raises() -> None:
+    # End-to-end: a response missing "segments" is malformed → retry → clean
+    # KaguraIngestError (not the no-speech message, and not a raw error).
+    bad = _Response('{"foo": "bar"}')
+    mod = _mock_litellm([bad, bad])
+    with patch.object(_audio, "_load_litellm", return_value=mod):
+        with pytest.raises(KaguraIngestError, match="could not parse"):
+            await transcribe_audio(b"x", mime="audio/mpeg", source_uri="a.mp3")
+    assert mod.acompletion.await_count == 2
+
+
 def test_parse_segments_clamps_end_before_start() -> None:
     segs = _audio._parse_segments('{"segments": [{"start": 5, "end": 2, "text": "x"}]}')
     assert segs[0].start == 5.0
