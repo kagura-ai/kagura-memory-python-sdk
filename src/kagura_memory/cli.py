@@ -362,6 +362,16 @@ def explore(context_id, memory_id, depth, min_weight):
     help="Allow ingesting paths under /etc, /proc, /root, ~/.ssh, etc.",
 )
 @click.option(
+    "--render/--no-render",
+    "render",
+    default=False,
+    help=(
+        "Render the URL in a headless browser before ingesting (for JS-heavy "
+        "/ SPA pages). Requires the [ingest-browser] extra plus "
+        "`playwright install chromium`. Ignored for local files."
+    ),
+)
+@click.option(
     "--dry-run",
     is_flag=True,
     default=False,
@@ -407,6 +417,7 @@ def ingest_file(
     timeout_read,
     allow_http,
     allow_system_paths,
+    render,
     dry_run,
     as_json,
     verbose,
@@ -485,6 +496,7 @@ def ingest_file(
                             read_timeout=timeout_read,
                             allow_http=allow_http,
                             allow_system_paths=allow_system_paths,
+                            render=render,
                         )
                     return await ingestor.ingest(
                         source,
@@ -496,6 +508,7 @@ def ingest_file(
                         read_timeout=timeout_read,
                         allow_http=allow_http,
                         allow_system_paths=allow_system_paths,
+                        render=render,
                         archive_original=archive,
                         logger=_resolve_progress_logger(verbose, progress),
                     )

@@ -84,6 +84,13 @@ ingest-epub = [
 ingest-audio = [
     "kagura-memory[ingest]",
 ]
+# Browser-rendered URL fetch for JS-heavy / SPA pages (Issue #145).
+# Opt-in: after install, run `playwright install chromium` to fetch the
+# headless browser binary.
+ingest-browser = [
+    "kagura-memory[ingest]",
+    "playwright>=1.40",
+]
 # Plain text / Markdown need no extra (stdlib) — covered by base [ingest].
 ingest-all = [
     "kagura-memory[ingest-pdf]",
@@ -93,6 +100,7 @@ ingest-all = [
     "kagura-memory[ingest-pptx]",
     "kagura-memory[ingest-epub]",
     "kagura-memory[ingest-audio]",
+    "kagura-memory[ingest-browser]",
 ]
 
 [project.scripts]
@@ -128,6 +136,7 @@ markers = [
     "integration: requires a live memory-cloud backend (gated by KAGURA_INTEGRATION_URL, KAGURA_API_KEY, and KAGURA_INTEGRATION_CONTEXT_ID env vars)",
     "eval: ingestion quality eval against real LLMs (gated by ANTHROPIC_API_KEY / GEMINI_API_KEY env vars; default-skipped, run with `pytest -m eval`)",
     "audio: requires GEMINI_API_KEY + network for real Gemini transcription; default-skipped, run with `pytest -m audio`",
+    "browser: requires a real Chromium via `playwright install`; default-skipped, run with `pytest -m browser`",
 ]
 
 [tool.ruff]
