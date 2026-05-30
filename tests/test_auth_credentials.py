@@ -506,3 +506,60 @@ class _AsyncContextStub:
 
     async def __aexit__(self, *_):
         return None
+
+
+@pytest.mark.asyncio
+async def test_force_refresh_refreshes_even_when_not_expired(tmp_path: Path):
+    """force_refresh() rotates the token regardless of the skew window (kagura-mcp 401 path)."""
+    reset_state_cache()
+    path = tmp_path / "creds.json"
+    # Token is far from expiry → _maybe_refresh would no-op, force_refresh must not.
+    creds = _sample_creds(access_token="old", expires_at=datetime.now(UTC) + timedelta(hours=1))
+    cf = CredentialsFile()
+    cf.set_profile("default", creds)
+    save_credentials_file(cf, path)
+
+    state = get_shared_state(path)
+    auth = KaguraOAuth(state)
+
+    refreshed = TokenResponse(
+        access_token="forced-new",
+        refresh_token="new-rtok",
+        token_type="Bearer",
+        expires_at=datetime.now(UTC) + timedelta(hours=1),
+        scope="memory:read",
+    )
+    with (
+        patch(
+            "kagura_memory.auth.device_flow.refresh_access_token",
+            new=AsyncMock(return_value=refreshed),
+        ),
+        patch(
+            "kagura_memory.auth.device_flow.make_oauth_client",
+            return_value=_AsyncContextStub(),
+        ),
+    ):
+        await auth.force_refresh()
+
+    assert state.credentials.access_token == "forced-new"
+    assert load_credentials_file(path).get_profile().access_token == "forced-new"
+
+
+def test_update_profile_is_file_lock_guarded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """update_profile wraps its read-modify-write in the cross-process file lock."""
+    import kagura_memory._filelock as fl
+
+    calls: list[bool] = []
+    real_file_lock = fl.file_lock
+
+    def spy_file_lock(target: Path, *, exclusive: bool = True):
+        calls.append(exclusive)
+        return real_file_lock(target, exclusive=exclusive)
+
+    monkeypatch.setattr(fl, "file_lock", spy_file_lock)
+
+    path = tmp_path / "creds.json"
+    update_profile("default", _sample_creds(access_token="locked-write"), path)
+
+    assert calls == [True]  # acquired exactly once, exclusively
+    assert load_credentials_file(path).get_profile().access_token == "locked-write"

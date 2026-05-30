@@ -4,6 +4,35 @@ See [GitHub Releases](https://github.com/kagura-ai/kagura-memory-python-sdk/rele
 
 ## Unreleased
 
+### Added
+
+- **`kagura-mcp` refresh-aware stdio MCP proxy** (#101, core): a new console
+  script (`kagura_memory.mcp_proxy:main`) that Claude Code spawns as a stdio
+  MCP child. It owns `~/.kagura/credentials.json` and transparently forwards
+  every JSON-RPC message to memory-cloud's HTTP `/mcp` endpoint with an
+  always-fresh OAuth bearer — fixing the silent 401 that occurs when a
+  short-lived `access_token` is baked into a static `.mcp.json` `headers`
+  block. The proxy is a thin pass-through pump (not a tool-registering server),
+  captures and replays the upstream `mcp-session-id`, and on an upstream `401`
+  forces one token refresh + retry, surfacing an actionable "run `kagura auth
+  login`" MCP error if the refresh itself fails. Point a `.mcp.json` entry at
+  it with `{"type": "stdio", "command": "kagura-mcp", "args": ["--profile",
+  "default"]}`.
+- **`KaguraOAuth.force_refresh()`**: unconditional token refresh (ignores the
+  skew window), coalesced through the same in-process lock as skew-driven
+  refreshes. Backs the proxy's 401-retry.
+- **Cross-process credentials locking**: `update_profile()` now wraps its
+  read-modify-write in a POSIX `fcntl` advisory lock (on a sibling
+  `credentials.json.lock`), so concurrent writers in different processes
+  (e.g. multiple `kagura-mcp` children) cannot lose an update. Windows is a
+  documented no-op pending a follow-up (the `msvcrt` semantics differ enough
+  to warrant separate work).
+
+Deferred to a follow-up issue (per the design review): `kagura setup claude
+--profile` writing the stdio form automatically, `kagura auth status`
+`.mcp.json` mode detection, the Windows locking shim, and the README
+"Connect to Claude Code" rewrite.
+
 ## v0.24.0
 
 ### Added
