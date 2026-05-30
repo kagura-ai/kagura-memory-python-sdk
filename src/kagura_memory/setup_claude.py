@@ -13,6 +13,13 @@ from .exceptions import KaguraAuthError, KaguraConnectionError, _exc_message
 
 DEFAULT_MCP_URL = "http://localhost:8080/mcp"
 
+# Single source of truth for the `.mcp.json` server entry. Both the writers
+# (`_write_mcp_json` / `_write_mcp_json_stdio`) and the `kagura auth status`
+# mode detector (`detect_mcp_json_mode`) key off these so the form that is
+# written and the form that is detected can never drift apart.
+MCP_SERVER_NAME = "kagura-memory"
+MCP_PROXY_COMMAND = "kagura-mcp"
+
 # Trailing space distinguishes "kagura recall/remember" from "kagura-memory" in MCP config
 KAGURA_HOOK_MARKER = "kagura "
 
@@ -126,19 +133,39 @@ def _prompt_mcp_url(existing: str | None, non_interactive: bool) -> str:
     return _validate_not_empty(value, "MCP URL")
 
 
-async def _test_connection(api_key: str, mcp_url: str) -> dict[str, Any]:
+def _make_client(api_key: str | None, mcp_url: str | None, profile: str | None) -> KaguraClient:
+    """Build a KaguraClient for either the API-key or OAuth-profile path.
+
+    When ``profile`` is set, authentication and the MCP URL come from the
+    OAuth profile in ``~/.kagura/credentials.json``; ``api_key`` / ``mcp_url``
+    are ignored. Otherwise the static API-key path is used.
+    """
+    if profile is not None:
+        return KaguraClient(profile=profile)
+    return KaguraClient(api_key=api_key, mcp_url=mcp_url)
+
+
+async def _test_connection(
+    api_key: str | None = None,
+    mcp_url: str | None = None,
+    *,
+    profile: str | None = None,
+) -> dict[str, Any]:
     """Test connection and return contexts list."""
-    client = KaguraClient(api_key=api_key, mcp_url=mcp_url)
-    async with client:
+    async with _make_client(api_key, mcp_url, profile) as client:
         return await client.list_contexts()
 
 
 async def _create_context(
-    api_key: str, mcp_url: str, name: str, summary: str | None
+    api_key: str | None,
+    mcp_url: str | None,
+    name: str,
+    summary: str | None,
+    *,
+    profile: str | None = None,
 ) -> dict[str, Any]:
     """Create a new context."""
-    client = KaguraClient(api_key=api_key, mcp_url=mcp_url)
-    async with client:
+    async with _make_client(api_key, mcp_url, profile) as client:
         return await client.create_context(name=name, summary=summary)
 
 
@@ -177,14 +204,20 @@ def _auto_match_context(
 
 def _select_or_create_context(
     contexts_response: dict[str, Any],
-    api_key: str,
-    mcp_url: str,
+    api_key: str | None,
+    mcp_url: str | None,
     preselected: str | None,
     project_dir: Path,
     non_interactive: bool,
     no_auto_context: bool = False,
+    *,
+    profile: str | None = None,
 ) -> str:
-    """Select existing context or create a new one. Returns context_id."""
+    """Select existing context or create a new one. Returns context_id.
+
+    When ``profile`` is set, any context creation authenticates via the OAuth
+    profile instead of ``api_key`` / ``mcp_url``.
+    """
     contexts = contexts_response.get("contexts", [])
 
     if preselected:
@@ -200,7 +233,7 @@ def _select_or_create_context(
     default_name = project_dir.name.lower().replace(" ", "-")
 
     if non_interactive:
-        result = asyncio.run(_create_context(api_key, mcp_url, default_name, None))
+        result = asyncio.run(_create_context(api_key, mcp_url, default_name, None, profile=profile))
         ctx_id = result.get("context_id") or result.get("id", "")
         click.echo(f"  Created context: {default_name} ({ctx_id[:8]}...)")
         return ctx_id
@@ -233,7 +266,9 @@ def _select_or_create_context(
 
     name = click.prompt("Context name", default=default_name)
     summary = click.prompt("Context summary (optional)", default="", show_default=False)
-    result = asyncio.run(_create_context(api_key, mcp_url, name, summary if summary else None))
+    result = asyncio.run(
+        _create_context(api_key, mcp_url, name, summary if summary else None, profile=profile)
+    )
     ctx_id = result.get("context_id") or result.get("id", "")
     click.echo(f"  Created context: {name} ({ctx_id[:8]}...)")
     return ctx_id
@@ -251,17 +286,82 @@ def _write_kagura_config(project_dir: Path, api_key: str, mcp_url: str, context_
 
 
 def _write_mcp_json(project_dir: Path, api_key: str, mcp_url: str) -> Path:
-    """Write .mcp.json for Claude Code MCP server config, merging with existing."""
+    """Write .mcp.json for Claude Code MCP server config, merging with existing.
+
+    This is the legacy static-token form: the API key is baked into an
+    ``Authorization`` header that Claude Code reads once at startup and never
+    refreshes. Fine for long-lived API keys (CI / service accounts); for
+    short-lived OAuth tokens use :func:`_write_mcp_json_stdio` instead.
+    """
     path = project_dir / ".mcp.json"
     existing = _read_json_safe(path)
     servers = existing.setdefault("mcpServers", {})
-    servers["kagura-memory"] = {
+    servers[MCP_SERVER_NAME] = {
         "type": "url",
         "url": mcp_url,
         "headers": {"Authorization": f"Bearer {api_key}"},
     }
     _write_json(path, existing)
     return path
+
+
+def _write_mcp_json_stdio(project_dir: Path, profile: str) -> Path:
+    """Write .mcp.json pointing Claude Code at the ``kagura-mcp`` stdio proxy.
+
+    The refresh-aware proxy (issue #101) owns ``~/.kagura/credentials.json``
+    and injects an always-fresh OAuth bearer per request, so — unlike the url
+    form written by :func:`_write_mcp_json` — this entry contains **no secret**
+    and never goes stale after the access token's ``expires_at``.
+    """
+    path = project_dir / ".mcp.json"
+    existing = _read_json_safe(path)
+    servers = existing.setdefault("mcpServers", {})
+    servers[MCP_SERVER_NAME] = {
+        "type": "stdio",
+        "command": MCP_PROXY_COMMAND,
+        "args": ["--profile", profile],
+    }
+    _write_json(path, existing)
+    return path
+
+
+def detect_mcp_json_mode(project_dir: Path) -> str:
+    """Classify the ``kagura-memory`` entry in a project's ``.mcp.json``.
+
+    Returns one of:
+
+    * ``"stdio"``        — refresh-aware ``kagura-mcp`` proxy (OAuth).
+    * ``"static-token"`` — legacy url form with a baked ``Authorization`` header.
+    * ``"url"``          — url form **without** an ``Authorization`` header.
+    * ``"absent"``       — file exists (or is unreadable) but has no usable
+      ``kagura-memory`` entry.
+    * ``"none"``         — no ``.mcp.json`` in the directory.
+
+    Used by ``kagura auth status`` to report the current Claude Code
+    integration mode. Keyed off :data:`MCP_SERVER_NAME` /
+    :data:`MCP_PROXY_COMMAND` so it stays in lockstep with the writers.
+    """
+    path = project_dir / ".mcp.json"
+    if not path.exists():
+        return "none"
+    entry = (_read_json_safe(path).get("mcpServers") or {}).get(MCP_SERVER_NAME)
+    if not isinstance(entry, dict):
+        return "absent"
+    if entry.get("type") == "stdio" and entry.get("command") == MCP_PROXY_COMMAND:
+        return "stdio"
+    if entry.get("type") == "url":
+        headers = entry.get("headers")
+        if isinstance(headers, dict) and any(k.lower() == "authorization" for k in headers):
+            return "static-token"
+        return "url"
+    return "absent"
+
+
+def _kagura_mcp_on_path() -> bool:
+    """True when the ``kagura-mcp`` console script is resolvable on ``$PATH``."""
+    import shutil
+
+    return shutil.which(MCP_PROXY_COMMAND) is not None
 
 
 def _is_kagura_hook(hook: dict[str, Any]) -> bool:
@@ -352,8 +452,30 @@ def run_setup_claude(
     project_dir: str,
     non_interactive: bool,
     no_auto_context: bool = False,
+    profile: str | None = None,
 ) -> None:
-    """Run the full setup flow for Claude Code integration."""
+    """Run the full setup flow for Claude Code integration.
+
+    Two mutually exclusive auth paths:
+
+    * ``profile`` set → OAuth path: write the refresh-aware ``kagura-mcp``
+      stdio ``.mcp.json`` form bound to the named OAuth profile (no API key).
+    * ``profile`` unset → legacy API-key path: write the static-token url form.
+    """
+    if profile is not None:
+        if api_key is not None:
+            raise click.UsageError(
+                "--profile (OAuth) and --api-key (static token) are mutually exclusive; pick one."
+            )
+        _run_setup_claude_oauth(
+            profile=profile,
+            context_id=context_id,
+            project_dir=project_dir,
+            non_interactive=non_interactive,
+            no_auto_context=no_auto_context,
+        )
+        return
+
     project = Path(project_dir).resolve()
 
     # Load existing config from project dir (not cwd)
@@ -442,5 +564,136 @@ def run_setup_claude(
         "\nSetup complete! Claude Code will now:\n"
         "  - Recall relevant memories at session start\n"
         "  - Sync .claude/memory/ writes to Kagura\n"
+        "  - /kagura-recall and /kagura-remember available as skills"
+    )
+
+
+def _write_kagura_config_oauth(project_dir: Path, mcp_url: str, context_id: str) -> Path:
+    """Write .kagura.json for the OAuth path (no api_key), merging with existing.
+
+    Unlike :func:`_write_kagura_config`, this never writes an ``api_key`` — the
+    hooks and skills run ``kagura recall`` / ``kagura remember``, which resolve
+    the OAuth profile from ``~/.kagura/credentials.json`` automatically. Any
+    pre-existing ``api_key`` in the file is left untouched (the OAuth profile
+    still wins in the credential-resolution order).
+    """
+    path = project_dir / ".kagura.json"
+    existing = _read_json_safe(path)
+    existing["mcp_url"] = mcp_url
+    existing["context_id"] = context_id
+    _write_json(path, existing)
+    return path
+
+
+def _run_setup_claude_oauth(
+    *,
+    profile: str,
+    context_id: str | None,
+    project_dir: str,
+    non_interactive: bool,
+    no_auto_context: bool,
+) -> None:
+    """Setup flow for the refresh-aware ``kagura-mcp`` (OAuth) integration.
+
+    Resolves auth and the MCP URL from the named OAuth profile in
+    ``~/.kagura/credentials.json`` (created by ``kagura auth login``), then
+    writes the stdio ``.mcp.json`` form so Claude Code launches ``kagura-mcp``
+    as the MCP server with an always-fresh bearer token.
+    """
+    from .auth.credentials import load_credentials_file
+
+    project = Path(project_dir).resolve()
+
+    cf = load_credentials_file()
+    creds = cf.get_profile(profile)
+    if creds is None:
+        raise click.ClickException(
+            f"No OAuth profile '{profile}' in ~/.kagura/credentials.json.\n"
+            f"  Run: kagura auth login --profile {profile}"
+        )
+
+    # $PATH check is a warning, never a hard failure: kagura-mcp is a
+    # console_script that resolves inside its own venv even when that venv is
+    # not on the invoking shell's PATH (a common Claude Code launch setup).
+    if not _kagura_mcp_on_path():
+        click.echo(
+            f"\n  Warning: '{MCP_PROXY_COMMAND}' was not found on $PATH.\n"
+            "  Claude Code launches it as the MCP server command — make sure the\n"
+            "  environment that starts Claude Code has the kagura-memory package\n"
+            "  installed (pip install kagura-memory)."
+        )
+
+    # Verify the profile works and list contexts (auth + URL come from profile)
+    click.echo("\nVerifying connection...")
+    try:
+        contexts_response = asyncio.run(_test_connection(profile=profile))
+    except KaguraAuthError as e:
+        raise click.ClickException(
+            f"Authentication failed: {_exc_message(e)}\n"
+            f"  Your token may have expired — re-run: kagura auth login --profile {profile}"
+        ) from e
+    except KaguraConnectionError as e:
+        raise click.ClickException(f"Cannot connect to {creds.server}: {_exc_message(e)}") from e
+    except Exception as e:
+        raise click.ClickException(f"Connection failed: {_exc_message(e)}") from e
+
+    count = contexts_response.get("count", 0)
+    click.echo(f"  Connected as {creds.user_email or '<unknown>'} ({count} contexts available)")
+
+    resolved_context_id = _select_or_create_context(
+        contexts_response,
+        None,
+        creds.mcp_url,
+        context_id,
+        project,
+        non_interactive,
+        no_auto_context,
+        profile=profile,
+    )
+
+    if not re.match(_CONTEXT_ID_PATTERN, resolved_context_id):
+        raise click.ClickException(
+            f"Invalid context_id: {resolved_context_id!r} — "
+            "must be alphanumeric, hyphens, or underscores only"
+        )
+
+    click.echo("\nSetting up Kagura Memory for Claude Code (OAuth via kagura-mcp)...")
+
+    kagura_path = _write_kagura_config_oauth(project, creds.mcp_url, resolved_context_id)
+    click.echo(f"  Wrote {kagura_path.relative_to(project)}")
+
+    mcp_path = _write_mcp_json_stdio(project, profile)
+    click.echo(
+        f"  Wrote {mcp_path.relative_to(project)} (stdio: {MCP_PROXY_COMMAND} --profile {profile})"
+    )
+
+    hooks_path = _install_hooks(project, resolved_context_id)
+    click.echo(f"  Wrote {hooks_path.relative_to(project)}")
+
+    skill_paths = _install_skills(project, resolved_context_id)
+    for p in skill_paths:
+        click.echo(f"  Wrote {p.relative_to(project)}")
+
+    # The installed hooks shell out to `kagura recall` / `kagura remember`,
+    # which resolve the *default* OAuth profile (they take no --profile flag).
+    # When the chosen profile is not the file's default_profile, those hooks
+    # would sync under the wrong account — warn rather than silently desync.
+    # (The kagura-mcp MCP server itself always uses the named profile.)
+    if profile != cf.default_profile:
+        click.echo(
+            f"\n  Warning: the session/PostToolUse hooks run `kagura recall` / "
+            f"`kagura remember`,\n"
+            f"  which use the DEFAULT profile '{cf.default_profile}', not '{profile}'.\n"
+            f"  To make them use '{profile}', set KAGURA_PROFILE={profile} in the\n"
+            f"  environment that runs Claude Code (the MCP server already uses it)."
+        )
+
+    # Note: the stdio .mcp.json carries NO secret (the proxy injects a fresh
+    # token per request), so the API-key gitignore warning does not apply here.
+    click.echo(
+        "\nSetup complete! Claude Code will use the refresh-aware kagura-mcp proxy:\n"
+        f"  - MCP server: {MCP_PROXY_COMMAND} --profile {profile} "
+        "(auto-refreshes the OAuth token — no more silent 401s)\n"
+        "  - Recall relevant memories at session start\n"
         "  - /kagura-recall and /kagura-remember available as skills"
     )

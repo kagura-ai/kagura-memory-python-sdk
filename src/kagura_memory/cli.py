@@ -1029,17 +1029,33 @@ def setup():
 @click.option("--api-key", help="Kagura API key (skip prompt)")
 @click.option("--mcp-url", help="MCP URL (skip prompt)")
 @click.option("--context-id", help="Context ID or name (skip prompt)")
+@click.option(
+    "--profile",
+    default=None,
+    help=(
+        "OAuth profile name (from `kagura auth login`). Writes the refresh-aware "
+        "`kagura-mcp` stdio .mcp.json form instead of a static API-key url. "
+        "Mutually exclusive with --api-key."
+    ),
+)
 @click.option("--project-dir", default=".", help="Project directory (default: current)")
 @click.option("--non-interactive", "-y", is_flag=True, help="No prompts, use defaults/flags")
 @click.option("--no-auto-context", is_flag=True, help="Disable auto-select by directory name")
-def setup_claude(api_key, mcp_url, context_id, project_dir, non_interactive, no_auto_context):
+def setup_claude(
+    api_key, mcp_url, context_id, profile, project_dir, non_interactive, no_auto_context
+):
     """
     Set up Kagura Memory integration for Claude Code.
 
     Configures .kagura.json, .mcp.json, hooks, and skills in the target project.
 
+    Two auth modes:
+      - default (API key): static token baked into .mcp.json (CI / service accounts)
+      - --profile NAME (OAuth): refresh-aware `kagura-mcp` stdio proxy, no silent 401s
+
     Examples:
       kagura setup claude
+      kagura setup claude --profile default        # OAuth via kagura-mcp (recommended)
       kagura setup claude --api-key kagura_xxx --mcp-url http://localhost:8080/mcp/w/{workspace_id}
       kagura setup claude -y --api-key kagura_xxx --context-id my-project
       kagura setup claude --no-auto-context  # always show full context list
@@ -1052,6 +1068,7 @@ def setup_claude(api_key, mcp_url, context_id, project_dir, non_interactive, no_
             project_dir=project_dir,
             non_interactive=non_interactive,
             no_auto_context=no_auto_context,
+            profile=profile,
         )
     except (click.Abort, click.ClickException):
         # click.Abort fires on Ctrl+D / explicit abort during prompts — let Click
