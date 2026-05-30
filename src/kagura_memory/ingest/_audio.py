@@ -63,6 +63,13 @@ _SUFFIX_AUDIO_MIME: dict[str, str] = {
     ".mp4": "video/mp4",
 }
 
+# Generic / "I don't really know" Content-Type values. Only these (and an empty
+# Content-Type, i.e. local files) allow suffix/magic-byte fallback in
+# ``detect_audio_mime``; any other concrete type is treated as authoritative.
+_GENERIC_CONTENT_TYPES: frozenset[str] = frozenset(
+    {"application/octet-stream", "binary/octet-stream", "application/binary"}
+)
+
 # Short human-readable labels for ``details.format`` on the overview memory.
 _AUDIO_MIME_LABEL: dict[str, str] = {
     "audio/mpeg": "audio",
@@ -155,6 +162,14 @@ def detect_audio_mime(*, source_uri: str, body: bytes, content_type: str = "") -
     normalized = content_type.split(";", 1)[0].strip().lower()
     if normalized in _AUDIO_MIMES:
         return normalized
+    # A *concrete* non-audio Content-Type is authoritative too: if the server
+    # explicitly typed the body as something else (e.g. ``text/html`` for a
+    # login/redirect page), do NOT audio-route on a misleading ``.mp3``/``.mp4``
+    # suffix — return None so the normal MIME resolver handles it and the bytes
+    # never reach Gemini. Only a missing or generic type (octet-stream) falls
+    # through to suffix / magic-byte detection.
+    if normalized and normalized not in _GENERIC_CONTENT_TYPES:
+        return None
 
     path = source_uri.split("?", 1)[0].split("#", 1)[0].lower()
     for suffix, mime in _SUFFIX_AUDIO_MIME.items():

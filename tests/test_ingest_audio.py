@@ -161,9 +161,9 @@ def test_detect_audio_mime_content_type_video_recognized() -> None:
     )
 
 
-def test_detect_audio_mime_non_audio_content_type_falls_back_to_suffix() -> None:
-    # A non-audio Content-Type must NOT short-circuit: suffix detection still
-    # applies (a real .mp3 mislabeled application/octet-stream by the server).
+def test_detect_audio_mime_generic_content_type_falls_back_to_suffix() -> None:
+    # A GENERIC Content-Type (octet-stream) is "I don't know", so suffix
+    # detection still applies (a real .mp3 mislabeled by the server).
     assert (
         detect_audio_mime(
             source_uri="/tmp/talk.mp3",
@@ -171,6 +171,20 @@ def test_detect_audio_mime_non_audio_content_type_falls_back_to_suffix() -> None
             content_type="application/octet-stream",
         )
         == "audio/mpeg"
+    )
+
+
+def test_detect_audio_mime_concrete_non_audio_content_type_blocks_suffix() -> None:
+    # A CONCRETE non-audio Content-Type (e.g. text/html for a login/redirect
+    # page served at a .mp3 URL) is authoritative — it must NOT be audio-routed
+    # on the misleading suffix, so the bytes never reach Gemini.
+    assert (
+        detect_audio_mime(
+            source_uri="https://evil.example/login.mp3",
+            body=b"<!doctype html>",
+            content_type="text/html; charset=utf-8",
+        )
+        is None
     )
 
 
