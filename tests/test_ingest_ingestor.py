@@ -41,13 +41,18 @@ class FakeProvider:
             self.vision_model = None
         self.summarize_calls: list[str] = []
         self.overview_calls: list[list[str]] = []
+        self.steering_seen: list[str | None] = []
 
-    async def summarize(self, text: str, *, max_tokens: int) -> str:
+    async def summarize(self, text: str, *, max_tokens: int, steering: str | None = None) -> str:
         self.summarize_calls.append(text)
+        self.steering_seen.append(steering)
         return f"[summary len={len(text)}]"
 
-    async def summarize_overview(self, section_summaries: list[str], *, max_tokens: int) -> str:
+    async def summarize_overview(
+        self, section_summaries: list[str], *, max_tokens: int, steering: str | None = None
+    ) -> str:
         self.overview_calls.append(list(section_summaries))
+        self.steering_seen.append(steering)
         return f"[overview of {len(section_summaries)} sections]"
 
     async def describe_image(self, image_bytes: bytes, mime: str) -> str:
@@ -151,6 +156,56 @@ async def test_full_ingest_writes_overview_and_sections() -> None:
 
 
 @pytest.mark.asyncio
+async def test_context_config_steering_flows_to_provider() -> None:
+    """End-to-end: context instructions become steering on every summarize call."""
+    from kagura_memory.models import ContextDetail, ContextInfo
+
+    client = _make_client()
+    provider = FakeProvider()
+    # Prime the steering cache so no get_context_info network call is made.
+    client._context_info_cache["ctx-uuid"] = ContextInfo(
+        context=ContextDetail(id="ctx-uuid", name="billing", summary="ignored — instructions win"),
+        instructions="Focus on billing terminology.",
+    )
+    ingestor = FileIngestor(client=client, text_provider=provider, vision_provider=None)
+
+    async def fake_remember(**kwargs: Any) -> dict[str, Any]:
+        return {"memory_id": "mem-x"}
+
+    with patch.object(client, "remember", side_effect=fake_remember):
+        await ingestor.ingest(str(FIXTURE), context_id="ctx-uuid")
+
+    # 3 sections + 1 overview, all steered by the resolved instructions.
+    assert provider.steering_seen == ["Focus on billing terminology."] * 4
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_caller_steering_overrides_context_config() -> None:
+    """An explicit steering= kwarg wins over context instructions."""
+    from kagura_memory.models import ContextDetail, ContextInfo
+
+    client = _make_client()
+    provider = FakeProvider()
+    client._context_info_cache["ctx-uuid"] = ContextInfo(
+        context=ContextDetail(id="ctx-uuid", name="ctx", summary="ctx summary"),
+        instructions="context instructions",
+    )
+    ingestor = FileIngestor(client=client, text_provider=provider, vision_provider=None)
+
+    async def fake_remember(**kwargs: Any) -> dict[str, Any]:
+        return {"memory_id": "mem-x"}
+
+    with patch.object(client, "remember", side_effect=fake_remember):
+        await ingestor.ingest(str(FIXTURE), context_id="ctx-uuid", steering="caller wins")
+
+    assert set(provider.steering_seen) == {"caller wins"}
+
+    await client.close()
+
+
+@pytest.mark.asyncio
 async def test_section_summarize_failure_collected_not_raised() -> None:
     """A per-section LLM failure is recorded in errors, not raised."""
     from kagura_memory.exceptions import KaguraLLMError
@@ -161,11 +216,11 @@ async def test_section_summarize_failure_collected_not_raised() -> None:
     call_count = {"n": 0}
     original_summarize = provider.summarize
 
-    async def flaky_summarize(text: str, *, max_tokens: int) -> str:
+    async def flaky_summarize(text: str, *, max_tokens: int, steering: str | None = None) -> str:
         call_count["n"] += 1
         if call_count["n"] == 2:
             raise KaguraLLMError("simulated LLM failure")
-        return await original_summarize(text, max_tokens=max_tokens)
+        return await original_summarize(text, max_tokens=max_tokens, steering=steering)
 
     provider.summarize = flaky_summarize  # type: ignore[method-assign]
 

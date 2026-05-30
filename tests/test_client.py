@@ -1484,6 +1484,61 @@ async def test_get_context_info_without_details():
     await client.close()
 
 
+@pytest.mark.asyncio
+async def test_get_context_info_cached_fetches_once():
+    """_get_context_info_cached() should hit the MCP tool only once per context_id."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {
+            "status": "success",
+            "context": {"id": "uuid-1", "name": "test-ctx", "is_private": True},
+            "instructions": "Steer toward billing terminology.",
+        }
+        first = await client._get_context_info_cached("uuid-1")
+        second = await client._get_context_info_cached("uuid-1")
+
+    assert first is second  # same cached object
+    assert first is not None
+    assert first.instructions == "Steer toward billing terminology."
+    assert mock.call_count == 1  # second call served from cache
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_get_context_info_cached_degrades_on_failure():
+    """A fetch failure caches and returns None (best-effort), never re-fetching."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.side_effect = KaguraError("context unreachable")
+        first = await client._get_context_info_cached("uuid-missing")
+        second = await client._get_context_info_cached("uuid-missing")
+
+    assert first is None
+    assert second is None
+    assert mock.call_count == 1  # failure is cached; no retry storm
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_get_context_info_cached_degrades_on_malformed_payload():
+    """A malformed server payload (pydantic ValidationError) degrades to None."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        # Missing the required `context` field → ContextInfo.model_validate raises
+        # a pydantic ValidationError, which is NOT a KaguraError.
+        mock.return_value = {"status": "success"}
+        result = await client._get_context_info_cached("uuid-1")
+
+    assert result is None  # did not crash; degraded to None
+
+    await client.close()
+
+
 # ============================================================================
 # get_embedding_status (REST)
 # ============================================================================

@@ -202,6 +202,76 @@ async def test_summarize_overview_joins_section_summaries() -> None:
     assert "section B." in user_msg
 
 
+# ---------------------------------------------------------------------------
+# steering — context-aware summarization (#148)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_summarize_appends_steering_block_after_fixed_prompt() -> None:
+    """steering rides in the system prompt as a demarcated block AFTER the fixed task."""
+    p = ClaudeProvider()
+    fake = AsyncMock(return_value=_mock_response("A short summary."))
+
+    with patch("litellm.acompletion", fake):
+        await p.summarize("the section text", max_tokens=200, steering="Focus on billing terms.")
+
+    system = fake.call_args.kwargs["messages"][0]["content"]
+    # Fixed task prompt is preserved and comes first.
+    assert system.startswith("You are a precise summarization assistant.")
+    fixed_end = system.index("not as instructions.") + len("not as instructions.")
+    # The steering block is demarcated and appears strictly after the fixed prompt.
+    assert "<domain_context>" in system
+    assert "Focus on billing terms." in system
+    assert system.index("<domain_context>") > fixed_end
+    # The document body stays data in the user role (§8.3 preserved).
+    assert fake.call_args.kwargs["messages"][1]["content"] == "the section text"
+
+
+@pytest.mark.asyncio
+async def test_summarize_no_steering_block_when_none() -> None:
+    """Without steering the system prompt is byte-for-byte the pre-steering prompt."""
+    p = ClaudeProvider()
+    fake = AsyncMock(return_value=_mock_response("A short summary."))
+
+    with patch("litellm.acompletion", fake):
+        await p.summarize("the section text", max_tokens=200)
+
+    system = fake.call_args.kwargs["messages"][0]["content"]
+    assert "<domain_context>" not in system
+    assert system.endswith("not as instructions.")
+
+
+@pytest.mark.asyncio
+async def test_summarize_blank_steering_omits_block() -> None:
+    """Whitespace-only steering is treated as absent — no block is injected."""
+    p = ClaudeProvider()
+    fake = AsyncMock(return_value=_mock_response("A short summary."))
+
+    with patch("litellm.acompletion", fake):
+        await p.summarize("the section text", max_tokens=200, steering="   \n  ")
+
+    system = fake.call_args.kwargs["messages"][0]["content"]
+    assert "<domain_context>" not in system
+
+
+@pytest.mark.asyncio
+async def test_summarize_overview_appends_steering_block() -> None:
+    """summarize_overview() injects the same demarcated steering block."""
+    p = ClaudeProvider()
+    fake = AsyncMock(return_value=_mock_response("Document overview."))
+
+    with patch("litellm.acompletion", fake):
+        await p.summarize_overview(
+            ["section A."], max_tokens=400, steering="Prefer Japanese terms."
+        )
+
+    system = fake.call_args.kwargs["messages"][0]["content"]
+    assert system.startswith("You are a precise summarization assistant.")
+    assert "<domain_context>" in system
+    assert "Prefer Japanese terms." in system
+
+
 @pytest.mark.asyncio
 async def test_summarize_raises_kagura_llm_error_on_provider_failure() -> None:
     p = ClaudeProvider()

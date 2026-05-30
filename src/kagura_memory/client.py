@@ -120,6 +120,13 @@ class KaguraClient:
 
         self._session_id: str | None = None
         self._request_id_counter = itertools.count(1)
+        # Per-(client, context_id) cache for ingest steering: get_context_info
+        # is fetched at most once per context for the client's lifetime. A
+        # context_id present as a key with value None is the "fetched but
+        # unusable" sentinel (empty info or fetch failure) — it suppresses
+        # re-fetching on every section summarization. See
+        # :meth:`_get_context_info_cached`.
+        self._context_info_cache: dict[str, ContextInfo | None] = {}
 
     def _next_request_id(self) -> int:
         """Get next JSON-RPC request ID (concurrency-safe via itertools.count)."""
@@ -1009,6 +1016,52 @@ class KaguraClient:
         }
         result = await self._call_tool("get_context_info", arguments)
         return ContextInfo.model_validate(result)
+
+    async def _get_context_info_cached(self, context_id: str) -> ContextInfo | None:
+        """Best-effort, cached :meth:`get_context_info` for ingest steering.
+
+        Internal: the only caller is the ingest pipeline (see
+        :meth:`FileIngestor._resolve_steering`). It lives on the client — not
+        the ingestor — so the fetch-once cache is keyed per
+        ``(client, context_id)`` and shared across ingestors that reuse one
+        client, but it is deliberately kept off the public API surface.
+
+        Fetches the context info at most once per ``context_id`` for this
+        client's lifetime, caching the result (including ``None`` on failure)
+        so repeated callers — e.g. per-section ingest summarization — never
+        re-fetch. On any error the failure is swallowed and ``None`` is cached
+        and returned: steering is purely additive and best-effort, so a
+        missing or unreachable context must never crash ingestion.
+
+        Note: the cache is not invalidated mid-session. A concurrent
+        ``update_context`` is not reflected until a fresh client is created
+        (an intentional v1 design seam).
+
+        Args:
+            context_id: Context UUID.
+
+        Returns:
+            The :class:`ContextInfo`, or ``None`` if it could not be fetched.
+        """
+        if context_id in self._context_info_cache:
+            return self._context_info_cache[context_id]
+        try:
+            info: ContextInfo | None = await self.get_context_info(context_id)
+        except Exception as e:  # noqa: BLE001
+            # Best-effort contract: ingest must never crash because steering
+            # could not be fetched. Catch broadly — not just KaguraError but
+            # also a pydantic ValidationError from get_context_info's
+            # model_validate on a malformed/changed server payload — log a
+            # warning, and cache None so we degrade to steering=None without
+            # re-fetching. (python.md permits a broad catch that logs.)
+            logging.getLogger("kagura_memory").warning(
+                "get_context_info failed for context %s; ingest steering disabled: %s",
+                context_id,
+                e,
+            )
+            info = None
+        self._context_info_cache[context_id] = info
+        return info
 
     async def update_search_config(
         self,
