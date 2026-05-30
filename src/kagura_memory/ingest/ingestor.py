@@ -139,6 +139,7 @@ class FileIngestor:
         read_timeout: float = 60.0,
         allow_http: bool = False,
         allow_system_paths: bool = False,
+        render: bool = False,
         archive_original: bool = True,
         details_extra: dict[str, Any] | None = None,
         logger: VerboseLogger | None = None,
@@ -146,6 +147,13 @@ class FileIngestor:
         """Run a full ingestion against ``source``.
 
         Args:
+            render: Route URL fetches through a headless browser (requires
+                the ``[ingest-browser]`` extra plus ``playwright install
+                chromium``). Use for JS-heavy / SPA pages whose content is
+                rendered client-side. Ignored for local file paths. When the
+                Playwright dependency is missing, the run surfaces a
+                ``step="fetch"`` error on the :class:`IngestResult` rather
+                than raising.
             archive_original: When True and a :class:`FilesClient` was
                 supplied at construction time, the source bytes are
                 uploaded to the workspace's object store and the
@@ -220,6 +228,17 @@ class FileIngestor:
                 read_timeout=read_timeout,
                 allow_http=allow_http,
                 allow_system_paths=allow_system_paths,
+                render=render,
+            )
+        except KaguraIngestError as e:
+            # render=True but Playwright is not installed (lazy import in
+            # BrowserFetcher). Surface as a fetch-step failure (mirroring the
+            # KaguraFetchError path below) rather than crashing uncaught, so
+            # --json output stays machine-readable. Wrap as KaguraFetchError
+            # so _fetch_failure_result (which reads .url) can render it.
+            log.error(f"Fetch failed: {e}", stage="complete", detail={"source": source})
+            return _fetch_failure_result(
+                source, KaguraFetchError(str(e), url=source), is_dry_run=False, ingestor=self
             )
         except KaguraFetchError as e:
             # Best-effort contract: surface fetch failures via IngestResult
@@ -273,6 +292,7 @@ class FileIngestor:
         read_timeout: float = 60.0,
         allow_http: bool = False,
         allow_system_paths: bool = False,
+        render: bool = False,
     ) -> IngestResult:
         """Local-only token + page count estimate (``--dry-run``).
 
@@ -283,6 +303,12 @@ class FileIngestor:
         Fetch failures are also surfaced as a dry-run IngestResult with a
         ``step="fetch"`` error record, never as a raised exception, so
         ``kagura ingest --dry-run --json`` stays machine-readable.
+
+        Args:
+            render: Route URL fetches through a headless browser (requires
+                the ``[ingest-browser]`` extra). Ignored for local file
+                paths. A missing Playwright dependency is surfaced as a
+                ``step="fetch"`` error record, not a raised exception.
         """
         try:
             fetched = await self._fetch(
@@ -292,6 +318,11 @@ class FileIngestor:
                 read_timeout=read_timeout,
                 allow_http=allow_http,
                 allow_system_paths=allow_system_paths,
+                render=render,
+            )
+        except KaguraIngestError as e:
+            return _fetch_failure_result(
+                source, KaguraFetchError(str(e), url=source), is_dry_run=True, ingestor=self
             )
         except KaguraFetchError as e:
             return _fetch_failure_result(source, e, is_dry_run=True, ingestor=self)
@@ -358,7 +389,21 @@ class FileIngestor:
         read_timeout: float,
         allow_http: bool,
         allow_system_paths: bool,
+        render: bool = False,
     ) -> FetchResult:
+        # render only affects URL sources. A local file path with
+        # render=True silently falls back to the standard Fetcher.
+        if render and urlsplit(source).scheme in ("http", "https"):
+            from ._browser import BrowserFetcher
+
+            async with BrowserFetcher(
+                max_bytes=max_bytes,
+                connect_timeout=connect_timeout,
+                read_timeout=read_timeout,
+                allow_http=allow_http,
+            ) as browser:
+                return await browser.fetch(source)
+
         async with Fetcher(
             max_bytes=max_bytes,
             connect_timeout=connect_timeout,
