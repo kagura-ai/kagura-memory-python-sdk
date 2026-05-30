@@ -6,6 +6,20 @@ See [GitHub Releases](https://github.com/kagura-ai/kagura-memory-python-sdk/rele
 
 ### Added
 
+- **YouTube transcript ingestion** (#146): `ingest("https://youtube.com/watch?v=...")`
+  now resolves a single video's captions into a memory graph. YouTube URLs are
+  auto-detected by host (`youtube.com`, `youtu.be`, `m.youtube.com`, including
+  `watch?v=`, `youtu.be/`, and `shorts/` forms) and routed to a transcript
+  source resolver that formats the captions as time-windowed Markdown
+  (`# <title>` + `## [mm:ss]` sections), flowing through the existing
+  chunk → summarize → remember pipeline. Manual captions are preferred,
+  auto-generated captions are the fallback; the video title/channel come from
+  YouTube oEmbed (best-effort — failure degrades the title to the video id, it
+  never fails the ingest). Opt-in via the `[ingest-youtube]` extra
+  (`youtube-transcript-api`, no API key); also bundled in `[ingest-all]`.
+  Playlists/channels, caption-disabled, age-restricted, and unavailable videos
+  raise an actionable error. Chapters are deferred to a follow-up. See
+  `examples/ingest_youtube.py`.
 - **Browser-rendered URL fetch** (#145): opt-in `render=True` on
   `FileIngestor.ingest()` / `estimate_cost()` (and `kagura ingest --render`)
   drives a headless Chromium via Playwright to load and render JS-heavy / SPA

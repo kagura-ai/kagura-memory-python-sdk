@@ -24,6 +24,7 @@ from ..files_client import FilesClient
 from ..logger import VerboseLogger, normalize_logger
 from ..models import CostBreakdown, FileObject, IngestErrorRecord, IngestResult
 from ._types import Chunk, ExtractedContent
+from ._youtube import fetch_youtube, is_youtube_url
 from .chunker import chunk as do_chunk
 from .extractors import (
     DOCX_MIME,
@@ -391,6 +392,31 @@ class FileIngestor:
         allow_system_paths: bool,
         render: bool = False,
     ) -> FetchResult:
+        # YouTube URLs are a transcript-source path, not a byte fetch: detect
+        # them FIRST (by host) and route to the transcript resolver, which
+        # returns a ready-to-extract text/markdown FetchResult. A missing
+        # [ingest-youtube] dependency surfaces as KaguraIngestError, which the
+        # ingest()/estimate_cost() fetch try-blocks already wrap as a
+        # step="fetch" IngestResult error (alongside KaguraFetchError).
+        #
+        # Gate the YouTube path on the same http(s) policy as the byte Fetcher:
+        # only route an http:// YouTube URL to fetch_youtube when allow_http is
+        # True. Otherwise fall through to the normal Fetcher path, which raises
+        # the canonical "http:// is disabled" KaguraFetchError — keeping the
+        # allow_http contract consistent across every source type.
+        if is_youtube_url(source) and (allow_http or urlsplit(source).scheme.lower() == "https"):
+            # A missing [ingest-youtube] dependency raises KaguraIngestError;
+            # ingest()/estimate_cost() already catch it around the _fetch call and
+            # surface it as a machine-readable step="fetch" IngestResult error
+            # (identical handling to the BrowserFetcher path below), so no local
+            # wrap is needed here.
+            return await fetch_youtube(
+                source,
+                max_bytes=max_bytes,
+                connect_timeout=connect_timeout,
+                read_timeout=read_timeout,
+            )
+
         # render only affects URL sources. A local file path with
         # render=True silently falls back to the standard Fetcher.
         if render and urlsplit(source).scheme in ("http", "https"):
