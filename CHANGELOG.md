@@ -13,8 +13,10 @@ See [GitHub Releases](https://github.com/kagura-ai/kagura-memory-python-sdk/rele
   runs the normal chunk → summarize → remember pipeline. Audio has no parseable
   text — the transcript is *generated* by an LLM, so this is a Provider-layer
   concern (a new `ingest/_audio.py`), NOT an Extractor. v1 is a single inline
-  request ≤ ~20 MB (Gemini's inline limit); cost is surfaced from the provider's
-  real token usage (audio is metered at ~32 tokens/sec inside `prompt_tokens`).
+  request: media is sent base64-encoded, so the effective cap is ~15 MiB of raw
+  audio/video (the encoded payload must fit Gemini's ~20 MiB inline limit), and
+  larger files are rejected up front. Cost is surfaced from the provider's real
+  token usage (audio is metered at ~32 tokens/sec inside `prompt_tokens`).
   Opt-in `[ingest-audio]` extra; requires `GEMINI_API_KEY`. Chapter detection
   and ffmpeg-based chunking of longer media are deferred follow-ups. See
   `examples/ingest_audio.py`.

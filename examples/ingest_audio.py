@@ -7,8 +7,10 @@ routes ``.mp3`` / ``.wav`` / ``.m4a`` / ``.mp4`` to that transcription path,
 which returns timestamped segments assembled into time-windowed sections, then
 runs the SAME chunk → summarize → remember pipeline as every other format.
 
-v1 is a single inline request capped at ~20 MB (Gemini's inline-request limit);
-splitting longer media with ffmpeg is a planned follow-up.
+v1 is a single inline request. Because the media is sent base64-encoded (~33%
+larger than raw), the effective cap is ~15 MiB of RAW audio/video so the encoded
+payload fits Gemini's ~20 MiB inline-request limit; larger files are rejected up
+front. Splitting longer media with ffmpeg is a planned follow-up.
 
     pip install 'kagura-memory[ingest-audio]'
     export KAGURA_API_KEY="kagura_..."

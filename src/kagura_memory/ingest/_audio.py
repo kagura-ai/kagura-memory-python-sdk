@@ -160,13 +160,17 @@ def audio_inline_oversize_message(
     """
     raw_len = len(body)
     encoded_len = ((raw_len + 2) // 3) * 4
-    inline_limit = min(max_bytes_audio * 4 // 3, _GEMINI_INLINE_LIMIT_BYTES)
-    if encoded_len > inline_limit:
+    # Oversized if it busts the caller's RAW cap, OR if the base64 wire payload
+    # busts Gemini's hard inline limit. Checking raw-vs-raw and encoded-vs-encoded
+    # separately avoids the rounding error of translating one cap into the other
+    # (``max_bytes_audio * 4 // 3`` would floor non-multiple-of-3 caps).
+    if raw_len > max_bytes_audio or encoded_len > _GEMINI_INLINE_LIMIT_BYTES:
         return (
             f"audio/video file is {raw_len} bytes raw ({encoded_len} bytes once "
-            f"base64-encoded), over Gemini's {inline_limit}-byte inline-request "
-            "limit. Splitting large media with ffmpeg is a planned follow-up; "
-            "for now transcribe a shorter clip."
+            f"base64-encoded); the raw cap is {max_bytes_audio} bytes and Gemini's "
+            f"inline-request limit is {_GEMINI_INLINE_LIMIT_BYTES} bytes (base64). "
+            "Splitting large media with ffmpeg is a planned follow-up; for now "
+            "transcribe a shorter clip."
         )
     return None
 
