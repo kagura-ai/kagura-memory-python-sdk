@@ -394,6 +394,13 @@ def _parse_segments(raw: str) -> list[_Segment]:
         if end < start:
             end = start
         segments.append(_Segment(start=start, end=end, text=body))
+
+    # A non-empty `segments` list that yields zero VALID segments is a malformed
+    # response (the model returned junk shapes), not silence — raise so the
+    # one-shot retry fires. Only a genuinely empty list (`{"segments": []}`,
+    # handled above by returning an empty list) is the no-speech contract.
+    if items and not segments:
+        raise _TranscriptParseError("'segments' contained no valid {start, end, text} objects")
     return segments
 
 

@@ -326,6 +326,25 @@ def test_parse_segments_explicit_empty_segments_is_no_speech() -> None:
     assert _audio._parse_segments('{"segments": []}') == []
 
 
+def test_parse_segments_all_invalid_items_raises() -> None:
+    # A non-empty segments list that yields zero VALID segments is malformed
+    # (not silence) → raise so the one-shot retry fires.
+    with pytest.raises(_audio._TranscriptParseError, match="no valid"):
+        _audio._parse_segments('{"segments": ["junk", {"start": 0}, {"text": "x"}]}')
+
+
+@pytest.mark.asyncio
+async def test_all_invalid_segments_retries_then_raises() -> None:
+    # End-to-end: a {"segments": [<all invalid>]} response is malformed → retry
+    # → clean KaguraIngestError, not the no-speech path.
+    bad = _Response('{"segments": [{"start": 0}, "junk"]}')
+    mod = _mock_litellm([bad, bad])
+    with patch.object(_audio, "_load_litellm", return_value=mod):
+        with pytest.raises(KaguraIngestError, match="could not parse"):
+            await transcribe_audio(b"x", mime="audio/mpeg", source_uri="a.mp3")
+    assert mod.acompletion.await_count == 2
+
+
 @pytest.mark.asyncio
 async def test_missing_segments_field_retries_then_raises() -> None:
     # End-to-end: a response missing "segments" is malformed → retry → clean
