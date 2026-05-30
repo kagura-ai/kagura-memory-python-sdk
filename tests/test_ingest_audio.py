@@ -188,6 +188,28 @@ def test_detect_audio_mime_concrete_non_audio_content_type_blocks_suffix() -> No
     )
 
 
+def test_detect_audio_mime_audio_alias_content_type_falls_back_to_suffix() -> None:
+    # An unrecognized audio/* alias (audio/mp3, audio/wave) is NOT "something
+    # else" — it must fall through to suffix/magic so a real MP3/WAV routes.
+    assert (
+        detect_audio_mime(source_uri="/tmp/talk.mp3", body=b"", content_type="audio/mp3")
+        == "audio/mpeg"
+    )
+    assert (
+        detect_audio_mime(source_uri="/tmp/talk.wav", body=b"", content_type="audio/wave")
+        == "audio/wav"
+    )
+
+
+def test_detect_audio_mime_rejects_non_av_ftyp_brands() -> None:
+    # AVIF / HEIC images are ISO-BMFF with an "ftyp" box too — they must NOT be
+    # routed to transcription. Only known MP4/M4A brands match.
+    avif = b"\x00\x00\x00\x20ftypavif\x00\x00\x00\x00"
+    heic = b"\x00\x00\x00\x18ftypheic\x00\x00\x00\x00"
+    assert detect_audio_mime(source_uri="/tmp/img", body=avif) is None
+    assert detect_audio_mime(source_uri="/tmp/img", body=heic) is None
+
+
 def test_is_audio_mime() -> None:
     assert is_audio_mime("audio/mpeg") is True
     assert is_audio_mime("video/mp4") is True
@@ -307,6 +329,21 @@ async def test_retry_recovers_after_first_bad_response() -> None:
         content, _ = await transcribe_audio(b"x", mime="audio/mpeg", source_uri="a.mp3")
     assert content.sections[0].body_text == "recovered"
     assert mod.acompletion.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_retry_accumulates_usage_across_attempts() -> None:
+    # Both the malformed first call and the successful retry are billable —
+    # reported usage must be the SUM, not just the recovery attempt's.
+    bad = _Response("nonsense", prompt=900, completion=10)
+    good = _Response(
+        _segments_json([{"start": 0, "end": 1, "text": "ok"}]), prompt=1100, completion=50
+    )
+    mod = _mock_litellm([bad, good])
+    with patch.object(_audio, "_load_litellm", return_value=mod):
+        _, usage = await transcribe_audio(b"x", mime="audio/mpeg", source_uri="a.mp3")
+    assert usage.prompt_tokens == 2000  # 900 + 1100
+    assert usage.completion_tokens == 60  # 10 + 50
 
 
 @pytest.mark.asyncio

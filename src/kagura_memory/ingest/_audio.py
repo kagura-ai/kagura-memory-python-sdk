@@ -70,6 +70,13 @@ _GENERIC_CONTENT_TYPES: frozenset[str] = frozenset(
     {"application/octet-stream", "binary/octet-stream", "application/binary"}
 )
 
+# Known ISO-BMFF ("ftyp") major brands that carry transcribable audio/video.
+# Other brands (notably AVIF/HEIC image brands) must NOT route to Gemini.
+_FTYP_AUDIO_BRANDS: frozenset[bytes] = frozenset({b"M4A ", b"M4B "})
+_FTYP_VIDEO_BRANDS: frozenset[bytes] = frozenset(
+    {b"isom", b"iso2", b"iso4", b"iso5", b"iso6", b"mp41", b"mp42", b"M4V ", b"avc1", b"dash"}
+)
+
 # Short human-readable labels for ``details.format`` on the overview memory.
 _AUDIO_MIME_LABEL: dict[str, str] = {
     "audio/mpeg": "audio",
@@ -168,7 +175,15 @@ def detect_audio_mime(*, source_uri: str, body: bytes, content_type: str = "") -
     # suffix — return None so the normal MIME resolver handles it and the bytes
     # never reach Gemini. Only a missing or generic type (octet-stream) falls
     # through to suffix / magic-byte detection.
-    if normalized and normalized not in _GENERIC_CONTENT_TYPES:
+    # ...but an unrecognized ``audio/*`` / ``video/*`` alias (e.g. ``audio/mp3``,
+    # ``audio/wave``) is NOT a "this is something else" signal — fall through to
+    # suffix/magic so a real MP3/WAV still routes. Only a concrete *non*-media
+    # type (and not a generic octet-stream) blocks the audio path.
+    if (
+        normalized
+        and not normalized.startswith(("audio/", "video/"))
+        and normalized not in _GENERIC_CONTENT_TYPES
+    ):
         return None
 
     path = source_uri.split("?", 1)[0].split("#", 1)[0].lower()
@@ -181,12 +196,17 @@ def detect_audio_mime(*, source_uri: str, body: bytes, content_type: str = "") -
         return "audio/mpeg"
     if head[:4] == b"RIFF" and head[8:12] == b"WAVE":
         return "audio/wav"
-    # ISO base media (MP4 / M4A): "ftyp" box brand at bytes 4..8.
+    # ISO base media (MP4 / M4A): "ftyp" box at bytes 4..8, major brand at
+    # 8..12. Only KNOWN audio/video brands route to transcription — other
+    # ISO-BMFF containers (AVIF/HEIC images: ftypavif/ftypheic/ftypmif1, etc.)
+    # also carry an "ftyp" box and must NOT be sent to Gemini.
     if head[4:8] == b"ftyp":
         brand = head[8:12]
-        if brand[:3] == b"M4A":
+        if brand in _FTYP_AUDIO_BRANDS:
             return "audio/mp4"
-        return "video/mp4"
+        if brand in _FTYP_VIDEO_BRANDS:
+            return "video/mp4"
+        return None
     return None
 
 
@@ -289,6 +309,11 @@ async def transcribe_audio(
 
     raw = ""
     last_error: Exception | None = None
+    # Both the initial attempt AND a retry are billable, so accumulate token
+    # usage across every provider call and report the total — a recovered retry
+    # must not under-report transcription cost.
+    total_prompt = 0
+    total_completion = 0
     # One initial attempt + one retry: a truncated JSON (output-token cap) is
     # the dominant failure mode for long media; a single retry is cheap
     # insurance against a transient bad decode without unbounded re-billing.
@@ -305,7 +330,9 @@ async def transcribe_audio(
             raise KaguraIngestError(f"audio transcription provider call failed: {e}") from e
 
         raw = _extract_content(response)
-        usage = _extract_usage(response, model=model)
+        attempt_usage = _extract_usage(response, model=model)
+        total_prompt += attempt_usage.prompt_tokens
+        total_completion += attempt_usage.completion_tokens
         try:
             segments = _parse_segments(raw)
         except _TranscriptParseError as e:
@@ -318,7 +345,7 @@ async def transcribe_audio(
                 "with spoken content."
             )
         content = _build_content(segments, source_uri=source_uri)
-        return content, usage
+        return content, AudioUsage(prompt_tokens=total_prompt, completion_tokens=total_completion)
 
     raise KaguraIngestError(
         "could not parse a valid transcript from the model response "
