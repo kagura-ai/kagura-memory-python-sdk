@@ -129,6 +129,51 @@ def test_detect_audio_mime_non_audio_returns_none() -> None:
     assert detect_audio_mime(source_uri="/tmp/x", body=b"%PDF-1.7 not audio") is None
 
 
+def test_detect_audio_mime_by_content_type_when_suffix_and_magic_miss() -> None:
+    # No audio suffix and non-audio magic bytes, but a registered audio
+    # Content-Type — the Content-Type must win (server is authoritative).
+    assert (
+        detect_audio_mime(
+            source_uri="https://cdn.example/stream?id=42",
+            body=b"not-a-recognized-magic-prefix",
+            content_type="audio/mpeg",
+        )
+        == "audio/mpeg"
+    )
+
+
+def test_detect_audio_mime_content_type_wins_over_non_audio_suffix() -> None:
+    # A registered audio Content-Type takes precedence over a non-audio
+    # filename suffix (e.g. an extension-less download endpoint named *.bin).
+    assert (
+        detect_audio_mime(
+            source_uri="https://cdn.example/download.bin",
+            body=b"",
+            content_type="audio/mp4; codecs=mp4a.40.2",
+        )
+        == "audio/mp4"
+    )
+
+
+def test_detect_audio_mime_content_type_video_recognized() -> None:
+    assert (
+        detect_audio_mime(source_uri="/tmp/clip", body=b"", content_type="video/mp4") == "video/mp4"
+    )
+
+
+def test_detect_audio_mime_non_audio_content_type_falls_back_to_suffix() -> None:
+    # A non-audio Content-Type must NOT short-circuit: suffix detection still
+    # applies (a real .mp3 mislabeled application/octet-stream by the server).
+    assert (
+        detect_audio_mime(
+            source_uri="/tmp/talk.mp3",
+            body=b"",
+            content_type="application/octet-stream",
+        )
+        == "audio/mpeg"
+    )
+
+
 def test_is_audio_mime() -> None:
     assert is_audio_mime("audio/mpeg") is True
     assert is_audio_mime("video/mp4") is True

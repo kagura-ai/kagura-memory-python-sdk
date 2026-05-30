@@ -84,6 +84,13 @@ ingest-epub = [
 ingest-audio = [
     "kagura-memory[ingest]",
 ]
+# YouTube transcript ingestion (Issue #146) — captions-only, no API key.
+# `youtube-transcript-api` v1.0+ uses an instance-based API; oEmbed (title /
+# channel) goes through the core `httpx` dependency, so no extra dep there.
+ingest-youtube = [
+    "kagura-memory[ingest]",
+    "youtube-transcript-api>=1.0",
+]
 # Browser-rendered URL fetch for JS-heavy / SPA pages (Issue #145).
 # Opt-in: after install, run `playwright install chromium` to fetch the
 # headless browser binary.
@@ -100,6 +107,7 @@ ingest-all = [
     "kagura-memory[ingest-pptx]",
     "kagura-memory[ingest-epub]",
     "kagura-memory[ingest-audio]",
+    "kagura-memory[ingest-youtube]",
     "kagura-memory[ingest-browser]",
 ]
 
@@ -136,6 +144,7 @@ markers = [
     "integration: requires a live memory-cloud backend (gated by KAGURA_INTEGRATION_URL, KAGURA_API_KEY, and KAGURA_INTEGRATION_CONTEXT_ID env vars)",
     "eval: ingestion quality eval against real LLMs (gated by ANTHROPIC_API_KEY / GEMINI_API_KEY env vars; default-skipped, run with `pytest -m eval`)",
     "audio: requires GEMINI_API_KEY + network for real Gemini transcription; default-skipped, run with `pytest -m audio`",
+    "youtube: requires network access to YouTube; default-skipped, run with `pytest -m youtube`",
     "browser: requires a real Chromium via `playwright install`; default-skipped, run with `pytest -m browser`",
 ]
 

@@ -129,22 +129,33 @@ def is_audio_mime(mime: str | None) -> bool:
     return mime.split(";", 1)[0].strip().lower() in _AUDIO_MIMES
 
 
-def detect_audio_mime(*, source_uri: str, body: bytes) -> str | None:
-    """Best-effort audio/video MIME from a source URI suffix or magic bytes.
+def detect_audio_mime(*, source_uri: str, body: bytes, content_type: str = "") -> str | None:
+    """Best-effort audio/video MIME from Content-Type, URI suffix, or magic bytes.
 
-    Local files give an empty Content-Type, so the filename suffix is the
-    primary signal. Magic bytes provide a fallback for extension-less inputs:
-    ``ID3``/``0xFFEx`` (MP3), ``RIFF....WAVE`` (WAV), and ``ftyp`` boxes (MP4 /
-    M4A). Never raises.
+    A registered HTTP ``Content-Type`` is authoritative and checked FIRST,
+    mirroring the document MIME resolver (``_detect_mime`` in ``ingestor.py``):
+    a server that labels the body as a recognized audio/video type wins over the
+    filename suffix or magic bytes. Local files give an empty ``content_type``,
+    so for them the filename suffix is the primary signal, with magic bytes as a
+    fallback for extension-less inputs: ``ID3``/``0xFFEx`` (MP3),
+    ``RIFF....WAVE`` (WAV), and ``ftyp`` boxes (MP4 / M4A). Never raises.
 
     Args:
         source_uri: Origin URI/path (used for the suffix lookup).
         body: Leading bytes of the file (only a small prefix is inspected).
+        content_type: HTTP response Content-Type, if any. An empty string (the
+            local-file case) is ignored so suffix/magic detection still applies.
 
     Returns:
         A canonical MIME from :data:`_AUDIO_MIMES`, or ``None`` if the input
         does not look like supported audio/video.
     """
+    # A registered audio/video Content-Type is authoritative — match the
+    # document resolver, which trusts a known Content-Type before the suffix.
+    normalized = content_type.split(";", 1)[0].strip().lower()
+    if normalized in _AUDIO_MIMES:
+        return normalized
+
     path = source_uri.split("?", 1)[0].split("#", 1)[0].lower()
     for suffix, mime in _SUFFIX_AUDIO_MIME.items():
         if path.endswith(suffix):

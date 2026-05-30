@@ -684,4 +684,150 @@ async def test_details_extra_non_str_keys_raise_type_error() -> None:
         mock_remember.assert_not_called()
         mock_fetch.assert_not_called()
 
+
+# ---------------------------------------------------------------------------
+# YouTube transcript source routing (issue #146)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_youtube_url_is_routed_to_transcript_path() -> None:
+    """A YouTube URL is detected by host and routed to fetch_youtube()."""
+    from kagura_memory.ingest.fetcher import FetchResult
+
+    client = _make_client()
+    provider = FakeProvider()
+    ingestor = FileIngestor(client=client, text_provider=provider)
+
+    url = "https://youtu.be/dQw4w9WgXcQ"
+    md = b"# Test Video\n\n## [00:00]\n\nhello world\n"
+    fake_fetch = AsyncMock(
+        return_value=FetchResult(
+            body=md,
+            content_type="text/markdown",
+            source_uri=url,
+            source_type="url",
+            final_url=url,
+            bytes_read=len(md),
+        )
+    )
+
+    with (
+        patch("kagura_memory.ingest.ingestor.fetch_youtube", new=fake_fetch),
+        patch.object(client, "remember", new_callable=AsyncMock) as mock_remember,
+    ):
+        mock_remember.return_value = {"memory_id": "mem-1"}
+        result = await ingestor.ingest(url, context_id="ctx-uuid")
+
+    fake_fetch.assert_awaited_once()
+    assert fake_fetch.await_args is not None
+    assert fake_fetch.await_args.args[0] == url
+    assert result.source_uri == url
+    assert result.source_type == "url"
+    # Title flowed from the markdown H1 (TextExtractor promotes it) into the
+    # overview memory's summary.
+    overview_call = mock_remember.await_args_list[0]
+    assert "Test Video" in overview_call.kwargs.get("summary", "")
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_youtube_missing_dependency_surfaces_as_fetch_error() -> None:
+    """Without [ingest-youtube], the youtube path yields a step='fetch' error."""
+    client = _make_client()
+    provider = FakeProvider()
+    ingestor = FileIngestor(client=client, text_provider=provider)
+
+    from kagura_memory.exceptions import KaguraIngestError
+
+    with patch(
+        "kagura_memory.ingest.ingestor.fetch_youtube",
+        new=AsyncMock(
+            side_effect=KaguraIngestError(
+                "youtube-transcript-api is not installed. Install with: "
+                "pip install 'kagura-memory[ingest-youtube]'"
+            )
+        ),
+    ):
+        result = await ingestor.ingest(
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ", context_id="ctx-uuid"
+        )
+
+    assert result.overview_id is None
+    assert result.errors
+    assert result.errors[0].step == "fetch"
+    assert "ingest-youtube" in result.errors[0].message
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_http_youtube_url_not_routed_when_allow_http_false() -> None:
+    """An http:// YouTube URL with allow_http=False bypasses fetch_youtube.
+
+    is_youtube_url() is host-based and true for http:// too. The _fetch gate
+    must NOT route such a URL to the transcript path; it falls through to the
+    byte Fetcher, which raises the canonical 'http:// is disabled' error —
+    keeping the allow_http contract consistent across source types.
+    """
+    from kagura_memory.exceptions import KaguraFetchError
+
+    client = _make_client()
+    provider = FakeProvider()
+    ingestor = FileIngestor(client=client, text_provider=provider)
+
+    url = "http://www.youtube.com/watch?v=dQw4w9WgXcQ"
+    with patch("kagura_memory.ingest.ingestor.fetch_youtube", new_callable=AsyncMock) as fake_fetch:
+        with pytest.raises(KaguraFetchError) as ei:
+            await ingestor._fetch(
+                url,
+                max_bytes=10_000_000,
+                connect_timeout=10.0,
+                read_timeout=10.0,
+                allow_http=False,
+                allow_system_paths=False,
+            )
+    fake_fetch.assert_not_called()
+    assert "http" in str(ei.value).lower()
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_http_youtube_url_routed_when_allow_http_true() -> None:
+    """An http:// YouTube URL with allow_http=True DOES route to fetch_youtube."""
+    from kagura_memory.ingest.fetcher import FetchResult
+
+    client = _make_client()
+    provider = FakeProvider()
+    ingestor = FileIngestor(client=client, text_provider=provider)
+
+    url = "http://www.youtube.com/watch?v=dQw4w9WgXcQ"
+    md = b"# Test\n\n## [00:00]\n\nhi\n"
+    fake_fetch = AsyncMock(
+        return_value=FetchResult(
+            body=md,
+            content_type="text/markdown",
+            source_uri=url,
+            source_type="url",
+            final_url=url,
+            bytes_read=len(md),
+        )
+    )
+    with patch("kagura_memory.ingest.ingestor.fetch_youtube", new=fake_fetch):
+        result = await ingestor._fetch(
+            url,
+            max_bytes=10_000_000,
+            connect_timeout=7.0,
+            read_timeout=10.0,
+            allow_http=True,
+            allow_system_paths=False,
+        )
+    fake_fetch.assert_awaited_once()
+    # connect_timeout is threaded into the YouTube path (oEmbed connect bound).
+    assert fake_fetch.await_args is not None
+    assert fake_fetch.await_args.kwargs.get("connect_timeout") == 7.0
+    assert result.source_uri == url
+
     await client.close()
