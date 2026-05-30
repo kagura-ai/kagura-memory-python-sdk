@@ -1026,12 +1026,20 @@ class KaguraClient:
         ``(client, context_id)`` and shared across ingestors that reuse one
         client, but it is deliberately kept off the public API surface.
 
-        Fetches the context info at most once per ``context_id`` for this
-        client's lifetime, caching the result (including ``None`` on failure)
-        so repeated callers — e.g. per-section ingest summarization — never
-        re-fetch. On any error the failure is swallowed and ``None`` is cached
-        and returned: steering is purely additive and best-effort, so a
-        missing or unreachable context must never crash ingestion.
+        After the first successful (or failed) fetch the result is cached for
+        this client's lifetime — including ``None`` on failure — so repeated
+        callers (e.g. per-section ingest summarization, which is the hot path
+        this exists for) never re-fetch. On any error the failure is swallowed
+        and ``None`` is cached and returned: steering is purely additive and
+        best-effort, so a missing or unreachable context must never crash
+        ingestion.
+
+        Within a single ingest the fetch happens exactly once: the ingestor
+        resolves steering before fanning out the per-section calls. The only
+        case that can fetch more than once is two *concurrent* ingests on the
+        same client racing on the same not-yet-cached ``context_id`` (both miss
+        the cache before either stores) — that simply repeats an idempotent
+        read and converges, so no lock is used.
 
         Note: the cache is not invalidated mid-session. A concurrent
         ``update_context`` is not reflected until a fresh client is created
