@@ -42,11 +42,28 @@ See [GitHub Releases](https://github.com/kagura-ai/kagura-memory-python-sdk/rele
   whether the `kagura-memory` entry is `refresh-aware` (the `kagura-mcp` stdio
   proxy) or a `legacy static API-key token` (with a migration hint), so you can
   see at a glance which path a project is on.
-
-Deferred to a follow-up issue (the #157 PR-B set, per the design review): the
-Windows `msvcrt` locking shim behind `_filelock`, network-level refresh dedup
-(re-check-after-lock so only one proxy hits `/oauth2/token`), and a
-subprocess-based cross-process lock-contention test.
+- **Windows credentials-lock shim** (#158): `_filelock.file_lock` now has a
+  Windows backend (`msvcrt.locking`) alongside the POSIX `fcntl` one, replacing
+  the previous non-POSIX no-op. Because the Windows API has no shared-lock mode,
+  `exclusive=False` is upgraded to an exclusive lock (concurrent readers
+  serialize on Windows where they run in parallel on POSIX — the documented
+  behavior difference), and a non-blocking `LK_NBLCK` retry loop emulates
+  `flock`'s blocking acquire without `msvcrt`'s 10-second `LK_LOCK` timeout.
+- **Cross-process refresh dedup over the network** (#158): concurrent
+  `kagura-mcp` proxies no longer each hit `/oauth2/token`. `KaguraOAuth`'s
+  refresh now acquires the cross-process advisory lock (off the event loop, in
+  a worker thread, so other coroutines keep running), re-reads the on-disk
+  token, and **skips the network round-trip when another process already
+  rotated it** — adopting the on-disk token instead. The skew-driven path and
+  the 401-retry path use different "already rotated?" predicates: the skew path
+  skips when the on-disk token is outside the skew window, while the 401 path
+  skips only when the on-disk token *differs* from the rejected one (an
+  identical token means nobody rotated yet, so a real refresh must fire — an
+  `expires_at`-based skip there would loop on the rejected token). The lock is
+  released synchronously (never offloaded) so a saturated executor cannot
+  deadlock the release. Covered by a subprocess-based cross-process
+  lock-contention test (no lost updates under `N`-way contention) plus
+  deterministic in-process dedup tests with a negative control.
 
 ## v0.24.0
 
