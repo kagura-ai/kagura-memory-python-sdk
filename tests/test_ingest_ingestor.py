@@ -684,4 +684,81 @@ async def test_details_extra_non_str_keys_raise_type_error() -> None:
         mock_remember.assert_not_called()
         mock_fetch.assert_not_called()
 
+
+# ---------------------------------------------------------------------------
+# YouTube transcript source routing (issue #146)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_youtube_url_is_routed_to_transcript_path() -> None:
+    """A YouTube URL is detected by host and routed to fetch_youtube()."""
+    from kagura_memory.ingest.fetcher import FetchResult
+
+    client = _make_client()
+    provider = FakeProvider()
+    ingestor = FileIngestor(client=client, text_provider=provider)
+
+    url = "https://youtu.be/dQw4w9WgXcQ"
+    md = b"# Test Video\n\n## [00:00]\n\nhello world\n"
+    fake_fetch = AsyncMock(
+        return_value=FetchResult(
+            body=md,
+            content_type="text/markdown",
+            source_uri=url,
+            source_type="url",
+            final_url=url,
+            bytes_read=len(md),
+        )
+    )
+
+    with (
+        patch("kagura_memory.ingest.ingestor.fetch_youtube", new=fake_fetch),
+        patch.object(client, "remember", new_callable=AsyncMock) as mock_remember,
+    ):
+        mock_remember.return_value = {"memory_id": "mem-1"}
+        result = await ingestor.ingest(url, context_id="ctx-uuid")
+
+    fake_fetch.assert_awaited_once()
+    assert fake_fetch.await_args is not None
+    assert fake_fetch.await_args.args[0] == url
+    assert result.source_uri == url
+    assert result.source_type == "url"
+    # Title flowed from the markdown H1 (TextExtractor promotes it) into the
+    # overview memory's summary.
+    overview_call = mock_remember.await_args_list[0]
+    assert "Test Video" in overview_call.kwargs.get("summary", "")
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_youtube_missing_dependency_surfaces_as_fetch_error() -> None:
+    """Without [ingest-youtube], the youtube path yields a step='fetch' error."""
+    client = _make_client()
+    provider = FakeProvider()
+    ingestor = FileIngestor(client=client, text_provider=provider)
+
+    from kagura_memory.exceptions import KaguraIngestError
+
+    with patch(
+        "kagura_memory.ingest.ingestor.fetch_youtube",
+        new=AsyncMock(
+            side_effect=KaguraIngestError(
+                "youtube-transcript-api is not installed. Install with: "
+                "pip install 'kagura-memory[ingest-youtube]'"
+            )
+        ),
+    ):
+        result = await ingestor.ingest(
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ", context_id="ctx-uuid"
+        )
+
+    assert result.overview_id is None
+    assert result.errors
+    assert result.errors[0].step == "fetch"
+    assert "ingest-youtube" in result.errors[0].message
+
+    await client.close()
+
     await client.close()
