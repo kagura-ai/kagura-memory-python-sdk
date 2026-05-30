@@ -43,7 +43,7 @@ from .fetcher import (
 )
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
-    from playwright.async_api import Route
+    from playwright.async_api import Route  # type: ignore[import-not-found]
 
 _ALLOWED_SCHEMES: frozenset[str] = frozenset({"http", "https"})
 _DEFAULT_WAIT_UNTIL: str = "networkidle"
@@ -65,14 +65,14 @@ def _load_async_playwright() -> Any:
             required ``playwright install chromium`` browser download.
     """
     try:
-        from playwright.async_api import async_playwright
+        from playwright.async_api import async_playwright  # type: ignore[import-not-found]
     except ImportError as e:
         raise KaguraIngestError(
             "playwright is not installed. Install with: "
             "pip install 'kagura-memory[ingest-browser]' then run: "
             "playwright install chromium"
         ) from e
-    return async_playwright
+    return async_playwright  # pragma: no cover - requires playwright installed
 
 
 class BrowserFetcher:

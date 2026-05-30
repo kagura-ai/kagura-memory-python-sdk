@@ -222,6 +222,43 @@ async def test_route_handler_fails_closed_on_unexpected_error(
     route.continue_.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+async def test_host_is_blocked_uses_per_fetch_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A second lookup of the same host hits the cache (no re-resolution)."""
+    calls = {"n": 0}
+
+    def counting_getaddrinfo(host: str, *args: Any, **kwargs: Any) -> Any:
+        calls["n"] += 1
+        return [(2, 1, 6, "", ("93.184.216.34", 0))]
+
+    monkeypatch.setattr(_browser.socket, "getaddrinfo", counting_getaddrinfo)
+
+    fetcher = BrowserFetcher()
+    assert await fetcher._host_is_blocked("example.com") is False
+    assert await fetcher._host_is_blocked("example.com") is False
+    assert calls["n"] == 1  # second call served from cache
+
+
+@pytest.mark.asyncio
+async def test_route_handler_swallows_abort_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """If abort() itself raises during fail-closed handling, the secondary
+    error is swallowed so the handler never propagates into Playwright."""
+
+    def boom_getaddrinfo(host: str, *args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("resolver exploded")
+
+    monkeypatch.setattr(_browser.socket, "getaddrinfo", boom_getaddrinfo)
+
+    fetcher = BrowserFetcher()
+    route = _FakeRoute("https://example.com/app.js")
+    route.abort = AsyncMock(side_effect=RuntimeError("context closing"))
+
+    # Must not raise even though both the resolver and abort() fail.
+    await fetcher._route_handler(route)  # type: ignore[arg-type]
+
+    route.abort.assert_awaited_once()
+
+
 # --- Missing dependency ------------------------------------------------------
 
 
@@ -302,6 +339,22 @@ async def test_navigation_timeout_rejected(monkeypatch: pytest.MonkeyPatch) -> N
 
 
 @pytest.mark.asyncio
+async def test_navigation_reraises_kagura_fetch_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A KaguraFetchError raised during goto (e.g. from the route handler) is
+    re-raised unchanged, not wrapped as a generic navigation failure."""
+    _patch_unblocked_resolver(monkeypatch)
+    factory, _page, _ctx = _make_fake_playwright(
+        goto_side_effect=KaguraFetchError("blocked sub-resource", url="https://example.com/")
+    )
+    monkeypatch.setattr(_browser, "_load_async_playwright", lambda: factory)
+
+    fetcher = BrowserFetcher()
+    with pytest.raises(KaguraFetchError, match="blocked sub-resource"):
+        await fetcher.fetch("https://example.com/")
+    await fetcher.close()
+
+
+@pytest.mark.asyncio
 async def test_http_error_status_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
     """A rendered 404 page must raise instead of being ingested as content."""
     _patch_unblocked_resolver(monkeypatch)
@@ -328,6 +381,22 @@ async def test_none_response_status_does_not_crash(monkeypatch: pytest.MonkeyPat
 
 
 # --- URL validation ----------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_rejects_empty_url() -> None:
+    fetcher = BrowserFetcher()
+    with pytest.raises(KaguraFetchError, match="non-empty string"):
+        await fetcher.fetch("")
+    await fetcher.close()
+
+
+@pytest.mark.asyncio
+async def test_rejects_url_without_hostname() -> None:
+    fetcher = BrowserFetcher()
+    with pytest.raises(KaguraFetchError, match="no hostname"):
+        await fetcher.fetch("https:///path-only")
+    await fetcher.close()
 
 
 @pytest.mark.asyncio
