@@ -405,20 +405,17 @@ class FileIngestor:
         # the canonical "http:// is disabled" KaguraFetchError — keeping the
         # allow_http contract consistent across every source type.
         if is_youtube_url(source) and (allow_http or urlsplit(source).scheme.lower() == "https"):
-            try:
-                return await fetch_youtube(
-                    source,
-                    max_bytes=max_bytes,
-                    connect_timeout=connect_timeout,
-                    read_timeout=read_timeout,
-                )
-            except KaguraIngestError as e:
-                # A missing [ingest-youtube] dependency raises KaguraIngestError.
-                # ingest()/estimate_cost() only catch KaguraFetchError around the
-                # fetch call, so re-raise as KaguraFetchError to surface it as a
-                # machine-readable step="fetch" IngestResult error (preserving the
-                # original install hint in the message).
-                raise KaguraFetchError(str(e), url=source) from e
+            # A missing [ingest-youtube] dependency raises KaguraIngestError;
+            # ingest()/estimate_cost() already catch it around the _fetch call and
+            # surface it as a machine-readable step="fetch" IngestResult error
+            # (identical handling to the BrowserFetcher path below), so no local
+            # wrap is needed here.
+            return await fetch_youtube(
+                source,
+                max_bytes=max_bytes,
+                connect_timeout=connect_timeout,
+                read_timeout=read_timeout,
+            )
 
         # render only affects URL sources. A local file path with
         # render=True silently falls back to the standard Fetcher.
