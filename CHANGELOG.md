@@ -6,6 +6,25 @@ See [GitHub Releases](https://github.com/kagura-ai/kagura-memory-python-sdk/rele
 
 ### Added
 
+- **Context-aware ingest summarization steering** (#148): ingest summaries are
+  no longer context-blind. `FileIngestor.ingest()` gains a keyword-only
+  `steering=None` argument; when omitted, the destination context's own
+  owner-authored configuration steers the summaries, resolved by precedence
+  `caller steering > context_info.instructions > context.summary > None`. The
+  resolved string is injected as a clearly-demarcated, **non-overriding**
+  trusted `<domain_context>` block appended *after* the fixed summarization
+  prompt — it focuses terminology/scope but never replaces the task and never
+  reopens the prompt-injection surface (the document body always stays data in
+  the `user` role; §8.3 preserved). The signal source is owner/editor-authored
+  workspace config, never document content; in a shared context the steering
+  author may differ from the ingesting member, hence the non-overriding
+  demarcation. `get_context_info` is fetched at most once per
+  `(client, context_id)` and cached on `KaguraClient` (failures cache `None`),
+  so steering adds no per-section round-trips; a fetch failure logs a warning
+  and proceeds with `steering=None` rather than failing the ingest. Whitespace-
+  only steering is treated as absent and the resolved value is truncated to
+  2000 characters. Recall-side steering, vision steering, named profiles, and
+  mid-session cache invalidation are deferred follow-ups.
 - **Audio/video transcription via Gemini** (#147): `ingest("talk.mp3")` (and
   `.wav` / `.m4a` / `.mp4`-with-audio) now routes the file to a Gemini
   transcription path (`gemini/gemini-2.5-flash`) that returns timestamped

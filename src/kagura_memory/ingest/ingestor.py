@@ -48,6 +48,10 @@ from .providers.base import Provider
 _DEFAULT_OVERVIEW_TOKENS = 400
 _DEFAULT_SECTION_TOKENS = 200
 _DEFAULT_CONCURRENCY = 4
+# Upper bound on the resolved steering string injected into the summarization
+# prompt. Caps the per-call input-token overhead (the block rides on every
+# section + the overview call) and bounds untrusted-context-config size.
+_STEERING_MAX_CHARS = 2000
 
 # Keys stamped by the SDK in _write_overview. Callers must not pass these in
 # details_extra — collisions are rejected with ValueError at ingest() entry.
@@ -150,6 +154,7 @@ class FileIngestor:
         render: bool = False,
         archive_original: bool = True,
         details_extra: dict[str, Any] | None = None,
+        steering: str | None = None,
         logger: VerboseLogger | None = None,
     ) -> IngestResult:
         """Run a full ingestion against ``source``.
@@ -197,6 +202,24 @@ class FileIngestor:
                 :exc:`ValueError` at ``ingest()`` entry, before any
                 fetch or write operation is performed. Non-``str`` keys
                 raise :exc:`TypeError` at the same point.
+            steering: Optional caller override for context-aware
+                summarization. When omitted (the default), the destination
+                context's own owner-authored configuration is used as the
+                steering signal, resolved by precedence
+                ``caller steering > context_info.instructions >
+                context.summary > None``. The resolved value is injected as a
+                clearly-demarcated, *non-overriding* trusted block appended to
+                the fixed summarization prompt — it focuses terminology/scope
+                but never replaces the task and never reopens the prompt-
+                injection surface (the document body always stays data in the
+                ``user`` role; see ``providers/_litellm.py`` §8.3). Whitespace-
+                only steering is treated as absent; the resolved value is
+                truncated to 2000 characters. Trust boundary: in a shared
+                context the steering source is whatever the context owner/
+                editor authored, which may differ from the ingesting member —
+                hence the non-overriding demarcation. Fetching the context
+                config is best-effort: a failure logs a warning and proceeds
+                with ``steering=None`` rather than aborting the ingest.
             logger: Optional :class:`VerboseLogger` for progress events
                 (Rich for human stderr, NDJSON for AI consumers). When
                 omitted, the no-op :data:`_NULL_LOGGER` is used and no
@@ -266,6 +289,7 @@ class FileIngestor:
                 importance=importance,
                 archive_original=archive_original,
                 details_extra=details_extra,
+                steering=steering,
                 logger=log,
             )
         except BaseException as e:
@@ -541,11 +565,16 @@ class FileIngestor:
         importance: float,
         archive_original: bool,
         details_extra: dict[str, Any] | None = None,
+        steering: str | None = None,
         logger: VerboseLogger | None = None,
     ) -> IngestResult:
         log = normalize_logger(logger)
         errors: list[IngestErrorRecord] = []
         warnings: list[str] = []
+
+        # Resolve the steering signal once per ingest (not per section): a
+        # caller override wins, else the destination context's own config.
+        resolved_steering = await self._resolve_steering(context_id, steering)
 
         log.action("Extracting and chunking", stage="chunk")
         try:
@@ -585,7 +614,7 @@ class FileIngestor:
             )
 
         log.action(f"Summarizing {len(chunks)} section(s)", stage="summarize")
-        section_summaries = await self._summarize_sections(chunks, errors)
+        section_summaries = await self._summarize_sections(chunks, errors, resolved_steering)
         log.detail("Sections summarized", len(section_summaries), stage="summarize")
 
         # Build the overview from the section summaries (in parallel with
@@ -593,7 +622,9 @@ class FileIngestor:
         log.action("Summarizing overview", stage="summarize")
         try:
             overview_summary = await self._text.summarize_overview(
-                [s for s in section_summaries if s], max_tokens=_DEFAULT_OVERVIEW_TOKENS
+                [s for s in section_summaries if s],
+                max_tokens=_DEFAULT_OVERVIEW_TOKENS,
+                steering=resolved_steering,
             )
         except KaguraLLMError as e:
             errors.append(
@@ -662,10 +693,35 @@ class FileIngestor:
             errors=errors,
         )
 
+    async def _resolve_steering(self, context_id: str, caller_steering: str | None) -> str | None:
+        """Resolve the steering signal for one ingest run.
+
+        Precedence: ``caller_steering > context_info.instructions >
+        context.summary > None``. Each candidate is taken only if it is
+        non-blank after stripping; the chosen value is stripped and truncated
+        to :data:`_STEERING_MAX_CHARS`. Resolution is best-effort — the
+        context-config fetch is cached and never raises (see
+        :meth:`KaguraClient._get_context_info_cached`), so a missing or
+        unreachable context simply yields ``None`` and ingest proceeds.
+        """
+        if caller_steering and caller_steering.strip():
+            return caller_steering.strip()[:_STEERING_MAX_CHARS]
+
+        info = await self._client._get_context_info_cached(context_id)
+        if info is None:
+            return None
+        # instructions (purpose-built usage guidelines) outrank the broader
+        # context.summary description.
+        for candidate in (info.instructions, info.context.summary):
+            if candidate and candidate.strip():
+                return candidate.strip()[:_STEERING_MAX_CHARS]
+        return None
+
     async def _summarize_sections(
         self,
         chunks: list[Chunk],
         errors: list[IngestErrorRecord],
+        steering: str | None = None,
     ) -> list[str | None]:
         sem = asyncio.Semaphore(self._concurrency)
         results: list[str | None] = [None] * len(chunks)
@@ -674,7 +730,9 @@ class FileIngestor:
             async with sem:
                 try:
                     summary = await self._text.summarize(
-                        chunk_obj.text, max_tokens=_DEFAULT_SECTION_TOKENS
+                        chunk_obj.text,
+                        max_tokens=_DEFAULT_SECTION_TOKENS,
+                        steering=steering,
                     )
                 except KaguraLLMError as e:
                     errors.append(

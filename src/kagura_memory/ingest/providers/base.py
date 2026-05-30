@@ -24,25 +24,36 @@ class Provider(Protocol):
     default_text_model: ClassVar[str]
     default_vision_model: ClassVar[str | None]
 
-    async def summarize(self, text: str, *, max_tokens: int) -> str:
+    async def summarize(self, text: str, *, max_tokens: int, steering: str | None = None) -> str:
         """Produce a short summary of ``text``.
 
         Args:
             text: Section body to summarize.
             max_tokens: Approximate output ceiling.
+            steering: Optional trusted domain-context string (owner-authored
+                workspace configuration, never document content). When
+                present, it is appended to the fixed system prompt as a
+                clearly-demarcated, non-overriding block to focus terminology
+                — it never replaces the fixed task. ``None`` (default) is the
+                pre-steering behavior. See ``_litellm.py`` (§8.3) for why the
+                document body always stays data in the user role.
 
         Returns:
             Plain-text summary; never None or empty.
         """
         ...
 
-    async def summarize_overview(self, section_summaries: list[str], *, max_tokens: int) -> str:
+    async def summarize_overview(
+        self, section_summaries: list[str], *, max_tokens: int, steering: str | None = None
+    ) -> str:
         """Produce a document-level overview from per-section summaries.
 
         Args:
             section_summaries: Already-summarized section texts in document
                 order.
             max_tokens: Approximate output ceiling.
+            steering: Optional trusted domain-context string; same semantics
+                as :meth:`summarize`.
         """
         ...
 

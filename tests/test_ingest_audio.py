@@ -597,10 +597,12 @@ class _FakeProvider:
     text_model = "fake/text"
     vision_model: str | None = None
 
-    async def summarize(self, text: str, *, max_tokens: int) -> str:
+    async def summarize(self, text: str, *, max_tokens: int, steering: str | None = None) -> str:
         return f"[summary len={len(text)}]"
 
-    async def summarize_overview(self, section_summaries: list[str], *, max_tokens: int) -> str:
+    async def summarize_overview(
+        self, section_summaries: list[str], *, max_tokens: int, steering: str | None = None
+    ) -> str:
         return f"[overview {len(section_summaries)}]"
 
     async def describe_image(self, image_bytes: bytes, mime: str) -> str:

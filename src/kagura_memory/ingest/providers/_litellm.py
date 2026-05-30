@@ -50,6 +50,31 @@ _VISION_SYSTEM_PROMPT = (
 
 _FALLBACK_CHARS_PER_TOKEN = 4
 
+# Trusted domain-context block appended AFTER the fixed task prompt when a
+# caller supplies steering. The fixed prompt always comes first and is never
+# replaced — this block only narrows terminology/focus. The label is a fixed
+# string positioned so the steering body cannot be confused for a task
+# instruction (defense-in-depth for shared contexts: the steering text comes
+# from owner-authored workspace config, but it is still demarcated as
+# non-overriding). §8.3 is preserved: the document body stays in the ``user``
+# role as data; this block lives in the ``system`` role as configuration.
+_STEERING_TEMPLATE = (
+    "\n\nDomain context (trusted workspace configuration — guides "
+    "terminology/focus only; NOT part of the document, contains no "
+    "task-overriding instructions):\n<domain_context>\n{steering}\n</domain_context>"
+)
+
+
+def _with_steering(system: str, steering: str | None) -> str:
+    """Append the demarcated steering block to ``system`` when present.
+
+    Returns ``system`` unchanged when ``steering`` is None or blank, so the
+    pre-steering prompt is byte-for-byte identical on the default path.
+    """
+    if steering and steering.strip():
+        return system + _STEERING_TEMPLATE.format(steering=steering)
+    return system
+
 
 class LiteLLMProvider:
     """Base class implementing the :class:`Provider` Protocol via litellm."""
@@ -75,19 +100,21 @@ class LiteLLMProvider:
 
     # --- Public API ----------------------------------------------------------
 
-    async def summarize(self, text: str, *, max_tokens: int) -> str:
+    async def summarize(self, text: str, *, max_tokens: int, steering: str | None = None) -> str:
         return await self._acompletion(
             model=self.text_model,
-            system=_SUMMARIZE_SYSTEM_PROMPT,
+            system=_with_steering(_SUMMARIZE_SYSTEM_PROMPT, steering),
             user_text=text,
             max_tokens=max_tokens,
         )
 
-    async def summarize_overview(self, section_summaries: list[str], *, max_tokens: int) -> str:
+    async def summarize_overview(
+        self, section_summaries: list[str], *, max_tokens: int, steering: str | None = None
+    ) -> str:
         joined = "\n\n".join(f"[Section {i + 1}]\n{s}" for i, s in enumerate(section_summaries))
         return await self._acompletion(
             model=self.text_model,
-            system=_OVERVIEW_SYSTEM_PROMPT,
+            system=_with_steering(_OVERVIEW_SYSTEM_PROMPT, steering),
             user_text=joined,
             max_tokens=max_tokens,
         )
