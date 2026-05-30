@@ -171,6 +171,12 @@ class TestDetectMcpJsonMode:
         (project_dir / ".mcp.json").write_text(json.dumps(existing))
         assert detect_mcp_json_mode(project_dir) == "absent"
 
+    def test_stdio_with_wrong_command_not_stdio(self, project_dir: Path) -> None:
+        """A stdio entry whose command isn't kagura-mcp is not classified as stdio."""
+        existing = {"mcpServers": {MCP_SERVER_NAME: {"type": "stdio", "command": "some-other-mcp"}}}
+        (project_dir / ".mcp.json").write_text(json.dumps(existing))
+        assert detect_mcp_json_mode(project_dir) == "absent"
+
 
 # =============================================================================
 # _make_client / _kagura_mcp_on_path (dispatch + PATH probe)
@@ -214,6 +220,7 @@ class TestConnectionHelpers:
         _async_client_mock(mock_kc, inner)
         out = await _test_connection(profile="work")
         assert out["count"] == 2
+        inner.list_contexts.assert_awaited_once()
         mock_kc.assert_called_once_with(profile="work")
 
     @pytest.mark.asyncio
