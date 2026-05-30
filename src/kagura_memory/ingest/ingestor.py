@@ -24,6 +24,7 @@ from ..files_client import FilesClient
 from ..logger import VerboseLogger, normalize_logger
 from ..models import CostBreakdown, FileObject, IngestErrorRecord, IngestResult
 from ._types import Chunk, ExtractedContent
+from ._youtube import fetch_youtube, is_youtube_url
 from .chunker import chunk as do_chunk
 from .extractors import (
     DOCX_MIME,
@@ -359,6 +360,22 @@ class FileIngestor:
         allow_http: bool,
         allow_system_paths: bool,
     ) -> FetchResult:
+        # YouTube URLs are a transcript-source path, not a byte fetch: detect
+        # them FIRST (by host) and route to the transcript resolver, which
+        # returns a ready-to-extract text/markdown FetchResult. A missing
+        # [ingest-youtube] dependency surfaces as KaguraIngestError, which the
+        # ingest()/estimate_cost() fetch try-blocks already wrap as a
+        # step="fetch" IngestResult error (alongside KaguraFetchError).
+        if is_youtube_url(source):
+            try:
+                return await fetch_youtube(source, max_bytes=max_bytes, read_timeout=read_timeout)
+            except KaguraIngestError as e:
+                # A missing [ingest-youtube] dependency raises KaguraIngestError.
+                # ingest()/estimate_cost() only catch KaguraFetchError around the
+                # fetch call, so re-raise as KaguraFetchError to surface it as a
+                # machine-readable step="fetch" IngestResult error (preserving the
+                # original install hint in the message).
+                raise KaguraFetchError(str(e), url=source) from e
         async with Fetcher(
             max_bytes=max_bytes,
             connect_timeout=connect_timeout,
