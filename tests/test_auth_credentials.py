@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import stat
+import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -20,6 +21,7 @@ from kagura_memory.auth.credentials import (
     CredentialsFile,
     KaguraOAuth,
     OAuthCredentials,
+    _SharedCredentialsState,
     delete_credentials_file,
     delete_profile,
     get_shared_state,
@@ -29,6 +31,13 @@ from kagura_memory.auth.credentials import (
     update_profile,
 )
 from kagura_memory.auth.device_flow import TokenResponse
+
+# The cross-process refresh-dedup tests rely on fcntl serializing two
+# independent open descriptions of the same lock file; gate them to POSIX (CI
+# runs Linux). The Windows msvcrt backend is unit-tested in test_filelock.py.
+_POSIX_ONLY_CREDS = pytest.mark.skipif(
+    sys.platform == "win32", reason="cross-process dedup test uses POSIX fcntl"
+)
 
 
 def _sample_creds(
@@ -542,6 +551,204 @@ async def test_force_refresh_refreshes_even_when_not_expired(tmp_path: Path):
         await auth.force_refresh()
 
     assert state.credentials.access_token == "forced-new"
+    assert load_credentials_file(path).get_profile().access_token == "forced-new"
+
+
+# ---------------------------------------------------------------------------
+# Cross-process refresh dedup (#158)
+#
+# These tests construct two _SharedCredentialsState objects with *separate*
+# asyncio.Locks over the SAME credentials file to simulate two processes. The
+# cross-process fcntl lock genuinely serializes them — flock treats independent
+# open descriptions independently even within one process — so the dedup logic
+# is exercised deterministically without spawning subprocesses (the real
+# cross-process *lock* itself is covered by the subprocess test in
+# tests/test_filelock.py).
+# ---------------------------------------------------------------------------
+
+
+def _independent_state(path: Path, creds: OAuthCredentials, profile: str = "default"):
+    """A state with its own asyncio.Lock — a stand-in for a separate process."""
+    return _SharedCredentialsState(
+        credentials=creds,
+        profile_name=profile,
+        path=path.resolve(),
+        lock=asyncio.Lock(),
+    )
+
+
+def _fresh_token(access_token: str) -> TokenResponse:
+    return TokenResponse(
+        access_token=access_token,
+        refresh_token="new-rtok",
+        token_type="Bearer",
+        expires_at=datetime.now(UTC) + timedelta(hours=1),
+        scope="memory:read",
+    )
+
+
+@_POSIX_ONLY_CREDS
+@pytest.mark.asyncio
+async def test_refresh_dedup_skew_only_one_network_call(tmp_path: Path):
+    """Two 'processes' both within the skew window → exactly one /oauth2/token call.
+
+    The second to acquire the cross-process lock re-reads the freshly-rotated
+    token from disk and adopts it instead of hitting the network again.
+    """
+    reset_state_cache()
+    path = tmp_path / "creds.json"
+    near = datetime.now(UTC) + timedelta(seconds=10)  # within REFRESH_SKEW_SEC
+    cf = CredentialsFile()
+    cf.set_profile("default", _sample_creds(access_token="old", expires_at=near))
+    save_credentials_file(cf, path)
+
+    auth_a = KaguraOAuth(
+        _independent_state(path, _sample_creds(access_token="old", expires_at=near))
+    )
+    auth_b = KaguraOAuth(
+        _independent_state(path, _sample_creds(access_token="old", expires_at=near))
+    )
+
+    calls = 0
+
+    async def fake_refresh(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(0.02)  # hold the lock so the other waits on it
+        return _fresh_token("fresh")
+
+    with (
+        patch("kagura_memory.auth.device_flow.refresh_access_token", new=fake_refresh),
+        patch("kagura_memory.auth.device_flow.make_oauth_client", return_value=_AsyncContextStub()),
+    ):
+        await asyncio.gather(auth_a._maybe_refresh(), auth_b._maybe_refresh())
+
+    assert calls == 1, f"expected exactly one network refresh across processes, got {calls}"
+    assert auth_a._state.credentials.access_token == "fresh"
+    # The process that skipped the network still adopts the on-disk token.
+    assert auth_b._state.credentials.access_token == "fresh"
+    assert load_credentials_file(path).get_profile().access_token == "fresh"
+
+
+@_POSIX_ONLY_CREDS
+@pytest.mark.asyncio
+async def test_refresh_dedup_negative_control_without_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """With the cross-process lock disabled, both processes hit the network.
+
+    This proves the dedup in the positive test is the *lock's* doing, not an
+    artifact of the test harness (the recalled TOCTOU 3-layer pattern: a
+    positive race test needs a negative control to prove it can fail).
+    """
+    import contextlib
+
+    import kagura_memory._filelock as fl
+
+    @contextlib.asynccontextmanager
+    async def noop_lock(target, *, exclusive=True):
+        yield
+
+    monkeypatch.setattr(fl, "async_file_lock", noop_lock)
+
+    reset_state_cache()
+    path = tmp_path / "creds.json"
+    near = datetime.now(UTC) + timedelta(seconds=10)
+    cf = CredentialsFile()
+    cf.set_profile("default", _sample_creds(access_token="old", expires_at=near))
+    save_credentials_file(cf, path)
+
+    auth_a = KaguraOAuth(
+        _independent_state(path, _sample_creds(access_token="old", expires_at=near))
+    )
+    auth_b = KaguraOAuth(
+        _independent_state(path, _sample_creds(access_token="old", expires_at=near))
+    )
+
+    calls = 0
+
+    async def fake_refresh(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(0.02)
+        return _fresh_token("fresh")
+
+    with (
+        patch("kagura_memory.auth.device_flow.refresh_access_token", new=fake_refresh),
+        patch("kagura_memory.auth.device_flow.make_oauth_client", return_value=_AsyncContextStub()),
+    ):
+        await asyncio.gather(auth_a._maybe_refresh(), auth_b._maybe_refresh())
+
+    assert calls == 2, f"without the lock both processes should refresh, got {calls}"
+
+
+@_POSIX_ONLY_CREDS
+@pytest.mark.asyncio
+async def test_force_refresh_adopts_when_another_process_rotated(tmp_path: Path):
+    """401 path: if the on-disk token already differs from the rejected one, adopt + skip.
+
+    A different on-disk token means another proxy already rotated in response
+    to the same out-of-band revocation — no second /oauth2/token call needed.
+    """
+    reset_state_cache()
+    path = tmp_path / "creds.json"
+    # Disk already holds a rotated token (a peer process refreshed first).
+    cf = CredentialsFile()
+    cf.set_profile("default", _sample_creds(access_token="peer-rotated"))
+    save_credentials_file(cf, path)
+
+    # This process still holds the now-rejected token in memory.
+    auth = KaguraOAuth(_independent_state(path, _sample_creds(access_token="rejected-401")))
+
+    calls = 0
+
+    async def fake_refresh(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return _fresh_token("should-not-happen")
+
+    with (
+        patch("kagura_memory.auth.device_flow.refresh_access_token", new=fake_refresh),
+        patch("kagura_memory.auth.device_flow.make_oauth_client", return_value=_AsyncContextStub()),
+    ):
+        await auth.force_refresh()
+
+    assert calls == 0, "a peer already rotated; this process must not hit the network"
+    assert auth._state.credentials.access_token == "peer-rotated"
+
+
+@_POSIX_ONLY_CREDS
+@pytest.mark.asyncio
+async def test_force_refresh_hits_network_when_token_unchanged(tmp_path: Path):
+    """401 path: an identical on-disk token means nobody rotated → this process refreshes.
+
+    Guards against the wrong predicate: an expires_at-based skip here would
+    wrongly no-op on a 401 while the rejected token is still current, looping.
+    """
+    reset_state_cache()
+    path = tmp_path / "creds.json"
+    # On-disk token is the SAME one that just got 401'd, and not near expiry.
+    cf = CredentialsFile()
+    cf.set_profile("default", _sample_creds(access_token="rejected-401"))
+    save_credentials_file(cf, path)
+
+    auth = KaguraOAuth(_independent_state(path, _sample_creds(access_token="rejected-401")))
+
+    calls = 0
+
+    async def fake_refresh(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return _fresh_token("forced-new")
+
+    with (
+        patch("kagura_memory.auth.device_flow.refresh_access_token", new=fake_refresh),
+        patch("kagura_memory.auth.device_flow.make_oauth_client", return_value=_AsyncContextStub()),
+    ):
+        await auth.force_refresh()
+
+    assert calls == 1, "nobody rotated; the 401 must force a real refresh"
+    assert auth._state.credentials.access_token == "forced-new"
     assert load_credentials_file(path).get_profile().access_token == "forced-new"
 
 

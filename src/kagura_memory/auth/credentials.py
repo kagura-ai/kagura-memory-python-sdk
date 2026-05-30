@@ -13,11 +13,14 @@ This module owns three responsibilities:
    ``/oauth2/token`` refresh fires per cycle even when many client
    instances run side by side.
 
-Multi-process coordination (e.g. two ``KaguraClient`` instances in
-different worker processes refreshing the same file) is out of scope
-for this module — the in-process lock collapses to a no-op across
-process boundaries. The follow-up proxy daemon (issue #101) becomes
-the single owner of the credentials file in that scenario.
+Multi-process coordination (e.g. several ``kagura-mcp`` proxy children
+refreshing the same file) is handled in two layers: the in-process
+:class:`asyncio.Lock` coalesces refreshes *within* a process, and the
+cross-process advisory lock in :mod:`kagura_memory._filelock` (acquired
+inside :meth:`KaguraOAuth._refresh_locked`) re-reads the on-disk token
+after locking and skips the ``/oauth2/token`` round-trip when another
+process already rotated it — so only one process hits the token endpoint
+per cycle (issue #158).
 """
 
 from __future__ import annotations
@@ -532,36 +535,101 @@ class KaguraOAuth(httpx.Auth):
         Used by the ``kagura-mcp`` proxy on an upstream ``401``: the token was
         rejected server-side (rotated / revoked out-of-band) even though it is
         not yet within the skew window, so :meth:`_maybe_refresh` would no-op.
-        The same lock serializes this with skew-driven refreshes, so a 401 on
-        one in-flight request and a skew refresh on another coalesce to a
-        single ``/oauth2/token`` call.
+        The same in-process lock serializes this with skew-driven refreshes, so
+        a 401 on one in-flight request and a skew refresh on another coalesce to
+        a single ``/oauth2/token`` call. Cross-process dedup is handled in
+        :meth:`_refresh_locked` via the rejected-token identity check.
         """
+        # Capture the rejected token BEFORE the in-process lock: if a peer
+        # coroutine already rotated it while we waited on the lock, we must
+        # still compare against the token that actually got the 401, otherwise
+        # the rotated token (== current in-memory) would compare equal to disk
+        # and force a redundant /oauth2/token call instead of coalescing.
+        rejected_token = self._state.credentials.access_token
         async with self._state.lock:
-            await self._refresh_locked()
+            await self._refresh_locked(expected_stale_token=rejected_token)
 
-    async def _refresh_locked(self) -> None:
-        """Perform the ``/oauth2/token`` refresh and persist. Caller holds the lock."""
-        # Lazy import: ``device_flow`` may depend on this module's
-        # public types, so resolve only at refresh time to avoid a
-        # cycle at import time.
+    async def _refresh_locked(self, *, expected_stale_token: str | None = None) -> None:
+        """Refresh ``/oauth2/token`` once across all processes. Caller holds the in-process lock.
+
+        The cross-process advisory lock is acquired with non-blocking attempts
+        on the event loop (``asyncio.sleep`` between tries — see
+        :func:`async_file_lock`), so other coroutines — e.g. concurrent
+        ``kagura-mcp`` proxy forwards — keep running while we wait, and a
+        cancellation while waiting holds nothing. After acquiring it we
+        re-read the credentials from disk and **skip the network call when
+        another process already rotated the token**, so only one proxy among
+        many hits ``/oauth2/token`` per cycle (dedup over the network, not just
+        a lost-update-safe write).
+
+        Args:
+            expected_stale_token: governs the "already rotated?" predicate.
+                ``None`` (skew-driven path) → skip when the on-disk token is no
+                longer within the skew window (another process produced a fresh
+                token). A token string (401 path) → skip only when the on-disk
+                token *differs* from this rejected token; an identical on-disk
+                token means nobody has rotated yet, so this process must refresh
+                (a 401 is independent of ``expires_at``).
+        """
+        from .._filelock import async_file_lock
+
+        path = self._state.path
+        profile = self._state.profile_name
+        # async_file_lock acquires the cross-process lock with non-blocking
+        # attempts on the event loop (asyncio.sleep between tries), so it never
+        # stalls the loop and is cancellation-safe — a cancellation while
+        # waiting holds nothing, and the body is released in its own finally.
+        async with async_file_lock(path, exclusive=True):
+            disk = load_credentials_file(path).get_profile(profile)
+            if disk is not None and self._already_rotated(disk, expected_stale_token):
+                # Another process refreshed while we waited — adopt its token
+                # and skip the network call. "Skip" means "adopt the on-disk
+                # result", never "leave the stale in-memory token in place".
+                self._state.credentials = disk
+                return
+            base = disk if disk is not None else self._state.credentials
+            await self._network_refresh_and_save(base, path, profile)
+
+    def _already_rotated(self, disk: OAuthCredentials, expected_stale_token: str | None) -> bool:
+        """Whether ``disk`` shows another process already produced a usable token."""
+        if expected_stale_token is None:
+            # Skew path: a token outside the skew window is fresh enough.
+            return not disk.is_expired(skew_seconds=REFRESH_SKEW_SEC)
+        # 401 path: a different token means someone rotated; an identical token
+        # means the rejected token is still current and we must refresh.
+        return disk.access_token != expected_stale_token
+
+    async def _network_refresh_and_save(
+        self, base: OAuthCredentials, path: Path, profile: str
+    ) -> None:
+        """Hit ``/oauth2/token`` from ``base`` and persist. Caller holds both locks."""
+        # Lazy import: ``device_flow`` may depend on this module's public types,
+        # so resolve only at refresh time to avoid a cycle at import time.
         from .device_flow import make_oauth_client, refresh_access_token
 
         async with make_oauth_client() as client:
             token = await refresh_access_token(
                 client,
-                server=self._state.credentials.server,
-                client_id=self._state.credentials.client_id,
-                refresh_token=self._state.credentials.refresh_token,
+                server=base.server,
+                client_id=base.client_id,
+                refresh_token=base.refresh_token,
             )
-        # Pass ``None`` when the server omits ``refresh_token`` so the
-        # stored token is preserved. ``TokenResponse.refresh_token``
-        # defaults to ``""`` when absent, and passing the empty string
-        # to ``with_refreshed`` would overwrite a valid stored token
-        # with an empty one — breaking every subsequent refresh.
-        self._state.credentials = self._state.credentials.with_refreshed(
+        # Pass ``None`` when the server omits ``refresh_token`` so the stored
+        # token is preserved. ``TokenResponse.refresh_token`` defaults to ``""``
+        # when absent, and passing the empty string to ``with_refreshed`` would
+        # overwrite a valid stored token with an empty one — breaking every
+        # subsequent refresh.
+        self._state.credentials = base.with_refreshed(
             access_token=token.access_token,
             refresh_token=token.refresh_token or None,
             expires_at=token.expires_at,
             scope=token.scope,
         )
-        update_profile(self._state.profile_name, self._state.credentials, self._state.path)
+        # We already hold the cross-process lock; write directly rather than via
+        # update_profile (which would re-acquire the same lock on a second fd
+        # and self-deadlock — fcntl treats independent open descriptions
+        # independently, even within one process). Re-load → set → save still
+        # preserves every other profile in the file.
+        cf = load_credentials_file(path)
+        cf.set_profile(profile, self._state.credentials)
+        save_credentials_file(cf, path)
