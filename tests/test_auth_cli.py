@@ -589,6 +589,17 @@ def test_status_silent_when_no_mcp_json(patched_default_path: Path):
     assert "Claude Code (.mcp.json)" not in result.output
 
 
+def test_status_reports_url_mode_without_auth(patched_default_path: Path):
+    """status reports a url-form .mcp.json that carries no Authorization header."""
+    _seed_credentials(patched_default_path.parent.parent, _make_creds())
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        _write_cwd_mcp_json({"type": "url", "url": "https://x/mcp"})
+        result = runner.invoke(main, ["auth", "status"])
+    assert result.exit_code == 0, result.output
+    assert "url form (no Authorization header)" in result.output
+
+
 # ---------------------------------------------------------------------------
 # logout
 # ---------------------------------------------------------------------------
