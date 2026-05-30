@@ -18,7 +18,7 @@ import pytest
 # via the lazy loader (and the test helpers below import them directly), so the
 # whole module must skip cleanly on a bare install without the optional
 # [ingest-youtube] extra — otherwise collection breaks at import time.
-pytest.importorskip("youtube_transcript_api")
+pytest.importorskip("youtube_transcript_api", reason="requires the [ingest-youtube] extra")
 
 from kagura_memory.exceptions import KaguraFetchError, KaguraIngestError  # noqa: E402
 from kagura_memory.ingest import _youtube  # noqa: E402
@@ -611,7 +611,7 @@ async def test_fetch_oembed_threads_connect_timeout() -> None:
 @pytest.mark.youtube
 @pytest.mark.asyncio
 async def test_fetch_youtube_real_video() -> None:
-    pytest.importorskip("youtube_transcript_api")
+    pytest.importorskip("youtube_transcript_api", reason="requires the [ingest-youtube] extra")
     # "Me at the zoo" — the first YouTube video, stable and captioned.
     url = "https://www.youtube.com/watch?v=jNQXAC9IVRw"
     result = await fetch_youtube(url, max_bytes=10_000_000, read_timeout=30.0)

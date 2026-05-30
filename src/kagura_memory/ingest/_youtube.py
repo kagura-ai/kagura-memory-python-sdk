@@ -293,7 +293,7 @@ def _build_markdown(title: str, author: str | None, windows: list[tuple[float, s
     return markdown
 
 
-def _resolve_transcript(transcript_list: Any, languages: tuple[str, ...]) -> Any:
+def _resolve_transcript(transcript_list: Any, languages: tuple[str, ...]) -> Any | None:
     """Pick a transcript: manual (preferred) → generated → first available.
 
     Args:
@@ -301,11 +301,9 @@ def _resolve_transcript(transcript_list: Any, languages: tuple[str, ...]) -> Any
         languages: Preferred language codes, in descending priority.
 
     Returns:
-        A ``Transcript`` object whose ``.fetch()`` yields snippets.
-
-    Raises:
-        Exception: Re-raises the library's lookup error only when no transcript
-            of any kind is available.
+        A ``Transcript`` object whose ``.fetch()`` yields snippets, or ``None``
+        when the video has no transcript in any language. The caller maps
+        ``None`` to a :class:`KaguraFetchError` carrying the original URL.
     """
     youtube_transcript_api = _load_youtube_transcript_api()
     no_transcript = youtube_transcript_api.NoTranscriptFound
@@ -321,7 +319,10 @@ def _resolve_transcript(transcript_list: Any, languages: tuple[str, ...]) -> Any
     # Fall back to the first available transcript in any language.
     for transcript in transcript_list:
         return transcript
-    raise no_transcript.__new__(no_transcript)
+    # Nothing in any language. Signal "no transcript" to the caller rather than
+    # constructing the library's NoTranscriptFound — its __init__ signature
+    # varies across versions, so building one via __new__ was fragile.
+    return None
 
 
 def _fetch_transcript_sync(video_id: str, languages: tuple[str, ...], *, url: str) -> list[Any]:
@@ -351,15 +352,15 @@ def _fetch_transcript_sync(video_id: str, languages: tuple[str, ...], *, url: st
     try:
         transcript_list = api.list(video_id)
         transcript = _resolve_transcript(transcript_list, languages)
+        if transcript is None:
+            raise KaguraFetchError(
+                "no transcript/captions found for this video in any language",
+                url=url,
+            )
         snippets = list(transcript.fetch())
     except youtube_transcript_api.TranscriptsDisabled as e:
         raise KaguraFetchError(
             "captions are disabled for this video; no transcript is available",
-            url=url,
-        ) from e
-    except youtube_transcript_api.NoTranscriptFound as e:
-        raise KaguraFetchError(
-            "no transcript/captions found for this video in any language",
             url=url,
         ) from e
     except youtube_transcript_api.AgeRestricted as e:
