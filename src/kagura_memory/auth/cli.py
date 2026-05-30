@@ -79,10 +79,11 @@ def auth():
     running 'kagura recall', 'kagura remember', and other CLI tools
     that talk to the server directly.
 
-    For Claude Code MCP integration, continue to use 'kagura setup
-    claude' with a long-lived API key from the web UI — automatic
-    refresh inside Claude Code's MCP client is tracked in a follow-up
-    (kagura-mcp proxy daemon).
+    For Claude Code MCP integration, run 'kagura setup claude --profile
+    <name>' to wire up the refresh-aware 'kagura-mcp' stdio proxy, which
+    reuses these OAuth credentials and refreshes the token automatically.
+    The long-lived API-key path ('kagura setup claude' with no --profile)
+    remains for CI / service accounts.
     """
 
 
@@ -315,8 +316,9 @@ def _print_login_success(creds: OAuthCredentials, profile: str) -> None:
     click.echo(f"  Expires: {expires_utc} (refreshable)")
     click.echo()
     click.echo(
-        "  Note: To use Kagura from Claude Code, continue to use "
-        "'kagura setup claude' with an API key from the web UI."
+        f"  Next: wire this profile into Claude Code with\n"
+        f"    kagura setup claude --profile {profile}\n"
+        "  (uses the refresh-aware kagura-mcp proxy — no more silent 401s)."
     )
 
 
@@ -359,6 +361,31 @@ def auth_status(profile: str | None) -> None:
             f"Expires: {expires.isoformat()} (EXPIRED — auto-refresh will run on next request)"
         )
     click.echo(f"Issued: {creds.issued_at.astimezone(UTC).isoformat()}")
+
+    _print_mcp_json_mode(Path.cwd())
+
+
+def _print_mcp_json_mode(project_dir: Path) -> None:
+    """Report the Claude Code ``.mcp.json`` integration mode for ``project_dir``.
+
+    Informational only — silent when there is no ``.mcp.json`` (or no
+    ``kagura-memory`` entry) so ``kagura auth status`` stays quiet outside a
+    project configured for Claude Code. Lazy import avoids pulling the setup
+    machinery (and its ``KaguraClient`` dependency) into the common auth path.
+    """
+    from ..setup_claude import MCP_PROXY_COMMAND, detect_mcp_json_mode
+
+    mode = detect_mcp_json_mode(project_dir)
+    if mode == "stdio":
+        click.echo(f"Claude Code (.mcp.json): refresh-aware ({MCP_PROXY_COMMAND} stdio proxy)")
+    elif mode == "static-token":
+        click.echo(
+            "Claude Code (.mcp.json): legacy static API-key token (no auto-refresh)\n"
+            "  Migrate to refresh-aware: kagura setup claude --profile <name>"
+        )
+    elif mode == "url":
+        click.echo("Claude Code (.mcp.json): url form (no Authorization header)")
+    # "none" / "absent" → print nothing
 
 
 # ---------------------------------------------------------------------------

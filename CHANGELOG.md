@@ -27,11 +27,26 @@ See [GitHub Releases](https://github.com/kagura-ai/kagura-memory-python-sdk/rele
   (e.g. multiple `kagura-mcp` children) cannot lose an update. Windows is a
   documented no-op pending a follow-up (the `msvcrt` semantics differ enough
   to warrant separate work).
+- **`kagura setup claude --profile NAME`** (#157): wires Claude Code to the
+  refresh-aware `kagura-mcp` proxy in one step. With `--profile`, `setup
+  claude` writes the stdio `.mcp.json` form
+  (`{"type": "stdio", "command": "kagura-mcp", "args": ["--profile", NAME]}`)
+  bound to an OAuth profile from `kagura auth login` — no API key, no secret in
+  the file, and the token refreshes automatically. It resolves the MCP URL and
+  auth from the profile, verifies `kagura-mcp` is on `$PATH` (a warning, never a
+  hard failure), and writes a `.kagura.json` without an `api_key`. Without
+  `--profile`, the legacy long-lived API-key url form is unchanged
+  (CI / service accounts). `--profile` and `--api-key` are mutually exclusive.
+- **`kagura auth status` reports the Claude Code integration mode** (#157):
+  when a `.mcp.json` exists in the current directory, `auth status` now reports
+  whether the `kagura-memory` entry is `refresh-aware` (the `kagura-mcp` stdio
+  proxy) or a `legacy static API-key token` (with a migration hint), so you can
+  see at a glance which path a project is on.
 
-Deferred to a follow-up issue (per the design review): `kagura setup claude
---profile` writing the stdio form automatically, `kagura auth status`
-`.mcp.json` mode detection, the Windows locking shim, and the README
-"Connect to Claude Code" rewrite.
+Deferred to a follow-up issue (the #157 PR-B set, per the design review): the
+Windows `msvcrt` locking shim behind `_filelock`, network-level refresh dedup
+(re-check-after-lock so only one proxy hits `/oauth2/token`), and a
+subprocess-based cross-process lock-contention test.
 
 ## v0.24.0
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -544,6 +545,48 @@ def test_status_no_credentials_errors_with_login_hint(patched_default_path: Path
     result = CliRunner().invoke(main, ["auth", "status"])
     assert result.exit_code != 0
     assert "kagura auth login" in result.output
+
+
+def _write_cwd_mcp_json(entry: dict) -> None:
+    Path(".mcp.json").write_text(json.dumps({"mcpServers": {"kagura-memory": entry}}))
+
+
+def test_status_reports_stdio_mcp_mode(patched_default_path: Path):
+    """status reports refresh-aware mode when cwd .mcp.json uses the kagura-mcp stdio form."""
+    _seed_credentials(patched_default_path.parent.parent, _make_creds())
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        _write_cwd_mcp_json(
+            {"type": "stdio", "command": "kagura-mcp", "args": ["--profile", "default"]}
+        )
+        result = runner.invoke(main, ["auth", "status"])
+    assert result.exit_code == 0, result.output
+    assert "refresh-aware" in result.output
+    assert "kagura-mcp" in result.output
+
+
+def test_status_reports_legacy_static_token_mode(patched_default_path: Path):
+    """status flags a legacy static-token .mcp.json and offers a migration hint."""
+    _seed_credentials(patched_default_path.parent.parent, _make_creds())
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        _write_cwd_mcp_json(
+            {"type": "url", "url": "https://x/mcp", "headers": {"Authorization": "Bearer kagura_x"}}
+        )
+        result = runner.invoke(main, ["auth", "status"])
+    assert result.exit_code == 0, result.output
+    assert "legacy static API-key token" in result.output
+    assert "kagura setup claude --profile" in result.output
+
+
+def test_status_silent_when_no_mcp_json(patched_default_path: Path):
+    """status says nothing about Claude Code when there is no .mcp.json in cwd."""
+    _seed_credentials(patched_default_path.parent.parent, _make_creds())
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        result = runner.invoke(main, ["auth", "status"])
+    assert result.exit_code == 0, result.output
+    assert "Claude Code (.mcp.json)" not in result.output
 
 
 # ---------------------------------------------------------------------------

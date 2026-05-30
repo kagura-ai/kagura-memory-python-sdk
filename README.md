@@ -294,14 +294,18 @@ Two integration paths:
 | You want… | Use |
 |---|---|
 | **CLI / `KaguraClient`** (terminal use, scripts, `KaguraAgent`) | `kagura auth login` — refresh happens automatically |
-| **Claude Code MCP** (Claude Code reads `.mcp.json`) | `kagura setup claude` with a long-lived API key from the web UI |
+| **Claude Code MCP** (Claude Code reads `.mcp.json`) | `kagura setup claude --profile <name>` — OAuth via the refresh-aware `kagura-mcp` proxy (recommended) |
+| **CI / service accounts** | `kagura setup claude` with a long-lived API key from the web UI |
 
-Claude Code's MCP client reads its config once at startup and does
-not refresh tokens — a refresh-aware MCP proxy daemon
-(`kagura-mcp`) is tracked as a follow-up so that `kagura auth login`
-can eventually power both paths from a single credentials file. For
-now, use the long-lived API key path for Claude Code and the OAuth
-path for everything else.
+Claude Code's MCP client reads its config once at startup and never
+refreshes tokens, so a short-lived OAuth `access_token` baked into
+`.mcp.json` would 401 silently after it expires. `kagura setup claude
+--profile <name>` instead points `.mcp.json` at the **`kagura-mcp`**
+stdio proxy, which owns `~/.kagura/credentials.json`, forwards every
+MCP request to the server, and injects an always-fresh bearer token —
+so the same `kagura auth login` credentials power both the CLI and
+Claude Code. Use the long-lived API-key path only for CI / service
+accounts, where a static token is preferable.
 
 Credential resolution order when `KaguraClient()` is called with no
 arguments: `KAGURA_API_KEY` env (CI / service accounts always win) →
@@ -377,11 +381,26 @@ Provider configuration (env vars, picked up automatically via `litellm`):
 
 ## Claude Code Integration
 
-Use Kagura Memory as an MCP server in Claude Code:
+Wire Kagura Memory into Claude Code as an MCP server. **Recommended: OAuth via
+the refresh-aware `kagura-mcp` proxy** — log in once, then `setup claude` writes
+the stdio `.mcp.json` form and tokens refresh automatically:
 
 ```bash
-cp .mcp.json.example .mcp.json
-# Edit .mcp.json — set workspace_id and API key
+kagura auth login --profile default        # one-time OAuth device flow
+kagura setup claude --profile default      # writes .mcp.json → kagura-mcp stdio proxy
+```
+
+This writes a `.mcp.json` that launches `kagura-mcp` as the MCP server (no secret
+in the file), plus `.claude/` hooks and `/kagura-recall` · `/kagura-remember`
+skills. Check the active mode any time with `kagura auth status` (it reports
+`refresh-aware` vs `legacy static API-key token` for the `.mcp.json` in the
+current directory).
+
+**CI / service accounts** — use a long-lived API key instead (static token, no
+refresh needed):
+
+```bash
+kagura setup claude --api-key kagura_xxx --mcp-url https://memory.kagura-ai.com/mcp
 ```
 
 Or use the CLI directly:
