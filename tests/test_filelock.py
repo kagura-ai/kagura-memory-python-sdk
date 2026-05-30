@@ -11,8 +11,11 @@ from pathlib import Path
 
 import pytest
 
-import kagura_memory._filelock as fl
 from kagura_memory._filelock import _lock_path, async_file_lock, file_lock
+
+# Module path for monkeypatching module-level lock constants (string-target form
+# so we don't also `import ... as fl`, keeping a single import style).
+_FL = "kagura_memory._filelock"
 
 _POSIX_ONLY = pytest.mark.skipif(
     sys.platform == "win32", reason="POSIX fcntl lock; Windows is a no-op"
@@ -162,7 +165,7 @@ def test_msvcrt_backend_retries_on_contention(tmp_path: Path, monkeypatch: pytes
     """A busy lock (LK_NBLCK raising OSError) is retried until it succeeds."""
     fake = _FakeMsvcrt(fail_nblck_times=2)
     _force_msvcrt(monkeypatch, fake)
-    monkeypatch.setattr(fl, "_LOCK_RETRY_SEC", 0)  # don't actually sleep
+    monkeypatch.setattr(f"{_FL}._LOCK_RETRY_SEC", 0)  # don't actually sleep
 
     target = tmp_path / "credentials.json"
     with file_lock(target, exclusive=True):
@@ -178,8 +181,8 @@ def test_msvcrt_backend_times_out_on_stuck_lock(tmp_path: Path, monkeypatch: pyt
     """A permanently-busy msvcrt lock raises TimeoutError instead of spinning forever."""
     fake = _FakeMsvcrt(fail_nblck_times=10_000)  # never succeeds
     _force_msvcrt(monkeypatch, fake)
-    monkeypatch.setattr(fl, "_LOCK_RETRY_SEC", 0)
-    monkeypatch.setattr(fl, "_LOCK_ACQUIRE_TIMEOUT_SEC", 0.0)  # trip the deadline at once
+    monkeypatch.setattr(f"{_FL}._LOCK_RETRY_SEC", 0)
+    monkeypatch.setattr(f"{_FL}._LOCK_ACQUIRE_TIMEOUT_SEC", 0.0)  # trip the deadline at once
 
     target = tmp_path / "credentials.json"
     with pytest.raises(TimeoutError):
@@ -318,8 +321,8 @@ async def test_async_file_lock_times_out_on_held_lock(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """A contended async acquire raises TimeoutError once the deadline passes."""
-    monkeypatch.setattr(fl, "_LOCK_RETRY_SEC", 0)
-    monkeypatch.setattr(fl, "_LOCK_ACQUIRE_TIMEOUT_SEC", 0.0)  # trip immediately
+    monkeypatch.setattr(f"{_FL}._LOCK_RETRY_SEC", 0)
+    monkeypatch.setattr(f"{_FL}._LOCK_ACQUIRE_TIMEOUT_SEC", 0.0)  # trip immediately
 
     target = tmp_path / "credentials.json"
     async with async_file_lock(target, exclusive=True):

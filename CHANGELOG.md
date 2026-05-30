@@ -51,8 +51,9 @@ See [GitHub Releases](https://github.com/kagura-ai/kagura-memory-python-sdk/rele
   `flock`'s blocking acquire without `msvcrt`'s 10-second `LK_LOCK` timeout.
 - **Cross-process refresh dedup over the network** (#158): concurrent
   `kagura-mcp` proxies no longer each hit `/oauth2/token`. `KaguraOAuth`'s
-  refresh now acquires the cross-process advisory lock (off the event loop, in
-  a worker thread, so other coroutines keep running), re-reads the on-disk
+  refresh now acquires the cross-process advisory lock with non-blocking
+  attempts on the event loop (so other coroutines keep running and a
+  cancellation while waiting cannot leak the lock), re-reads the on-disk
   token, and **skips the network round-trip when another process already
   rotated it** — adopting the on-disk token instead. The skew-driven path and
   the 401-retry path use different "already rotated?" predicates: the skew path

@@ -552,9 +552,11 @@ class KaguraOAuth(httpx.Auth):
     async def _refresh_locked(self, *, expected_stale_token: str | None = None) -> None:
         """Refresh ``/oauth2/token`` once across all processes. Caller holds the in-process lock.
 
-        The cross-process advisory lock is acquired off the event loop (in a
-        worker thread) so other coroutines — e.g. concurrent ``kagura-mcp``
-        proxy forwards — keep running while we wait. After acquiring it we
+        The cross-process advisory lock is acquired with non-blocking attempts
+        on the event loop (``asyncio.sleep`` between tries — see
+        :func:`async_file_lock`), so other coroutines — e.g. concurrent
+        ``kagura-mcp`` proxy forwards — keep running while we wait, and a
+        cancellation while waiting holds nothing. After acquiring it we
         re-read the credentials from disk and **skip the network call when
         another process already rotated the token**, so only one proxy among
         many hits ``/oauth2/token`` per cycle (dedup over the network, not just
