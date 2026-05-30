@@ -2,7 +2,7 @@
 
 See [GitHub Releases](https://github.com/kagura-ai/kagura-memory-python-sdk/releases) for all release notes.
 
-## Unreleased
+## v0.25.0
 
 ### Added
 
