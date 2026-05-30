@@ -688,6 +688,39 @@ async def test_dry_run_audio_does_not_call_provider(tmp_path: Path) -> None:
     await client.close()
 
 
+def test_audio_inline_oversize_none_for_small_input() -> None:
+    assert _audio.audio_inline_oversize_message(b"x" * 100) is None
+
+
+def test_audio_inline_oversize_caps_at_provider_limit() -> None:
+    # Raising max_bytes_audio above Gemini's hard inline limit must NOT let an
+    # oversized request through — the effective cap is bounded by the provider.
+    big = b"\x00" * (16 * 1024 * 1024)  # ~21.8 MB base64, over the 20 MB hard cap
+    assert _audio.audio_inline_oversize_message(big, max_bytes_audio=100 * 1024 * 1024) is not None
+
+
+@pytest.mark.asyncio
+async def test_dry_run_audio_oversize_reports_extract_error(tmp_path: Path) -> None:
+    # The dry-run audio branch applies the same size preflight as real ingest,
+    # so an oversized file is a step="extract" error, not a "success" estimate.
+    from kagura_memory.ingest import FileIngestor
+    from kagura_memory.ingest import ingestor as ingestor_mod
+
+    audio_file = tmp_path / "talk.mp3"
+    audio_file.write_bytes(b"ID3\x04\x00fakeaudiobytes")
+    client = _make_client()
+    ing = FileIngestor(client=client, text_provider=_FakeProvider(), vision_provider=None)
+
+    with patch.object(
+        ingestor_mod, "audio_inline_oversize_message", return_value="too big — ffmpeg follow-up"
+    ):
+        result = await ing.estimate_cost(str(audio_file))
+
+    assert result.is_dry_run is True
+    assert any(e.step == "extract" and "too big" in e.message for e in result.errors)
+    await client.close()
+
+
 # ---------------------------------------------------------------------------
 # Integration (default-skipped) — real Gemini transcription
 # ---------------------------------------------------------------------------

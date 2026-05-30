@@ -26,6 +26,7 @@ from ..models import CostBreakdown, FileObject, IngestErrorRecord, IngestResult
 from ._audio import (
     AudioUsage,
     audio_format_label,
+    audio_inline_oversize_message,
     detect_audio_mime,
     transcribe_audio,
 )
@@ -344,6 +345,24 @@ class FileIngestor:
             content_type=fetched.content_type,
         )
         if audio_mime is not None:
+            # Mirror the transcription path's size preflight: a file the real
+            # ingest would reject as oversized must surface here as a
+            # step="extract" error, not a misleading "success" estimate.
+            oversize = audio_inline_oversize_message(fetched.body)
+            if oversize is not None:
+                return IngestResult(
+                    is_dry_run=True,
+                    source_uri=fetched.source_uri,
+                    source_type=fetched.source_type,
+                    cost=CostBreakdown(is_estimate=True),
+                    errors=[
+                        IngestErrorRecord(
+                            step="extract",
+                            message=oversize,
+                            exception_type="KaguraIngestError",
+                        )
+                    ],
+                )
             return IngestResult(
                 is_dry_run=True,
                 source_uri=fetched.source_uri,

@@ -136,6 +136,41 @@ class _Segment:
     text: str
 
 
+def audio_inline_oversize_message(
+    body: bytes, *, max_bytes_audio: int = _DEFAULT_MAX_BYTES_AUDIO
+) -> str | None:
+    """Return an oversize error message if ``body`` won't fit Gemini's inline request.
+
+    The request carries the media as a base64 data URL, so the ENCODED size
+    (~33% larger than raw) is what must fit the inline-request limit. The
+    effective cap is the SMALLER of the caller's ``max_bytes_audio`` (translated
+    to its encoded equivalent) and Gemini's hard :data:`_GEMINI_INLINE_LIMIT_BYTES`
+    — a caller raising ``max_bytes_audio`` above the provider limit must NOT be
+    able to send a request the provider will reject. Shared by
+    :func:`transcribe_audio` and the dry-run preflight in the orchestrator so
+    both agree on what counts as oversized.
+
+    Args:
+        body: Raw media bytes.
+        max_bytes_audio: Caller's raw-size cap (default ~15 MB).
+
+    Returns:
+        An actionable message when oversized (pointing at the ffmpeg follow-up),
+        or ``None`` when the input fits.
+    """
+    raw_len = len(body)
+    encoded_len = ((raw_len + 2) // 3) * 4
+    inline_limit = min(max_bytes_audio * 4 // 3, _GEMINI_INLINE_LIMIT_BYTES)
+    if encoded_len > inline_limit:
+        return (
+            f"audio/video file is {raw_len} bytes raw ({encoded_len} bytes once "
+            f"base64-encoded), over Gemini's {inline_limit}-byte inline-request "
+            "limit. Splitting large media with ffmpeg is a planned follow-up; "
+            "for now transcribe a shorter clip."
+        )
+    return None
+
+
 def is_audio_mime(mime: str | None) -> bool:
     """Return True if ``mime`` is an audio/video type this module transcribes."""
     if not mime:
@@ -275,23 +310,9 @@ async def transcribe_audio(
             malformed/truncated transcript (after one retry), or a provider
             call failure.
     """
-    # The request carries the media as a base64 data URL, so the wire payload —
-    # not the raw bytes — is what must fit Gemini's inline-request limit. Cap on
-    # the ENCODED size: base64 length is ceil(raw / 3) * 4, ~33% larger than raw.
-    # A file just under the raw 20 MB figure would otherwise become ~27 MB on the
-    # wire and exceed the actual inline limit. ``max_bytes_audio`` is the raw cap;
-    # we translate it to the equivalent inline limit (raw * 4 / 3) and check the
-    # real encoded length against it.
-    raw_len = len(body)
-    encoded_len = ((raw_len + 2) // 3) * 4
-    inline_limit = max_bytes_audio * 4 // 3
-    if encoded_len > inline_limit:
-        raise KaguraIngestError(
-            f"audio/video file is {raw_len} bytes raw ({encoded_len} bytes once "
-            f"base64-encoded), over Gemini's {inline_limit}-byte inline-request "
-            "limit. Splitting large media with ffmpeg is a planned follow-up; "
-            "for now transcribe a shorter clip."
-        )
+    oversize = audio_inline_oversize_message(body, max_bytes_audio=max_bytes_audio)
+    if oversize is not None:
+        raise KaguraIngestError(oversize)
 
     litellm = _load_litellm()
     encoded = base64.b64encode(body).decode("ascii")
@@ -531,6 +552,7 @@ def _format_timestamp(seconds: float) -> str:
 __all__ = [
     "AudioUsage",
     "audio_format_label",
+    "audio_inline_oversize_message",
     "detect_audio_mime",
     "is_audio_mime",
     "transcribe_audio",
