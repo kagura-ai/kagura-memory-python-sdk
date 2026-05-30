@@ -540,8 +540,13 @@ class KaguraOAuth(httpx.Auth):
         a single ``/oauth2/token`` call. Cross-process dedup is handled in
         :meth:`_refresh_locked` via the rejected-token identity check.
         """
+        # Capture the rejected token BEFORE the in-process lock: if a peer
+        # coroutine already rotated it while we waited on the lock, we must
+        # still compare against the token that actually got the 401, otherwise
+        # the rotated token (== current in-memory) would compare equal to disk
+        # and force a redundant /oauth2/token call instead of coalescing.
+        rejected_token = self._state.credentials.access_token
         async with self._state.lock:
-            rejected_token = self._state.credentials.access_token
             await self._refresh_locked(expected_stale_token=rejected_token)
 
     async def _refresh_locked(self, *, expected_stale_token: str | None = None) -> None:
@@ -564,19 +569,15 @@ class KaguraOAuth(httpx.Auth):
                 token means nobody has rotated yet, so this process must refresh
                 (a 401 is independent of ``expires_at``).
         """
-        from .._filelock import file_lock
+        from .._filelock import async_file_lock
 
         path = self._state.path
         profile = self._state.profile_name
-        lock_cm = file_lock(path, exclusive=True)
-        # Block for the cross-process lock in a worker thread: holding the
-        # blocking acquire on the event loop would stall every other coroutine
-        # (the proxy multiplexes many MCP forwards on one loop). Release is
-        # synchronous and non-blocking (LOCK_UN / os.close), so it must NOT be
-        # offloaded — doing so could starve on a saturated executor (every
-        # worker blocked acquiring this same lock) and deadlock the release.
-        await asyncio.to_thread(lock_cm.__enter__)
-        try:
+        # async_file_lock acquires the cross-process lock with non-blocking
+        # attempts on the event loop (asyncio.sleep between tries), so it never
+        # stalls the loop and is cancellation-safe — a cancellation while
+        # waiting holds nothing, and the body is released in its own finally.
+        async with async_file_lock(path, exclusive=True):
             disk = load_credentials_file(path).get_profile(profile)
             if disk is not None and self._already_rotated(disk, expected_stale_token):
                 # Another process refreshed while we waited — adopt its token
@@ -586,8 +587,6 @@ class KaguraOAuth(httpx.Auth):
                 return
             base = disk if disk is not None else self._state.credentials
             await self._network_refresh_and_save(base, path, profile)
-        finally:
-            lock_cm.__exit__(None, None, None)
 
     def _already_rotated(self, disk: OAuthCredentials, expected_stale_token: str | None) -> bool:
         """Whether ``disk`` shows another process already produced a usable token."""

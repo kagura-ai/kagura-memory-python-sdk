@@ -645,11 +645,11 @@ async def test_refresh_dedup_negative_control_without_lock(
 
     import kagura_memory._filelock as fl
 
-    @contextlib.contextmanager
-    def noop_lock(target, *, exclusive=True):
+    @contextlib.asynccontextmanager
+    async def noop_lock(target, *, exclusive=True):
         yield
 
-    monkeypatch.setattr(fl, "file_lock", noop_lock)
+    monkeypatch.setattr(fl, "async_file_lock", noop_lock)
 
     reset_state_cache()
     path = tmp_path / "creds.json"

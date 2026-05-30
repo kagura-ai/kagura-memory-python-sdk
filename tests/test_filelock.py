@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import builtins
+import os
 import sys
 import time
 from pathlib import Path
@@ -10,7 +12,7 @@ from pathlib import Path
 import pytest
 
 import kagura_memory._filelock as fl
-from kagura_memory._filelock import _lock_path, file_lock
+from kagura_memory._filelock import _lock_path, async_file_lock, file_lock
 
 _POSIX_ONLY = pytest.mark.skipif(
     sys.platform == "win32", reason="POSIX fcntl lock; Windows is a no-op"
@@ -99,9 +101,14 @@ class _FakeMsvcrt:
 
     def __init__(self, fail_nblck_times: int = 0) -> None:
         self.calls: list[tuple[int, int]] = []
+        self.offsets: list[int] = []
         self._fail = fail_nblck_times
 
     def locking(self, fd: int, mode: int, nbytes: int) -> None:
+        # Record the fd position so the test can assert the caller seeked to 0
+        # (real msvcrt locks a byte range relative to the current position —
+        # dropping the lseek would lock/unlock the wrong region on Windows).
+        self.offsets.append(os.lseek(fd, 0, os.SEEK_CUR))
         self.calls.append((mode, nbytes))
         if mode == self.LK_NBLCK and self._fail > 0:
             self._fail -= 1
@@ -134,6 +141,8 @@ def test_msvcrt_backend_locks_and_unlocks(tmp_path: Path, monkeypatch: pytest.Mo
     modes = [mode for mode, _ in fake.calls]
     assert modes == [fake.LK_NBLCK, fake.LK_UNLCK]
     assert all(nbytes == 1 for _, nbytes in fake.calls)
+    # Both lock and unlock must operate at offset 0 (byte 0 of the lock file).
+    assert fake.offsets == [0, 0]
 
 
 def test_msvcrt_backend_treats_shared_as_exclusive(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -153,7 +162,7 @@ def test_msvcrt_backend_retries_on_contention(tmp_path: Path, monkeypatch: pytes
     """A busy lock (LK_NBLCK raising OSError) is retried until it succeeds."""
     fake = _FakeMsvcrt(fail_nblck_times=2)
     _force_msvcrt(monkeypatch, fake)
-    monkeypatch.setattr(fl, "_MSVCRT_RETRY_SEC", 0)  # don't actually sleep
+    monkeypatch.setattr(fl, "_LOCK_RETRY_SEC", 0)  # don't actually sleep
 
     target = tmp_path / "credentials.json"
     with file_lock(target, exclusive=True):
@@ -163,6 +172,19 @@ def test_msvcrt_backend_retries_on_contention(tmp_path: Path, monkeypatch: pytes
     nblck = [m for m, _ in fake.calls if m == fake.LK_NBLCK]
     assert len(nblck) == 3
     assert fake.calls[-1][0] == fake.LK_UNLCK
+
+
+def test_msvcrt_backend_times_out_on_stuck_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """A permanently-busy msvcrt lock raises TimeoutError instead of spinning forever."""
+    fake = _FakeMsvcrt(fail_nblck_times=10_000)  # never succeeds
+    _force_msvcrt(monkeypatch, fake)
+    monkeypatch.setattr(fl, "_LOCK_RETRY_SEC", 0)
+    monkeypatch.setattr(fl, "_LOCK_ACQUIRE_TIMEOUT_SEC", 0.0)  # trip the deadline at once
+
+    target = tmp_path / "credentials.json"
+    with pytest.raises(TimeoutError):
+        with file_lock(target, exclusive=True):
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -186,24 +208,32 @@ def _contend_worker(cred_path: str, counter_path: str, barrier, iters: int) -> N
             counter.write_text(str(value + 1))
 
 
-@_POSIX_ONLY
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux"),
+    reason="uses mp 'fork' start method; fork is unsafe/non-default on macOS, absent on Windows",
+)
 def test_file_lock_serializes_across_processes(tmp_path: Path):
     """N processes doing read-modify-write under the lock lose zero updates.
 
     A deterministic count==N*iters proves cross-process mutual exclusion. The
-    matching negative control (no lock → lost updates) is the deterministic
-    in-process ``test_refresh_dedup_negative_control_without_lock`` in
-    tests/test_auth_credentials.py — a subprocess negative control would be
+    contention (high iteration count + a held read-modify-write window) is sized
+    so that WITHOUT the lock — e.g. if file_lock regressed to the no-op backend —
+    lost updates are near-certain and the count would fall short. The matching
+    deterministic negative control (no lock → both refresh) is the in-process
+    ``test_refresh_dedup_negative_control_without_lock`` in
+    tests/test_auth_credentials.py; a subprocess negative control would be
     inherently racy, which we avoid (flaky tests erode trust).
     """
     import multiprocessing as mp
 
+    # 'fork' lets the worker inherit the Barrier (a spawn context cannot pickle
+    # it as a plain arg). Gated to Linux above where fork is the safe default.
     ctx = mp.get_context("fork")
     cred = tmp_path / "credentials.json"
     counter = tmp_path / "counter.txt"
     counter.write_text("0")
 
-    n_procs, iters = 4, 5
+    n_procs, iters = 4, 25
     barrier = ctx.Barrier(n_procs)
     procs = [
         ctx.Process(target=_contend_worker, args=(str(cred), str(counter), barrier, iters))
@@ -220,3 +250,80 @@ def test_file_lock_serializes_across_processes(tmp_path: Path):
         assert p.exitcode == 0
 
     assert int(counter.read_text()) == n_procs * iters
+
+
+# ---------------------------------------------------------------------------
+# async_file_lock — event-loop-friendly, cancellation-safe (#158)
+# ---------------------------------------------------------------------------
+
+
+@_POSIX_ONLY
+@pytest.mark.asyncio
+async def test_async_file_lock_acquires_and_releases(tmp_path: Path):
+    """The async lock creates the lock file and releases so it can be re-taken."""
+    target = tmp_path / "credentials.json"
+    async with async_file_lock(target, exclusive=True):
+        assert (tmp_path / "credentials.json.lock").exists()
+    # A second acquire after release must not hang.
+    async with async_file_lock(target, exclusive=True):
+        pass
+
+
+@_POSIX_ONLY
+@pytest.mark.asyncio
+async def test_async_file_lock_waits_and_is_cancellation_safe(tmp_path: Path):
+    """A waiter blocked on a held lock can be cancelled WITHOUT leaking the lock.
+
+    This is the failure mode the async lock exists to prevent: offloading a
+    blocking ``__enter__`` to a worker thread would let the thread win the lock
+    after the awaiting task is cancelled, leaking it forever. Here the waiter
+    only ever awaits ``asyncio.sleep`` while not holding the lock, so cancelling
+    it holds nothing.
+    """
+    target = tmp_path / "credentials.json"
+    release = asyncio.Event()
+    acquired_b = False
+
+    async def holder() -> None:
+        async with async_file_lock(target, exclusive=True):
+            await release.wait()
+
+    async def waiter() -> None:
+        nonlocal acquired_b
+        async with async_file_lock(target, exclusive=True):
+            acquired_b = True
+
+    h = asyncio.create_task(holder())
+    await asyncio.sleep(0.05)  # let the holder acquire first
+    w = asyncio.create_task(waiter())
+    await asyncio.sleep(0.1)  # waiter polls but cannot acquire
+    assert not acquired_b, "waiter must not acquire while the holder holds the lock"
+
+    w.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await w
+
+    # If the cancelled waiter had leaked the lock, this fresh acquire would hang
+    # (and the join-free test would time out). Release the holder, then prove
+    # the lock is cleanly re-acquirable.
+    release.set()
+    await h
+    async with async_file_lock(target, exclusive=True):
+        pass
+
+
+@_POSIX_ONLY
+@pytest.mark.asyncio
+async def test_async_file_lock_times_out_on_held_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A contended async acquire raises TimeoutError once the deadline passes."""
+    monkeypatch.setattr(fl, "_LOCK_RETRY_SEC", 0)
+    monkeypatch.setattr(fl, "_LOCK_ACQUIRE_TIMEOUT_SEC", 0.0)  # trip immediately
+
+    target = tmp_path / "credentials.json"
+    async with async_file_lock(target, exclusive=True):
+        # A second acquire on a different fd of the same already-held lock.
+        with pytest.raises(TimeoutError):
+            async with async_file_lock(target, exclusive=True):
+                pass
