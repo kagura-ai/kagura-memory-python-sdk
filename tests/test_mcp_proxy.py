@@ -203,3 +203,94 @@ async def test_amain_exits_1_when_no_profile(monkeypatch: pytest.MonkeyPatch, ca
     err = capsys.readouterr().err
     assert "kagura auth login" in err
     assert "--profile default" in err
+
+
+def _build_state(tmp_path):
+    """A real _SharedCredentialsState backed by a tmp credentials file."""
+    from datetime import UTC, datetime, timedelta
+
+    from kagura_memory.auth.credentials import (
+        CredentialsFile,
+        OAuthCredentials,
+        get_shared_state,
+        reset_state_cache,
+        save_credentials_file,
+    )
+
+    reset_state_cache()
+    path = tmp_path / "creds.json"
+    creds = OAuthCredentials(
+        server="https://test.example.com",
+        mcp_url="https://test.example.com/mcp",
+        client_id="kagura-cli",
+        access_token="atok",
+        refresh_token="rtok",
+        token_type="Bearer",
+        expires_at=datetime.now(UTC) + timedelta(hours=1),
+        scope="memory:read",
+        workspace_id="ws-1",
+        workspace_name="ws",
+        user_email="u@example.com",
+        issued_at=datetime.now(UTC),
+    )
+    cf = CredentialsFile()
+    cf.set_profile("default", creds)
+    save_credentials_file(cf, path)
+    return get_shared_state(path)
+
+
+@pytest.mark.asyncio
+async def test_amain_happy_path_runs_serve_until_eof(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    """_amain wires a real httpx client + serve loop; immediate stdin EOF → clean exit 0."""
+    import io
+
+    state = _build_state(tmp_path)
+    monkeypatch.setattr(mcp_proxy, "get_shared_state", lambda profile=None: state)
+    # Empty stdin → readline() returns "" → serve() exits immediately, no upstream call.
+    monkeypatch.setattr("sys.stdin", io.StringIO(""))
+    rc = await mcp_proxy._amain([])
+    assert rc == 0
+
+
+def test_main_returns_amain_exit_code(monkeypatch: pytest.MonkeyPatch):
+    """main() drives asyncio.run(_amain(...)) and returns its exit code."""
+    monkeypatch.setattr(mcp_proxy, "get_shared_state", lambda profile=None: None)
+    assert mcp_proxy.main(["--profile", "x"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_amain_forwards_one_request_and_writes_response(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+):
+    """End-to-end: _amain reads one stdin line, forwards via the real client, writes the reply."""
+    import io
+
+    state = _build_state(tmp_path)
+    monkeypatch.setattr(mcp_proxy, "get_shared_state", lambda profile=None: state)
+    monkeypatch.setattr(
+        "sys.stdin",
+        io.StringIO('{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}\n'),
+    )
+    out = io.StringIO()
+    monkeypatch.setattr("sys.stdout", out)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"jsonrpc": "2.0", "id": 1, "result": {"tools": []}},
+            headers={"mcp-session-id": "s1"},
+        )
+
+    real_async_client = httpx.AsyncClient
+
+    def fake_async_client(**kwargs: Any) -> httpx.AsyncClient:
+        # Inject a MockTransport so no real network call is made; the real
+        # KaguraOAuth auth flow still runs (token is fresh, so it no-ops).
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return real_async_client(**kwargs)
+
+    monkeypatch.setattr(mcp_proxy.httpx, "AsyncClient", fake_async_client)
+
+    rc = await mcp_proxy._amain([])
+    assert rc == 0
+    assert json.loads(out.getvalue().strip())["result"] == {"tools": []}
