@@ -56,7 +56,11 @@ _OEMBED_URL = "https://www.youtube.com/oembed"
 
 
 def _normalize_host(host: str | None) -> str:
-    """Lowercase a hostname, stripping a leading ``www.`` for comparison."""
+    """Lowercase a hostname for comparison against :data:`_YOUTUBE_HOSTS`.
+
+    The host set already lists both the apex and ``www.`` forms, so no prefix
+    stripping is needed here.
+    """
     return (host or "").lower()
 
 
@@ -260,10 +264,16 @@ def _build_markdown(title: str, author: str | None, windows: list[tuple[float, s
         lines.append("")
     markdown = "\n".join(lines).rstrip() + "\n"
 
-    if len(markdown) > _MAX_TOTAL_TEXT_CHARS:
+    # Cap on encoded BYTES, not characters: TextExtractor bounds its input at
+    # _MAX_TOTAL_TEXT_CHARS *bytes*, so a long multibyte (e.g. Japanese)
+    # transcript capped only by character count could still overflow it. Slice
+    # the UTF-8 bytes and decode with errors="ignore" to drop a partial
+    # trailing multibyte sequence.
+    if len(markdown.encode("utf-8")) > _MAX_TOTAL_TEXT_CHARS:
         marker = "\n\n[transcript truncated: exceeded length cap]\n"
-        keep = _MAX_TOTAL_TEXT_CHARS - len(marker)
-        markdown = markdown[: max(0, keep)] + marker
+        budget = _MAX_TOTAL_TEXT_CHARS - len(marker.encode("utf-8"))
+        truncated = markdown.encode("utf-8")[: max(0, budget)].decode("utf-8", errors="ignore")
+        markdown = truncated + marker
     return markdown
 
 
