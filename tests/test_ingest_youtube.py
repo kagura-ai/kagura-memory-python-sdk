@@ -297,6 +297,30 @@ async def test_fetch_youtube_oversize_body_raises() -> None:
 
 
 @pytest.mark.asyncio
+async def test_fetch_youtube_transcript_timeout_raises() -> None:
+    """A blocking transcript fetch that exceeds read_timeout raises KaguraFetchError."""
+    url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+
+    async def _never(awaitable: Any, *args: Any, **kwargs: Any) -> Any:
+        # Close the to_thread coroutine we were handed so it isn't left
+        # un-awaited (avoids a RuntimeWarning), then simulate the timeout.
+        close = getattr(awaitable, "close", None)
+        if close is not None:
+            close()
+        raise TimeoutError
+
+    # Patch asyncio.wait_for to simulate the to_thread call timing out, so the
+    # test stays fast and deterministic (no real hang).
+    with patch.object(_youtube.asyncio, "wait_for", new=_never), _patch_oembed():
+        with pytest.raises(KaguraFetchError) as ei:
+            await fetch_youtube(url, max_bytes=10_000_000, read_timeout=5.0)
+    msg = str(ei.value).lower()
+    assert "timed out" in msg
+    assert "5.0" in str(ei.value)
+    assert ei.value.url == url
+
+
+@pytest.mark.asyncio
 async def test_fetch_youtube_video_unavailable() -> None:
     from youtube_transcript_api import VideoUnavailable
 
@@ -423,6 +447,36 @@ def test_segment_windows_skips_empty_snippets() -> None:
     assert windows == [(1.0, "real text")]
 
 
+def test_segment_windows_closes_before_overrunning_char_cap() -> None:
+    """A new window opens when the next snippet WOULD push past _WINDOW_CHARS.
+
+    The close check looks ahead at the snippet about to be added, so no window
+    overruns _WINDOW_CHARS by a whole snippet.
+    """
+    from kagura_memory.ingest._youtube import _WINDOW_CHARS
+
+    half = "a" * (_WINDOW_CHARS // 2 + 50)  # two of these would exceed the cap
+    snippets = [
+        _snippet(half, 0.0, 1.0),
+        _snippet(half, 1.0, 1.0),  # adding this would overrun -> opens window 2
+    ]
+    windows = _youtube._segment_windows(snippets)
+    assert len(windows) == 2
+    # Each window holds exactly one snippet, so neither overruns the cap.
+    assert len(windows[0][1]) <= _WINDOW_CHARS
+    assert len(windows[1][1]) <= _WINDOW_CHARS
+    assert windows[1][0] == 1.0  # window 2 anchored at the 2nd snippet's start
+
+
+def test_segment_windows_oversized_single_snippet_forms_own_window() -> None:
+    """A single snippet larger than _WINDOW_CHARS still forms one window (no loop)."""
+    from kagura_memory.ingest._youtube import _WINDOW_CHARS
+
+    giant = "z" * (_WINDOW_CHARS * 3)
+    windows = _youtube._segment_windows([_snippet(giant, 0.0, 1.0)])
+    assert windows == [(0.0, giant)]
+
+
 @pytest.mark.asyncio
 async def test_resolve_transcript_first_available_fallback() -> None:
     """When no manual/generated transcript matches, the first available wins."""
@@ -517,6 +571,38 @@ async def test_fetch_oembed_returns_title_and_author() -> None:
         )
     assert title == "My Video"
     assert author == "Some Channel"
+
+
+@pytest.mark.asyncio
+async def test_fetch_oembed_threads_connect_timeout() -> None:
+    """The caller's connect_timeout reaches the httpx.Timeout connect field."""
+    import httpx
+
+    captured: dict[str, Any] = {}
+
+    class _FailClient:
+        async def __aenter__(self) -> _FailClient:
+            return self
+
+        async def __aexit__(self, *exc: Any) -> None:
+            return None
+
+        async def get(self, *args: Any, **kwargs: Any) -> Any:
+            raise httpx.ConnectError("boom")
+
+    def _make(*args: Any, **kwargs: Any) -> Any:
+        captured["timeout"] = kwargs.get("timeout")
+        return _FailClient()
+
+    with patch.object(httpx, "AsyncClient", new=_make):
+        await _youtube._fetch_oembed(
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            connect_timeout=3.5,
+            read_timeout=10.0,
+        )
+    timeout = captured["timeout"]
+    assert timeout.connect == 3.5
+    assert timeout.read == 10.0
 
 
 # --- Integration (default-skipped) ------------------------------------------

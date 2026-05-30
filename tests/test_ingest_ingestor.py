@@ -819,12 +819,15 @@ async def test_http_youtube_url_routed_when_allow_http_true() -> None:
         result = await ingestor._fetch(
             url,
             max_bytes=10_000_000,
-            connect_timeout=10.0,
+            connect_timeout=7.0,
             read_timeout=10.0,
             allow_http=True,
             allow_system_paths=False,
         )
     fake_fetch.assert_awaited_once()
+    # connect_timeout is threaded into the YouTube path (oEmbed connect bound).
+    assert fake_fetch.await_args is not None
+    assert fake_fetch.await_args.kwargs.get("connect_timeout") == 7.0
     assert result.source_uri == url
 
     await client.close()

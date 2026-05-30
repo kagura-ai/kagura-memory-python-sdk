@@ -45,6 +45,10 @@ _VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
 # Default caption languages, in descending priority.
 _DEFAULT_LANGUAGES: tuple[str, ...] = ("en",)
 
+# Fallback connect timeout (seconds) when the caller does not pass one, e.g.
+# unit tests that call fetch_youtube/_fetch_oembed directly.
+_DEFAULT_CONNECT_TIMEOUT: float = 10.0
+
 # Time-window segmentation: group caption snippets into windows of roughly this
 # duration OR this many characters, whichever boundary is hit first. Each window
 # becomes one ``## [mm:ss]`` Markdown section.
@@ -150,7 +154,12 @@ def _load_youtube_transcript_api() -> Any:
     return youtube_transcript_api
 
 
-async def _fetch_oembed(url: str, *, read_timeout: float) -> tuple[str | None, str | None]:
+async def _fetch_oembed(
+    url: str,
+    *,
+    connect_timeout: float = _DEFAULT_CONNECT_TIMEOUT,
+    read_timeout: float,
+) -> tuple[str | None, str | None]:
     """Fetch ``(title, author_name)`` from YouTube oEmbed; best-effort.
 
     A failure (network error, non-200, malformed JSON) returns
@@ -159,12 +168,14 @@ async def _fetch_oembed(url: str, *, read_timeout: float) -> tuple[str | None, s
 
     Args:
         url: The YouTube video URL.
+        connect_timeout: Per-request connect timeout in seconds (threaded from
+            the caller's ingest connect timeout).
         read_timeout: Per-request read timeout in seconds.
 
     Returns:
         A ``(title, author_name)`` tuple; either element may be ``None``.
     """
-    timeout = httpx.Timeout(connect=10.0, read=read_timeout, write=10.0, pool=10.0)
+    timeout = httpx.Timeout(connect=connect_timeout, read=read_timeout, write=10.0, pool=10.0)
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.get(_OEMBED_URL, params={"url": url, "format": "json"})
@@ -222,9 +233,14 @@ def _segment_windows(snippets: list[Any]) -> list[tuple[float, str]]:
         start = float(getattr(snippet, "start", 0.0))
         # Close the current window BEFORE adding a snippet that would push it
         # past either window boundary, so the new snippet opens a fresh window
-        # anchored at its own start time.
+        # anchored at its own start time. The char check looks ahead at the
+        # snippet about to be added (char_count + len(text)) rather than the
+        # already-accumulated count, so a window never overruns _WINDOW_CHARS by
+        # a whole snippet. ``char_count > 0`` guarantees we never flush an empty
+        # window, so a single oversized snippet still forms its own window.
         if window_start is not None and (
-            start - window_start >= _WINDOW_SECONDS or char_count >= _WINDOW_CHARS
+            start - window_start >= _WINDOW_SECONDS
+            or (char_count > 0 and char_count + len(text) > _WINDOW_CHARS)
         ):
             flush()
         if window_start is None:
@@ -250,8 +266,8 @@ def _build_markdown(title: str, author: str | None, windows: list[tuple[float, s
 
     Returns:
         The UTF-8 Markdown document as a ``str``, capped at
-        :data:`_MAX_TOTAL_TEXT_CHARS` characters (truncated with a marker if
-        the transcript would exceed the cap).
+        :data:`_MAX_TOTAL_TEXT_CHARS` UTF-8 encoded bytes (truncated with a
+        marker if the transcript would exceed the cap).
     """
     lines: list[str] = [f"# {title}", ""]
     if author:
@@ -375,6 +391,7 @@ async def fetch_youtube(
     *,
     max_bytes: int,
     read_timeout: float,
+    connect_timeout: float = _DEFAULT_CONNECT_TIMEOUT,
     languages: tuple[str, ...] | None = None,
 ) -> FetchResult:
     """Resolve a YouTube video URL to a Markdown transcript ``FetchResult``.
@@ -394,7 +411,11 @@ async def fetch_youtube(
             :data:`_MAX_TOTAL_TEXT_CHARS` bytes inside :func:`_build_markdown`
             (the ``TextExtractor`` input bound), so the effective limit is the
             smaller of the two.
-        read_timeout: Per-request read timeout (seconds) for the oEmbed call.
+        read_timeout: Per-request read timeout (seconds). Bounds both the
+            blocking transcript fetch (an overall ceiling on the to-thread
+            call) and the oEmbed read.
+        connect_timeout: Per-request connect timeout (seconds) for the oEmbed
+            call, threaded from the caller's ingest connect timeout.
         languages: Preferred caption languages, in descending priority.
             Defaults to ``("en",)``.
 
@@ -403,8 +424,9 @@ async def fetch_youtube(
         ``source_type="url"``, and ``source_uri=url``.
 
     Raises:
-        KaguraFetchError: For playlist/channel URLs and for caption-disabled,
-            unavailable, age-restricted, or otherwise unretrievable videos.
+        KaguraFetchError: For playlist/channel URLs, for caption-disabled,
+            unavailable, age-restricted, or otherwise unretrievable videos, and
+            when the blocking transcript request exceeds ``read_timeout``.
         KaguraIngestError: If ``youtube-transcript-api`` is not installed.
     """
     video_id = extract_video_id(url)
@@ -419,8 +441,24 @@ async def fetch_youtube(
     # Run the transcript fetch and the (best-effort) oEmbed fetch. Thread the
     # original ``url`` through so transcript-failure errors carry it (not the
     # bare video id) as their ``.url``.
-    snippets = await asyncio.to_thread(_fetch_transcript_sync, video_id, langs, url=url)
-    title, author = await _fetch_oembed(url, read_timeout=read_timeout)
+    #
+    # The transcript fetch is a blocking library call run in a worker thread; if
+    # YouTube stalls it can hang indefinitely. Bound it with ``read_timeout`` so
+    # the ingest fails fast (the worker thread is left to unwind on its own —
+    # ``asyncio.wait_for`` cannot cancel the underlying blocking call).
+    try:
+        snippets = await asyncio.wait_for(
+            asyncio.to_thread(_fetch_transcript_sync, video_id, langs, url=url),
+            timeout=read_timeout,
+        )
+    except TimeoutError as e:
+        raise KaguraFetchError(
+            f"transcript request timed out after {read_timeout}s",
+            url=url,
+        ) from e
+    title, author = await _fetch_oembed(
+        url, connect_timeout=connect_timeout, read_timeout=read_timeout
+    )
 
     windows = _segment_windows(snippets)
     markdown = _build_markdown(title or video_id, author, windows)
