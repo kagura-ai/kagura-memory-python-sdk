@@ -353,15 +353,23 @@ def update_profile(
 ) -> None:
     """Load, mutate one profile, and atomically save back.
 
-    The whole-file read-modify-write is intentionally simple — no file
-    locking. The in-process :class:`asyncio.Lock` held in
-    :class:`_SharedCredentialsState` serializes refreshes within a
-    single process; multi-process coordination is out of scope here.
+    The read-modify-write is serialized two ways: the in-process
+    :class:`asyncio.Lock` held in :class:`_SharedCredentialsState` coalesces
+    refreshes within a single process, and a cross-process advisory
+    :func:`kagura_memory._filelock.file_lock` (POSIX ``fcntl``; a no-op on
+    Windows pending a follow-up) wraps the load→set→save so concurrent writers
+    in *different* processes — e.g. multiple ``kagura-mcp`` proxy children —
+    cannot lose an update. The lock is on a sibling ``credentials.json.lock``,
+    not the file itself, so it never races the atomic ``os.replace`` in
+    :func:`save_credentials_file`.
     """
+    from .._filelock import file_lock
+
     path = _resolve_path(path)
-    cf = load_credentials_file(path)
-    cf.set_profile(profile_name, creds)
-    save_credentials_file(cf, path)
+    with file_lock(path, exclusive=True):
+        cf = load_credentials_file(path)
+        cf.set_profile(profile_name, creds)
+        save_credentials_file(cf, path)
 
 
 def delete_profile(
@@ -516,28 +524,44 @@ class KaguraOAuth(httpx.Auth):
         async with self._state.lock:
             if not self._state.credentials.is_expired(skew_seconds=REFRESH_SKEW_SEC):
                 return
+            await self._refresh_locked()
 
-            # Lazy import: ``device_flow`` may depend on this module's
-            # public types, so resolve only at refresh time to avoid a
-            # cycle at import time.
-            from .device_flow import make_oauth_client, refresh_access_token
+    async def force_refresh(self) -> None:
+        """Unconditionally refresh the access_token, ignoring the skew window.
 
-            async with make_oauth_client() as client:
-                token = await refresh_access_token(
-                    client,
-                    server=self._state.credentials.server,
-                    client_id=self._state.credentials.client_id,
-                    refresh_token=self._state.credentials.refresh_token,
-                )
-            # Pass ``None`` when the server omits ``refresh_token`` so the
-            # stored token is preserved. ``TokenResponse.refresh_token``
-            # defaults to ``""`` when absent, and passing the empty string
-            # to ``with_refreshed`` would overwrite a valid stored token
-            # with an empty one — breaking every subsequent refresh.
-            self._state.credentials = self._state.credentials.with_refreshed(
-                access_token=token.access_token,
-                refresh_token=token.refresh_token or None,
-                expires_at=token.expires_at,
-                scope=token.scope,
+        Used by the ``kagura-mcp`` proxy on an upstream ``401``: the token was
+        rejected server-side (rotated / revoked out-of-band) even though it is
+        not yet within the skew window, so :meth:`_maybe_refresh` would no-op.
+        The same lock serializes this with skew-driven refreshes, so a 401 on
+        one in-flight request and a skew refresh on another coalesce to a
+        single ``/oauth2/token`` call.
+        """
+        async with self._state.lock:
+            await self._refresh_locked()
+
+    async def _refresh_locked(self) -> None:
+        """Perform the ``/oauth2/token`` refresh and persist. Caller holds the lock."""
+        # Lazy import: ``device_flow`` may depend on this module's
+        # public types, so resolve only at refresh time to avoid a
+        # cycle at import time.
+        from .device_flow import make_oauth_client, refresh_access_token
+
+        async with make_oauth_client() as client:
+            token = await refresh_access_token(
+                client,
+                server=self._state.credentials.server,
+                client_id=self._state.credentials.client_id,
+                refresh_token=self._state.credentials.refresh_token,
             )
-            update_profile(self._state.profile_name, self._state.credentials, self._state.path)
+        # Pass ``None`` when the server omits ``refresh_token`` so the
+        # stored token is preserved. ``TokenResponse.refresh_token``
+        # defaults to ``""`` when absent, and passing the empty string
+        # to ``with_refreshed`` would overwrite a valid stored token
+        # with an empty one — breaking every subsequent refresh.
+        self._state.credentials = self._state.credentials.with_refreshed(
+            access_token=token.access_token,
+            refresh_token=token.refresh_token or None,
+            expires_at=token.expires_at,
+            scope=token.scope,
+        )
+        update_profile(self._state.profile_name, self._state.credentials, self._state.path)

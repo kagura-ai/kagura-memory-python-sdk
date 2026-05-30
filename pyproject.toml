@@ -113,6 +113,7 @@ ingest-all = [
 
 [project.scripts]
 kagura = "kagura_memory.cli:main"
+kagura-mcp = "kagura_memory.mcp_proxy:main"
 
 [project.urls]
 Homepage = "https://github.com/kagura-ai/kagura-memory-python-sdk"
