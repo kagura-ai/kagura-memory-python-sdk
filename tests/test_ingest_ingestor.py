@@ -761,4 +761,70 @@ async def test_youtube_missing_dependency_surfaces_as_fetch_error() -> None:
 
     await client.close()
 
+
+@pytest.mark.asyncio
+async def test_http_youtube_url_not_routed_when_allow_http_false() -> None:
+    """An http:// YouTube URL with allow_http=False bypasses fetch_youtube.
+
+    is_youtube_url() is host-based and true for http:// too. The _fetch gate
+    must NOT route such a URL to the transcript path; it falls through to the
+    byte Fetcher, which raises the canonical 'http:// is disabled' error —
+    keeping the allow_http contract consistent across source types.
+    """
+    from kagura_memory.exceptions import KaguraFetchError
+
+    client = _make_client()
+    provider = FakeProvider()
+    ingestor = FileIngestor(client=client, text_provider=provider)
+
+    url = "http://www.youtube.com/watch?v=dQw4w9WgXcQ"
+    with patch("kagura_memory.ingest.ingestor.fetch_youtube", new_callable=AsyncMock) as fake_fetch:
+        with pytest.raises(KaguraFetchError) as ei:
+            await ingestor._fetch(
+                url,
+                max_bytes=10_000_000,
+                connect_timeout=10.0,
+                read_timeout=10.0,
+                allow_http=False,
+                allow_system_paths=False,
+            )
+    fake_fetch.assert_not_called()
+    assert "http" in str(ei.value).lower()
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_http_youtube_url_routed_when_allow_http_true() -> None:
+    """An http:// YouTube URL with allow_http=True DOES route to fetch_youtube."""
+    from kagura_memory.ingest.fetcher import FetchResult
+
+    client = _make_client()
+    provider = FakeProvider()
+    ingestor = FileIngestor(client=client, text_provider=provider)
+
+    url = "http://www.youtube.com/watch?v=dQw4w9WgXcQ"
+    md = b"# Test\n\n## [00:00]\n\nhi\n"
+    fake_fetch = AsyncMock(
+        return_value=FetchResult(
+            body=md,
+            content_type="text/markdown",
+            source_uri=url,
+            source_type="url",
+            final_url=url,
+            bytes_read=len(md),
+        )
+    )
+    with patch("kagura_memory.ingest.ingestor.fetch_youtube", new=fake_fetch):
+        result = await ingestor._fetch(
+            url,
+            max_bytes=10_000_000,
+            connect_timeout=10.0,
+            read_timeout=10.0,
+            allow_http=True,
+            allow_system_paths=False,
+        )
+    fake_fetch.assert_awaited_once()
+    assert result.source_uri == url
+
     await client.close()

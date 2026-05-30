@@ -308,7 +308,7 @@ def _resolve_transcript(transcript_list: Any, languages: tuple[str, ...]) -> Any
     raise no_transcript.__new__(no_transcript)
 
 
-def _fetch_transcript_sync(video_id: str, languages: tuple[str, ...]) -> list[Any]:
+def _fetch_transcript_sync(video_id: str, languages: tuple[str, ...], *, url: str) -> list[Any]:
     """Synchronously resolve and fetch a transcript's snippets.
 
     Runs the blocking ``youtube-transcript-api`` calls; the caller wraps this
@@ -317,6 +317,9 @@ def _fetch_transcript_sync(video_id: str, languages: tuple[str, ...]) -> list[An
     Args:
         video_id: The 11-character YouTube video id.
         languages: Preferred caption languages.
+        url: The original YouTube URL. Used as the ``KaguraFetchError.url`` on
+            failure so the error (and any derived ``IngestResult.source_uri``)
+            surfaces the caller's URL rather than the bare video id.
 
     Returns:
         The list of caption snippets (each with ``.text`` / ``.start``).
@@ -336,17 +339,17 @@ def _fetch_transcript_sync(video_id: str, languages: tuple[str, ...]) -> list[An
     except youtube_transcript_api.TranscriptsDisabled as e:
         raise KaguraFetchError(
             "captions are disabled for this video; no transcript is available",
-            url=video_id,
+            url=url,
         ) from e
     except youtube_transcript_api.NoTranscriptFound as e:
         raise KaguraFetchError(
             "no transcript/captions found for this video in any language",
-            url=video_id,
+            url=url,
         ) from e
     except youtube_transcript_api.AgeRestricted as e:
         raise KaguraFetchError(
             "video is age-restricted; its transcript cannot be retrieved",
-            url=video_id,
+            url=url,
         ) from e
     except (
         youtube_transcript_api.VideoUnavailable,
@@ -355,14 +358,14 @@ def _fetch_transcript_sync(video_id: str, languages: tuple[str, ...]) -> list[An
     ) as e:
         raise KaguraFetchError(
             "video is unavailable (private, removed, or region-locked)",
-            url=video_id,
+            url=url,
         ) from e
     except youtube_transcript_api.CouldNotRetrieveTranscript as e:
         # Catch-all for the library's other retrieval failures (IP blocked,
         # request blocked, members-only, etc.).
         raise KaguraFetchError(
             f"could not retrieve transcript for this video: {e}",
-            url=video_id,
+            url=url,
         ) from e
     return snippets
 
@@ -384,8 +387,13 @@ async def fetch_youtube(
     Args:
         url: A single-video YouTube URL (``watch?v=``, ``youtu.be/``,
             ``shorts/``). Playlist / channel URLs are rejected.
-        max_bytes: Reserved for parity with the byte fetcher; the transcript is
-            additionally capped at :data:`_MAX_TOTAL_TEXT_CHARS` characters.
+        max_bytes: Hard upper bound (in bytes) on the assembled transcript
+            body, enforced for parity with the byte fetcher — an oversize
+            transcript raises :class:`KaguraFetchError` rather than being
+            silently truncated. The body is *also* capped at
+            :data:`_MAX_TOTAL_TEXT_CHARS` bytes inside :func:`_build_markdown`
+            (the ``TextExtractor`` input bound), so the effective limit is the
+            smaller of the two.
         read_timeout: Per-request read timeout (seconds) for the oEmbed call.
         languages: Preferred caption languages, in descending priority.
             Defaults to ``("en",)``.
@@ -408,13 +416,25 @@ async def fetch_youtube(
 
     langs = languages or _DEFAULT_LANGUAGES
 
-    # Run the transcript fetch and the (best-effort) oEmbed fetch.
-    snippets = await asyncio.to_thread(_fetch_transcript_sync, video_id, langs)
+    # Run the transcript fetch and the (best-effort) oEmbed fetch. Thread the
+    # original ``url`` through so transcript-failure errors carry it (not the
+    # bare video id) as their ``.url``.
+    snippets = await asyncio.to_thread(_fetch_transcript_sync, video_id, langs, url=url)
     title, author = await _fetch_oembed(url, read_timeout=read_timeout)
 
     windows = _segment_windows(snippets)
     markdown = _build_markdown(title or video_id, author, windows)
     body = markdown.encode("utf-8")
+
+    # Enforce the caller's byte budget, mirroring the byte fetcher's behavior:
+    # an oversize transcript is a hard failure, not a silent truncation. The
+    # _MAX_TOTAL_TEXT_CHARS cap in _build_markdown is the extractor-input bound;
+    # this is the caller's explicit ingest(..., max_bytes=...) bound.
+    if len(body) > max_bytes:
+        raise KaguraFetchError(
+            f"transcript body {len(body)} bytes exceeds max_bytes {max_bytes}",
+            url=url,
+        )
 
     return FetchResult(
         body=body,

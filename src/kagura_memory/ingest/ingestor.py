@@ -366,7 +366,13 @@ class FileIngestor:
         # [ingest-youtube] dependency surfaces as KaguraIngestError, which the
         # ingest()/estimate_cost() fetch try-blocks already wrap as a
         # step="fetch" IngestResult error (alongside KaguraFetchError).
-        if is_youtube_url(source):
+        #
+        # Gate the YouTube path on the same http(s) policy as the byte Fetcher:
+        # only route an http:// YouTube URL to fetch_youtube when allow_http is
+        # True. Otherwise fall through to the normal Fetcher path, which raises
+        # the canonical "http:// is disabled" KaguraFetchError — keeping the
+        # allow_http contract consistent across every source type.
+        if is_youtube_url(source) and (allow_http or urlsplit(source).scheme.lower() == "https"):
             try:
                 return await fetch_youtube(source, max_bytes=max_bytes, read_timeout=read_timeout)
             except KaguraIngestError as e:

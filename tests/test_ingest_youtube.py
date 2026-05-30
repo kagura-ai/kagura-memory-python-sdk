@@ -14,9 +14,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from kagura_memory.exceptions import KaguraFetchError, KaguraIngestError
-from kagura_memory.ingest import _youtube
-from kagura_memory.ingest._youtube import (
+# The module under test references youtube_transcript_api's exception classes
+# via the lazy loader (and the test helpers below import them directly), so the
+# whole module must skip cleanly on a bare install without the optional
+# [ingest-youtube] extra — otherwise collection breaks at import time.
+pytest.importorskip("youtube_transcript_api")
+
+from kagura_memory.exceptions import KaguraFetchError, KaguraIngestError  # noqa: E402
+from kagura_memory.ingest import _youtube  # noqa: E402
+from kagura_memory.ingest._youtube import (  # noqa: E402
     extract_video_id,
     fetch_youtube,
     is_youtube_url,
@@ -207,15 +213,87 @@ async def test_fetch_youtube_transcripts_disabled() -> None:
     api = MagicMock()
     api.list.side_effect = exc
 
+    url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
     with _patch_api(api), _patch_oembed():
         with pytest.raises(KaguraFetchError) as ei:
-            await fetch_youtube(
-                "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
-                max_bytes=10_000_000,
-                read_timeout=10.0,
-            )
+            await fetch_youtube(url, max_bytes=10_000_000, read_timeout=10.0)
     msg = str(ei.value).lower()
     assert "caption" in msg or "transcript" in msg
+    # The error carries the ORIGINAL url, not the bare video id, so the
+    # derived IngestResult.source_uri surfaces the caller's URL.
+    assert ei.value.url == url
+
+
+@pytest.mark.asyncio
+async def test_fetch_youtube_no_transcript_found_carries_original_url() -> None:
+    """NoTranscriptFound surfaces the original URL, not the bare video id."""
+    transcript_list = MagicMock()
+    transcript_list.find_manually_created_transcript.side_effect = _no_transcript_found()
+    transcript_list.find_generated_transcript.side_effect = _no_transcript_found()
+    transcript_list.__iter__.return_value = iter([])
+
+    api = MagicMock()
+    api.list.return_value = transcript_list
+
+    url = "https://youtu.be/dQw4w9WgXcQ"
+    with _patch_api(api), _patch_oembed():
+        with pytest.raises(KaguraFetchError) as ei:
+            await fetch_youtube(url, max_bytes=10_000_000, read_timeout=10.0)
+    assert ei.value.url == url
+
+
+@pytest.mark.asyncio
+async def test_fetch_youtube_age_restricted_carries_original_url() -> None:
+    from youtube_transcript_api import AgeRestricted
+
+    exc = AgeRestricted.__new__(AgeRestricted)
+    Exception.__init__(exc, "age restricted")
+
+    api = MagicMock()
+    api.list.side_effect = exc
+
+    url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+    with _patch_api(api), _patch_oembed():
+        with pytest.raises(KaguraFetchError) as ei:
+            await fetch_youtube(url, max_bytes=10_000_000, read_timeout=10.0)
+    assert "age-restricted" in str(ei.value).lower()
+    assert ei.value.url == url
+
+
+@pytest.mark.asyncio
+async def test_fetch_youtube_could_not_retrieve_carries_original_url() -> None:
+    from youtube_transcript_api import CouldNotRetrieveTranscript
+
+    # CouldNotRetrieveTranscript.__str__ formats a watch URL from .video_id, so
+    # set it on the bare instance (its __init__ signature varies by version).
+    exc = CouldNotRetrieveTranscript.__new__(CouldNotRetrieveTranscript)
+    exc.video_id = "dQw4w9WgXcQ"
+    Exception.__init__(exc, "ip blocked")
+
+    api = MagicMock()
+    api.list.side_effect = exc
+
+    url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+    with _patch_api(api), _patch_oembed():
+        with pytest.raises(KaguraFetchError) as ei:
+            await fetch_youtube(url, max_bytes=10_000_000, read_timeout=10.0)
+    assert ei.value.url == url
+
+
+@pytest.mark.asyncio
+async def test_fetch_youtube_oversize_body_raises() -> None:
+    """A transcript whose body exceeds max_bytes is a hard failure."""
+    snippets = [_snippet("word " * 50, 0.0, 2.0)]
+    api = _fake_api(_fake_transcript(snippets))
+    url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+
+    with _patch_api(api), _patch_oembed():
+        with pytest.raises(KaguraFetchError) as ei:
+            # max_bytes far below the assembled markdown body forces the cap.
+            await fetch_youtube(url, max_bytes=10, read_timeout=10.0)
+    msg = str(ei.value).lower()
+    assert "max_bytes" in msg
+    assert ei.value.url == url
 
 
 @pytest.mark.asyncio
@@ -228,13 +306,11 @@ async def test_fetch_youtube_video_unavailable() -> None:
     api = MagicMock()
     api.list.side_effect = exc
 
+    url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
     with _patch_api(api), _patch_oembed():
-        with pytest.raises(KaguraFetchError):
-            await fetch_youtube(
-                "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
-                max_bytes=10_000_000,
-                read_timeout=10.0,
-            )
+        with pytest.raises(KaguraFetchError) as ei:
+            await fetch_youtube(url, max_bytes=10_000_000, read_timeout=10.0)
+    assert ei.value.url == url
 
 
 @pytest.mark.asyncio
@@ -250,9 +326,6 @@ async def test_fetch_youtube_playlist_rejected() -> None:
 
 @pytest.mark.asyncio
 async def test_fetch_youtube_missing_dependency() -> None:
-    def _raise() -> Any:
-        raise ImportError("no module")
-
     with patch.object(
         _youtube,
         "_load_youtube_transcript_api",
@@ -295,6 +368,25 @@ async def test_fetch_youtube_oembed_failure_degrades_gracefully() -> None:
 # --- Real loader (no dep installed → KaguraIngestError) ----------------------
 
 
+def test_load_youtube_transcript_api_success() -> None:
+    """The real loader returns the module when the dep is installed."""
+    import youtube_transcript_api as real_module
+
+    assert _youtube._load_youtube_transcript_api() is real_module
+
+
+def test_is_youtube_url_handles_unparseable() -> None:
+    """A URL whose parsing raises ValueError returns False, not an error."""
+    # An unterminated IPv6 literal makes urlsplit raise ValueError; the helper
+    # must swallow it and report "not a YouTube URL".
+    assert is_youtube_url("https://[invalid") is False
+
+
+def test_extract_video_id_handles_unparseable() -> None:
+    """A URL whose parsing raises ValueError returns None, not an error."""
+    assert extract_video_id("https://[invalid") is None
+
+
 def test_load_youtube_transcript_api_importerror(monkeypatch: pytest.MonkeyPatch) -> None:
     import builtins
 
@@ -309,6 +401,122 @@ def test_load_youtube_transcript_api_importerror(monkeypatch: pytest.MonkeyPatch
     with pytest.raises(KaguraIngestError) as ei:
         _youtube._load_youtube_transcript_api()
     assert "ingest-youtube" in str(ei.value)
+
+
+# --- Internal helpers --------------------------------------------------------
+
+
+def test_format_timestamp_hours() -> None:
+    """Past an hour, the timestamp gains an ``h:mm:ss`` field."""
+    assert _youtube._format_timestamp(3725.0) == "1:02:05"
+    assert _youtube._format_timestamp(59.0) == "00:59"
+
+
+def test_segment_windows_skips_empty_snippets() -> None:
+    """Blank/whitespace-only snippets are dropped before windowing."""
+    snippets = [
+        _snippet("   ", 0.0, 1.0),
+        _snippet("real text", 1.0, 1.0),
+        _snippet("", 2.0, 1.0),
+    ]
+    windows = _youtube._segment_windows(snippets)
+    assert windows == [(1.0, "real text")]
+
+
+@pytest.mark.asyncio
+async def test_resolve_transcript_first_available_fallback() -> None:
+    """When no manual/generated transcript matches, the first available wins."""
+    snippets = [_snippet("fallback caption", 0.0, 2.0)]
+    fallback = _fake_transcript(snippets, language_code="de")
+
+    transcript_list = MagicMock()
+    transcript_list.find_manually_created_transcript.side_effect = _no_transcript_found()
+    transcript_list.find_generated_transcript.side_effect = _no_transcript_found()
+    transcript_list.__iter__.return_value = iter([fallback])
+
+    api = MagicMock()
+    api.list.return_value = transcript_list
+
+    with _patch_api(api), _patch_oembed():
+        result = await fetch_youtube(
+            "https://youtu.be/dQw4w9WgXcQ", max_bytes=10_000_000, read_timeout=10.0
+        )
+    assert b"fallback caption" in result.body
+
+
+@pytest.mark.asyncio
+async def test_fetch_youtube_truncates_when_over_text_cap() -> None:
+    """A transcript over _MAX_TOTAL_TEXT_CHARS bytes is truncated with a marker."""
+    from kagura_memory.ingest._youtube import _MAX_TOTAL_TEXT_CHARS
+
+    # One huge snippet whose text alone blows past the char/byte cap.
+    big = "x" * (_MAX_TOTAL_TEXT_CHARS + 5000)
+    api = _fake_api(_fake_transcript([_snippet(big, 0.0, 2.0)]))
+
+    with _patch_api(api), _patch_oembed():
+        # max_bytes above the text cap so the _build_markdown truncation path
+        # (not the max_bytes hard cap) is the one exercised here.
+        result = await fetch_youtube(
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            max_bytes=_MAX_TOTAL_TEXT_CHARS + 1_000_000,
+            read_timeout=10.0,
+        )
+    body = result.body.decode("utf-8")
+    assert "[transcript truncated: exceeded length cap]" in body
+    assert len(result.body) <= _MAX_TOTAL_TEXT_CHARS
+
+
+@pytest.mark.asyncio
+async def test_fetch_oembed_degrades_on_http_error() -> None:
+    """A non-200 / network error from oEmbed yields (None, None), never raises."""
+    import httpx
+
+    class _FailClient:
+        async def __aenter__(self) -> _FailClient:
+            return self
+
+        async def __aexit__(self, *exc: Any) -> None:
+            return None
+
+        async def get(self, *args: Any, **kwargs: Any) -> Any:
+            raise httpx.ConnectError("boom")
+
+    with patch.object(httpx, "AsyncClient", return_value=_FailClient()):
+        title, author = await _youtube._fetch_oembed(
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ", read_timeout=10.0
+        )
+    assert title is None
+    assert author is None
+
+
+@pytest.mark.asyncio
+async def test_fetch_oembed_returns_title_and_author() -> None:
+    """A 200 oEmbed response yields the parsed title/author."""
+    import httpx
+
+    class _OkResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, str]:
+            return {"title": "My Video", "author_name": "Some Channel"}
+
+    class _OkClient:
+        async def __aenter__(self) -> _OkClient:
+            return self
+
+        async def __aexit__(self, *exc: Any) -> None:
+            return None
+
+        async def get(self, *args: Any, **kwargs: Any) -> _OkResponse:
+            return _OkResponse()
+
+    with patch.object(httpx, "AsyncClient", return_value=_OkClient()):
+        title, author = await _youtube._fetch_oembed(
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ", read_timeout=10.0
+        )
+    assert title == "My Video"
+    assert author == "Some Channel"
 
 
 # --- Integration (default-skipped) ------------------------------------------
