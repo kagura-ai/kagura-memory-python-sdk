@@ -205,6 +205,59 @@ async def test_caller_steering_overrides_context_config() -> None:
     await client.close()
 
 
+class LegacyProvider:
+    """A pre-steering Provider: summarize/summarize_overview have NO steering kwarg.
+
+    Mirrors a custom provider written against the signature that shipped before
+    #148. The default (no-steering) ingest path must not pass `steering=` to it.
+    """
+
+    name = "legacy"
+    default_text_model = "legacy/text"
+    default_vision_model: str | None = None
+    text_model = "legacy/text"
+    vision_model: str | None = None
+
+    async def summarize(self, text: str, *, max_tokens: int) -> str:
+        return f"[legacy summary len={len(text)}]"
+
+    async def summarize_overview(self, section_summaries: list[str], *, max_tokens: int) -> str:
+        return f"[legacy overview {len(section_summaries)}]"
+
+    async def describe_image(self, image_bytes: bytes, mime: str) -> str:
+        return "[image]"
+
+    def count_tokens(self, text: str, *, for_vision: bool = False) -> int:
+        return max(1, len(text) // 4)
+
+
+@pytest.mark.asyncio
+async def test_no_steering_path_is_nonbreaking_for_legacy_provider() -> None:
+    """Default (no-steering) ingest must not pass steering= to a legacy provider.
+
+    Regression for the back-compat gap: unconditionally forwarding steering=None
+    raises TypeError on a provider whose summarize() predates the steering kwarg.
+    """
+    client = _make_client()
+    provider = LegacyProvider()
+    # Prime the cache to None so _resolve_steering returns None without any fetch,
+    # exercising the steering-omitted call path deterministically.
+    client._context_info_cache["ctx-uuid"] = None
+    ingestor = FileIngestor(client=client, text_provider=provider, vision_provider=None)
+
+    async def fake_remember(**kwargs: Any) -> dict[str, Any]:
+        return {"memory_id": "mem-x"}
+
+    with patch.object(client, "remember", side_effect=fake_remember):
+        result = await ingestor.ingest(str(FIXTURE), context_id="ctx-uuid")
+
+    # Overview created and no summarize errors → the legacy signature was honored.
+    assert result.overview_id == "mem-x"
+    assert [e for e in result.errors if e.step == "summarize"] == []
+
+    await client.close()
+
+
 @pytest.mark.asyncio
 async def test_section_summarize_failure_collected_not_raised() -> None:
     """A per-section LLM failure is recorded in errors, not raised."""

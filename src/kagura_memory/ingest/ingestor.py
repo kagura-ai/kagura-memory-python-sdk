@@ -53,6 +53,21 @@ _DEFAULT_CONCURRENCY = 4
 # section + the overview call) and bounds untrusted-context-config size.
 _STEERING_MAX_CHARS = 2000
 
+
+def _steering_kwargs(steering: str | None) -> dict[str, str]:
+    """Build the ``steering=`` kwarg for a provider summarize call.
+
+    Returns ``{"steering": steering}`` only when steering is present, and an
+    empty dict otherwise. The empty-dict case means the kwarg is omitted from
+    the call entirely — so the default (no-steering) path keeps working with
+    custom :class:`~.providers.base.Provider` implementations written against
+    the pre-steering signature, which would otherwise raise ``TypeError`` on an
+    unexpected ``steering`` keyword. This is what makes ``steering=None`` truly
+    non-breaking, not just non-breaking for the bundled providers.
+    """
+    return {"steering": steering} if steering is not None else {}
+
+
 # Keys stamped by the SDK in _write_overview. Callers must not pass these in
 # details_extra — collisions are rejected with ValueError at ingest() entry.
 _OVERVIEW_RESERVED: frozenset[str] = frozenset(
@@ -624,7 +639,7 @@ class FileIngestor:
             overview_summary = await self._text.summarize_overview(
                 [s for s in section_summaries if s],
                 max_tokens=_DEFAULT_OVERVIEW_TOKENS,
-                steering=resolved_steering,
+                **_steering_kwargs(resolved_steering),
             )
         except KaguraLLMError as e:
             errors.append(
@@ -732,7 +747,7 @@ class FileIngestor:
                     summary = await self._text.summarize(
                         chunk_obj.text,
                         max_tokens=_DEFAULT_SECTION_TOKENS,
-                        steering=steering,
+                        **_steering_kwargs(steering),
                     )
                 except KaguraLLMError as e:
                     errors.append(

@@ -23,8 +23,12 @@ See [GitHub Releases](https://github.com/kagura-ai/kagura-memory-python-sdk/rele
   so steering adds no per-section round-trips; a fetch failure logs a warning
   and proceeds with `steering=None` rather than failing the ingest. Whitespace-
   only steering is treated as absent and the resolved value is truncated to
-  2000 characters. Recall-side steering, vision steering, named profiles, and
-  mid-session cache invalidation are deferred follow-ups.
+  2000 characters. The default (no-steering) path is **fully** non-breaking,
+  including for custom `Provider` implementations written against the
+  pre-steering signature: the `steering=` kwarg is omitted from the summarize
+  call entirely when no steering is resolved, so such providers never receive
+  an unexpected keyword. Recall-side steering, vision steering, named profiles,
+  and mid-session cache invalidation are deferred follow-ups.
 - **Audio/video transcription via Gemini** (#147): `ingest("talk.mp3")` (and
   `.wav` / `.m4a` / `.mp4`-with-audio) now routes the file to a Gemini
   transcription path (`gemini/gemini-2.5-flash`) that returns timestamped
