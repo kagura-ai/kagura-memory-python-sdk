@@ -196,11 +196,21 @@ class BrowserFetcher:
         try:
             await page.route("**/*", self._route_handler)
             try:
-                await page.goto(url, wait_until=self.wait_until, timeout=self.nav_timeout_ms)
+                response = await page.goto(
+                    url, wait_until=self.wait_until, timeout=self.nav_timeout_ms
+                )
             except KaguraFetchError:
                 raise
             except Exception as e:  # noqa: BLE001 - normalized to a domain error below
                 raise KaguraFetchError(f"browser navigation failed: {e}", url=url) from e
+
+            # Reject rendered error pages (4xx/5xx) the way Fetcher does via
+            # raise_for_status(). A None response (about:blank, data: URLs)
+            # carries no status and is left to flow through.
+            if response is not None and isinstance(response.status, int) and response.status >= 400:
+                raise KaguraFetchError(
+                    f"browser navigation returned HTTP {response.status}", url=url
+                )
 
             html = await page.content()
             body = html.encode("utf-8")
@@ -256,9 +266,12 @@ class BrowserFetcher:
     async def _host_is_blocked(self, hostname: str) -> bool:
         """True iff ``hostname`` resolves to any blocked IP (cached per fetch).
 
-        A resolution failure is treated as blocked (fail-closed), matching
-        the conservative posture of :func:`is_blocked_ip` for malformed
-        addresses.
+        Any resolution failure is treated as blocked (fail-closed): besides
+        :class:`socket.gaierror`, :func:`socket.getaddrinfo` can raise
+        :class:`UnicodeError` for a malformed IDN host or other
+        :class:`OSError` subclasses. All of these are conservatively treated
+        as "blocked", matching the posture of :func:`is_blocked_ip` for
+        malformed addresses.
         """
         cached = self._resolve_cache.get(hostname)
         if cached is not None:
@@ -267,7 +280,7 @@ class BrowserFetcher:
             addrs = await asyncio.to_thread(
                 socket.getaddrinfo, hostname, None, 0, socket.SOCK_STREAM
             )
-        except socket.gaierror:
+        except (socket.gaierror, UnicodeError, OSError):
             self._resolve_cache[hostname] = True
             return True
         ips = {str(info[4][0]) for info in addrs}
@@ -282,22 +295,37 @@ class BrowserFetcher:
         redirects, XHR/fetch, and sub-resources to internal addresses) and
         ``http://`` requests when ``allow_http`` is False; otherwise lets the
         request continue.
+
+        A route must be resolved exactly once. Any unexpected exception while
+        deciding is treated fail-closed: the request is aborted rather than
+        left dangling (which would hang navigation until the timeout). If
+        resolving the route itself raises — e.g. the context is closing — that
+        is swallowed, since the route can no longer be acted upon.
         """
-        request_url = route.request.url
-        parsed = urlsplit(request_url)
-        scheme = parsed.scheme.lower()
-        # Non-network schemes (data:, blob:, about:) are harmless for SSRF.
-        if scheme not in _ALLOWED_SCHEMES:
+        try:
+            request_url = route.request.url
+            parsed = urlsplit(request_url)
+            scheme = parsed.scheme.lower()
+            # Non-network schemes (data:, blob:, about:) are harmless for SSRF.
+            if scheme not in _ALLOWED_SCHEMES:
+                await route.continue_()
+                return
+            if scheme == "http" and not self.allow_http:
+                await route.abort()
+                return
+            hostname = parsed.hostname
+            if not hostname or await self._host_is_blocked(hostname):
+                await route.abort()
+                return
             await route.continue_()
-            return
-        if scheme == "http" and not self.allow_http:
-            await route.abort()
-            return
-        hostname = parsed.hostname
-        if not hostname or await self._host_is_blocked(hostname):
-            await route.abort()
-            return
-        await route.continue_()
+        except Exception:  # noqa: BLE001 - fail closed, never let a route dangle
+            # Any unexpected error -> abort (fail-closed). Swallow a secondary
+            # error from abort() itself (e.g. the context is tearing down) so
+            # the route handler never propagates into Playwright's callback.
+            try:
+                await route.abort()
+            except Exception:  # noqa: BLE001 - route already resolved / closing
+                pass
 
 
 __all__ = ["BrowserFetcher"]

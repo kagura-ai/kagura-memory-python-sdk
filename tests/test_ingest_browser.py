@@ -40,15 +40,25 @@ def _make_fake_playwright(
     html: str = "<html><body><h1>Hi</h1></body></html>",
     final_url: str = "https://example.com/",
     goto_side_effect: Exception | None = None,
+    status: int | None = 200,
 ) -> tuple[Any, MagicMock, MagicMock]:
     """Build a fake ``async_playwright`` factory and its page/context mocks.
 
     Returns ``(factory, page, context)`` so tests can assert on the page's
-    ``route``/``goto`` calls.
+    ``route``/``goto`` calls. ``page.goto`` returns a fake response whose
+    ``status`` is ``status`` (pass ``status=None`` to model a response-less
+    navigation such as ``about:blank``/``data:`` URLs).
     """
+    response: MagicMock | None
+    if status is None:
+        response = None
+    else:
+        response = MagicMock()
+        response.status = status
+
     page = MagicMock()
     page.route = AsyncMock()
-    page.goto = AsyncMock(side_effect=goto_side_effect)
+    page.goto = AsyncMock(side_effect=goto_side_effect, return_value=response)
     page.content = AsyncMock(return_value=html)
     page.url = final_url
 
@@ -178,6 +188,40 @@ async def test_route_handler_allows_data_scheme(monkeypatch: pytest.MonkeyPatch)
     route.continue_.assert_awaited_once()
 
 
+@pytest.mark.asyncio
+async def test_host_is_blocked_on_unicode_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A resolver raising UnicodeError (malformed IDN) is treated as blocked."""
+
+    def boom_getaddrinfo(host: str, *args: Any, **kwargs: Any) -> Any:
+        raise UnicodeError("malformed IDN host")
+
+    monkeypatch.setattr(_browser.socket, "getaddrinfo", boom_getaddrinfo)
+
+    fetcher = BrowserFetcher()
+    assert await fetcher._host_is_blocked("xn--bad..host") is True
+
+
+@pytest.mark.asyncio
+async def test_route_handler_fails_closed_on_unexpected_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unexpected resolution error aborts the route (never propagates)."""
+
+    def boom_getaddrinfo(host: str, *args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("resolver exploded")
+
+    monkeypatch.setattr(_browser.socket, "getaddrinfo", boom_getaddrinfo)
+
+    fetcher = BrowserFetcher()
+    route = _FakeRoute("https://example.com/app.js")
+
+    # Must not raise — the handler swallows and fails closed by aborting.
+    await fetcher._route_handler(route)  # type: ignore[arg-type]
+
+    route.abort.assert_awaited_once()
+    route.continue_.assert_not_awaited()
+
+
 # --- Missing dependency ------------------------------------------------------
 
 
@@ -255,6 +299,32 @@ async def test_navigation_timeout_rejected(monkeypatch: pytest.MonkeyPatch) -> N
     with pytest.raises(KaguraFetchError, match="navigation failed"):
         await fetcher.fetch("https://example.com/")
     await fetcher.close()
+
+
+@pytest.mark.asyncio
+async def test_http_error_status_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A rendered 404 page must raise instead of being ingested as content."""
+    _patch_unblocked_resolver(monkeypatch)
+    factory, _page, _ctx = _make_fake_playwright(status=404)
+    monkeypatch.setattr(_browser, "_load_async_playwright", lambda: factory)
+
+    fetcher = BrowserFetcher()
+    with pytest.raises(KaguraFetchError, match="404"):
+        await fetcher.fetch("https://example.com/missing")
+    await fetcher.close()
+
+
+@pytest.mark.asyncio
+async def test_none_response_status_does_not_crash(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A response-less navigation (status=None) flows through without error."""
+    _patch_unblocked_resolver(monkeypatch)
+    factory, _page, _ctx = _make_fake_playwright(status=None)
+    monkeypatch.setattr(_browser, "_load_async_playwright", lambda: factory)
+
+    async with BrowserFetcher() as fetcher:
+        result = await fetcher.fetch("https://example.com/")
+
+    assert result.content_type == "text/html"
 
 
 # --- URL validation ----------------------------------------------------------
