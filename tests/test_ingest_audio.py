@@ -356,13 +356,47 @@ async def test_no_speech_empty_segments_raises_actionable() -> None:
 
 @pytest.mark.asyncio
 async def test_oversized_file_raises_ffmpeg_followup() -> None:
+    # max_bytes_audio=12 → inline_limit = 12 * 4 // 3 = 16 bytes. 100 raw bytes
+    # encode to 136 base64 bytes, well over the 16-byte encoded cap → reject.
     mod = _mock_litellm(_Response(_GOOD_JSON))
     with patch.object(_audio, "_load_litellm", return_value=mod):
         with pytest.raises(KaguraIngestError, match="ffmpeg"):
             await transcribe_audio(
-                b"x" * 100, mime="audio/mpeg", source_uri="big.mp3", max_bytes_audio=10
+                b"x" * 100, mime="audio/mpeg", source_uri="big.mp3", max_bytes_audio=12
             )
     mod.acompletion.assert_not_called()  # rejected before any provider call
+
+
+@pytest.mark.asyncio
+async def test_raw_under_cap_but_base64_over_inline_limit_rejected() -> None:
+    # The cap is on the ENCODED payload, not the raw bytes. Pick a raw size that
+    # is UNDER the raw cap arithmetic would naively allow, but whose base64
+    # form exceeds the inline limit. With max_bytes_audio=12 the raw bytes are
+    # within 12 only up to 12 bytes; choose 13 raw bytes (just over the raw cap
+    # but the point is the *encoded* boundary): encoded = ceil(13/3)*4 = 20 >
+    # inline_limit (16) → must reject. A file at the raw cap (12) encodes to 16,
+    # exactly the inline limit, and is accepted.
+    mod = _mock_litellm(_Response(_GOOD_JSON))
+    with patch.object(_audio, "_load_litellm", return_value=mod):
+        with pytest.raises(KaguraIngestError, match="base64-encoded"):
+            await transcribe_audio(
+                b"x" * 13, mime="audio/mpeg", source_uri="boundary.mp3", max_bytes_audio=12
+            )
+    mod.acompletion.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_at_encoded_boundary_is_accepted() -> None:
+    # Raw size exactly at the cap: encoded == inline_limit → accepted (the
+    # boundary is now on the encoded size, not the raw size). max_bytes_audio=12
+    # → inline_limit=16; 12 raw bytes encode to ((12+2)//3)*4 = 16 == 16 → ok.
+    mod = _mock_litellm(_Response(_GOOD_JSON))
+    with patch.object(_audio, "_load_litellm", return_value=mod):
+        content, _ = await transcribe_audio(
+            b"x" * 12, mime="audio/mpeg", source_uri="ok.mp3", max_bytes_audio=12
+        )
+    assert content.sections  # transcription proceeded past the size gate
+    mod.acompletion.assert_called_once()
 
 
 @pytest.mark.asyncio

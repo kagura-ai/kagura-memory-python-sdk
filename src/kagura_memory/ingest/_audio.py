@@ -15,11 +15,13 @@ via ``litellm.acompletion`` with the audio attached inline as base64. The
 model is asked to return timestamped ``{start, end, text}`` JSON segments,
 which are mapped to time-windowed :class:`ExtractedSection` objects.
 
-v1 scope (single inline request, ≤ ~20 MB, no local transcoding). Long
-files that exceed the inline-request size cap, or whose JSON transcript is
-truncated by the model's output-token ceiling, raise
-:class:`KaguraIngestError` pointing the user at the future ffmpeg-chunking
-follow-up. The opt-in extra is ``[ingest-audio]``.
+v1 scope (single inline request, no local transcoding). The cap is on the
+ACTUAL request payload, which carries the media as a base64 data URL: Gemini's
+inline-request limit is ~20 MB on that encoded payload, so the raw media is
+capped at ~15 MB (base64 inflates by ~33%). Long files that exceed the
+inline-request size cap, or whose JSON transcript is truncated by the model's
+output-token ceiling, raise :class:`KaguraIngestError` pointing the user at the
+future ffmpeg-chunking follow-up. The opt-in extra is ``[ingest-audio]``.
 
 Security / privacy: the ``GEMINI_API_KEY`` is read by ``litellm`` from the
 environment and is NEVER stored as an attribute or logged here.
@@ -71,10 +73,21 @@ _AUDIO_MIME_LABEL: dict[str, str] = {
     "video/mp4": "video",
 }
 
-# Gemini's inline-request payload cap. Files larger than this must be chunked
-# (deferred to the ffmpeg follow-up); we reject them with an actionable error
-# rather than letting the provider return an opaque 4xx.
-_DEFAULT_MAX_BYTES_AUDIO = 20 * 1024 * 1024  # 20 MB
+# Gemini's INLINE-REQUEST limit — the cap on the actual wire payload, which
+# carries the media as a base64 data URL, NOT as raw bytes. Base64 inflates the
+# media by ~33% (every 3 raw bytes become 4 ASCII chars), so a raw file just
+# under 20 MB becomes ~27 MB once encoded and blows past this limit. The cap we
+# enforce must therefore reflect the ENCODED size, not the raw size.
+_GEMINI_INLINE_LIMIT_BYTES = 20 * 1024 * 1024  # 20 MB, on the base64 payload
+
+# Safe cap on the RAW media bytes so the base64-encoded payload stays under
+# :data:`_GEMINI_INLINE_LIMIT_BYTES`. Base64 size ≈ ceil(raw / 3) * 4 ≈
+# raw * 4 / 3, so the largest raw size that still encodes within the inline
+# limit is ``inline_limit * 3 // 4`` (~15 MB for a 20 MB inline limit). Files
+# larger than this must be chunked (deferred to the ffmpeg follow-up); we reject
+# them with an actionable error rather than letting the provider return an
+# opaque 4xx.
+_DEFAULT_MAX_BYTES_AUDIO = _GEMINI_INLINE_LIMIT_BYTES * 3 // 4  # ~15 MB raw
 
 # Default transcription model. The FULL Flash (not Lite) is used: audio
 # understanding is materially weaker on Lite. Matches the vision default in
@@ -195,8 +208,13 @@ async def transcribe_audio(
         body: Raw audio/video bytes.
         mime: Canonical MIME (one of :data:`_AUDIO_MIMES`).
         source_uri: Origin URI/path — the filename becomes the content title.
-        max_bytes_audio: Inline-request size cap. Oversized input raises
-            :class:`KaguraIngestError` (ffmpeg-chunking follow-up).
+        max_bytes_audio: Cap on the RAW media bytes. Because the request sends
+            the media as a base64 data URL (~33% larger than the raw bytes),
+            this defaults to :data:`_DEFAULT_MAX_BYTES_AUDIO` (~15 MB), derived
+            so the *encoded* payload stays under Gemini's
+            :data:`_GEMINI_INLINE_LIMIT_BYTES` (~20 MB) inline-request limit.
+            Input whose base64-encoded size would exceed that inline limit
+            raises :class:`KaguraIngestError` (ffmpeg-chunking follow-up).
         model: litellm model string. Defaults to ``gemini/gemini-2.5-flash``.
         timeout: Per-request timeout in seconds passed to ``litellm``.
 
@@ -211,12 +229,22 @@ async def transcribe_audio(
             malformed/truncated transcript (after one retry), or a provider
             call failure.
     """
-    if len(body) > max_bytes_audio:
+    # The request carries the media as a base64 data URL, so the wire payload —
+    # not the raw bytes — is what must fit Gemini's inline-request limit. Cap on
+    # the ENCODED size: base64 length is ceil(raw / 3) * 4, ~33% larger than raw.
+    # A file just under the raw 20 MB figure would otherwise become ~27 MB on the
+    # wire and exceed the actual inline limit. ``max_bytes_audio`` is the raw cap;
+    # we translate it to the equivalent inline limit (raw * 4 / 3) and check the
+    # real encoded length against it.
+    raw_len = len(body)
+    encoded_len = ((raw_len + 2) // 3) * 4
+    inline_limit = max_bytes_audio * 4 // 3
+    if encoded_len > inline_limit:
         raise KaguraIngestError(
-            f"audio/video file is {len(body)} bytes, over the "
-            f"{max_bytes_audio}-byte inline-request limit. Splitting large "
-            "media with ffmpeg is a planned follow-up; for now transcribe a "
-            "shorter clip."
+            f"audio/video file is {raw_len} bytes raw ({encoded_len} bytes once "
+            f"base64-encoded), over Gemini's {inline_limit}-byte inline-request "
+            "limit. Splitting large media with ffmpeg is a planned follow-up; "
+            "for now transcribe a shorter clip."
         )
 
     litellm = _load_litellm()
