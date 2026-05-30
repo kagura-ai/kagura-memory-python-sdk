@@ -4,6 +4,8 @@ See [GitHub Releases](https://github.com/kagura-ai/kagura-memory-python-sdk/rele
 
 ## Unreleased
 
+## v0.24.0
+
 ### Added
 
 - **Context-aware ingest summarization steering** (#148): ingest summaries are
