@@ -19,6 +19,7 @@ from .agent import KaguraAgent
 from .auth.cli import auth as _auth_group
 from .client import KaguraClient
 from .config import load_config
+from .doctor import run_doctor
 from .exceptions import _exc_message
 from .files_client import FilesClient
 from .logger import VerboseLogger
@@ -203,6 +204,20 @@ def config_show():
     except Exception as e:
         click.echo(f"Error loading config: {e}", err=True)
         sys.exit(1)
+
+
+@main.command()
+@click.option("--profile", default=None, help="OAuth profile to inspect")
+@click.option("--json", "json_output", is_flag=True, help="Emit machine-readable JSON")
+def doctor(profile, json_output):
+    """Diagnose common setup, auth, MCP, and connectivity issues."""
+    report = run_doctor(profile=profile)
+    if json_output:
+        click.echo(json.dumps(report.to_dict(), indent=2, ensure_ascii=False))
+    else:
+        for check in report.checks:
+            click.echo(f"{check.status.upper()} {check.message}")
+    raise SystemExit(report.exit_code)
 
 
 # =============================================================================
