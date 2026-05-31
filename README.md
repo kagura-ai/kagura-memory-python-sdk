@@ -366,12 +366,13 @@ CI. Sections covered:
 - **extras** — which optional ingestion dependencies are installed.
 - **security** — flags a `litellm` version in the known-bad supply-chain range.
 - **providers** — reports which optional LLM-provider keys are set (`GEMINI_API_KEY`,
-  `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OLLAMA_API_KEY`) and **warns** when a configured
-  default model targets a provider whose key is missing (e.g. the agent default
-  `gpt-5.4-nano` with no `OPENAI_API_KEY`, or audio transcription `gemini/gemini-2.5-flash`
-  with no `GEMINI_API_KEY`). These keys are opt-in per feature — a memory/recall-only user
-  needs none, so absence is never a `FAIL`. Key **values** are never read into the report
-  (only env-var names), and no network calls are made to validate them.
+  `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OLLAMA_API_KEY`) and **warns** when a default model
+  targets a provider whose key is missing: the agent model (`gpt-5.4-nano` unless overridden
+  via `.kagura.json` / `KAGURA_MODEL`) with no `OPENAI_API_KEY`, or the fixed
+  audio-transcription model `gemini/gemini-2.5-flash` with no `GEMINI_API_KEY`. These keys are
+  opt-in per feature — a memory/recall-only user needs none, so absence is never a `FAIL`.
+  Key **values** are never read into the report (only env-var names), and no network calls are
+  made to validate them.
 
 ```bash
 $ kagura doctor
