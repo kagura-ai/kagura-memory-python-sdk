@@ -47,11 +47,17 @@ _PROVIDER_ENV_KEYS: dict[str, str] = {
 }
 
 # Default models for the optional LLM-backed features, mirrored from their
-# sources of truth: agent.py / config.py (`gpt-5.4-nano`) and
-# ingest/_audio.py (`gemini/gemini-2.5-flash`). doctor stays import-light and
-# deliberately does NOT import the ingest package (which pulls optional
-# extras), so these are mirrored here rather than imported.
+# sources of truth. doctor stays import-light and deliberately does NOT import
+# the ingest package (importing it runs ingest/__init__.py, which pulls the
+# optional ingest extras onto every `kagura` invocation), so these are mirrored
+# here rather than imported. Keep in sync with:
+#   - agent:         agent.py / config.py                 (`gpt-5.4-nano`)
+#   - ingest text:   ingest/providers/claude.py           (default text-provider=claude)
+#   - ingest vision: ingest/providers/gemini.py           (default vision-provider=gemini)
+#   - ingest audio:  ingest/_audio.py
 _DEFAULT_AGENT_MODEL = "gpt-5.4-nano"
+_DEFAULT_INGEST_TEXT_MODEL = "claude-sonnet-4-6"
+_DEFAULT_INGEST_VISION_MODEL = "gemini/gemini-2.5-flash"
 _DEFAULT_AUDIO_MODEL = "gemini/gemini-2.5-flash"
 
 
@@ -174,9 +180,11 @@ def _provider_for_model(model: str) -> str | None:
     """
 
     name = model.strip().lower()
+    if not name:
+        return None
     if name.startswith(("ollama/", "ollama_chat/")):
         return "ollama"
-    if name.startswith("gemini/"):
+    if name.startswith(("gemini/", "gemini-")):
         return "gemini"
     if name.startswith(("anthropic/", "claude")):
         return "anthropic"
@@ -204,19 +212,27 @@ def _check_provider_keys() -> DoctorCheck:
 
 
 def _check_model_provider_match(config: dict[str, Any]) -> list[DoctorCheck]:
-    """Warn when a configured default model targets a provider with no key.
+    """Warn when a default model targets a provider with no usable credential.
 
-    Informational only — no network calls are made to validate a key. Ollama
-    needs no key, so it never warns.
+    Covers every optional LLM-backed feature: the agent model and the three
+    ingest defaults (text=claude, vision=gemini, audio=gemini). Informational
+    only — no network calls are made to validate a key. Ollama needs no key, so
+    it never warns. The agent additionally accepts an ``llm_api_key`` from
+    ``.kagura.json`` (forwarded to litellm in cli.py / agent.py), so that counts
+    as a credential alongside the provider env var.
     """
 
-    configured: list[tuple[str, str]] = [
-        ("agent", config.get("model") or _DEFAULT_AGENT_MODEL),
-        ("audio ingest", _DEFAULT_AUDIO_MODEL),
+    agent_has_config_key = bool(config.get("llm_api_key"))
+    # (feature label, model, whether .kagura.json carries a usable llm_api_key)
+    configured: list[tuple[str, str, bool]] = [
+        ("agent", config.get("model") or _DEFAULT_AGENT_MODEL, agent_has_config_key),
+        ("ingest text", _DEFAULT_INGEST_TEXT_MODEL, False),
+        ("ingest vision", _DEFAULT_INGEST_VISION_MODEL, False),
+        ("ingest audio", _DEFAULT_AUDIO_MODEL, False),
     ]
 
     checks: list[DoctorCheck] = []
-    for feature, model in configured:
+    for feature, model, has_config_key in configured:
         details: dict[str, Any] = {"feature": feature, "model": model}
         provider = _provider_for_model(model)
         if provider is None:
@@ -233,6 +249,10 @@ def _check_model_provider_match(config: dict[str, Any]) -> list[DoctorCheck]:
                 if os.getenv(env_var):
                     status = "pass"
                     message = f"{feature} model {model}: {env_var} is set"
+                elif has_config_key:
+                    status = "pass"
+                    message = f"{feature} model {model}: credential via .kagura.json llm_api_key"
+                    details["credential_source"] = "config"
                 else:
                     status = "warn"
                     message = f"{feature} model {model} targets {provider} but {env_var} is not set"

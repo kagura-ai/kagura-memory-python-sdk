@@ -644,21 +644,51 @@ def test_model_provider_match_warns_on_missing_audio_key():
 
     checks = _check_model_provider_match({})
 
-    audio = next(c for c in checks if c.details.get("feature") == "audio ingest")
+    audio = next(c for c in checks if c.details.get("feature") == "ingest audio")
     assert audio.status == "warn"
     assert audio.details["provider"] == "gemini"
     assert "GEMINI_API_KEY" in audio.message
 
 
+def test_model_provider_match_covers_agent_and_ingest_features():
+    from kagura_memory.doctor import _check_model_provider_match
+
+    checks = _check_model_provider_match({})
+    by_feature = {c.details["feature"]: c for c in checks}
+
+    assert set(by_feature) == {"agent", "ingest text", "ingest vision", "ingest audio"}
+    # ingest text defaults to the claude provider, vision/audio to gemini.
+    assert by_feature["ingest text"].details["provider"] == "anthropic"
+    assert by_feature["ingest vision"].details["provider"] == "gemini"
+    assert by_feature["ingest audio"].details["provider"] == "gemini"
+
+
 def test_model_provider_match_passes_when_keys_present(monkeypatch):
     from kagura_memory.doctor import _check_model_provider_match
 
+    # All four features across openai (agent), anthropic (text), gemini (vision/audio).
     monkeypatch.setenv("OPENAI_API_KEY", "sk-x")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "ant-x")
     monkeypatch.setenv("GEMINI_API_KEY", "gem-x")
 
     checks = _check_model_provider_match({})
 
     assert all(c.status == "pass" for c in checks)
+
+
+def test_model_provider_match_accepts_config_llm_api_key():
+    """A `.kagura.json` llm_api_key satisfies the agent credential (no env var)."""
+    from kagura_memory.doctor import _check_model_provider_match
+
+    checks = _check_model_provider_match({"llm_api_key": "sk-from-config"})
+
+    agent = next(c for c in checks if c.details.get("feature") == "agent")
+    assert agent.status == "pass"
+    assert agent.details["credential_source"] == "config"
+    assert "llm_api_key" in agent.message
+    # config llm_api_key is agent-only; ingest features still warn without env keys.
+    text = next(c for c in checks if c.details.get("feature") == "ingest text")
+    assert text.status == "warn"
 
 
 def test_model_provider_match_respects_configured_model():
