@@ -34,7 +34,6 @@ _OPTIONAL_INGESTION_DEPENDENCIES: dict[str, str] = {
     "ingest-pptx": "pptx",
     "ingest-youtube": "youtube_transcript_api",
     "ingest-browser": "playwright",
-    "ingest-audio": "litellm",
 }
 
 
@@ -153,6 +152,7 @@ def _check_auth(
     config: dict[str, Any],
     *,
     profile: str | None = None,
+    project_dir: Path | None = None,
     creds_file_path: Path | None = None,
 ) -> tuple[list[DoctorCheck], _StaticAuth | _OAuthAuth | None]:
     checks: list[DoctorCheck] = []
@@ -160,7 +160,7 @@ def _check_auth(
     env_key = os.getenv("KAGURA_API_KEY") or ""
     target_profile = profile or os.getenv("KAGURA_PROFILE") or None
     oauth_creds = creds_file.get_profile(target_profile)
-    config_key = _configured_api_key(config)
+    config_key = _configured_api_key(config, project_dir=project_dir)
 
     try:
         resolved = _resolve_auth(
@@ -241,10 +241,11 @@ def _check_auth(
     return checks, resolved
 
 
-def _configured_api_key(config: dict[str, Any]) -> str:
+def _configured_api_key(config: dict[str, Any], *, project_dir: Path | None = None) -> str:
     """Return a file-backed api_key candidate, excluding env fallback config."""
 
-    if Path(".kagura.json").exists() or (Path.home() / ".kagura.json").exists():
+    local_config = (project_dir or Path.cwd()) / ".kagura.json"
+    if local_config.exists() or (Path.home() / ".kagura.json").exists():
         return config.get("api_key") or ""
     return ""
 
@@ -423,13 +424,15 @@ def _check_mcp(project_dir: Path) -> list[DoctorCheck]:
     return checks
 
 
-async def _check_server(resolved: _StaticAuth | _OAuthAuth) -> list[DoctorCheck]:
+async def _check_server(
+    resolved: _StaticAuth | _OAuthAuth, *, profile: str | None = None
+) -> list[DoctorCheck]:
     checks: list[DoctorCheck] = []
     try:
         if isinstance(resolved, _StaticAuth):
             client = KaguraClient(api_key=resolved.api_key, mcp_url=resolved.mcp_url)
         else:
-            client = KaguraClient(mcp_url=resolved.mcp_url)
+            client = KaguraClient(mcp_url=resolved.mcp_url, profile=profile)
     except Exception as exc:
         return [DoctorCheck(section="server", status="fail", message=_exc_message(exc))]
 
@@ -491,7 +494,7 @@ def run_doctor(*, project_dir: Path | None = None, profile: str | None = None) -
     config = load_config()
 
     checks: list[DoctorCheck] = []
-    auth_checks, resolved = _check_auth(config, profile=profile)
+    auth_checks, resolved = _check_auth(config, profile=profile, project_dir=cwd)
     checks.extend(auth_checks)
     checks.extend(_check_mcp(cwd))
     checks.extend(_check_optional_dependencies())
@@ -501,7 +504,7 @@ def run_doctor(*, project_dir: Path | None = None, profile: str | None = None) -
         https_check = _check_https(resolved.mcp_url)
         checks.append(https_check)
         if https_check.status == "pass":
-            checks.extend(asyncio.run(_check_server(resolved)))
+            checks.extend(asyncio.run(_check_server(resolved, profile=profile)))
         else:
             checks.append(
                 DoctorCheck(
