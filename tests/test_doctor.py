@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
@@ -19,6 +20,7 @@ from tests.conftest import make_oauth_creds
 @pytest.fixture(autouse=True)
 def _isolate_doctor_env(monkeypatch, tmp_path):
     reset_state_cache()
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
     monkeypatch.setattr(
         "kagura_memory.auth.credentials.DEFAULT_CREDENTIALS_PATH",
         tmp_path / "credentials.json",
@@ -350,6 +352,9 @@ def test_doctor_litellm_missing_and_blocked(monkeypatch):
     assert blocked.status == "fail"
     assert "blocked" in blocked.message
 
+    monkeypatch.setattr("kagura_memory.doctor.importlib_metadata.version", lambda _: "1.82.9")
+    assert _check_litellm().status == "pass"
+
 
 def test_doctor_version_parser_ignores_extra_components():
     from kagura_memory.doctor import _parse_version_prefix
@@ -470,6 +475,37 @@ def test_check_server_failure_branches(monkeypatch, exc, message):
 
     assert checks[0].status == "fail"
     assert message in checks[0].message
+
+
+def test_check_server_oauth_auth_error_is_informational(monkeypatch):
+    from kagura_memory.doctor import _check_server
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def check_server_version(self):
+            raise KaguraAuthError("REST rejected OAuth bearer")
+
+    monkeypatch.setattr("kagura_memory.doctor.KaguraClient", FakeClient)
+    resolved = _OAuthAuth(
+        oauth=object(),
+        mcp_url="https://profile.example.com/mcp",
+        workspace_id="ws-1",
+    )
+
+    import asyncio
+
+    checks = asyncio.run(_check_server(resolved, profile="dev"))
+
+    assert checks[0].status == "info"
+    assert "REST validates API keys" in checks[0].message
 
 
 def test_check_server_constructor_failure(monkeypatch):

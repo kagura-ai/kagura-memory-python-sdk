@@ -132,7 +132,7 @@ def _check_litellm() -> DoctorCheck:
         )
 
     parsed = _parse_version_prefix(version)
-    if parsed is not None and parsed >= (1, 82, 7):
+    if parsed in {(1, 82, 7), (1, 82, 8)}:
         return DoctorCheck(
             section="security",
             status="fail",
@@ -440,6 +440,18 @@ async def _check_server(
         try:
             info = await client.check_server_version()
         except KaguraAuthError as exc:
+            if isinstance(resolved, _OAuthAuth):
+                return [
+                    DoctorCheck(
+                        section="server",
+                        status="info",
+                        message=(
+                            "Could not verify server version over REST with an OAuth profile "
+                            "(expected: REST validates API keys, not OAuth bearers; the MCP "
+                            "connection is unaffected)."
+                        ),
+                    )
+                ]
             return [DoctorCheck(section="server", status="fail", message=str(exc))]
         except KaguraConnectionError as exc:
             return [
