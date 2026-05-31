@@ -36,6 +36,24 @@ _OPTIONAL_INGESTION_DEPENDENCIES: dict[str, str] = {
     "ingest-browser": "playwright",
 }
 
+# Environment variable that litellm reads for each LLM provider the SDK can
+# route to. Used only by the optional ingest / agent features; a memory- or
+# recall-only user needs none of these.
+_PROVIDER_ENV_KEYS: dict[str, str] = {
+    "gemini": "GEMINI_API_KEY",
+    "anthropic": "ANTHROPIC_API_KEY",
+    "openai": "OPENAI_API_KEY",
+    "ollama": "OLLAMA_API_KEY",
+}
+
+# Default models for the optional LLM-backed features, mirrored from their
+# sources of truth: agent.py / config.py (`gpt-5.4-nano`) and
+# ingest/_audio.py (`gemini/gemini-2.5-flash`). doctor stays import-light and
+# deliberately does NOT import the ingest package (which pulls optional
+# extras), so these are mirrored here rather than imported.
+_DEFAULT_AGENT_MODEL = "gpt-5.4-nano"
+_DEFAULT_AUDIO_MODEL = "gemini/gemini-2.5-flash"
+
 
 @dataclass
 class DoctorCheck:
@@ -146,6 +164,83 @@ def _check_litellm() -> DoctorCheck:
         message=f"LiteLLM version: {version}",
         details={"version": version},
     )
+
+
+def _provider_for_model(model: str) -> str | None:
+    """Map a litellm model string to a known provider name.
+
+    Returns one of the keys in :data:`_PROVIDER_ENV_KEYS`, or ``None`` when the
+    provider cannot be determined from the model string (key check is skipped).
+    """
+
+    name = model.strip().lower()
+    if name.startswith(("ollama/", "ollama_chat/")):
+        return "ollama"
+    if name.startswith("gemini/"):
+        return "gemini"
+    if name.startswith(("anthropic/", "claude")):
+        return "anthropic"
+    if name.startswith(("openai/", "gpt", "o1", "o3", "o4")):
+        return "openai"
+    return None
+
+
+def _check_provider_keys() -> DoctorCheck:
+    """Report which optional LLM-provider keys are present (informational).
+
+    Only the env-var names are reported — values are never read into the
+    message, so there is nothing to leak. Absence is never a failure: these
+    keys are opt-in per feature.
+    """
+
+    present = [env for env in _PROVIDER_ENV_KEYS.values() if os.getenv(env)]
+    absent = [env for env in _PROVIDER_ENV_KEYS.values() if env not in present]
+    return DoctorCheck(
+        section="providers",
+        status="info",
+        message="LLM provider keys set: " + (", ".join(present) if present else "none"),
+        details={"present": present, "absent": absent},
+    )
+
+
+def _check_model_provider_match(config: dict[str, Any]) -> list[DoctorCheck]:
+    """Warn when a configured default model targets a provider with no key.
+
+    Informational only — no network calls are made to validate a key. Ollama
+    needs no key, so it never warns.
+    """
+
+    configured: list[tuple[str, str]] = [
+        ("agent", config.get("model") or _DEFAULT_AGENT_MODEL),
+        ("audio ingest", _DEFAULT_AUDIO_MODEL),
+    ]
+
+    checks: list[DoctorCheck] = []
+    for feature, model in configured:
+        details: dict[str, Any] = {"feature": feature, "model": model}
+        provider = _provider_for_model(model)
+        if provider is None:
+            status: DoctorStatus = "info"
+            message = f"{feature} model {model}: provider not recognized; key check skipped"
+        else:
+            env_var = _PROVIDER_ENV_KEYS[provider]
+            details["provider"] = provider
+            if provider == "ollama":
+                status = "info"
+                message = f"{feature} model {model} targets Ollama (no API key required)"
+            else:
+                details["env"] = env_var
+                if os.getenv(env_var):
+                    status = "pass"
+                    message = f"{feature} model {model}: {env_var} is set"
+                else:
+                    status = "warn"
+                    message = f"{feature} model {model} targets {provider} but {env_var} is not set"
+        checks.append(
+            DoctorCheck(section="providers", status=status, message=message, details=details)
+        )
+
+    return checks
 
 
 def _check_auth(
@@ -511,6 +606,8 @@ def run_doctor(*, project_dir: Path | None = None, profile: str | None = None) -
     checks.extend(_check_mcp(cwd))
     checks.extend(_check_optional_dependencies())
     checks.append(_check_litellm())
+    checks.append(_check_provider_keys())
+    checks.extend(_check_model_provider_match(config))
 
     if resolved is not None:
         https_check = _check_https(resolved.mcp_url)

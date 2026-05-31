@@ -28,6 +28,14 @@ def _isolate_doctor_env(monkeypatch, tmp_path):
     monkeypatch.delenv("KAGURA_API_KEY", raising=False)
     monkeypatch.delenv("KAGURA_PROFILE", raising=False)
     monkeypatch.delenv("KAGURA_MCP_URL", raising=False)
+    monkeypatch.delenv("KAGURA_MODEL", raising=False)
+    for _provider_env in (
+        "GEMINI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "OLLAMA_API_KEY",
+    ):
+        monkeypatch.delenv(_provider_env, raising=False)
     yield
     reset_state_cache()
 
@@ -564,3 +572,142 @@ def test_doctor_cli_passes_profile(monkeypatch):
 
     assert result.exit_code == 0
     assert seen["profile"] == "dev"
+
+
+# ---------------------------------------------------------------------------
+# LLM-provider diagnostics (#163)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("model", "expected"),
+    [
+        ("gpt-5.4-nano", "openai"),
+        ("openai/gpt-4o", "openai"),
+        ("o3-mini", "openai"),
+        ("gemini/gemini-2.5-flash", "gemini"),
+        ("claude-haiku-4-5-20251001", "anthropic"),
+        ("anthropic/claude-3", "anthropic"),
+        ("ollama/qwen3:30b", "ollama"),
+        ("ollama_chat/qwen3:30b", "ollama"),
+        ("some-unknown-model", None),
+    ],
+)
+def test_provider_for_model_mapping(model, expected):
+    from kagura_memory.doctor import _provider_for_model
+
+    assert _provider_for_model(model) == expected
+
+
+def test_check_provider_keys_reports_none_when_unset():
+    from kagura_memory.doctor import _check_provider_keys
+
+    check = _check_provider_keys()
+
+    assert check.section == "providers"
+    assert check.status == "info"
+    assert check.message == "LLM provider keys set: none"
+    assert check.details["present"] == []
+    assert "OPENAI_API_KEY" in check.details["absent"]
+
+
+def test_check_provider_keys_lists_only_set_keys(monkeypatch):
+    from kagura_memory.doctor import _check_provider_keys
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-secret-value")
+    monkeypatch.setenv("GEMINI_API_KEY", "gem-secret-value")
+
+    check = _check_provider_keys()
+
+    assert check.status == "info"
+    assert "OPENAI_API_KEY" in check.details["present"]
+    assert "GEMINI_API_KEY" in check.details["present"]
+    assert "ANTHROPIC_API_KEY" in check.details["absent"]
+    # Values are never read into the report — only env-var names.
+    assert "sk-secret-value" not in check.message
+    assert "gem-secret-value" not in check.message
+
+
+def test_model_provider_match_warns_on_missing_agent_key():
+    from kagura_memory.doctor import _check_model_provider_match
+
+    checks = _check_model_provider_match({})
+
+    agent = next(c for c in checks if c.details.get("feature") == "agent")
+    assert agent.status == "warn"
+    assert agent.details["provider"] == "openai"
+    assert "OPENAI_API_KEY" in agent.message
+
+
+def test_model_provider_match_warns_on_missing_audio_key():
+    from kagura_memory.doctor import _check_model_provider_match
+
+    checks = _check_model_provider_match({})
+
+    audio = next(c for c in checks if c.details.get("feature") == "audio ingest")
+    assert audio.status == "warn"
+    assert audio.details["provider"] == "gemini"
+    assert "GEMINI_API_KEY" in audio.message
+
+
+def test_model_provider_match_passes_when_keys_present(monkeypatch):
+    from kagura_memory.doctor import _check_model_provider_match
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-x")
+    monkeypatch.setenv("GEMINI_API_KEY", "gem-x")
+
+    checks = _check_model_provider_match({})
+
+    assert all(c.status == "pass" for c in checks)
+
+
+def test_model_provider_match_respects_configured_model():
+    from kagura_memory.doctor import _check_model_provider_match
+
+    checks = _check_model_provider_match({"model": "gemini/gemini-2.5-pro"})
+
+    agent = next(c for c in checks if c.details.get("feature") == "agent")
+    assert agent.status == "warn"
+    assert agent.details["provider"] == "gemini"
+    assert "gemini/gemini-2.5-pro" in agent.message
+
+
+def test_model_provider_match_ollama_never_warns():
+    from kagura_memory.doctor import _check_model_provider_match
+
+    checks = _check_model_provider_match({"model": "ollama/qwen3:30b"})
+
+    agent = next(c for c in checks if c.details.get("feature") == "agent")
+    assert agent.status == "info"
+    assert "no API key required" in agent.message
+
+
+def test_model_provider_match_unknown_provider_skips_key_check():
+    from kagura_memory.doctor import _check_model_provider_match
+
+    checks = _check_model_provider_match({"model": "mystery-model-v9"})
+
+    agent = next(c for c in checks if c.details.get("feature") == "agent")
+    assert agent.status == "info"
+    assert "provider not recognized" in agent.message
+
+
+def test_doctor_never_fails_on_missing_provider_keys(monkeypatch):
+    """Missing provider keys must never raise the exit code (warn-only)."""
+    creds_file = CredentialsFile()
+    resolved = _StaticAuth(
+        api_key="kagura_12345678abcdef",
+        mcp_url="https://example.com/mcp",
+        source="env",
+    )
+    _patch_common_doctor_surface(monkeypatch, resolved=resolved, creds_file=creds_file)
+    monkeypatch.setenv("KAGURA_API_KEY", "kagura_12345678abcdef")
+    _patch_server(monkeypatch)
+
+    from kagura_memory.doctor import run_doctor
+
+    report = run_doctor()
+
+    assert report.exit_code == 0
+    assert any(c.section == "providers" and c.status == "warn" for c in report.checks)
+    assert report.section_statuses["providers"] == "warn"
