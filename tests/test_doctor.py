@@ -453,7 +453,7 @@ def test_doctor_model_provider_handles_empty_model():
 def test_doctor_model_alignment_skips_empty_model(monkeypatch):
     from kagura_memory.doctor import _check_model_key_alignment
 
-    monkeypatch.setattr("kagura_memory.doctor.GeminiProvider.default_vision_model", None)
+    monkeypatch.setattr("kagura_memory.doctor._DEFAULT_INGEST_VISION_MODEL", None)
 
     checks = _check_model_key_alignment({})
 

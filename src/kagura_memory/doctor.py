@@ -19,9 +19,6 @@ from .auth.credentials import REFRESH_SKEW_SEC, load_credentials_file
 from .client import MIN_SERVER_VERSION, KaguraClient
 from .config import load_config
 from .exceptions import KaguraAuthError, KaguraConnectionError, _exc_message
-from .ingest._audio import _DEFAULT_AUDIO_MODEL
-from .ingest.providers.claude import ClaudeProvider
-from .ingest.providers.gemini import GeminiProvider
 from .setup_claude import _kagura_mcp_on_path, detect_mcp_json_mode
 
 DoctorStatus = Literal["pass", "warn", "fail", "info"]
@@ -45,7 +42,13 @@ _PROVIDER_ENV_KEYS: dict[str, str] = {
     "ollama": "OLLAMA_API_KEY",
 }
 _KEYLESS_PROVIDERS = {"ollama"}
-_DEFAULT_AGENT_MODEL = "gpt-5.4-nano"
+# Mirrored to keep doctor import-light. Importing the ingest package runs
+# ingest/__init__.py, pulling fetcher/youtube/chunker/files_client onto every
+# `kagura` invocation, including memory-only commands.
+_DEFAULT_AGENT_MODEL = "gpt-5.4-nano"  # agent.py / config.py
+_DEFAULT_INGEST_TEXT_MODEL = "claude-sonnet-4-6"  # ingest/providers/claude.py
+_DEFAULT_INGEST_VISION_MODEL = "gemini/gemini-2.5-flash"  # ingest/providers/gemini.py
+_DEFAULT_AUDIO_MODEL = "gemini/gemini-2.5-flash"  # ingest/_audio.py
 
 
 @dataclass
@@ -198,57 +201,39 @@ def _check_model_key_alignment(config: dict[str, Any]) -> list[DoctorCheck]:
     checks: list[DoctorCheck] = []
     model_checks = [
         ("agent", config.get("model") or _DEFAULT_AGENT_MODEL, bool(config.get("llm_api_key"))),
-        ("ingest-text", ClaudeProvider.default_text_model, False),
-        ("ingest-vision", GeminiProvider.default_vision_model, False),
+        ("ingest-text", _DEFAULT_INGEST_TEXT_MODEL, False),
+        ("ingest-vision", _DEFAULT_INGEST_VISION_MODEL, False),
         ("ingest-audio", _DEFAULT_AUDIO_MODEL, False),
     ]
     for feature, model, has_config_key in model_checks:
         if not model:
             continue
         provider = _provider_for_model(model)
-        details = {"feature": feature, "model": model, "provider": provider}
+        details: dict[str, Any] = {"feature": feature, "model": model, "provider": provider}
         if provider is None:
-            checks.append(
-                DoctorCheck(
-                    section="llm",
-                    status="info",
-                    message=f"{feature} model provider could not be inferred: {model}",
-                    details=details,
-                )
-            )
-            continue
-        if provider in _KEYLESS_PROVIDERS:
-            checks.append(
-                DoctorCheck(
-                    section="llm",
-                    status="info",
-                    message=f"{feature} model {model} uses {provider}; no API key is required",
-                    details=details,
-                )
-            )
-            continue
-
-        env_name = _PROVIDER_ENV_KEYS[provider]
-        has_env_key = bool(os.getenv(env_name))
-        if has_env_key or has_config_key:
-            credential_source = env_name if has_env_key else ".kagura.json llm_api_key"
-            checks.append(
-                DoctorCheck(
-                    section="llm",
-                    status="pass",
-                    message=f"{feature} model {model} has credentials via {credential_source}",
-                    details={**details, "env": env_name, "credential_source": credential_source},
-                )
-            )
+            status: DoctorStatus = "info"
+            message = f"{feature} model provider could not be inferred: {model}"
+        elif provider in _KEYLESS_PROVIDERS:
+            status = "info"
+            message = f"{feature} model {model} uses {provider}; no API key is required"
         else:
-            checks.append(
-                DoctorCheck(
-                    section="llm",
-                    status="warn",
-                    message=f"{feature} model {model} expects {env_name}, but it is not set",
-                    details={**details, "env": env_name},
-                )
+            env_name = _PROVIDER_ENV_KEYS[provider]
+            details["env"] = env_name
+            credential_source = (
+                env_name
+                if os.getenv(env_name)
+                else ".kagura.json llm_api_key"
+                if has_config_key
+                else None
             )
+            if credential_source:
+                details["credential_source"] = credential_source
+                status = "pass"
+                message = f"{feature} model {model} has credentials via {credential_source}"
+            else:
+                status = "warn"
+                message = f"{feature} model {model} expects {env_name}, but it is not set"
+        checks.append(DoctorCheck(section="llm", status=status, message=message, details=details))
     return checks
 
 

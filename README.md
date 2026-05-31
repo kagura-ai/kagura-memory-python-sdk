@@ -312,6 +312,25 @@ arguments: `KAGURA_API_KEY` env (CI / service accounts always win) →
 `KAGURA_PROFILE` env or explicit `profile=` arg → `default_profile`
 from `~/.kagura/credentials.json` → legacy `.kagura.json`.
 
+### Diagnostics (`kagura doctor`)
+
+Run `kagura doctor` when a local setup is not behaving as expected:
+
+```bash
+kagura doctor                  # human-readable pass/warn/fail report
+kagura doctor --profile work   # inspect a named OAuth profile
+kagura doctor --json           # machine-readable output for CI/scripts
+```
+
+The report covers effective auth source, OAuth/static API-key health,
+Claude Code `.mcp.json` mode, `kagura-mcp` PATH wiring, MCP URL HTTPS,
+server reachability/version, optional ingestion extras, LiteLLM supply-chain
+status, and local LLM provider key/model diagnostics. Provider diagnostics are
+local-only: `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, and
+`OLLAMA_API_KEY` are reported with redacted previews, and model/key mismatches
+are warnings only. `doctor` exits non-zero only on `fail` checks; warnings do
+not fail CI.
+
 ### Other commands
 
 ```bash
