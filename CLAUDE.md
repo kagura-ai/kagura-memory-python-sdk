@@ -34,7 +34,7 @@ uv run pyright src/              # Type check
 - **File uploads**: `FilesClient.upload/download_url/delete/list` with R2 sha256 binding (server v0.15.1+)
 - Agent hooks/skills: `@agent.hook("before_process")`, `@agent.skill("name")`
 - Ollama support: `model="ollama/qwen3:30b"` for local LLMs
-- CLI: `kagura auth login/refresh/status`, `kagura setup claude`, `kagura ingest <file|url>`, `kagura resource setup/import/stats/schema`, `kagura files upload/list/delete/download-url`, `kagura context search-config`, `kagura sleep history/report/rollback`
+- CLI: `kagura auth login/refresh/status`, `kagura setup claude`, `kagura doctor` (setup/auth/MCP/connectivity + LLM-provider key/model diagnostics), `kagura ingest <file|url>`, `kagura resource setup/import/stats/schema`, `kagura files upload/list/delete/download-url`, `kagura context search-config`, `kagura sleep history/report/rollback`
 
 ## Branch Strategy
 

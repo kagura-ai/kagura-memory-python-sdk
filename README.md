@@ -345,6 +345,41 @@ kagura files delete <file-id>
 
 # Config
 kagura config show
+
+# Diagnose local setup, auth, MCP wiring, and connectivity
+kagura doctor
+kagura doctor --json          # machine-readable report
+```
+
+### Diagnostics (`kagura doctor`)
+
+`kagura doctor` runs a batch of read-only checks and prints a `PASS`/`WARN`/`FAIL`/`INFO`
+line per finding. It exits non-zero only when a `FAIL` is present, so it is safe to run in
+CI. Sections covered:
+
+- **auth** — which credential source resolves (env `KAGURA_API_KEY`, `.kagura.json`, or an
+  OAuth profile), API-key shape, and OAuth token expiry. Shadowing warnings when more than
+  one source is configured.
+- **mcp** — `.mcp.json` mode (stdio / url / legacy static-token) and whether `kagura-mcp`
+  is on `PATH`.
+- **server** — reachability and minimum-version check (skipped on an insecure MCP URL).
+- **extras** — which optional ingestion dependencies are installed.
+- **security** — flags a `litellm` version in the known-bad supply-chain range.
+- **providers** — reports which optional LLM-provider keys are set (`GEMINI_API_KEY`,
+  `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OLLAMA_API_KEY`) and **warns** when a configured
+  default model targets a provider whose key is missing (e.g. the agent default
+  `gpt-5.4-nano` with no `OPENAI_API_KEY`, or audio transcription `gemini/gemini-2.5-flash`
+  with no `GEMINI_API_KEY`). These keys are opt-in per feature — a memory/recall-only user
+  needs none, so absence is never a `FAIL`. Key **values** are never read into the report
+  (only env-var names), and no network calls are made to validate them.
+
+```bash
+$ kagura doctor
+PASS Effective Auth: OAuth profile
+PASS MCP Mode: stdio
+INFO LLM provider keys set: none
+WARN agent model gpt-5.4-nano targets openai but OPENAI_API_KEY is not set
+WARN audio ingest model gemini/gemini-2.5-flash targets gemini but GEMINI_API_KEY is not set
 ```
 
 ### Document ingestion (`kagura ingest`)
