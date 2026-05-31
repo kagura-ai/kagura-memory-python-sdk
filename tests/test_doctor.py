@@ -28,6 +28,10 @@ def _isolate_doctor_env(monkeypatch, tmp_path):
     monkeypatch.delenv("KAGURA_API_KEY", raising=False)
     monkeypatch.delenv("KAGURA_PROFILE", raising=False)
     monkeypatch.delenv("KAGURA_MCP_URL", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OLLAMA_API_KEY", raising=False)
     yield
     reset_state_cache()
 
@@ -354,6 +358,138 @@ def test_doctor_litellm_missing_and_blocked(monkeypatch):
 
     monkeypatch.setattr("kagura_memory.doctor.importlib_metadata.version", lambda _: "1.82.9")
     assert _check_litellm().status == "pass"
+
+
+def test_doctor_reports_provider_key_presence_with_redaction(monkeypatch):
+    from kagura_memory.doctor import _check_provider_keys
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-1234567890")
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini-secret")
+
+    checks = _check_provider_keys()
+
+    openai = next(check for check in checks if check.details["env"] == "OPENAI_API_KEY")
+    anthropic = next(check for check in checks if check.details["env"] == "ANTHROPIC_API_KEY")
+
+    assert openai.status == "info"
+    assert openai.details["set"] is True
+    assert openai.details["preview"] == "sk-test-...7890"
+    assert "sk-test-1234567890" not in openai.message
+    assert anthropic.details["set"] is False
+    assert anthropic.details["preview"] is None
+
+
+def test_doctor_warns_when_default_agent_model_key_missing(monkeypatch):
+    from kagura_memory.doctor import _check_model_key_alignment
+
+    checks = _check_model_key_alignment({})
+
+    assert any(
+        check.status == "warn"
+        and check.details["feature"] == "agent"
+        and check.details["env"] == "OPENAI_API_KEY"
+        for check in checks
+    )
+
+
+def test_doctor_accepts_config_llm_key_for_agent_model():
+    from kagura_memory.doctor import _check_model_key_alignment
+
+    checks = _check_model_key_alignment({"model": "gpt-5.4-nano", "llm_api_key": "sk-local"})
+
+    assert any(
+        check.status == "pass"
+        and check.details["feature"] == "agent"
+        and check.details["credential_source"] == ".kagura.json llm_api_key"
+        for check in checks
+    )
+
+
+def test_doctor_warns_for_audio_gemini_key_missing():
+    from kagura_memory.doctor import _check_model_key_alignment
+
+    checks = _check_model_key_alignment({})
+
+    assert any(
+        check.status == "warn"
+        and check.details["feature"] == "ingest-audio"
+        and check.details["env"] == "GEMINI_API_KEY"
+        for check in checks
+    )
+
+
+def test_doctor_ollama_model_does_not_require_key():
+    from kagura_memory.doctor import _check_model_key_alignment
+
+    checks = _check_model_key_alignment({"model": "ollama/qwen3:30b"})
+
+    assert any(
+        check.status == "info"
+        and check.details["feature"] == "agent"
+        and "no API key is required" in check.message
+        for check in checks
+    )
+
+
+def test_doctor_unknown_model_provider_is_informational():
+    from kagura_memory.doctor import _check_model_key_alignment
+
+    checks = _check_model_key_alignment({"model": "custom/model"})
+
+    assert any(
+        check.status == "info"
+        and check.details["feature"] == "agent"
+        and check.details["provider"] is None
+        for check in checks
+    )
+
+
+def test_doctor_model_provider_handles_empty_model():
+    from kagura_memory.doctor import _provider_for_model
+
+    assert _provider_for_model(" ") is None
+
+
+def test_doctor_model_alignment_skips_empty_model(monkeypatch):
+    from kagura_memory.doctor import _check_model_key_alignment
+
+    monkeypatch.setattr("kagura_memory.doctor._DEFAULT_INGEST_VISION_MODEL", None)
+
+    checks = _check_model_key_alignment({})
+
+    assert not any(check.details["feature"] == "ingest-vision" for check in checks)
+
+
+def test_doctor_llm_warnings_do_not_fail_exit(monkeypatch):
+    from kagura_memory.doctor import _check_llm_providers
+
+    checks = _check_llm_providers({})
+    report = DoctorReport(checks=checks)
+
+    assert any(check.status == "warn" for check in checks)
+    assert report.exit_code == 0
+
+
+def test_run_doctor_includes_llm_section(monkeypatch):
+    creds_file = CredentialsFile()
+    resolved = _StaticAuth(
+        api_key="kagura_12345678abcdef",
+        mcp_url="https://example.com/mcp",
+        source="env",
+    )
+    _patch_common_doctor_surface(monkeypatch, resolved=resolved, creds_file=creds_file)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-1234567890")
+    _patch_server(monkeypatch, checks=[])
+
+    from kagura_memory.doctor import run_doctor
+
+    report = run_doctor()
+
+    assert report.section_statuses["llm"] == "warn"
+    assert any(
+        check.section == "llm" and check.details.get("env") == "OPENAI_API_KEY"
+        for check in report.checks
+    )
 
 
 def test_doctor_version_parser_ignores_extra_components():
