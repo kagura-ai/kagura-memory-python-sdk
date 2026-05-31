@@ -19,6 +19,9 @@ from .auth.credentials import REFRESH_SKEW_SEC, load_credentials_file
 from .client import MIN_SERVER_VERSION, KaguraClient
 from .config import load_config
 from .exceptions import KaguraAuthError, KaguraConnectionError, _exc_message
+from .ingest._audio import _DEFAULT_AUDIO_MODEL
+from .ingest.providers.claude import ClaudeProvider
+from .ingest.providers.gemini import GeminiProvider
 from .setup_claude import _kagura_mcp_on_path, detect_mcp_json_mode
 
 DoctorStatus = Literal["pass", "warn", "fail", "info"]
@@ -35,6 +38,14 @@ _OPTIONAL_INGESTION_DEPENDENCIES: dict[str, str] = {
     "ingest-youtube": "youtube_transcript_api",
     "ingest-browser": "playwright",
 }
+_PROVIDER_ENV_KEYS: dict[str, str] = {
+    "gemini": "GEMINI_API_KEY",
+    "anthropic": "ANTHROPIC_API_KEY",
+    "openai": "OPENAI_API_KEY",
+    "ollama": "OLLAMA_API_KEY",
+}
+_KEYLESS_PROVIDERS = {"ollama"}
+_DEFAULT_AGENT_MODEL = "gpt-5.4-nano"
 
 
 @dataclass
@@ -146,6 +157,105 @@ def _check_litellm() -> DoctorCheck:
         message=f"LiteLLM version: {version}",
         details={"version": version},
     )
+
+
+def _check_provider_keys() -> list[DoctorCheck]:
+    checks: list[DoctorCheck] = []
+    for provider, env_name in _PROVIDER_ENV_KEYS.items():
+        value = os.getenv(env_name) or ""
+        checks.append(
+            DoctorCheck(
+                section="llm",
+                status="info",
+                message=f"{env_name} is set" if value else f"{env_name} is not set",
+                details={
+                    "provider": provider,
+                    "env": env_name,
+                    "set": bool(value),
+                    "preview": _redact_token(value) if value else None,
+                },
+            )
+        )
+    return checks
+
+
+def _provider_for_model(model: str) -> str | None:
+    normalized = model.strip().lower()
+    if not normalized:
+        return None
+    if normalized.startswith(("ollama/", "ollama_chat/")):
+        return "ollama"
+    if normalized.startswith(("gemini/", "gemini-")):
+        return "gemini"
+    if normalized.startswith(("claude", "anthropic/")):
+        return "anthropic"
+    if normalized.startswith(("openai/", "gpt-", "o1", "o3", "o4")):
+        return "openai"
+    return None
+
+
+def _check_model_key_alignment(config: dict[str, Any]) -> list[DoctorCheck]:
+    checks: list[DoctorCheck] = []
+    model_checks = [
+        ("agent", config.get("model") or _DEFAULT_AGENT_MODEL, bool(config.get("llm_api_key"))),
+        ("ingest-text", ClaudeProvider.default_text_model, False),
+        ("ingest-vision", GeminiProvider.default_vision_model, False),
+        ("ingest-audio", _DEFAULT_AUDIO_MODEL, False),
+    ]
+    for feature, model, has_config_key in model_checks:
+        if not model:
+            continue
+        provider = _provider_for_model(model)
+        details = {"feature": feature, "model": model, "provider": provider}
+        if provider is None:
+            checks.append(
+                DoctorCheck(
+                    section="llm",
+                    status="info",
+                    message=f"{feature} model provider could not be inferred: {model}",
+                    details=details,
+                )
+            )
+            continue
+        if provider in _KEYLESS_PROVIDERS:
+            checks.append(
+                DoctorCheck(
+                    section="llm",
+                    status="info",
+                    message=f"{feature} model {model} uses {provider}; no API key is required",
+                    details=details,
+                )
+            )
+            continue
+
+        env_name = _PROVIDER_ENV_KEYS[provider]
+        has_env_key = bool(os.getenv(env_name))
+        if has_env_key or has_config_key:
+            credential_source = env_name if has_env_key else ".kagura.json llm_api_key"
+            checks.append(
+                DoctorCheck(
+                    section="llm",
+                    status="pass",
+                    message=f"{feature} model {model} has credentials via {credential_source}",
+                    details={**details, "env": env_name, "credential_source": credential_source},
+                )
+            )
+        else:
+            checks.append(
+                DoctorCheck(
+                    section="llm",
+                    status="warn",
+                    message=f"{feature} model {model} expects {env_name}, but it is not set",
+                    details={**details, "env": env_name},
+                )
+            )
+    return checks
+
+
+def _check_llm_providers(config: dict[str, Any]) -> list[DoctorCheck]:
+    """Inspect local LLM provider env/config only; never call provider APIs."""
+
+    return [*_check_provider_keys(), *_check_model_key_alignment(config)]
 
 
 def _check_auth(
@@ -511,6 +621,7 @@ def run_doctor(*, project_dir: Path | None = None, profile: str | None = None) -
     checks.extend(_check_mcp(cwd))
     checks.extend(_check_optional_dependencies())
     checks.append(_check_litellm())
+    checks.extend(_check_llm_providers(config))
 
     if resolved is not None:
         https_check = _check_https(resolved.mcp_url)
