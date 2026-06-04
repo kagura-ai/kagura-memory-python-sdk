@@ -1262,7 +1262,10 @@ class KaguraClient:
         trigger_until: str | None = None,
         order_by: Literal["created_at", "trigger_from"] | None = None,
     ) -> MemoryListResponse:
-        """List memories newest-first, with optional substring and facet filters.
+        """List memories with optional substring, facet, and time-window filters.
+
+        Ordering is newest-first by default; pass ``order_by="trigger_from"`` to
+        sort Time Memories soonest-scheduled first.
 
         Calls ``GET /api/v1/memory/list``. Without ``context_id`` this returns
         the caller's own memories across all contexts; with ``context_id`` it
@@ -1295,8 +1298,9 @@ class KaguraClient:
                 server default.
 
         Returns:
-            :class:`MemoryListResponse` with ``memories`` (newest-first),
-            ``total`` (matching rows across all pages), and ``has_more``.
+            :class:`MemoryListResponse` with ``memories`` (ordered per
+            ``order_by``; newest-first by default), ``total`` (matching rows
+            across all pages), and ``has_more``.
 
         Raises:
             KaguraAuthError: Authentication failed.

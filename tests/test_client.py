@@ -1812,7 +1812,7 @@ async def test_list_memories_window_params_omitted_when_none():
 
 @pytest.mark.asyncio
 async def test_recall_upcoming_minimal():
-    """recall_upcoming() calls the recall_upcoming MCP tool with context_id only."""
+    """recall_upcoming() with no bounds sends only context_id + the default k."""
     client = _make_initialized_client()
 
     with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
