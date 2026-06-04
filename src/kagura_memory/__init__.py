@@ -89,7 +89,7 @@ from .models import (
 )
 from .resource_client import ResourceClient
 
-__version__ = "0.27.0"
+__version__ = "0.28.0"
 
 __all__ = [
     # Core classes
