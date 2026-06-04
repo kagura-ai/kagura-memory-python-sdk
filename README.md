@@ -199,9 +199,53 @@ async with KaguraClient(api_key="kagura_...", mcp_url="https://...") as client:
 
     # Cross-context recall — search several contexts at once
     results = await client.recall(query="auth", context_ids=["ctx-1", "ctx-2"], k=10)
+
+    # Trust-tier filter (provenance) — exclude untrusted / connector-ingested
+    # memories from behaviour-influencing reads (OWASP LLM01/LLM03)
+    safe = await client.recall(context_id="dev", query="policy",
+                               filters={"trust_tier": "trusted"})
 ```
 
-More operations — tag-vocabulary discovery (`list_tags`), `merge_contexts`, workspace `get_usage`, `get_memory_stats`, `find_duplicates`, `get_embedding_status` — are runnable in [`examples/client_advanced.py`](examples/client_advanced.py); the [API Coverage](#api-coverage) table lists the full surface.
+#### AI agent memory substrate (v0.28.0–v0.29.0)
+
+Primitives for autonomous agents — a deterministic load path, a retrieval-feedback
+signal, and a TTL-bounded run-state lane kept separate from knowledge:
+
+```python
+async with KaguraClient(api_key="kagura_...", mcp_url="https://...") as client:
+    # Deterministic delivery — pin on write, load the full pinned set every turn
+    # (Goal / Guardrail / critical-policy memories, distinct from probabilistic recall)
+    await client.remember(context_id="dev", summary="Guardrail: never delete prod",
+                          content="...", delivery_mode="always")
+    pinned = await client.load_pinned(context_id="dev")
+
+    # Time Memories — deterministic "what's upcoming" query (no semantic search)
+    upcoming = await client.recall_upcoming(context_id="dev", from_="now")
+
+    # Retrieval feedback — teach the substrate which recall results were useful
+    await client.feedback(context_id="dev", memory_id="uuid", helpful=True, query="OAuth2")
+
+    # Agent session-state lane — TTL-bounded, structurally excluded from recall()
+    await client.set_state(context_id="dev", key="step", value={"n": 3}, ttl_seconds=3600)
+    state = await client.get_state(context_id="dev", key="step")  # omit key → all live entries
+```
+
+> **⚠️ Error handling changed in v0.29.0 (breaking).** Every `KaguraClient` MCP tool
+> method now **raises** on a server domain error instead of returning an error dict:
+> a missing context/memory raises `KaguraNotFoundError`, any other domain error raises
+> `KaguraError`. Replace `result["status"] == "error"` checks with `try`/`except`:
+>
+> ```python
+> from kagura_memory import KaguraNotFoundError, KaguraError
+> try:
+>     results = await client.recall(context_id="dev", query="auth")
+> except KaguraNotFoundError:
+>     ...   # context or memory not found
+> except KaguraError:
+>     ...   # other server-side error
+> ```
+
+More operations — tag-vocabulary discovery (`list_tags`), `merge_contexts`, context lifecycle (`create_context`/`update_context`/`delete_context`), workspace `get_usage`, `get_memory_stats`, `find_duplicates`, `get_embedding_status` — are runnable in [`examples/client_advanced.py`](examples/client_advanced.py); the [API Coverage](#api-coverage) table lists the full surface.
 
 ### ResourceClient — External Data Ingestion
 
@@ -260,6 +304,7 @@ Runnable: [`examples/files_upload.py`](examples/files_upload.py).
 
 | SDK | Min memory-cloud | Notes |
 |---|---|---|
+| 0.27.0 – 0.29.x | 0.17.1 | **Agent memory substrate.** `load_pinned` + `delivery_mode` pin-on-write, `recall_upcoming`, `feedback`, `set_state`/`get_state`, and the `trust_tier` recall filter each need a memory-cloud carrying the matching [#885](https://github.com/kagura-ai/memory-cloud/issues/885) agent-substrate APIs (≈ v0.23.0+); against an older server those specific tools return an MCP "tool not found". `MIN_SERVER_VERSION` stays **0.17.1** — the rest of the SDK still works on 0.17.1+. **v0.29.0 also changed error handling (breaking): MCP tool methods now raise `KaguraNotFoundError`/`KaguraError` instead of returning `{"status":"error"}` dicts** (see the KaguraClient error-handling note above). |
 | 0.15.0 – 0.20.x | 0.15.1 | `FilesClient` + R2 checksum binding. `list_tags()` additionally needs **0.15.4** — `MIN_SERVER_VERSION` is intentionally not bumped, only that one method requires the newer server. |
 | 0.14.x | 0.15.1 | `FilesClient` + R2 checksum binding (`x-amz-checksum-sha256` on PUT) |
 | 0.13.x | 0.13.0 | Pre-`FilesClient` |
@@ -432,14 +477,18 @@ kagura process -m "今日の学び：FastAPIのDIはDepends()を使う"
 
 | Operation | SDK Client | Protocol | Auth |
 |-----------|-----------|----------|------|
-| Memory (remember/recall/forget/explore/reference) | `KaguraClient` | MCP | API Key |
-| Context (create/update/list/get_context_info) | `KaguraClient` | MCP | API Key |
+| Memory (remember/recall/forget/explore/reference/update_memory) | `KaguraClient` | MCP | API Key |
+| Provenance / trust_tier recall filter | `KaguraClient` | MCP | API Key |
+| Deterministic delivery (load_pinned + delivery_mode pin-on-write) | `KaguraClient` | MCP | API Key |
+| Time Memory (recall_upcoming) | `KaguraClient` | MCP | API Key |
+| Retrieval feedback (feedback) | `KaguraClient` | MCP | API Key |
+| Agent session-state lane (set_state/get_state, TTL) | `KaguraClient` | MCP | API Key |
+| Context (create/update/list/delete/get_context_info) | `KaguraClient` | MCP | API Key |
 | Workspace (get_usage) | `KaguraClient` | MCP | API Key |
 | Search config (update_search_config) | `KaguraClient` | MCP | API Key |
 | Embedding status (get_embedding_status) | `KaguraClient` | REST | API Key |
 | Memory stats (get_memory_stats) | `KaguraClient` | REST | API Key |
 | Duplicate detection (find_duplicates) | `KaguraClient` | REST | API Key |
-| Context delete | — | Web UI only | Session |
 | Sleep Maintenance (history / report / rollback) | `KaguraClient` | MCP | API Key |
 | Resource Token (create/list/update/revoke) | `ResourceClient` | REST API | API Key |
 | Resource Event ingestion | `ResourceClient` | REST API | Resource Token |
@@ -448,7 +497,7 @@ kagura process -m "今日の学び：FastAPIのDIはDepends()を使う"
 | File upload / download-url / delete / list | `FilesClient` | REST + presigned PUT | API Key |
 | Account erasure (GDPR Art.17 / APPI) | — | Web UI only | Session |
 
-Context deletion and account erasure are intentionally Web UI only — destructive operations require session authentication and confirmation. `kagura sleep rollback` runs over the MCP API Key but is itself destructive (reverses edge creation, merges, importance updates, promotions, and archives) and the CLI requires `--yes` to skip the interactive confirmation. The server commits per-action without a Saga, so a 5xx response after partial success means SOME actions may have been reversed before the error surfaced — re-run `kagura sleep report` to inspect the post-failure state.
+Context deletion is a **soft delete** available via `KaguraClient.delete_context()` and `kagura context delete` (the CLI prompts for confirmation). Account erasure (GDPR Art.17 / APPI) is intentionally Web UI only — it is irreversible and requires session authentication and confirmation. `kagura sleep rollback` runs over the MCP API Key but is itself destructive (reverses edge creation, merges, importance updates, promotions, and archives) and the CLI requires `--yes` to skip the interactive confirmation. The server commits per-action without a Saga, so a 5xx response after partial success means SOME actions may have been reversed before the error surfaced — re-run `kagura sleep report` to inspect the post-failure state.
 
 ## Development
 
