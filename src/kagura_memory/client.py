@@ -1287,11 +1287,15 @@ class KaguraClient:
                 vocabulary; the SDK passes through.
             limit: Maximum results (server accepts 1-500, default: 50).
             offset: Pagination offset (default: 0).
-            trigger_from: Lower bound (naive ISO) on a Time Memory's trigger
-                window — restricts results to ``type="time"`` memories whose
-                window starts at or after this instant. Omit for no lower bound.
-            trigger_until: Upper bound (naive ISO) on the trigger window. Omit
-                for an open-ended window. For a "what's upcoming" view, prefer
+            trigger_from: Lower bound (naive ISO) of a time window. Restricts
+                results to ``type="time"`` memories whose trigger window
+                **overlaps** ``[trigger_from, trigger_until]`` — i.e. a memory
+                may start before ``trigger_from`` and still match as long as its
+                window overlaps the range (not a "starts at or after" filter).
+                Omit for no lower bound.
+            trigger_until: Upper bound (naive ISO) of the time window (same
+                overlap semantics as ``trigger_from``). Omit for an open-ended
+                window. For a "what's upcoming" view, prefer
                 :meth:`recall_upcoming`, which is purpose-built for that query.
             order_by: Sort order — ``"created_at"`` (default, newest-first) or
                 ``"trigger_from"`` (soonest scheduled first). Omit to use the
