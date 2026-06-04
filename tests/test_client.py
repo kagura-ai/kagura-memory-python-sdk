@@ -2001,6 +2001,229 @@ async def test_recall_upcoming_omits_bounds_when_none():
 
 
 # ============================================================================
+# recall trust_tier filter (provenance, #173)
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_recall_passes_trust_tier_filter():
+    """recall() should pass a trust_tier filter straight through to the tool."""
+    client = _make_initialized_client()
+
+    try:
+        with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+            mock.return_value = {"results": []}
+            await client.recall(context_id="ctx", query="auth", filters={"trust_tier": "trusted"})
+            args = mock.call_args[0][1]
+            assert args["filters"] == {"trust_tier": "trusted"}
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_recall_omits_filters_when_not_given():
+    """recall() should not send a filters key when no filters are provided."""
+    client = _make_initialized_client()
+
+    try:
+        with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+            mock.return_value = {"results": []}
+            await client.recall(context_id="ctx", query="auth")
+            args = mock.call_args[0][1]
+            assert "filters" not in args
+    finally:
+        await client.close()
+
+
+# ============================================================================
+# feedback (retrieval signal, #174)
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_feedback_minimal():
+    """feedback() should send context_id, memory_id, and helpful only."""
+    client = _make_initialized_client()
+
+    try:
+        with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+            mock.return_value = {"status": "ok"}
+            result = await client.feedback(context_id="ctx", memory_id="mem", helpful=True)
+            name, args = mock.call_args[0][0], mock.call_args[0][1]
+            assert name == "feedback"
+            assert args == {"context_id": "ctx", "memory_id": "mem", "helpful": True}
+            assert result["status"] == "ok"
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_feedback_with_query_and_note():
+    """feedback() should pass optional query and note when provided."""
+    client = _make_initialized_client()
+
+    try:
+        with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+            mock.return_value = {"status": "ok"}
+            await client.feedback(
+                context_id="ctx",
+                memory_id="mem",
+                helpful=False,
+                query="auth flow",
+                note="off-topic result",
+            )
+            args = mock.call_args[0][1]
+            assert args["helpful"] is False
+            assert args["query"] == "auth flow"
+            assert args["note"] == "off-topic result"
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_feedback_omits_optionals_when_none():
+    """feedback() should omit query and note when not provided."""
+    client = _make_initialized_client()
+
+    try:
+        with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+            mock.return_value = {"status": "ok"}
+            await client.feedback(context_id="ctx", memory_id="mem", helpful=True)
+            args = mock.call_args[0][1]
+            assert "query" not in args
+            assert "note" not in args
+    finally:
+        await client.close()
+
+
+# ============================================================================
+# set_state / get_state (agent session-state lane, #175)
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_set_state_minimal():
+    """set_state() should send context_id, key, and value without a TTL."""
+    client = _make_initialized_client()
+
+    try:
+        with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+            mock.return_value = {"status": "ok"}
+            await client.set_state(context_id="ctx", key="step", value={"n": 3, "phase": "build"})
+            name, args = mock.call_args[0][0], mock.call_args[0][1]
+            assert name == "set_state"
+            assert args == {
+                "context_id": "ctx",
+                "key": "step",
+                "value": {"n": 3, "phase": "build"},
+            }
+            assert "ttl_seconds" not in args
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_set_state_with_ttl():
+    """set_state() should pass ttl_seconds when provided."""
+    client = _make_initialized_client()
+
+    try:
+        with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+            mock.return_value = {"status": "ok"}
+            await client.set_state(context_id="ctx", key="lock", value=True, ttl_seconds=300)
+            args = mock.call_args[0][1]
+            assert args["ttl_seconds"] == 300
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_get_state_single_key():
+    """get_state() should send the key when reading one value."""
+    client = _make_initialized_client()
+
+    try:
+        with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+            mock.return_value = {"key": "step", "value": {"n": 3}}
+            await client.get_state(context_id="ctx", key="step")
+            name, args = mock.call_args[0][0], mock.call_args[0][1]
+            assert name == "get_state"
+            assert args == {"context_id": "ctx", "key": "step"}
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_get_state_lists_all_when_key_omitted():
+    """get_state() should omit key to list all live entries for the context."""
+    client = _make_initialized_client()
+
+    try:
+        with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+            mock.return_value = {"entries": []}
+            await client.get_state(context_id="ctx")
+            args = mock.call_args[0][1]
+            assert args == {"context_id": "ctx"}
+            assert "key" not in args
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_feedback_surfaces_server_error():
+    """feedback() must raise on a server-side error rather than returning the error dict."""
+    client = _make_initialized_client()
+
+    try:
+        with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+            mock.return_value = {
+                "status": "error",
+                "error": "memory_not_found",
+                "message": "Memory not found.",
+            }
+            with pytest.raises(KaguraNotFoundError, match="feedback"):
+                await client.feedback(context_id="ctx", memory_id="missing", helpful=True)
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_set_state_surfaces_server_error():
+    """set_state() must raise on a server-side error rather than returning the error dict."""
+    client = _make_initialized_client()
+
+    try:
+        with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+            mock.return_value = {
+                "status": "error",
+                "error": "context_not_found",
+                "message": "Context not found.",
+            }
+            with pytest.raises(KaguraNotFoundError, match="set_state"):
+                await client.set_state(context_id="missing", key="k", value="v")
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_get_state_surfaces_server_error():
+    """get_state() must raise on a server-side error rather than returning the error dict."""
+    client = _make_initialized_client()
+
+    try:
+        with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+            mock.return_value = {
+                "status": "error",
+                "error": "context_not_found",
+                "message": "Context not found.",
+            }
+            with pytest.raises(KaguraNotFoundError, match="get_state"):
+                await client.get_state(context_id="missing")
+    finally:
+        await client.close()
+
+
+# ============================================================================
 # get_server_info / check_server_version
 # ============================================================================
 
