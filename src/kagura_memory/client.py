@@ -281,10 +281,10 @@ class KaguraClient:
         linked_memory_ids: list[str] | None = None,
         linked_source_uris: list[str] | None = None,
         source_type: Literal["file", "url", "vault", "api", "manual"] | None = None,
-        delivery_mode: Literal["always", "on_recall", "on_trigger"] = "on_recall",
         context_summary: str | None = None,
         details: dict[str, Any] | None = None,
         context: dict[str, Any] | None = None,
+        delivery_mode: Literal["always", "on_recall", "on_trigger"] = "on_recall",
     ) -> dict[str, Any]:
         """Call remember MCP tool.
 
@@ -305,14 +305,6 @@ class KaguraClient:
                 Unresolved URIs are silently skipped server-side.
             source_type: Origin classification. Closed enum per the MCP
                 tool schema; pairs with ``source_uri`` for downstream filters.
-            delivery_mode: When the memory is surfaced. ``"on_recall"``
-                (default) leaves it to probabilistic :meth:`recall`.
-                ``"always"`` pins it to ``scope="persistent"`` on write so it
-                is returned by every :meth:`load_pinned` call (Goal / Guardrail
-                / critical-policy memories). ``"on_trigger"`` is for
-                trigger-delivered memories. The default is sent only when it
-                differs from the server's ``server_default='on_recall'``, so
-                an unset value stays forward-compatible.
             context_summary: Brief explanation (max 2000 chars) of why the
                 memory exists and how to use it. Distinct from ``summary``,
                 which is the search-target text.
@@ -321,6 +313,16 @@ class KaguraClient:
                 payload that the server should store as-is.
             context: Open-ended context metadata JSON. Less structured than
                 ``details``; useful for free-form provenance hints.
+            delivery_mode: When the memory is surfaced. ``"on_recall"``
+                (default) leaves it to probabilistic :meth:`recall`.
+                ``"always"`` pins it to ``scope="persistent"`` on write so it
+                is returned by every :meth:`load_pinned` call (Goal / Guardrail
+                / critical-policy memories). ``"on_trigger"`` is for
+                trigger-delivered memories. The default is sent only when it
+                differs from the server's ``server_default='on_recall'``, so
+                an unset value stays forward-compatible. Keyword-only in
+                practice — keep passing it by name. (Appended at the end of the
+                signature so existing positional callers are unaffected.)
 
         Returns:
             API response with ``memory_id``.
@@ -443,8 +445,11 @@ class KaguraClient:
         The set is **bounded, never silently dropped**: when more pinned
         memories exist than ``cap``, the response ``truncated`` flag is ``True``
         and ``total_available`` reports the real count. Callers loading a
-        complete policy set should check ``truncated`` and raise ``cap`` (or
-        page via :meth:`list_memories`) rather than assume completeness.
+        complete policy set should check ``truncated`` and re-call with a larger
+        ``cap`` (up to the server maximum). Note that :meth:`list_memories` is
+        not a substitute for paging the pinned set — its responses do not carry
+        ``delivery_mode``/pinned state, so it cannot reconstruct the pinned
+        subset; use this method with a sufficient ``cap`` instead.
 
         Args:
             context_id: Target context UUID.
