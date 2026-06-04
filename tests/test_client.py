@@ -1042,6 +1042,22 @@ async def test_create_context_quota_exceeded():
 
 
 @pytest.mark.asyncio
+async def test_create_context_quota_exceeded_missing_count_limit():
+    """create_context() must raise KaguraQuotaError (not KeyError) when the quota
+    response omits count/limit (issue #183) — the message uses safe ``.get`` access."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        # can_create=False but no count/limit keys (server schema drift / partial payload)
+        mock.return_value = {"status": "success", "contexts": [], "can_create": False}
+
+        with pytest.raises(KaguraQuotaError, match=r"Context limit reached \(\?/\?\)"):
+            await client.create_context(name="over-limit")
+
+    await client.close()
+
+
+@pytest.mark.asyncio
 async def test_update_context_with_resource_id_and_is_public():
     """update_context() should pass resource_id and is_public."""
     client = _make_initialized_client()

@@ -947,7 +947,8 @@ class KaguraClient:
             from .exceptions import KaguraQuotaError
 
             raise KaguraQuotaError(
-                f"Context limit reached ({contexts['count']}/{contexts['limit']}). "
+                f"Context limit reached ({contexts.get('count', '?')}/"
+                f"{contexts.get('limit', '?')}). "
                 "Delete unused contexts or upgrade your plan."
             )
 
