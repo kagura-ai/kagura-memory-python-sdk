@@ -107,6 +107,222 @@ def test_files_upload(mock_client_cls, mock_config, tmp_path):
     assert call.kwargs["source"] == p
 
 
+def _mock_kagura_client(mock_client_cls: MagicMock) -> MagicMock:
+    """Wire a KaguraClient mock whose ``remember`` returns a memory id."""
+    client = AsyncMock()
+    client.remember.return_value = {"memory_id": "mem-1"}
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=None)
+    mock_client_cls.return_value = client
+    return client
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+@patch("kagura_memory.cli.FilesClient")
+def test_files_upload_remember_creates_linked_memory(
+    mock_files_cls, mock_kagura_cls, mock_config, tmp_path
+):
+    """`files upload --remember` uploads, then creates a memory linked to the file_object."""
+    mock_config.return_value = {
+        "api_key": "key",
+        "mcp_url": "https://test.com/mcp",
+        "context_id": SAMPLE_CTX_ID,
+    }
+    mock_files = _mock_files_client("upload", _file_object())
+    _wire_files_client_mock(mock_files_cls, mock_files)
+    mock_kagura = _mock_kagura_client(mock_kagura_cls)
+
+    p = tmp_path / "hello.txt"
+    p.write_text("hello kagura files")
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["files", "upload", str(p), "--remember"])
+
+    assert result.exit_code == 0, result.output
+    # Output reports both the file_object and the created memory.
+    assert SAMPLE_FILE_ID in result.output
+    assert "mem-1" in result.output
+
+    mock_kagura.remember.assert_awaited_once()
+    kwargs = mock_kagura.remember.call_args.kwargs
+    assert kwargs["context_id"] == SAMPLE_CTX_ID
+    assert kwargs["source_type"] == "file"
+    assert kwargs["source_uri"] == p.resolve().as_uri()
+    # The memory links back to the file_object via details.file_id.
+    assert kwargs["details"]["file_id"] == SAMPLE_FILE_ID
+    # The memory client must self-resolve credentials (constructed with no
+    # api_key/mcp_url args) so it shares the exact source that uploaded the
+    # file and owns ``ctx``. Passing config values would force the "explicit"
+    # branch of _resolve_auth and diverge from the upload's env/OAuth source
+    # for multi-source users → cross-workspace 403.
+    mock_kagura_cls.assert_called_once_with()
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+@patch("kagura_memory.cli.FilesClient")
+def test_files_upload_without_remember_skips_memory(
+    mock_files_cls, mock_kagura_cls, mock_config, tmp_path
+):
+    """Without --remember, no memory is created (default path unchanged)."""
+    mock_config.return_value = {
+        "api_key": "key",
+        "mcp_url": "https://test.com/mcp",
+        "context_id": SAMPLE_CTX_ID,
+    }
+    mock_files = _mock_files_client("upload", _file_object())
+    _wire_files_client_mock(mock_files_cls, mock_files)
+    mock_kagura = _mock_kagura_client(mock_kagura_cls)
+
+    p = tmp_path / "hello.txt"
+    p.write_text("hi")
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["files", "upload", str(p)])
+
+    assert result.exit_code == 0, result.output
+    mock_kagura.remember.assert_not_awaited()
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+@patch("kagura_memory.cli.FilesClient")
+def test_files_upload_remember_custom_summary_type_tags(
+    mock_files_cls, mock_kagura_cls, mock_config, tmp_path
+):
+    """--remember forwards --summary / --type / --importance / --tags to remember()."""
+    mock_config.return_value = {
+        "api_key": "key",
+        "mcp_url": "https://test.com/mcp",
+        "context_id": SAMPLE_CTX_ID,
+    }
+    mock_files = _mock_files_client("upload", _file_object())
+    _wire_files_client_mock(mock_files_cls, mock_files)
+    mock_kagura = _mock_kagura_client(mock_kagura_cls)
+
+    p = tmp_path / "hello.txt"
+    p.write_text("hi")
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        [
+            "files",
+            "upload",
+            str(p),
+            "--remember",
+            "--summary",
+            "My doc",
+            "--type",
+            "doc",
+            "--importance",
+            "0.9",
+            "--tags",
+            "a, b",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    kwargs = mock_kagura.remember.call_args.kwargs
+    assert kwargs["summary"] == "My doc"
+    assert kwargs["type"] == "doc"
+    assert kwargs["importance"] == 0.9
+    assert kwargs["tags"] == ["a", "b"]
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+@patch("kagura_memory.cli.FilesClient")
+def test_files_upload_remember_failure_still_reports_file_id(
+    mock_files_cls, mock_kagura_cls, mock_config, tmp_path
+):
+    """If upload succeeds but the memory write fails, the file_id must not be lost.
+
+    Otherwise the user sees a bare error, does not learn the file_object was
+    already created, and re-runs — orphaning a duplicate upload.
+    """
+    mock_config.return_value = {
+        "api_key": "key",
+        "mcp_url": "https://test.com/mcp",
+        "context_id": SAMPLE_CTX_ID,
+    }
+    mock_files = _mock_files_client("upload", _file_object())
+    _wire_files_client_mock(mock_files_cls, mock_files)
+    mock_kagura = _mock_kagura_client(mock_kagura_cls)
+    mock_kagura.remember.side_effect = RuntimeError("boom")
+
+    p = tmp_path / "hello.txt"
+    p.write_text("hi")
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["files", "upload", str(p), "--remember"])
+
+    assert result.exit_code != 0
+    # The successful upload's file_id is surfaced despite the memory failure.
+    assert SAMPLE_FILE_ID in result.output
+
+
+@pytest.mark.parametrize(
+    "bad_result",
+    [
+        {"status": "error", "message": "quota exceeded"},  # MCP domain error
+        {"ok": True},  # missing memory_id
+    ],
+)
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+@patch("kagura_memory.cli.FilesClient")
+def test_files_upload_remember_domain_error_is_failure(
+    mock_files_cls, mock_kagura_cls, mock_config, bad_result, tmp_path
+):
+    """remember() returning an error-shaped dict (no raise) must NOT exit 0.
+
+    KaguraClient.remember() surfaces MCP domain errors as a dict with
+    status=="error" / no memory_id rather than raising; treating that as
+    success would print an error payload as if the memory was created.
+    Mirrors the ingest path (ingestor.py).
+    """
+    mock_config.return_value = {
+        "api_key": "key",
+        "mcp_url": "https://test.com/mcp",
+        "context_id": SAMPLE_CTX_ID,
+    }
+    mock_files = _mock_files_client("upload", _file_object())
+    _wire_files_client_mock(mock_files_cls, mock_files)
+    mock_kagura = _mock_kagura_client(mock_kagura_cls)
+    mock_kagura.remember.return_value = bad_result
+
+    p = tmp_path / "hello.txt"
+    p.write_text("hi")
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["files", "upload", str(p), "--remember"])
+
+    assert result.exit_code != 0
+    # The upload succeeded — file_id still surfaced for recovery.
+    assert SAMPLE_FILE_ID in result.output
+
+
+@patch("kagura_memory.cli.load_config")
+def test_files_upload_summary_without_remember_errors(mock_config, tmp_path):
+    """--summary/--tags only make sense with --remember; using them alone must error,
+    not silently drop the value."""
+    mock_config.return_value = {
+        "api_key": "key",
+        "mcp_url": "https://test.com/mcp",
+        "context_id": SAMPLE_CTX_ID,
+    }
+    p = tmp_path / "hello.txt"
+    p.write_text("hi")
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["files", "upload", str(p), "--summary", "x"])
+
+    assert result.exit_code != 0
+    assert "--remember" in result.output
+
+
 @patch("kagura_memory.cli.load_config")
 def test_files_upload_missing_credentials(mock_config, monkeypatch, tmp_path):
     """upload with context-id but no api_key + no OAuth profile → credentials error."""

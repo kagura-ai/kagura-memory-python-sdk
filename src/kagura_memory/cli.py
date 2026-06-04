@@ -20,10 +20,10 @@ from .auth.cli import auth as _auth_group
 from .client import KaguraClient
 from .config import load_config
 from .doctor import run_doctor
-from .exceptions import _exc_message
+from .exceptions import KaguraError, _exc_message
 from .files_client import FilesClient
 from .logger import VerboseLogger
-from .models import Message, ProcessResult, ResourceEventRequest, Session
+from .models import FileObject, Message, ProcessResult, ResourceEventRequest, Session
 from .resource_client import ResourceClient
 from .setup_claude import run_setup_claude
 
@@ -1807,10 +1807,97 @@ def files():
     pass
 
 
+async def _remember_file_object(
+    ctx: str,
+    path: Path,
+    file_obj: FileObject,
+    summary: str | None,
+    memory_type: str,
+    importance: float,
+    tags: str | None,
+) -> dict[str, Any]:
+    """Create a summary memory linked to an uploaded file_object.
+
+    The memory carries ``source_uri``/``source_type`` provenance plus a
+    ``details.file_id`` back-reference — the same mechanism ``kagura ingest``
+    uses so callers can resolve memory → original bytes. No LLM is invoked;
+    the summary defaults to the filename, which keeps this path usable for
+    binaries and in environments without LLM credentials.
+
+    ``KaguraClient()`` is constructed with no arguments on purpose: it then
+    runs the exact same ``_resolve_auth`` chain (env > OAuth profile >
+    .kagura.json) that ``_run_files_command`` used for the upload, so the
+    memory write shares the identity that owns the resolved workspace ``ctx``.
+    Passing config-derived ``api_key``/``mcp_url`` would force the "explicit"
+    branch and could diverge from the upload's source for users with
+    credentials in more than one place (cross-workspace 403).
+    """
+    client = KaguraClient()
+    content = (
+        f"Uploaded file `{file_obj.filename}` "
+        f"({file_obj.size_bytes} bytes, {file_obj.content_type}). "
+        f"Stored as file_object {file_obj.id}."
+    )
+    async with client:
+        result = await client.remember(
+            context_id=ctx,
+            summary=summary or f"File: {file_obj.filename}",
+            content=content,
+            type=memory_type,
+            importance=importance,
+            tags=_parse_tags(tags),
+            source_uri=path.resolve().as_uri(),
+            source_type="file",
+            details={
+                "file_id": file_obj.id,
+                "sha256": file_obj.sha256,
+                "size_bytes": file_obj.size_bytes,
+                "content_type": file_obj.content_type,
+            },
+        )
+    # remember() surfaces MCP domain errors as a dict (status=="error" /
+    # missing memory_id) rather than raising. Treat those as failures — same
+    # as the ingest path — so the caller's handler can surface the file_id
+    # and exit non-zero instead of printing an error payload as success.
+    if (
+        not isinstance(result, dict)
+        or result.get("status") == "error"
+        or not result.get("memory_id")
+    ):
+        raise KaguraError(f"memory write reported an error: {result}")
+    return result
+
+
 @files.command(name="upload")
 @click.argument("path", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option("--context-id", "-c", help="Target context (workspace) UUID")
 @click.option("--content-type", "-t", help="MIME type override (default: sniffed)")
+@click.option(
+    "--remember",
+    is_flag=True,
+    default=False,
+    help="Also create a summary memory linked to the uploaded file_object (no LLM).",
+)
+@click.option(
+    "--summary",
+    default=None,
+    help="Summary for the --remember memory (default: derived from filename).",
+)
+@click.option(
+    "--type",
+    "memory_type",
+    default="note",
+    show_default=True,
+    help="Memory type for the --remember memory.",
+)
+@click.option(
+    "--importance",
+    type=click.FloatRange(0.0, 1.0),
+    default=0.5,
+    show_default=True,
+    help="Importance 0.0-1.0 for the --remember memory.",
+)
+@click.option("--tags", default=None, help="Comma-separated tags for the --remember memory.")
 @click.option(
     "--verbose",
     "-v",
@@ -1830,25 +1917,59 @@ def files_upload(
     path: Path,
     context_id: str | None,
     content_type: str | None,
+    remember: bool,
+    summary: str | None,
+    memory_type: str,
+    importance: float,
+    tags: str | None,
     verbose: int,
     progress: str | None,
 ):
     """
     Upload a file to Kagura Memory Cloud.
 
-    Example:
+    With --remember, also creates one summary memory linked to the
+    file_object (provenance + details.file_id back-reference), without
+    invoking an LLM — works for binaries and keyless environments. For
+    LLM-extracted section memories use `kagura ingest` instead.
+
+    Examples:
       kagura files upload ./report.pdf --context-id ctx-uuid
+      kagura files upload ./diagram.png --remember --tags "design,arch"
     """
+    # Fail loud rather than silently drop memory-only flags passed without
+    # --remember (the None-default flags are the ones that signal clear intent).
+    if not remember and (summary is not None or tags is not None):
+        raise click.UsageError("--summary and --tags require --remember.")
+
     logger = _resolve_progress_logger(verbose, progress)
 
     async def op(client: FilesClient, ctx: str) -> str:
-        result = await client.upload(
+        file_obj = await client.upload(
             context_id=ctx,
             source=path,
             content_type=content_type,
             logger=logger,
         )
-        return result.model_dump_json(indent=2)
+        if not remember:
+            return file_obj.model_dump_json(indent=2)
+        try:
+            memory = await _remember_file_object(
+                ctx, path, file_obj, summary, memory_type, importance, tags
+            )
+        except Exception as e:
+            # The upload already succeeded — surface the file_id so the user
+            # knows the file_object exists and does not re-upload a duplicate.
+            raise click.ClickException(
+                f"File uploaded (file_id={file_obj.id}), but creating the linked "
+                f"memory failed: {_exc_message(e)}. The file_object is stored; "
+                f"retry the memory write separately or reference it by file_id."
+            ) from e
+        return json.dumps(
+            {"file": file_obj.model_dump(mode="json"), "memory": memory},
+            indent=2,
+            ensure_ascii=False,
+        )
 
     _run_files_command(op, context_id)
 
