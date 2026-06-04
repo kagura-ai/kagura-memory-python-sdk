@@ -1818,7 +1818,7 @@ async def test_recall_upcoming_minimal():
     with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
         mock.return_value = {"results": []}
         await client.recall_upcoming(context_id="ctx")
-        name, args = mock.call_args[0][0], mock.call_args[0][1]
+        name, args = mock.call_args.args[0], mock.call_args.args[1]
         assert name == "recall_upcoming"
         assert args == {"context_id": "ctx", "k": 20}
 
@@ -1835,7 +1835,7 @@ async def test_recall_upcoming_maps_from_keyword_to_from_key():
         await client.recall_upcoming(
             context_id="ctx", from_="now", until="2026-07-01T00:00:00", k=5
         )
-        args = mock.call_args[0][1]
+        args = mock.call_args.args[1]
         assert args["from"] == "now"
         assert "from_" not in args
         assert args["until"] == "2026-07-01T00:00:00"
@@ -1852,7 +1852,7 @@ async def test_recall_upcoming_omits_bounds_when_none():
     with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
         mock.return_value = {"results": []}
         await client.recall_upcoming(context_id="ctx")
-        args = mock.call_args[0][1]
+        args = mock.call_args.args[1]
         assert "from" not in args
         assert "until" not in args
         assert args["k"] == 20
