@@ -2224,6 +2224,59 @@ async def test_get_state_surfaces_server_error():
 
 
 # ============================================================================
+# Issue #180 — unified MCP-error translation across the raw-dict family
+# ============================================================================
+
+# Every MCP tool method must translate a server {"status": "error", ...}
+# response into a typed exception instead of returning it as data. Each entry
+# invokes one method with minimal args; the patched _call_tool returns a
+# context_not_found error, so the method must raise KaguraNotFoundError.
+_ERROR_TRANSLATING_METHODS = [
+    ("remember", lambda c: c.remember(context_id="c", summary="s", content="x")),
+    ("recall", lambda c: c.recall(context_id="c", query="q")),
+    ("recall_upcoming", lambda c: c.recall_upcoming(context_id="c")),
+    ("load_pinned", lambda c: c.load_pinned(context_id="c")),
+    ("list_contexts", lambda c: c.list_contexts()),
+    ("explore", lambda c: c.explore(context_id="c", memory_id="m")),
+    ("reference", lambda c: c.reference(context_id="c", memory_id="m")),
+    ("update_memory", lambda c: c.update_memory(context_id="c", memory_id="m", summary="s")),
+    ("forget", lambda c: c.forget(context_id="c", memory_id="m")),
+    ("delete_context", lambda c: c.delete_context(context_id="c")),
+    ("update_context", lambda c: c.update_context(context_id="c", display_name="d")),
+    ("setup_resource", lambda c: c.setup_resource(resource_id="r")),
+    ("merge_contexts", lambda c: c.merge_contexts(source_id="a", target_id="b")),
+    ("update_search_config", lambda c: c.update_search_config(context_id="c")),
+    ("get_usage", lambda c: c.get_usage()),
+    ("get_context_info", lambda c: c.get_context_info(context_id="c")),
+    # create_context calls list_contexts() first; the mocked error surfaces there.
+    ("create_context", lambda c: c.create_context(name="n")),
+]
+
+
+@pytest.mark.parametrize(
+    "invoke",
+    [m[1] for m in _ERROR_TRANSLATING_METHODS],
+    ids=[m[0] for m in _ERROR_TRANSLATING_METHODS],
+)
+@pytest.mark.asyncio
+async def test_mcp_methods_raise_on_server_error(invoke):
+    """Issue #180: raw-dict tool methods translate MCP errors into exceptions, not data."""
+    client = _make_initialized_client()
+
+    try:
+        with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+            mock.return_value = {
+                "status": "error",
+                "error": "context_not_found",
+                "message": "Context not found.",
+            }
+            with pytest.raises(KaguraNotFoundError):
+                await invoke(client)
+    finally:
+        await client.close()
+
+
+# ============================================================================
 # get_server_info / check_server_version
 # ============================================================================
 
