@@ -365,6 +365,141 @@ async def test_remember_with_source_type():
     await client.close()
 
 
+# delivery_mode constant + literal drift guard: assert both the public default
+# and its literal value so a silent rename of either side fails fast.
+_DEFAULT_DELIVERY_MODE = "on_recall"
+
+
+@pytest.mark.asyncio
+async def test_remember_with_delivery_mode_always():
+    """remember() should pass delivery_mode when set to a non-default value."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {"memory_id": "abc"}
+        await client.remember(context_id="ctx", summary="s", content="c", delivery_mode="always")
+        args = mock.call_args[0][1]
+        assert args["delivery_mode"] == "always"
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_remember_delivery_mode_on_trigger():
+    """remember() should pass delivery_mode='on_trigger' through verbatim."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {"memory_id": "abc"}
+        await client.remember(
+            context_id="ctx", summary="s", content="c", delivery_mode="on_trigger"
+        )
+        args = mock.call_args[0][1]
+        assert args["delivery_mode"] == "on_trigger"
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_remember_delivery_mode_default_not_sent():
+    """remember() should omit delivery_mode when left at the default.
+
+    The server applies ``server_default='on_recall'``; not sending the key keeps
+    the SDK forward-compatible and avoids pinning the default into the payload.
+    """
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {"memory_id": "abc"}
+        await client.remember(context_id="ctx", summary="s", content="c")
+        args = mock.call_args[0][1]
+        assert "delivery_mode" not in args
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_remember_delivery_mode_default_literal():
+    """The remember() delivery_mode default is the literal 'on_recall'."""
+    import inspect
+
+    sig = inspect.signature(KaguraClient.remember)
+    assert sig.parameters["delivery_mode"].default == _DEFAULT_DELIVERY_MODE
+    assert _DEFAULT_DELIVERY_MODE == "on_recall"
+
+
+@pytest.mark.asyncio
+async def test_update_memory_with_delivery_mode():
+    """update_memory() should pass delivery_mode to pin/unpin a memory."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {"status": "success"}
+        await client.update_memory(context_id="ctx", memory_id="mid", delivery_mode="always")
+        args = mock.call_args[0][1]
+        assert args["delivery_mode"] == "always"
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_update_memory_delivery_mode_not_sent_when_none():
+    """update_memory() should omit delivery_mode when not provided."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {"status": "success"}
+        await client.update_memory(context_id="ctx", memory_id="mid", summary="s")
+        args = mock.call_args[0][1]
+        assert "delivery_mode" not in args
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_load_pinned_minimal():
+    """load_pinned() should call the load_pinned MCP tool with context_id only."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {"results": [], "truncated": False, "total_available": 0}
+        result = await client.load_pinned(context_id="ctx")
+        name, args = mock.call_args[0][0], mock.call_args[0][1]
+        assert name == "load_pinned"
+        assert args == {"context_id": "ctx"}
+        assert result["truncated"] is False
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_load_pinned_with_cap():
+    """load_pinned() should pass cap when provided."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {"results": [], "truncated": True, "total_available": 50}
+        await client.load_pinned(context_id="ctx", cap=10)
+        args = mock.call_args[0][1]
+        assert args["cap"] == 10
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_load_pinned_cap_not_sent_when_none():
+    """load_pinned() should omit cap when None (server default applies)."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {"results": []}
+        await client.load_pinned(context_id="ctx")
+        args = mock.call_args[0][1]
+        assert "cap" not in args
+
+    await client.close()
+
+
 @pytest.mark.asyncio
 async def test_remember_with_context_dict():
     """remember() should pass context dict (free-form provenance metadata)."""

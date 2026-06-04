@@ -281,6 +281,7 @@ class KaguraClient:
         linked_memory_ids: list[str] | None = None,
         linked_source_uris: list[str] | None = None,
         source_type: Literal["file", "url", "vault", "api", "manual"] | None = None,
+        delivery_mode: Literal["always", "on_recall", "on_trigger"] = "on_recall",
         context_summary: str | None = None,
         details: dict[str, Any] | None = None,
         context: dict[str, Any] | None = None,
@@ -304,6 +305,14 @@ class KaguraClient:
                 Unresolved URIs are silently skipped server-side.
             source_type: Origin classification. Closed enum per the MCP
                 tool schema; pairs with ``source_uri`` for downstream filters.
+            delivery_mode: When the memory is surfaced. ``"on_recall"``
+                (default) leaves it to probabilistic :meth:`recall`.
+                ``"always"`` pins it to ``scope="persistent"`` on write so it
+                is returned by every :meth:`load_pinned` call (Goal / Guardrail
+                / critical-policy memories). ``"on_trigger"`` is for
+                trigger-delivered memories. The default is sent only when it
+                differs from the server's ``server_default='on_recall'``, so
+                an unset value stays forward-compatible.
             context_summary: Brief explanation (max 2000 chars) of why the
                 memory exists and how to use it. Distinct from ``summary``,
                 which is the search-target text.
@@ -329,6 +338,10 @@ class KaguraClient:
             arguments["source_uri"] = source_uri
         if source_type is not None:
             arguments["source_type"] = source_type
+        # Only send a non-default delivery_mode; the server applies
+        # server_default='on_recall' so omitting it stays forward-compatible.
+        if delivery_mode != "on_recall":
+            arguments["delivery_mode"] = delivery_mode
         if context_summary is not None:
             arguments["context_summary"] = context_summary
         if details is not None:
@@ -408,6 +421,53 @@ class KaguraClient:
         if include_explore_hints:
             arguments["include_explore_hints"] = True
         return await self._call_tool("recall", arguments)
+
+    async def load_pinned(
+        self,
+        context_id: str,
+        cap: int | None = None,
+    ) -> dict[str, Any]:
+        """Deterministically load a context's pinned (``delivery_mode="always"``) memories.
+
+        This is the **deterministic** counterpart to :meth:`recall`: it returns
+        the complete, unranked pinned set on every call — no semantic search, no
+        ranking, no rerank — so an agent's Goal / Guardrail / critical-policy
+        memories load identically every turn. Pin a memory with
+        :meth:`remember` (``delivery_mode="always"``) or :meth:`update_memory`
+        (``delivery_mode="always"``); unpin with
+        :meth:`update_memory` (``delivery_mode="on_recall"``).
+
+        Results carry summary + context_summary only (Layer 1+2). Fetch full
+        content with :meth:`reference` using a result's ``memory_id``.
+
+        The set is **bounded, never silently dropped**: when more pinned
+        memories exist than ``cap``, the response ``truncated`` flag is ``True``
+        and ``total_available`` reports the real count. Callers loading a
+        complete policy set should check ``truncated`` and raise ``cap`` (or
+        page via :meth:`list_memories`) rather than assume completeness.
+
+        Args:
+            context_id: Target context UUID.
+            cap: Optional override for the maximum number returned (1-1000).
+                Omit to use the server default.
+
+        Returns:
+            API response with ``results`` (the pinned set), ``truncated``
+            (bool), and ``total_available`` (int).
+
+        Example:
+            >>> pinned = await client.load_pinned(context_id=ctx)
+            >>> if pinned["truncated"]:
+            ...     pinned = await client.load_pinned(context_id=ctx, cap=1000)
+            >>> for m in pinned["results"]:
+            ...     full = await client.reference(
+            ...         context_id=ctx, memory_id=m["memory_id"]
+            ...     )
+        """
+        arguments: dict[str, Any] = {"context_id": context_id}
+        if cap is not None:
+            arguments["cap"] = cap
+        return await self._call_tool("load_pinned", arguments)
 
     async def list_contexts(self) -> dict[str, Any]:
         """
@@ -555,6 +615,7 @@ class KaguraClient:
         importance: float | None = None,
         tags: list[str] | None = None,
         context_summary: str | None = None,
+        delivery_mode: Literal["always", "on_recall", "on_trigger"] | None = None,
     ) -> dict[str, Any]:
         """Update an existing memory in-place or upsert by external ID.
 
@@ -576,6 +637,11 @@ class KaguraClient:
             importance: Updated importance (0.0-1.0).
             tags: Updated tags.
             context_summary: Updated context summary (max 2000 chars).
+            delivery_mode: Pin or unpin the memory. ``"always"`` pins it
+                (deterministically loaded every turn via :meth:`load_pinned`,
+                promoted to ``scope="persistent"``); ``"on_recall"`` unpins it
+                (back to probabilistic :meth:`recall`; the memory stays
+                persistent). Omit to leave the current delivery mode unchanged.
 
         Returns:
             API response with updated memory info.
@@ -602,6 +668,8 @@ class KaguraClient:
             arguments["tags"] = tags
         if context_summary is not None:
             arguments["context_summary"] = context_summary
+        if delivery_mode is not None:
+            arguments["delivery_mode"] = delivery_mode
         return await self._call_tool("update_memory", arguments)
 
     async def forget(
