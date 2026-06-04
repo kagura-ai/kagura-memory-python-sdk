@@ -1773,20 +1773,21 @@ async def test_list_memories_window_params_forwarded():
     """list_memories() forwards trigger_from / trigger_until / order_by."""
     client = _make_initialized_client()
 
-    with patch.object(client._client, "get", new_callable=AsyncMock) as mock_get:
-        mock_get.return_value = _memory_list_response_mock()
-        await client.list_memories(
-            context_id="ctx-1",
-            trigger_from="2026-06-01T00:00:00",
-            trigger_until="2026-07-01T00:00:00",
-            order_by="trigger_from",
-        )
-        params = mock_get.call_args.kwargs["params"]
-        assert params["trigger_from"] == "2026-06-01T00:00:00"
-        assert params["trigger_until"] == "2026-07-01T00:00:00"
-        assert params["order_by"] == "trigger_from"
-
-    await client.close()
+    try:
+        with patch.object(client._client, "get", new_callable=AsyncMock) as mock_get:
+            mock_get.return_value = _memory_list_response_mock()
+            await client.list_memories(
+                context_id="ctx-1",
+                trigger_from="2026-06-01T00:00:00",
+                trigger_until="2026-07-01T00:00:00",
+                order_by="trigger_from",
+            )
+            params = mock_get.call_args.kwargs["params"]
+            assert params["trigger_from"] == "2026-06-01T00:00:00"
+            assert params["trigger_until"] == "2026-07-01T00:00:00"
+            assert params["order_by"] == "trigger_from"
+    finally:
+        await client.close()
 
 
 @pytest.mark.asyncio
@@ -1794,15 +1795,16 @@ async def test_list_memories_window_params_omitted_when_none():
     """list_memories() omits the window params when not provided."""
     client = _make_initialized_client()
 
-    with patch.object(client._client, "get", new_callable=AsyncMock) as mock_get:
-        mock_get.return_value = _memory_list_response_mock()
-        await client.list_memories(context_id="ctx-1")
-        params = mock_get.call_args.kwargs["params"]
-        assert "trigger_from" not in params
-        assert "trigger_until" not in params
-        assert "order_by" not in params
-
-    await client.close()
+    try:
+        with patch.object(client._client, "get", new_callable=AsyncMock) as mock_get:
+            mock_get.return_value = _memory_list_response_mock()
+            await client.list_memories(context_id="ctx-1")
+            params = mock_get.call_args.kwargs["params"]
+            assert "trigger_from" not in params
+            assert "trigger_until" not in params
+            assert "order_by" not in params
+    finally:
+        await client.close()
 
 
 # ============================================================================
@@ -1815,14 +1817,15 @@ async def test_recall_upcoming_minimal():
     """recall_upcoming() with no bounds sends only context_id + the default k."""
     client = _make_initialized_client()
 
-    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
-        mock.return_value = {"results": []}
-        await client.recall_upcoming(context_id="ctx")
-        name, args = mock.call_args.args[0], mock.call_args.args[1]
-        assert name == "recall_upcoming"
-        assert args == {"context_id": "ctx", "k": 20}
-
-    await client.close()
+    try:
+        with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+            mock.return_value = {"results": []}
+            await client.recall_upcoming(context_id="ctx")
+            name, args = mock.call_args.args[0], mock.call_args.args[1]
+            assert name == "recall_upcoming"
+            assert args == {"context_id": "ctx", "k": 20}
+    finally:
+        await client.close()
 
 
 @pytest.mark.asyncio
@@ -1830,18 +1833,19 @@ async def test_recall_upcoming_maps_from_keyword_to_from_key():
     """recall_upcoming() maps the from_ param to the reserved-word "from" key."""
     client = _make_initialized_client()
 
-    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
-        mock.return_value = {"results": []}
-        await client.recall_upcoming(
-            context_id="ctx", from_="now", until="2026-07-01T00:00:00", k=5
-        )
-        args = mock.call_args.args[1]
-        assert args["from"] == "now"
-        assert "from_" not in args
-        assert args["until"] == "2026-07-01T00:00:00"
-        assert args["k"] == 5
-
-    await client.close()
+    try:
+        with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+            mock.return_value = {"results": []}
+            await client.recall_upcoming(
+                context_id="ctx", from_="now", until="2026-07-01T00:00:00", k=5
+            )
+            args = mock.call_args.args[1]
+            assert args["from"] == "now"
+            assert "from_" not in args
+            assert args["until"] == "2026-07-01T00:00:00"
+            assert args["k"] == 5
+    finally:
+        await client.close()
 
 
 @pytest.mark.asyncio
@@ -1849,15 +1853,16 @@ async def test_recall_upcoming_omits_bounds_when_none():
     """recall_upcoming() omits from/until when not provided (k always sent)."""
     client = _make_initialized_client()
 
-    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
-        mock.return_value = {"results": []}
-        await client.recall_upcoming(context_id="ctx")
-        args = mock.call_args.args[1]
-        assert "from" not in args
-        assert "until" not in args
-        assert args["k"] == 20
-
-    await client.close()
+    try:
+        with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+            mock.return_value = {"results": []}
+            await client.recall_upcoming(context_id="ctx")
+            args = mock.call_args.args[1]
+            assert "from" not in args
+            assert "until" not in args
+            assert args["k"] == 20
+    finally:
+        await client.close()
 
 
 # ============================================================================
