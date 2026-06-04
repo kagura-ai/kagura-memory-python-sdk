@@ -519,6 +519,131 @@ def test_remember_with_empty_tags(mock_client_cls, mock_config):
     assert call_kwargs[1].get("tags") is None or call_kwargs[1].get("tags") == []
 
 
+def _remember_mock_client(mock_client_cls):
+    """Wire a mock KaguraClient whose ``remember`` returns a memory id."""
+    mock_client = AsyncMock()
+    mock_client.remember.return_value = {"memory_id": "m1"}
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    mock_client_cls.return_value = mock_client
+    return mock_client
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_remember_passes_source_uri_and_type(mock_client_cls, mock_config):
+    """remember should forward --source-uri / --source-type to the client."""
+    mock_config.return_value = {
+        "api_key": "key",
+        "mcp_url": "https://test.com/mcp",
+        "context_id": "ctx",
+    }
+    mock_client = _remember_mock_client(mock_client_cls)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        [
+            "remember",
+            "-s",
+            "test",
+            "--content",
+            "data",
+            "--source-uri",
+            "file:///foo.md",
+            "--source-type",
+            "file",
+        ],
+    )
+    assert result.exit_code == 0
+    kwargs = mock_client.remember.call_args[1]
+    assert kwargs["source_uri"] == "file:///foo.md"
+    assert kwargs["source_type"] == "file"
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_remember_parses_linked_memory_ids_with_whitespace(mock_client_cls, mock_config):
+    """--linked-memory-ids should split on comma and strip whitespace."""
+    mock_config.return_value = {
+        "api_key": "key",
+        "mcp_url": "https://test.com/mcp",
+        "context_id": "ctx",
+    }
+    mock_client = _remember_mock_client(mock_client_cls)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        [
+            "remember",
+            "-s",
+            "test",
+            "--content",
+            "data",
+            "--linked-memory-ids",
+            "uuid-1, uuid-2 , uuid-3",
+        ],
+    )
+    assert result.exit_code == 0
+    kwargs = mock_client.remember.call_args[1]
+    assert kwargs["linked_memory_ids"] == ["uuid-1", "uuid-2", "uuid-3"]
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_remember_parses_linked_source_uris(mock_client_cls, mock_config):
+    """--linked-source-uris should split on comma into a list."""
+    mock_config.return_value = {
+        "api_key": "key",
+        "mcp_url": "https://test.com/mcp",
+        "context_id": "ctx",
+    }
+    mock_client = _remember_mock_client(mock_client_cls)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        [
+            "remember",
+            "-s",
+            "test",
+            "--content",
+            "data",
+            "--linked-source-uris",
+            "file:///a.md,vault://v/b",
+        ],
+    )
+    assert result.exit_code == 0
+    kwargs = mock_client.remember.call_args[1]
+    assert kwargs["linked_source_uris"] == ["file:///a.md", "vault://v/b"]
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_remember_omits_provenance_when_not_given(mock_client_cls, mock_config):
+    """Without provenance flags, remember must not stamp source_type/uri/links.
+
+    Guards against a silent behavior change: a plain ``kagura remember`` should
+    pass None for these so the server stores no misleading provenance.
+    """
+    mock_config.return_value = {
+        "api_key": "key",
+        "mcp_url": "https://test.com/mcp",
+        "context_id": "ctx",
+    }
+    mock_client = _remember_mock_client(mock_client_cls)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["remember", "-s", "test", "--content", "data"])
+    assert result.exit_code == 0
+    kwargs = mock_client.remember.call_args[1]
+    assert kwargs["source_uri"] is None
+    assert kwargs["source_type"] is None
+    assert kwargs["linked_memory_ids"] is None
+    assert kwargs["linked_source_uris"] is None
+
+
 @patch("kagura_memory.cli.load_config")
 @patch("kagura_memory.cli.ResourceClient")
 def test_resource_stats(mock_rc_cls, mock_config):

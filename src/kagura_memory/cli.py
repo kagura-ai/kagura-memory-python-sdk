@@ -232,15 +232,45 @@ def doctor(profile, json_output):
 @click.option("--type", "-t", "memory_type", default="note", help="Memory type")
 @click.option("--importance", "-i", type=float, default=0.5, help="Importance 0.0-1.0")
 @click.option("--tags", help="Comma-separated tags (e.g., 'python,fastapi')")
-def remember(context_id, summary, content, memory_type, importance, tags):
+@click.option(
+    "--source-uri",
+    help="Origin URI (e.g., file:///path/to/note.md, vault://my-vault/note)",
+)
+@click.option(
+    "--source-type",
+    type=click.Choice(["file", "url", "vault", "api", "manual"], case_sensitive=False),
+    default=None,
+    help="Origin classification. Opt-in: omitted means no provenance is stamped.",
+)
+@click.option(
+    "--linked-memory-ids",
+    help="Comma-separated memory UUIDs to link via declared_link edges",
+)
+@click.option(
+    "--linked-source-uris",
+    help="Comma-separated source URIs to resolve to memories and link",
+)
+def remember(
+    context_id,
+    summary,
+    content,
+    memory_type,
+    importance,
+    tags,
+    source_uri,
+    source_type,
+    linked_memory_ids,
+    linked_source_uris,
+):
     """
     Store a memory directly (without AI analysis).
 
     Examples:
       kagura remember -s "FastAPI DI pattern" --content "Use Depends()..."
       kagura remember -c dev -s "OAuth2 setup" --content "..." --tags "auth,oauth"
+      kagura remember -s "Spec" --content "$(cat spec.md)" \\
+        --source-uri file:///spec.md --source-type file
     """
-    tag_list = _parse_tags(tags)
 
     async def op(client: KaguraClient, ctx: str) -> dict[str, Any]:
         return await client.remember(
@@ -249,7 +279,11 @@ def remember(context_id, summary, content, memory_type, importance, tags):
             content=content,
             type=memory_type,
             importance=importance,
-            tags=tag_list,
+            tags=_parse_tags(tags),
+            source_uri=source_uri,
+            source_type=source_type,
+            linked_memory_ids=_parse_tags(linked_memory_ids),
+            linked_source_uris=_parse_tags(linked_source_uris),
         )
 
     _run_client_command(op, context_id)
