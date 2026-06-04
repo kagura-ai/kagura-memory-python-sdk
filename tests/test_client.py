@@ -1042,14 +1042,24 @@ async def test_create_context_quota_exceeded():
 
 
 @pytest.mark.asyncio
-async def test_create_context_quota_exceeded_missing_count_limit():
-    """create_context() must raise KaguraQuotaError (not KeyError) when the quota
-    response omits count/limit (issue #183) — the message uses safe ``.get`` access."""
+@pytest.mark.parametrize(
+    "quota_response",
+    [
+        # count/limit keys absent entirely
+        {"status": "success", "contexts": [], "can_create": False},
+        # count/limit present but null (JSON null — a distinct schema-drift form)
+        {"status": "success", "contexts": [], "can_create": False, "count": None, "limit": None},
+    ],
+    ids=["missing-keys", "null-values"],
+)
+async def test_create_context_quota_exceeded_missing_count_limit(quota_response):
+    """create_context() must raise KaguraQuotaError with a clean "(?/?)" message
+    (not KeyError, not "(None/None)") when the quota response omits count/limit
+    OR carries them as null (issue #183) — the message coerces both to "?"."""
     client = _make_initialized_client()
 
     with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
-        # can_create=False but no count/limit keys (server schema drift / partial payload)
-        mock.return_value = {"status": "success", "contexts": [], "can_create": False}
+        mock.return_value = quota_response
 
         with pytest.raises(KaguraQuotaError, match=r"Context limit reached \(\?/\?\)"):
             await client.create_context(name="over-limit")

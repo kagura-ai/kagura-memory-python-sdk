@@ -946,9 +946,15 @@ class KaguraClient:
         if not contexts.get("can_create", True):
             from .exceptions import KaguraQuotaError
 
+            # Use ``.get`` then coerce None → "?" so a quota response that is
+            # missing count/limit OR carries them as null (both forms of server
+            # schema drift) still yields a clean message, never KeyError or a
+            # literal "None" (issue #183). A real 0 is preserved as "0".
+            count = contexts.get("count")
+            limit = contexts.get("limit")
             raise KaguraQuotaError(
-                f"Context limit reached ({contexts.get('count', '?')}/"
-                f"{contexts.get('limit', '?')}). "
+                f"Context limit reached ({'?' if count is None else count}/"
+                f"{'?' if limit is None else limit}). "
                 "Delete unused contexts or upgrade your plan."
             )
 
