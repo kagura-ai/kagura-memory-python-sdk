@@ -409,6 +409,43 @@ class KaguraClient:
             arguments["include_explore_hints"] = True
         return await self._call_tool("recall", arguments)
 
+    async def recall_upcoming(
+        self,
+        context_id: str,
+        *,
+        from_: str | None = None,
+        until: str | None = None,
+        k: int = 20,
+    ) -> dict[str, Any]:
+        """List Time Memories whose scheduled window overlaps a range, soonest first.
+
+        Calls the ``recall_upcoming`` MCP tool. This is a **deterministic time
+        query** over ``type="time"`` memories — not semantic search and with no
+        Hebbian side-effects — so it is distinct from :meth:`recall`. Create a
+        Time Memory with ``remember(type="time", details={"trigger": {...}})``.
+
+        Args:
+            context_id: Target context UUID.
+            from_: Lower bound as naive ISO (e.g. ``"2026-06-01T00:00:00"``), or
+                the literal ``"now"`` which the server resolves. Omit for no
+                lower bound. (Named ``from_`` because ``from`` is a reserved
+                word; it is sent to the server as ``"from"``.)
+            until: Upper bound as naive ISO. Omit for an open-ended future window.
+            k: Maximum results (default 20, server max 100).
+
+        Returns:
+            API response with ``results`` — ``type="time"`` memories whose window
+            overlaps the range, soonest first.
+        """
+        # `from` is a Python reserved word, so the public param is `from_` but
+        # the MCP tool expects the key `"from"`.
+        arguments: dict[str, Any] = {"context_id": context_id, "k": k}
+        if from_ is not None:
+            arguments["from"] = from_
+        if until is not None:
+            arguments["until"] = until
+        return await self._call_tool("recall_upcoming", arguments)
+
     async def list_contexts(self) -> dict[str, Any]:
         """
         Call list_contexts MCP tool.
@@ -1221,6 +1258,9 @@ class KaguraClient:
         type: str | None = None,
         limit: int = 50,
         offset: int = 0,
+        trigger_from: str | None = None,
+        trigger_until: str | None = None,
+        order_by: Literal["created_at", "trigger_from"] | None = None,
     ) -> MemoryListResponse:
         """List memories newest-first, with optional substring and facet filters.
 
@@ -1244,6 +1284,15 @@ class KaguraClient:
                 vocabulary; the SDK passes through.
             limit: Maximum results (server accepts 1-500, default: 50).
             offset: Pagination offset (default: 0).
+            trigger_from: Lower bound (naive ISO) on a Time Memory's trigger
+                window — restricts results to ``type="time"`` memories whose
+                window starts at or after this instant. Omit for no lower bound.
+            trigger_until: Upper bound (naive ISO) on the trigger window. Omit
+                for an open-ended window. For a "what's upcoming" view, prefer
+                :meth:`recall_upcoming`, which is purpose-built for that query.
+            order_by: Sort order — ``"created_at"`` (default, newest-first) or
+                ``"trigger_from"`` (soonest scheduled first). Omit to use the
+                server default.
 
         Returns:
             :class:`MemoryListResponse` with ``memories`` (newest-first),
@@ -1267,6 +1316,12 @@ class KaguraClient:
             params["scope"] = scope
         if type is not None:
             params["type"] = type
+        if trigger_from is not None:
+            params["trigger_from"] = trigger_from
+        if trigger_until is not None:
+            params["trigger_until"] = trigger_until
+        if order_by is not None:
+            params["order_by"] = order_by
         return await self._rest_get("/api/v1/memory/list", MemoryListResponse, params=params)
 
     @staticmethod
