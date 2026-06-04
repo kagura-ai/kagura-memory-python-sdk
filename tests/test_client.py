@@ -2169,6 +2169,60 @@ async def test_get_state_lists_all_when_key_omitted():
         await client.close()
 
 
+@pytest.mark.asyncio
+async def test_feedback_surfaces_server_error():
+    """feedback() must raise on a server-side error rather than returning the error dict."""
+    client = _make_initialized_client()
+
+    try:
+        with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+            mock.return_value = {
+                "status": "error",
+                "error": "memory_not_found",
+                "message": "Memory not found.",
+            }
+            with pytest.raises(KaguraNotFoundError, match="feedback"):
+                await client.feedback(context_id="ctx", memory_id="missing", helpful=True)
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_set_state_surfaces_server_error():
+    """set_state() must raise on a server-side error rather than returning the error dict."""
+    client = _make_initialized_client()
+
+    try:
+        with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+            mock.return_value = {
+                "status": "error",
+                "error": "context_not_found",
+                "message": "Context not found.",
+            }
+            with pytest.raises(KaguraNotFoundError, match="set_state"):
+                await client.set_state(context_id="missing", key="k", value="v")
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_get_state_surfaces_server_error():
+    """get_state() must raise on a server-side error rather than returning the error dict."""
+    client = _make_initialized_client()
+
+    try:
+        with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+            mock.return_value = {
+                "status": "error",
+                "error": "context_not_found",
+                "message": "Context not found.",
+            }
+            with pytest.raises(KaguraNotFoundError, match="get_state"):
+                await client.get_state(context_id="missing")
+    finally:
+        await client.close()
+
+
 # ============================================================================
 # get_server_info / check_server_version
 # ============================================================================

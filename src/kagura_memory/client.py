@@ -552,6 +552,10 @@ class KaguraClient:
         Returns:
             API response acknowledging the recorded feedback event.
 
+        Raises:
+            KaguraNotFoundError: Context or memory not found.
+            KaguraError: Other server-side error.
+
         Example:
             >>> hits = await client.recall(context_id=ctx, query="auth flow")
             >>> await client.feedback(
@@ -570,7 +574,9 @@ class KaguraClient:
             arguments["query"] = query
         if note is not None:
             arguments["note"] = note
-        return await self._call_tool("feedback", arguments)
+        result = await self._call_tool("feedback", arguments)
+        self._raise_for_mcp_error(result, "feedback")
+        return result
 
     async def set_state(
         self,
@@ -601,6 +607,10 @@ class KaguraClient:
 
         Returns:
             API response acknowledging the upsert.
+
+        Raises:
+            KaguraNotFoundError: Context not found.
+            KaguraError: Other server-side error.
         """
         arguments: dict[str, Any] = {
             "context_id": context_id,
@@ -609,7 +619,9 @@ class KaguraClient:
         }
         if ttl_seconds is not None:
             arguments["ttl_seconds"] = ttl_seconds
-        return await self._call_tool("set_state", arguments)
+        result = await self._call_tool("set_state", arguments)
+        self._raise_for_mcp_error(result, "set_state")
+        return result
 
     async def get_state(
         self,
@@ -631,11 +643,17 @@ class KaguraClient:
         Returns:
             API response with the value for ``key``, or all live entries when
             ``key`` is omitted.
+
+        Raises:
+            KaguraNotFoundError: Context not found.
+            KaguraError: Other server-side error.
         """
         arguments: dict[str, Any] = {"context_id": context_id}
         if key is not None:
             arguments["key"] = key
-        return await self._call_tool("get_state", arguments)
+        result = await self._call_tool("get_state", arguments)
+        self._raise_for_mcp_error(result, "get_state")
+        return result
 
     async def list_contexts(self) -> dict[str, Any]:
         """
