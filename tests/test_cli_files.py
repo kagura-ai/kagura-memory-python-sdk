@@ -263,6 +263,47 @@ def test_files_upload_remember_failure_still_reports_file_id(
     assert SAMPLE_FILE_ID in result.output
 
 
+@pytest.mark.parametrize(
+    "bad_result",
+    [
+        {"status": "error", "message": "quota exceeded"},  # MCP domain error
+        {"ok": True},  # missing memory_id
+    ],
+)
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+@patch("kagura_memory.cli.FilesClient")
+def test_files_upload_remember_domain_error_is_failure(
+    mock_files_cls, mock_kagura_cls, mock_config, bad_result, tmp_path
+):
+    """remember() returning an error-shaped dict (no raise) must NOT exit 0.
+
+    KaguraClient.remember() surfaces MCP domain errors as a dict with
+    status=="error" / no memory_id rather than raising; treating that as
+    success would print an error payload as if the memory was created.
+    Mirrors the ingest path (ingestor.py).
+    """
+    mock_config.return_value = {
+        "api_key": "key",
+        "mcp_url": "https://test.com/mcp",
+        "context_id": SAMPLE_CTX_ID,
+    }
+    mock_files = _mock_files_client("upload", _file_object())
+    _wire_files_client_mock(mock_files_cls, mock_files)
+    mock_kagura = _mock_kagura_client(mock_kagura_cls)
+    mock_kagura.remember.return_value = bad_result
+
+    p = tmp_path / "hello.txt"
+    p.write_text("hi")
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["files", "upload", str(p), "--remember"])
+
+    assert result.exit_code != 0
+    # The upload succeeded — file_id still surfaced for recovery.
+    assert SAMPLE_FILE_ID in result.output
+
+
 @patch("kagura_memory.cli.load_config")
 def test_files_upload_summary_without_remember_errors(mock_config, tmp_path):
     """--summary/--tags only make sense with --remember; using them alone must error,

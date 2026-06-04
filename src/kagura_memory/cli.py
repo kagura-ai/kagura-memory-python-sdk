@@ -20,7 +20,7 @@ from .auth.cli import auth as _auth_group
 from .client import KaguraClient
 from .config import load_config
 from .doctor import run_doctor
-from .exceptions import _exc_message
+from .exceptions import KaguraError, _exc_message
 from .files_client import FilesClient
 from .logger import VerboseLogger
 from .models import FileObject, Message, ProcessResult, ResourceEventRequest, Session
@@ -1805,7 +1805,7 @@ async def _remember_file_object(
         f"Stored as file_object {file_obj.id}."
     )
     async with client:
-        return await client.remember(
+        result = await client.remember(
             context_id=ctx,
             summary=summary or f"File: {file_obj.filename}",
             content=content,
@@ -1821,6 +1821,17 @@ async def _remember_file_object(
                 "content_type": file_obj.content_type,
             },
         )
+    # remember() surfaces MCP domain errors as a dict (status=="error" /
+    # missing memory_id) rather than raising. Treat those as failures — same
+    # as the ingest path — so the caller's handler can surface the file_id
+    # and exit non-zero instead of printing an error payload as success.
+    if (
+        not isinstance(result, dict)
+        or result.get("status") == "error"
+        or not result.get("memory_id")
+    ):
+        raise KaguraError(f"memory write reported an error: {result}")
+    return result
 
 
 @files.command(name="upload")
