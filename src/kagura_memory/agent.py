@@ -522,6 +522,8 @@ class KaguraAgent:
         Raises:
             KaguraLLMError: LLM call failed
             KaguraRateLimitError: Rate limit exceeded
+            KaguraAuthError: Authentication failed while building enhanced
+                context — re-raised unrecoverable, not swallowed.
         """
         self.logger.action("Analyzing session with LLM", f"model={self.model}")
 
