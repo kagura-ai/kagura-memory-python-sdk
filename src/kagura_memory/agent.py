@@ -522,6 +522,8 @@ class KaguraAgent:
         Raises:
             KaguraLLMError: LLM call failed
             KaguraRateLimitError: Rate limit exceeded
+            KaguraAuthError: Authentication failed while building enhanced
+                context — re-raised unrecoverable, not swallowed.
         """
         self.logger.action("Analyzing session with LLM", f"model={self.model}")
 
@@ -606,7 +608,19 @@ class KaguraAgent:
             query = query_info.query
             self.logger.action("Recalling memories", f'query="{query}"')
 
-            result = await self.client.recall(ctx, query, k=recall_k, filters=query_info.filters)
+            try:
+                result = await self.client.recall(
+                    ctx, query, k=recall_k, filters=query_info.filters
+                )
+            except KaguraAuthError:
+                raise  # Auth errors are unrecoverable — surface to caller
+            except Exception as e:
+                # recall() raises on MCP domain errors (issue #180). Match the
+                # remember/explore paths: log and skip this query rather than
+                # crashing the whole process() pipeline (and losing the
+                # subsequent remember operations).
+                self.logger.warning(f"Recall failed: {e}")
+                continue
 
             for mem in result.get("results", []):
                 recalled.append(
@@ -706,6 +720,9 @@ class KaguraAgent:
             Selected context_id
 
         Raises:
+            ValueError: No contexts are available to select from.
+            KaguraNotFoundError / KaguraError: The ``list_contexts`` call hit an
+                MCP domain error (issue #180); auto-selection cannot proceed.
             KaguraLLMError: Context selection failed
         """
         self.logger.action("Auto-selecting context")

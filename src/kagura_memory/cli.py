@@ -1855,15 +1855,12 @@ async def _remember_file_object(
                 "content_type": file_obj.content_type,
             },
         )
-    # remember() surfaces MCP domain errors as a dict (status=="error" /
-    # missing memory_id) rather than raising. Treat those as failures — same
-    # as the ingest path — so the caller's handler can surface the file_id
-    # and exit non-zero instead of printing an error payload as success.
-    if (
-        not isinstance(result, dict)
-        or result.get("status") == "error"
-        or not result.get("memory_id")
-    ):
+    # remember() now raises KaguraError/KaguraNotFoundError on MCP domain
+    # errors (issue #180). A successful response can still in principle lack
+    # memory_id; treat that as a failure so the caller's handler can surface
+    # the file_id and exit non-zero instead of printing an incomplete payload
+    # as success.
+    if not isinstance(result, dict) or not result.get("memory_id"):
         raise KaguraError(f"memory write reported an error: {result}")
     return result
 

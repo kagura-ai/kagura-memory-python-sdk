@@ -58,6 +58,13 @@ class KaguraClient:
         KaguraAuthError: Authentication failed
         KaguraConnectionError: Connection to server failed
         KaguraRateLimitError: Rate limit exceeded
+
+    MCP tool methods additionally translate the server's structured domain
+    errors (``{"status": "error", ...}``) into exceptions rather than
+    returning them as data (issue #180): a missing context/memory/report
+    raises :class:`KaguraNotFoundError`, and any other domain error raises
+    :class:`KaguraError`. Callers should use ``try/except`` rather than
+    inspecting ``result["status"]``.
     """
 
     def __init__(
@@ -269,6 +276,28 @@ class KaguraClient:
 
         return {}
 
+    async def _call_tool_checked(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        """Call an MCP tool and translate domain errors into exceptions (issue #180).
+
+        Wraps :meth:`_call_tool` with :meth:`_raise_for_mcp_error` so a server
+        ``{"status": "error", ...}`` response raises :class:`KaguraNotFoundError`
+        / :class:`KaguraError` instead of being returned as data. This is the
+        single chokepoint every tool method routes through; use it instead of
+        calling :meth:`_call_tool` directly unless a method deliberately wants
+        the raw error dict.
+
+        Args:
+            tool_name: MCP tool name; also used as the operation label in the
+                raised exception's message.
+            arguments: Tool arguments.
+
+        Returns:
+            The parsed tool result (only when the server reported success).
+        """
+        result = await self._call_tool(tool_name, arguments)
+        self._raise_for_mcp_error(result, tool_name)
+        return result
+
     async def remember(
         self,
         context_id: str,
@@ -355,7 +384,7 @@ class KaguraClient:
         if linked_source_uris is not None:
             arguments["linked_source_uris"] = linked_source_uris
 
-        return await self._call_tool("remember", arguments)
+        return await self._call_tool_checked("remember", arguments)
 
     async def recall(
         self,
@@ -430,7 +459,7 @@ class KaguraClient:
             arguments["search_mode"] = search_mode
         if include_explore_hints:
             arguments["include_explore_hints"] = True
-        return await self._call_tool("recall", arguments)
+        return await self._call_tool_checked("recall", arguments)
 
     async def recall_upcoming(
         self,
@@ -467,7 +496,7 @@ class KaguraClient:
             arguments["from"] = from_
         if until is not None:
             arguments["until"] = until
-        return await self._call_tool("recall_upcoming", arguments)
+        return await self._call_tool_checked("recall_upcoming", arguments)
 
     async def load_pinned(
         self,
@@ -517,7 +546,7 @@ class KaguraClient:
         arguments: dict[str, Any] = {"context_id": context_id}
         if cap is not None:
             arguments["cap"] = cap
-        return await self._call_tool("load_pinned", arguments)
+        return await self._call_tool_checked("load_pinned", arguments)
 
     async def feedback(
         self,
@@ -574,9 +603,7 @@ class KaguraClient:
             arguments["query"] = query
         if note is not None:
             arguments["note"] = note
-        result = await self._call_tool("feedback", arguments)
-        self._raise_for_mcp_error(result, "feedback")
-        return result
+        return await self._call_tool_checked("feedback", arguments)
 
     async def set_state(
         self,
@@ -620,9 +647,7 @@ class KaguraClient:
         }
         if ttl_seconds is not None:
             arguments["ttl_seconds"] = ttl_seconds
-        result = await self._call_tool("set_state", arguments)
-        self._raise_for_mcp_error(result, "set_state")
-        return result
+        return await self._call_tool_checked("set_state", arguments)
 
     async def get_state(
         self,
@@ -652,9 +677,7 @@ class KaguraClient:
         arguments: dict[str, Any] = {"context_id": context_id}
         if key is not None:
             arguments["key"] = key
-        result = await self._call_tool("get_state", arguments)
-        self._raise_for_mcp_error(result, "get_state")
-        return result
+        return await self._call_tool_checked("get_state", arguments)
 
     async def list_contexts(self) -> dict[str, Any]:
         """
@@ -663,7 +686,7 @@ class KaguraClient:
         Returns:
             API response with available contexts
         """
-        return await self._call_tool("list_contexts", {})
+        return await self._call_tool_checked("list_contexts", {})
 
     async def list_tags(
         self,
@@ -718,8 +741,7 @@ class KaguraClient:
         }
         if prefix:
             arguments["prefix"] = prefix
-        result = await self._call_tool("list_tags", arguments)
-        self._raise_for_mcp_error(result, "list_tags")
+        result = await self._call_tool_checked("list_tags", arguments)
         return ListTagsResponse.model_validate(result)
 
     async def get_tool_definitions(self) -> list[dict[str, Any]]:
@@ -764,7 +786,7 @@ class KaguraClient:
             "depth": depth,
             "min_weight": min_weight,
         }
-        return await self._call_tool("explore", arguments)
+        return await self._call_tool_checked("explore", arguments)
 
     async def reference(
         self,
@@ -789,7 +811,7 @@ class KaguraClient:
             "context_id": context_id,
             "memory_id": memory_id,
         }
-        return await self._call_tool("reference", arguments)
+        return await self._call_tool_checked("reference", arguments)
 
     async def update_memory(
         self,
@@ -857,7 +879,7 @@ class KaguraClient:
             arguments["context_summary"] = context_summary
         if delivery_mode is not None:
             arguments["delivery_mode"] = delivery_mode
-        return await self._call_tool("update_memory", arguments)
+        return await self._call_tool_checked("update_memory", arguments)
 
     async def forget(
         self,
@@ -887,7 +909,7 @@ class KaguraClient:
         if query:
             arguments["query"] = query
             arguments["k"] = k
-        return await self._call_tool("forget", arguments)
+        return await self._call_tool_checked("forget", arguments)
 
     async def create_context(
         self,
@@ -942,7 +964,7 @@ class KaguraClient:
             arguments["resource_id"] = resource_id
         if embedding_model is not None:
             arguments["embedding_model"] = embedding_model
-        return await self._call_tool("create_context", arguments)
+        return await self._call_tool_checked("create_context", arguments)
 
     async def delete_context(self, context_id: str) -> dict[str, Any]:
         """Soft-delete a context and all its memories.
@@ -953,7 +975,7 @@ class KaguraClient:
         Returns:
             API response with deletion confirmation.
         """
-        return await self._call_tool("delete_context", {"context_id": context_id})
+        return await self._call_tool_checked("delete_context", {"context_id": context_id})
 
     async def update_context(
         self,
@@ -996,7 +1018,7 @@ class KaguraClient:
             arguments["is_public"] = is_public
         if is_locked is not None:
             arguments["is_locked"] = is_locked
-        return await self._call_tool("update_context", arguments)
+        return await self._call_tool_checked("update_context", arguments)
 
     async def setup_resource(
         self,
@@ -1039,7 +1061,7 @@ class KaguraClient:
             arguments["summary"] = summary
         if description is not None:
             arguments["description"] = description
-        return await self._call_tool("setup_resource", arguments)
+        return await self._call_tool_checked("setup_resource", arguments)
 
     async def merge_contexts(
         self,
@@ -1073,7 +1095,7 @@ class KaguraClient:
         }
         if delete_source:
             arguments["delete_source"] = True
-        return await self._call_tool("merge_contexts", arguments)
+        return await self._call_tool_checked("merge_contexts", arguments)
 
     async def list_edges(
         self,
@@ -1113,8 +1135,7 @@ class KaguraClient:
             arguments["edge_types"] = edge_types
         if limit is not None:
             arguments["limit"] = limit
-        result = await self._call_tool("list_edges", arguments)
-        self._raise_for_mcp_error(result, "list_edges")
+        result = await self._call_tool_checked("list_edges", arguments)
         return [Edge.model_validate(e) for e in result.get("edges", [])]
 
     async def create_edge(
@@ -1168,8 +1189,7 @@ class KaguraClient:
             "weight": weight,
             "confidence": confidence,
         }
-        result = await self._call_tool("create_edge", arguments)
-        self._raise_for_mcp_error(result, "create_edge")
+        result = await self._call_tool_checked("create_edge", arguments)
         return Edge.model_validate(result.get("edge", result))
 
     async def update_edge(
@@ -1209,8 +1229,7 @@ class KaguraClient:
             arguments["weight"] = weight
         if edge_type is not None:
             arguments["edge_type"] = edge_type
-        result = await self._call_tool("update_edge", arguments)
-        self._raise_for_mcp_error(result, "update_edge")
+        result = await self._call_tool_checked("update_edge", arguments)
         return Edge.model_validate(result.get("edge", result))
 
     async def delete_edge(
@@ -1238,8 +1257,7 @@ class KaguraClient:
             "source_id": source_id,
             "target_id": target_id,
         }
-        result = await self._call_tool("delete_edge", arguments)
-        self._raise_for_mcp_error(result, "delete_edge")
+        result = await self._call_tool_checked("delete_edge", arguments)
         return bool(result.get("deleted", True))
 
     async def get_usage(self) -> UsageInfo:
@@ -1248,7 +1266,7 @@ class KaguraClient:
         Returns:
             UsageInfo with plan, memories, contexts, members, and MCP call limits.
         """
-        result = await self._call_tool("get_usage", {})
+        result = await self._call_tool_checked("get_usage", {})
         return UsageInfo.model_validate(result)
 
     async def get_context_info(
@@ -1269,7 +1287,7 @@ class KaguraClient:
             "context_id": context_id,
             "include_details": include_details,
         }
-        result = await self._call_tool("get_context_info", arguments)
+        result = await self._call_tool_checked("get_context_info", arguments)
         return ContextInfo.model_validate(result)
 
     async def _get_context_info_cached(self, context_id: str) -> ContextInfo | None:
@@ -1365,7 +1383,7 @@ class KaguraClient:
             arguments["reranker_provider"] = reranker_provider
         if reranker_model is not None:
             arguments["reranker_model"] = reranker_model
-        return await self._call_tool("update_search_config", arguments)
+        return await self._call_tool_checked("update_search_config", arguments)
 
     async def get_server_info(self) -> ServerInfo:
         """Get server name, version, environment, and feature flags.
@@ -1587,11 +1605,10 @@ class KaguraClient:
             KaguraNotFoundError: Context not found.
             KaguraError: Other server-side error.
         """
-        result = await self._call_tool(
+        result = await self._call_tool_checked(
             "get_sleep_history",
             {"context_id": context_id, "limit": limit},
         )
-        self._raise_for_mcp_error(result, "get_sleep_history")
         return [SleepReport.model_validate(r) for r in result["reports"]]
 
     async def get_sleep_report(
@@ -1614,11 +1631,10 @@ class KaguraClient:
             KaguraNotFoundError: Report not found or not owned by caller.
             KaguraError: Other server-side error.
         """
-        result = await self._call_tool(
+        result = await self._call_tool_checked(
             "get_sleep_report",
             {"context_id": context_id, "report_id": report_id},
         )
-        self._raise_for_mcp_error(result, "get_sleep_report")
         # The MCP tool wraps the report fields under a "report" key;
         # flatten so SleepReportDetail (a SleepReport subclass) validates
         # naturally without forcing callers through an extra ``.report.``
@@ -1656,11 +1672,10 @@ class KaguraClient:
                 server-side error. The exception message includes the
                 server-side error code for triage.
         """
-        result = await self._call_tool(
+        result = await self._call_tool_checked(
             "rollback_sleep_run",
             {"context_id": context_id, "report_id": report_id},
         )
-        self._raise_for_mcp_error(result, "rollback_sleep_run")
         return RollbackResult.model_validate(result)
 
     async def list_embedding_models(self) -> EmbeddingModelsResponse:

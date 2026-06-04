@@ -850,14 +850,8 @@ class FileIngestor:
                 )
             )
             return None
-        if not isinstance(result, dict) or result.get("status") == "error":
-            errors.append(
-                IngestErrorRecord(
-                    step="remember",
-                    message=f"overview write reported error: {result}",
-                )
-            )
-            return None
+        # remember() raises on MCP domain errors (issue #180); the try/except
+        # above records those. A success response may still lack memory_id.
         memory_id = result.get("memory_id")
         if not memory_id:
             errors.append(
@@ -930,15 +924,9 @@ class FileIngestor:
                         )
                     )
                     return
-            if not isinstance(result, dict) or result.get("status") == "error":
-                errors.append(
-                    IngestErrorRecord(
-                        step="remember",
-                        section_index=idx,
-                        message=f"section write reported error: {result}",
-                    )
-                )
-                return
+            # remember() raises on MCP domain errors (issue #180); the
+            # try/except above records those. A success response may still
+            # lack memory_id.
             memory_id = result.get("memory_id")
             if memory_id:
                 results[idx] = str(memory_id)

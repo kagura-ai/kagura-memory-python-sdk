@@ -653,6 +653,42 @@ async def test_execute_recalls_explore_auth_error():
     await agent.close()
 
 
+@pytest.mark.asyncio
+async def test_execute_recalls_swallows_recall_error():
+    """recall() raising an MCP domain error (issue #180) must be logged and
+    skipped, not propagated — the agent stays fault-tolerant."""
+    from kagura_memory.exceptions import KaguraNotFoundError
+
+    agent = KaguraAgent(api_key="test", model="gpt-test")
+
+    with patch.object(agent.client, "recall", new_callable=AsyncMock) as mock_recall:
+        mock_recall.side_effect = KaguraNotFoundError("context_not_found")
+
+        recalled, explored, actions = await agent._execute_recalls(
+            "ctx", [RecallQuery(query="test")], deep=True
+        )
+
+        assert recalled == []
+        assert explored == []
+        assert actions == []  # failed query contributes no action
+
+    await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_execute_recalls_propagates_recall_auth_error():
+    """A KaguraAuthError from recall() is unrecoverable and must surface."""
+    agent = KaguraAgent(api_key="test", model="gpt-test")
+
+    with patch.object(agent.client, "recall", new_callable=AsyncMock) as mock_recall:
+        mock_recall.side_effect = KaguraAuthError("bad key")
+
+        with pytest.raises(KaguraAuthError):
+            await agent._execute_recalls("ctx", [RecallQuery(query="test")], deep=False)
+
+    await agent.close()
+
+
 # ============================================================================
 # _analyze_session tests
 # ============================================================================
