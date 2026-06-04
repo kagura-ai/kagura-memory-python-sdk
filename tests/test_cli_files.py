@@ -151,6 +151,12 @@ def test_files_upload_remember_creates_linked_memory(
     assert kwargs["source_uri"] == p.resolve().as_uri()
     # The memory links back to the file_object via details.file_id.
     assert kwargs["details"]["file_id"] == SAMPLE_FILE_ID
+    # The memory client must self-resolve credentials (constructed with no
+    # api_key/mcp_url args) so it shares the exact source that uploaded the
+    # file and owns ``ctx``. Passing config values would force the "explicit"
+    # branch of _resolve_auth and diverge from the upload's env/OAuth source
+    # for multi-source users → cross-workspace 403.
+    mock_kagura_cls.assert_called_once_with()
 
 
 @patch("kagura_memory.cli.load_config")

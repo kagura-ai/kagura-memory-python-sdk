@@ -1790,15 +1790,15 @@ async def _remember_file_object(
     the summary defaults to the filename, which keeps this path usable for
     binaries and in environments without LLM credentials.
 
-    Built like :func:`_run_client_command`: passing ``api_key=None`` lets
-    ``KaguraClient`` run its own credential chain (env > OAuth profile >
-    .kagura.json), so OAuth-only users are handled correctly.
+    ``KaguraClient()`` is constructed with no arguments on purpose: it then
+    runs the exact same ``_resolve_auth`` chain (env > OAuth profile >
+    .kagura.json) that ``_run_files_command`` used for the upload, so the
+    memory write shares the identity that owns the resolved workspace ``ctx``.
+    Passing config-derived ``api_key``/``mcp_url`` would force the "explicit"
+    branch and could diverge from the upload's source for users with
+    credentials in more than one place (cross-workspace 403).
     """
-    config = load_config()
-    client = KaguraClient(
-        api_key=config.get("api_key") or None,
-        mcp_url=config.get("mcp_url") or None,
-    )
+    client = KaguraClient()
     content = (
         f"Uploaded file `{file_obj.filename}` "
         f"({file_obj.size_bytes} bytes, {file_obj.content_type}). "
