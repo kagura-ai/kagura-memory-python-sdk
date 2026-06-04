@@ -583,6 +583,7 @@ class KaguraClient:
         context_id: str,
         key: str,
         value: Any,
+        *,
         ttl_seconds: int | None = None,
     ) -> dict[str, Any]:
         """Set ephemeral agent run-state at ``(context_id, key)``.
