@@ -382,6 +382,14 @@ class KaguraClient:
                 - ``tags_match``: ``"any"`` (default) or ``"all"`` for AND logic
                 - ``created_after`` / ``created_before``: ISO 8601 datetime
                 - ``updated_after`` / ``updated_before``: ISO 8601 datetime
+                - ``trust_tier``: ``"trusted"`` EXCLUDES external/connector-ingested
+                  memories from the results (opt-in; default recall returns them).
+                  Pass it for behaviour-influencing reads where untrusted content
+                  must not be treated as instructions (OWASP LLM01/LLM03). Trust is
+                  **server-derived from server-stamped provenance** (memory-cloud
+                  #887): passing ``source_type`` on :meth:`remember` records origin
+                  but no longer establishes trust — the client is untrusted by
+                  contract, so it cannot mark its own writes ``"trusted"``.
             search_mode: Search strategy — "hybrid" (default), "semantic", or "keyword"
             context_ids: Search across multiple contexts (2–20 IDs).
                 When provided, ``context_id`` is not required.
@@ -510,6 +518,124 @@ class KaguraClient:
         if cap is not None:
             arguments["cap"] = cap
         return await self._call_tool("load_pinned", arguments)
+
+    async def feedback(
+        self,
+        context_id: str,
+        memory_id: str,
+        helpful: bool,
+        *,
+        query: str | None = None,
+        note: str | None = None,
+    ) -> dict[str, Any]:
+        """Record whether a recalled memory was useful for a query.
+
+        Calls the ``feedback`` MCP tool. This is an **append-only usefulness
+        signal** that lets SDK consumers (ai-worker, agents) teach the substrate
+        which :meth:`recall` results were on-target. Each call appends a new
+        event, so repeated or contradicting signals are kept as a time series
+        rather than overwriting.
+
+        Feedback is a **separate lane from knowledge**: it is not embedded and is
+        structurally excluded from :meth:`recall`, so rating a result never
+        pollutes the search space. Anyone who can read the context may record it.
+
+        Args:
+            context_id: Context UUID (the recalled memory's context).
+            memory_id: UUID of the recalled memory being rated.
+            helpful: ``True`` if the memory was useful for the query,
+                ``False`` if not.
+            query: Optional recall query this feedback is about (max 1024 chars).
+            note: Optional free-text note, e.g. why the result was wrong
+                (max 2000 chars).
+
+        Returns:
+            API response acknowledging the recorded feedback event.
+
+        Example:
+            >>> hits = await client.recall(context_id=ctx, query="auth flow")
+            >>> await client.feedback(
+            ...     context_id=ctx,
+            ...     memory_id=hits["results"][0]["memory_id"],
+            ...     helpful=True,
+            ...     query="auth flow",
+            ... )
+        """
+        arguments: dict[str, Any] = {
+            "context_id": context_id,
+            "memory_id": memory_id,
+            "helpful": helpful,
+        }
+        if query is not None:
+            arguments["query"] = query
+        if note is not None:
+            arguments["note"] = note
+        return await self._call_tool("feedback", arguments)
+
+    async def set_state(
+        self,
+        context_id: str,
+        key: str,
+        value: Any,
+        ttl_seconds: int | None = None,
+    ) -> dict[str, Any]:
+        """Set ephemeral agent run-state at ``(context_id, key)``.
+
+        Calls the ``set_state`` MCP tool. This is the write side of a
+        **TTL-bounded key/value lane for autonomous-agent run state** (current
+        task, step, scratch flags) — kept deliberately **separate from
+        memories**: state is not embedded and is structurally excluded from
+        :meth:`recall`, so transient run-state never pollutes the knowledge
+        search space. Writing upserts the value for the key.
+
+        Use this for transient run state, **not** durable knowledge — use
+        :meth:`remember` for knowledge.
+
+        Args:
+            context_id: Target context UUID (state is scoped to this context).
+            key: State key (max 255 chars). Re-using a key overwrites its value.
+            value: Arbitrary JSON value to store (object, array, string, number,
+                or boolean).
+            ttl_seconds: Optional TTL in seconds (server clamps to 2592000 =
+                30 days). Omit for no expiry.
+
+        Returns:
+            API response acknowledging the upsert.
+        """
+        arguments: dict[str, Any] = {
+            "context_id": context_id,
+            "key": key,
+            "value": value,
+        }
+        if ttl_seconds is not None:
+            arguments["ttl_seconds"] = ttl_seconds
+        return await self._call_tool("set_state", arguments)
+
+    async def get_state(
+        self,
+        context_id: str,
+        key: str | None = None,
+    ) -> dict[str, Any]:
+        """Read ephemeral agent run-state.
+
+        Calls the ``get_state`` MCP tool — the read side of the session-state
+        lane (see :meth:`set_state`). Supply ``key`` to read one value, or omit
+        it to list all live keys for the context. Expired entries are never
+        returned. This lane is excluded from :meth:`recall` by design.
+
+        Args:
+            context_id: Target context UUID.
+            key: Optional state key. Omit to list all live ``(key, value)``
+                entries for the context.
+
+        Returns:
+            API response with the value for ``key``, or all live entries when
+            ``key`` is omitted.
+        """
+        arguments: dict[str, Any] = {"context_id": context_id}
+        if key is not None:
+            arguments["key"] = key
+        return await self._call_tool("get_state", arguments)
 
     async def list_contexts(self) -> dict[str, Any]:
         """
