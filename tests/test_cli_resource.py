@@ -256,3 +256,138 @@ def test_resource_list_env_wins_over_config_api_key(monkeypatch):
     resolved = _resolved_from_call(mock_cls)
     assert resolved.source == "env"
     assert resolved.api_key == "env-key"
+
+
+# ============================================================================
+# kagura resource events (issue #186)
+# ============================================================================
+
+
+def test_resource_events_outputs_json(monkeypatch):
+    """`kagura resource events <id>` dumps the events page as JSON."""
+    monkeypatch.setenv("KAGURA_API_KEY", "env-key")
+
+    mock_client = _mock_resource_client()
+    mock_client.list_resource_events.return_value = MagicMock(
+        model_dump_json=lambda **_: '{"events": [], "next_cursor": null}'
+    )
+
+    with (
+        patch("kagura_memory.cli.load_config", return_value={}),
+        patch("kagura_memory.cli.ResourceClient") as mock_cls,
+    ):
+        _wire_resource_client_mock(mock_cls, mock_client)
+        runner = CliRunner()
+        result = runner.invoke(main, ["resource", "events", "products"])
+
+    assert result.exit_code == 0, result.output
+    assert "next_cursor" in result.output
+    # resource_id is positional and reaches the client method
+    assert mock_client.list_resource_events.call_args.args[0] == "products"
+
+
+def test_resource_events_passes_filters_and_parses_since(monkeypatch):
+    """Filters reach the client; --since is parsed to a datetime."""
+    from datetime import datetime
+
+    monkeypatch.setenv("KAGURA_API_KEY", "env-key")
+
+    mock_client = _mock_resource_client()
+    mock_client.list_resource_events.return_value = MagicMock(model_dump_json=lambda **_: "{}")
+
+    with (
+        patch("kagura_memory.cli.load_config", return_value={}),
+        patch("kagura_memory.cli.ResourceClient") as mock_cls,
+    ):
+        _wire_resource_client_mock(mock_cls, mock_client)
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            [
+                "resource",
+                "events",
+                "products",
+                "--op",
+                "delete",
+                "--limit",
+                "5",
+                "--doc-id",
+                "SKU-9",
+                "--version",
+                "3",
+                "--cursor",
+                "CUR-1",
+                "--since",
+                "2026-06-01T00:00:00+00:00",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    kwargs = mock_client.list_resource_events.call_args.kwargs
+    assert kwargs["op"] == "delete"
+    assert kwargs["limit"] == 5
+    assert kwargs["doc_id"] == "SKU-9"
+    assert kwargs["version"] == 3
+    assert kwargs["cursor"] == "CUR-1"
+    assert kwargs["since"] == datetime.fromisoformat("2026-06-01T00:00:00+00:00")
+
+
+def test_resource_events_invalid_since_errors(monkeypatch):
+    """A malformed --since is a clean CLI error, not a traceback."""
+    monkeypatch.setenv("KAGURA_API_KEY", "env-key")
+
+    mock_client = _mock_resource_client()
+    mock_client.list_resource_events.return_value = MagicMock(model_dump_json=lambda **_: "{}")
+
+    with (
+        patch("kagura_memory.cli.load_config", return_value={}),
+        patch("kagura_memory.cli.ResourceClient") as mock_cls,
+    ):
+        _wire_resource_client_mock(mock_cls, mock_client)
+        runner = CliRunner()
+        result = runner.invoke(main, ["resource", "events", "products", "--since", "not-a-date"])
+
+    assert result.exit_code != 0
+    assert "since" in result.output.lower()
+    # The client must not be called when arg parsing fails
+    mock_client.list_resource_events.assert_not_called()
+
+
+def test_resource_events_limit_out_of_range_errors(monkeypatch):
+    """--limit outside 1-100 is a clean local error, not a server round-trip."""
+    monkeypatch.setenv("KAGURA_API_KEY", "env-key")
+
+    mock_client = _mock_resource_client()
+    mock_client.list_resource_events.return_value = MagicMock(model_dump_json=lambda **_: "{}")
+
+    with (
+        patch("kagura_memory.cli.load_config", return_value={}),
+        patch("kagura_memory.cli.ResourceClient") as mock_cls,
+    ):
+        _wire_resource_client_mock(mock_cls, mock_client)
+        runner = CliRunner()
+        result = runner.invoke(main, ["resource", "events", "products", "--limit", "0"])
+
+    assert result.exit_code != 0
+    mock_client.list_resource_events.assert_not_called()
+
+
+def test_resource_events_renders_cursor_value(monkeypatch):
+    """A non-null next_cursor token is rendered to stdout (the value users copy)."""
+    monkeypatch.setenv("KAGURA_API_KEY", "env-key")
+
+    mock_client = _mock_resource_client()
+    mock_client.list_resource_events.return_value = MagicMock(
+        model_dump_json=lambda **_: '{"events": [], "next_cursor": "CUR-XYZ"}'
+    )
+
+    with (
+        patch("kagura_memory.cli.load_config", return_value={}),
+        patch("kagura_memory.cli.ResourceClient") as mock_cls,
+    ):
+        _wire_resource_client_mock(mock_cls, mock_client)
+        runner = CliRunner()
+        result = runner.invoke(main, ["resource", "events", "products"])
+
+    assert result.exit_code == 0, result.output
+    assert "CUR-XYZ" in result.output

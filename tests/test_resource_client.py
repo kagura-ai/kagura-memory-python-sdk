@@ -1,5 +1,6 @@
 """Tests for ResourceClient."""
 
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -12,7 +13,9 @@ from kagura_memory import (
     KaguraNotFoundError,
     KaguraQuotaError,
     ResourceClient,
+    ResourceEventRecord,
     ResourceEventRequest,
+    ResourceEventsListResponse,
 )
 from kagura_memory.auth.credentials import (
     CredentialsFile,
@@ -1069,3 +1072,195 @@ async def test_setup_resource_refuses_oauth_mode(_isolated_credentials):
         assert str(excinfo.value) == _SETUP_OAUTH_NOT_SUPPORTED_MSG
     finally:
         await client.close()
+
+
+# ============================================================================
+# list_resource_events (read events; Bearer auth) — issue #186
+# ============================================================================
+
+
+def _event_record_json() -> dict:
+    """A full 11-field server event row (mirrors ResourceEventRecord)."""
+    return {
+        "id": 7,
+        "op": "upsert",
+        "doc_id": "SKU-001",
+        "version": 2,
+        "idempotency_key": "idem-abc",
+        "importance": 0.8,
+        "created_at": "2026-06-01T12:00:00Z",
+        "payload": {"name": "Widget"},
+        "event_metadata": {"source_uri": "file://x"},
+        "payload_bytes": 42,
+        "payload_truncated": False,
+    }
+
+
+def test_resource_event_record_full_shape():
+    """ResourceEventRecord parses all 11 reference fields."""
+    rec = ResourceEventRecord.model_validate(_event_record_json())
+
+    assert rec.id == 7
+    assert rec.op == "upsert"
+    assert rec.doc_id == "SKU-001"
+    assert rec.version == 2
+    assert rec.idempotency_key == "idem-abc"
+    assert rec.importance == 0.8
+    assert rec.payload == {"name": "Widget"}
+    assert rec.event_metadata == {"source_uri": "file://x"}
+    assert rec.payload_bytes == 42
+    assert rec.payload_truncated is False
+
+
+def test_resource_events_list_response_defaults():
+    """Empty page parses with no events and a null cursor."""
+    resp = ResourceEventsListResponse.model_validate({"events": [], "next_cursor": None})
+
+    assert resp.events == []
+    assert resp.next_cursor is None
+
+
+@pytest.mark.asyncio
+async def test_list_resource_events_parses_page_and_cursor():
+    """list_resource_events GETs the events endpoint and parses events + next_cursor."""
+    client = ResourceClient(api_key="test", base_url="https://test.com")
+
+    response_data = {"events": [_event_record_json()], "next_cursor": "CURSOR-2"}
+    mock_resp = _mock_response(200, response_data)
+
+    with patch.object(client._client, "request", new_callable=AsyncMock) as mock_req:
+        mock_req.return_value = mock_resp
+
+        result = await client.list_resource_events("products")
+
+        assert isinstance(result, ResourceEventsListResponse)
+        assert len(result.events) == 1
+        assert result.events[0].doc_id == "SKU-001"
+        assert result.next_cursor == "CURSOR-2"
+
+        call_args = mock_req.call_args
+        assert call_args[0][0] == "GET"
+        assert "/api/v1/resources/products/events" in call_args[0][1]
+        # Bearer-auth read path: no X-Resource-API-Key header
+        assert call_args[1]["headers"] is None
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_list_resource_events_omits_unset_filters():
+    """Only ``limit`` is sent when no cursor/filters are provided."""
+    client = ResourceClient(api_key="test", base_url="https://test.com")
+    mock_resp = _mock_response(200, {"events": [], "next_cursor": None})
+
+    with patch.object(client._client, "request", new_callable=AsyncMock) as mock_req:
+        mock_req.return_value = mock_resp
+
+        await client.list_resource_events("products", limit=25)
+
+        params = mock_req.call_args[1]["params"]
+        assert params == {"limit": 25}
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_list_resource_events_passes_all_filters_and_iso_since():
+    """All filters flow to params; ``since`` is serialized to ISO 8601."""
+    client = ResourceClient(api_key="test", base_url="https://test.com")
+    mock_resp = _mock_response(200, {"events": [], "next_cursor": None})
+
+    since = datetime(2026, 6, 1, 9, 30, 0, tzinfo=UTC)
+    with patch.object(client._client, "request", new_callable=AsyncMock) as mock_req:
+        mock_req.return_value = mock_resp
+
+        await client.list_resource_events(
+            "products",
+            limit=10,
+            cursor="CUR-1",
+            op="delete",
+            doc_id="SKU-9",
+            version=3,
+            since=since,
+        )
+
+        params = mock_req.call_args[1]["params"]
+        assert params["limit"] == 10
+        assert params["cursor"] == "CUR-1"
+        assert params["op"] == "delete"
+        assert params["doc_id"] == "SKU-9"
+        assert params["version"] == 3
+        assert params["since"] == since.isoformat()
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_list_resource_events_raises_not_found():
+    """A 404 (unknown resource slug) surfaces as KaguraNotFoundError."""
+    client = ResourceClient(api_key="test", base_url="https://test.com")
+
+    request = httpx.Request("GET", "https://test.com/api/v1/resources/missing/events")
+    error_resp = MagicMock()
+    error_resp.status_code = 404
+    error_resp.json.return_value = {"detail": "Resource not found"}
+    error_resp.headers = {}
+    error_resp.raise_for_status.side_effect = httpx.HTTPStatusError(
+        "404", request=request, response=error_resp
+    )
+
+    with patch.object(client._client, "request", new_callable=AsyncMock) as mock_req:
+        mock_req.return_value = error_resp
+        with pytest.raises(KaguraNotFoundError):
+            await client.list_resource_events("missing")
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_list_resource_events_naive_since_assumed_utc():
+    """A tz-naive ``since`` is normalized to UTC before serialization."""
+    client = ResourceClient(api_key="test", base_url="https://test.com")
+    mock_resp = _mock_response(200, {"events": [], "next_cursor": None})
+
+    with patch.object(client._client, "request", new_callable=AsyncMock) as mock_req:
+        mock_req.return_value = mock_resp
+
+        await client.list_resource_events("products", since=datetime(2026, 6, 1, 0, 0, 0))
+
+        params = mock_req.call_args[1]["params"]
+        assert params["since"] == "2026-06-01T00:00:00+00:00"
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_list_resource_events_cursor_round_trip():
+    """Feeding a next_cursor back as ``cursor`` reaches params with no other filters."""
+    client = ResourceClient(api_key="test", base_url="https://test.com")
+    mock_resp = _mock_response(200, {"events": [], "next_cursor": None})
+
+    with patch.object(client._client, "request", new_callable=AsyncMock) as mock_req:
+        mock_req.return_value = mock_resp
+
+        await client.list_resource_events("products", cursor="CUR-1")
+
+        assert mock_req.call_args[1]["params"] == {"limit": 50, "cursor": "CUR-1"}
+
+    await client.close()
+
+
+def test_resource_event_record_payload_truncated_true():
+    """payload_truncated=True round-trips (not just the default False)."""
+    data = _event_record_json()
+    data["payload_truncated"] = True
+    rec = ResourceEventRecord.model_validate(data)
+    assert rec.payload_truncated is True
+
+
+def test_resource_event_record_importance_zero_preserved():
+    """importance=0.0 (falsy) is preserved, not coerced to None."""
+    data = _event_record_json()
+    data["importance"] = 0.0
+    rec = ResourceEventRecord.model_validate(data)
+    assert rec.importance == 0.0

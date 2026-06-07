@@ -4,6 +4,7 @@ import asyncio
 import json
 import sys
 from collections.abc import Awaitable, Callable
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -1421,6 +1422,54 @@ def resource_indexer_status(resource_id):
         return result.model_dump_json(indent=2)
 
     _run_resource_command(op)
+
+
+@resource.command(name="events")
+@click.argument("resource_id")
+@click.option(
+    "--limit", "-l", type=click.IntRange(1, 100), default=50, help="Events per page (1-100)"
+)
+@click.option("--cursor", "-c", help="Pagination cursor from a prior next_cursor")
+@click.option("--op", type=click.Choice(["upsert", "delete"]), help="Filter by operation")
+@click.option("--doc-id", help="Filter by document ID")
+@click.option("--version", "-V", type=int, help="Filter by document version")
+@click.option("--since", help="Only events at/after this ISO 8601 time (e.g. 2026-06-01T00:00:00Z)")
+def resource_events(resource_id, limit, cursor, op, doc_id, version, since):
+    """
+    List ingested events for a resource (cursor-paginated).
+
+    The response includes a ``next_cursor``; pass it back via --cursor to
+    page forward (null on the last page).
+
+    Examples:
+      kagura resource events products
+      kagura resource events products --op upsert --limit 20
+      kagura resource events products --since 2026-06-01T00:00:00Z
+      kagura resource events products --cursor "eyJ..."
+    """
+    parsed_since: datetime | None = None
+    if since is not None:
+        try:
+            parsed_since = datetime.fromisoformat(since)
+        except ValueError as e:
+            raise click.ClickException(
+                f"Invalid --since value (expected ISO 8601, e.g. 2026-06-01T00:00:00Z): "
+                f"{_exc_message(e)}"
+            ) from e
+
+    async def op_fn(client: ResourceClient) -> str:
+        result = await client.list_resource_events(
+            resource_id,
+            limit=limit,
+            cursor=cursor,
+            op=op,
+            doc_id=doc_id,
+            version=version,
+            since=parsed_since,
+        )
+        return result.model_dump_json(indent=2)
+
+    _run_resource_command(op_fn)
 
 
 @resource.command(name="schema")

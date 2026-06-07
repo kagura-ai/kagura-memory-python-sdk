@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 import httpx
@@ -25,6 +26,7 @@ from .models import (
     ResourceEventBatchResponse,
     ResourceEventRequest,
     ResourceEventResponse,
+    ResourceEventsListResponse,
     ResourceImpactResponse,
     ResourceListResponse,
     ResourceSchemaResponse,
@@ -510,6 +512,65 @@ class ResourceClient:
         except KaguraNotFoundError:
             return None
         return ResourceSchemaResponse.model_validate(response.json())
+
+    async def list_resource_events(
+        self,
+        resource_id: str,
+        *,
+        limit: int = 50,
+        cursor: str | None = None,
+        op: Literal["upsert", "delete"] | None = None,
+        doc_id: str | None = None,
+        version: int | None = None,
+        since: datetime | None = None,
+    ) -> ResourceEventsListResponse:
+        """List ingested events for a resource (server v0.15+).
+
+        Mirrors ``GET /api/v1/resources/{resource_id}/events``. Results are
+        cursor-paginated: pass the returned ``next_cursor`` back as
+        ``cursor`` to fetch the next page (``next_cursor`` is ``None`` on
+        the last page). Note this method uses ``limit``/``cursor``
+        pagination, unlike :meth:`list_tokens` which uses ``limit``/``offset``.
+
+        Uses Bearer auth (workspace read), not the ``X-Resource-API-Key``
+        ingestion credential.
+
+        Args:
+            resource_id: Resource identifier slug.
+            limit: Maximum events per page (1-100).
+            cursor: Opaque pagination cursor from a prior ``next_cursor``.
+            op: Filter by operation (``upsert`` or ``delete``).
+            doc_id: Filter by document ID.
+            version: Filter by document version.
+            since: Return only events with ``created_at`` at or after this
+                time (inclusive). Serialized to ISO 8601; a tz-naive value
+                is assumed to be UTC.
+
+        Returns:
+            A page of :class:`ResourceEventRecord` plus ``next_cursor``.
+
+        Raises:
+            KaguraNotFoundError: Resource slug does not exist in the caller's
+                workspace (404; cross-workspace probe protection).
+        """
+        params: dict[str, Any] = {"limit": limit}
+        if cursor is not None:
+            params["cursor"] = cursor
+        if op is not None:
+            params["op"] = op
+        if doc_id is not None:
+            params["doc_id"] = doc_id
+        if version is not None:
+            params["version"] = version
+        if since is not None:
+            if since.tzinfo is None:
+                since = since.replace(tzinfo=UTC)
+            params["since"] = since.isoformat()
+
+        response = await self._request(
+            "GET", f"/api/v1/resources/{resource_id}/events", params=params
+        )
+        return ResourceEventsListResponse.model_validate(response.json())
 
     # -------------------------------------------------------------------
     # Event Ingestion (X-Resource-API-Key auth)
