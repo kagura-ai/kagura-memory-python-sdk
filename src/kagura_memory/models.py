@@ -441,6 +441,42 @@ class ResourceEventBatchResponse(BaseModel):
     errors: list[dict[str, Any]] = Field(default_factory=list)
 
 
+class ResourceEventRecord(BaseModel):
+    """A single ingested event row returned by ``list_resource_events``.
+
+    Mirrors the server's ``ResourceEventRecord`` for
+    ``GET /api/v1/resources/{resource_id}/events``. This is the full
+    read shape — distinct from :class:`ResourceEventItem`, the 5-field
+    minimal row embedded in :class:`IndexerStatusResponse.recent_events`.
+    """
+
+    id: int
+    op: Literal["upsert", "delete"]
+    doc_id: str
+    version: int | None = None
+    idempotency_key: str | None = None
+    importance: float | None = None
+    created_at: datetime | None = None
+    payload: dict[str, Any] | None = None
+    event_metadata: dict[str, Any] = Field(default_factory=dict)
+    payload_bytes: int | None = None
+    payload_truncated: bool = False
+
+
+class ResourceEventsListResponse(BaseModel):
+    """Paginated resource events response.
+
+    Mirrors the server's ``ResourceEventsResponse``: a page of events
+    plus an opaque ``next_cursor`` (``None`` on the last page). Pass the
+    cursor back to :meth:`ResourceClient.list_resource_events` to page
+    forward. Unlike the ``limit``/``offset`` token list, events use
+    ``limit``/``cursor`` pagination.
+    """
+
+    events: list[ResourceEventRecord] = Field(default_factory=list)
+    next_cursor: str | None = None
+
+
 class ResourceImpactResponse(BaseModel):
     """Resource impact statistics per resource_id."""
 
