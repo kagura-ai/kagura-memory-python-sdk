@@ -547,11 +547,16 @@ class ResourceClient:
                 is assumed to be UTC.
 
         Returns:
-            A page of :class:`ResourceEventRecord` plus ``next_cursor``.
+            A page of :class:`ResourceEventRecord` plus ``next_cursor``. An
+            unknown ``resource_id`` returns an empty page (``events=[]``,
+            ``next_cursor=None``) rather than a 404 — observed against
+            memory-cloud production.
 
         Raises:
-            KaguraNotFoundError: Resource slug does not exist in the caller's
-                workspace (404; cross-workspace probe protection).
+            KaguraNotFoundError: The server returned 404 for this resource
+                (cross-workspace probe protection). This endpoint currently
+                returns an empty page for an unknown slug, so this path
+                applies only if the server does respond with 404.
         """
         params: dict[str, Any] = {"limit": limit}
         if cursor is not None:
