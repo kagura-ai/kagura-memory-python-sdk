@@ -5,13 +5,11 @@ local host, the local network, or cloud-provider metadata endpoints. The
 list is built from RFC 1918, RFC 4193, RFC 6890, and the documented cloud
 metadata IP ranges as of 2026-Q2.
 
-DNS rebinding caveat: pre-flight resolution + denylist closes 99% of the
-attack surface (an externally-supplied hostname pointing at
-``169.254.169.254`` is rejected). A timing-correlated DNS rebinding attack
-that flips the hostname between our resolve and httpx's connect remains
-theoretically possible. A follow-up issue tracks installing a custom httpx
-transport that pins the connection to the resolved IP for true rebinding
-protection.
+DNS rebinding: pre-flight resolution + this denylist rejects an
+externally-supplied hostname that points at, e.g., ``169.254.169.254``. The
+timing-correlated rebinding window (a hostname that flips between our resolve
+and httpx's connect) is closed by the fetcher pinning the connection to the
+exact IP validated here — see :meth:`Fetcher._stream_request` (#188).
 """
 
 from __future__ import annotations

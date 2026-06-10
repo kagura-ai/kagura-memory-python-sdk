@@ -162,6 +162,170 @@ async def test_redirect_to_blocked_ip_rejected() -> None:
         assert "redirect.example.com" in getaddrinfo_calls
 
 
+# ---------------------------------------------------------------------------
+# DNS-rebinding mitigation: the connection is pinned to the pre-validated IP
+# so httpx cannot re-resolve the hostname at connect time (#188).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pins_connection_to_validated_ip() -> None:
+    """The outbound request targets the validated IP, with Host + SNI preserved."""
+    async with Fetcher() as fetcher:
+        with patch("socket.getaddrinfo") as mock_getaddrinfo:
+            mock_getaddrinfo.return_value = [(0, 0, 0, "", ("93.184.216.34", 0))]
+            send_mock = AsyncMock(return_value=_mock_response(chunks=[b"ok"]))
+            with patch.object(fetcher._client, "send", new=send_mock):
+                await fetcher.fetch("https://example.com/doc.pdf")
+            request = send_mock.call_args.args[0]
+            # Connect target is the exact IP we validated — not the hostname.
+            assert request.url.host == "93.184.216.34"
+            # Host header keeps the real hostname for virtual-host routing.
+            assert request.headers["Host"] == "example.com"
+            # TLS SNI + certificate verification use the real hostname, not the IP.
+            assert request.extensions["sni_hostname"] == "example.com"
+
+
+@pytest.mark.asyncio
+async def test_pin_preserves_port_and_path() -> None:
+    """A non-default port and the path/query survive the host rewrite."""
+    async with Fetcher() as fetcher:
+        with patch("socket.getaddrinfo") as mock_getaddrinfo:
+            mock_getaddrinfo.return_value = [(0, 0, 0, "", ("93.184.216.34", 0))]
+            send_mock = AsyncMock(return_value=_mock_response(chunks=[b"ok"]))
+            with patch.object(fetcher._client, "send", new=send_mock):
+                await fetcher.fetch("https://example.com:8443/a/b?q=1")
+            request = send_mock.call_args.args[0]
+            assert request.url.host == "93.184.216.34"
+            assert request.url.port == 8443
+            assert request.url.raw_path == b"/a/b?q=1"
+            assert request.headers["Host"] == "example.com:8443"
+            assert request.extensions["sni_hostname"] == "example.com"
+
+
+@pytest.mark.asyncio
+async def test_pin_targets_a_validated_ip_when_multiple_resolve() -> None:
+    """With several resolved IPs (all validated), the connect target is one of them."""
+    async with Fetcher() as fetcher:
+        with patch("socket.getaddrinfo") as mock_getaddrinfo:
+            mock_getaddrinfo.return_value = [
+                (0, 0, 0, "", ("93.184.216.34", 0)),
+                (0, 0, 0, "", ("93.184.216.35", 0)),
+            ]
+            send_mock = AsyncMock(return_value=_mock_response(chunks=[b"ok"]))
+            with patch.object(fetcher._client, "send", new=send_mock):
+                await fetcher.fetch("https://example.com/")
+            request = send_mock.call_args.args[0]
+            assert request.url.host in {"93.184.216.34", "93.184.216.35"}
+
+
+@pytest.mark.asyncio
+async def test_pin_falls_back_to_next_validated_ip_on_connect_failure() -> None:
+    """A connect-level failure on the first validated IP falls back to the next.
+
+    Restores the multi-address robustness (e.g. IPv6→IPv4 on a broken-IPv6 host)
+    that pinning a single IP would otherwise drop — without ever connecting to an
+    unvalidated address, since both candidates passed the denylist.
+    """
+    async with Fetcher() as fetcher:
+        with patch("socket.getaddrinfo") as mock_getaddrinfo:
+            # IPv6 first (as RFC 6724 ordering often yields), then IPv4.
+            mock_getaddrinfo.return_value = [
+                (0, 0, 0, "", ("2606:2800:220:1:248:1893:25c8:1946", 0)),
+                (0, 0, 0, "", ("93.184.216.34", 0)),
+            ]
+            attempted: list[str] = []
+
+            async def flaky_send(request: Any, **kwargs: Any) -> Any:
+                attempted.append(request.url.host)
+                if len(attempted) == 1:
+                    raise httpx.ConnectError("network unreachable", request=request)
+                return _mock_response(chunks=[b"ok"])
+
+            with patch.object(fetcher._client, "send", new=flaky_send):
+                result = await fetcher.fetch("https://example.com/doc")
+            assert result.body == b"ok"
+            # First the IPv6 address was tried, then the IPv4 fallback connected.
+            assert attempted == ["2606:2800:220:1:248:1893:25c8:1946", "93.184.216.34"]
+
+
+@pytest.mark.asyncio
+async def test_non_connect_error_is_not_retried_across_ips() -> None:
+    """A non-connect httpx error fails fast — fallback is only for connect failures."""
+    async with Fetcher() as fetcher:
+        with patch("socket.getaddrinfo") as mock_getaddrinfo:
+            mock_getaddrinfo.return_value = [
+                (0, 0, 0, "", ("93.184.216.34", 0)),
+                (0, 0, 0, "", ("93.184.216.35", 0)),
+            ]
+            calls: list[Any] = []
+
+            async def boom(request: Any, **kwargs: Any) -> Any:
+                calls.append(request.url.host)
+                raise httpx.ReadError("stream broke", request=request)
+
+            with patch.object(fetcher._client, "send", new=boom):
+                with pytest.raises(KaguraFetchError, match="network error"):
+                    await fetcher.fetch("https://example.com/doc")
+            # Only the first IP was attempted — a non-connect error is not a
+            # reachability problem, so we do not try the other validated address.
+            assert calls == ["93.184.216.34"]
+
+
+@pytest.mark.asyncio
+async def test_all_validated_ips_unreachable_raises() -> None:
+    """When every validated IP fails to connect, the last error surfaces."""
+    async with Fetcher() as fetcher:
+        with patch("socket.getaddrinfo") as mock_getaddrinfo:
+            mock_getaddrinfo.return_value = [
+                (0, 0, 0, "", ("93.184.216.34", 0)),
+                (0, 0, 0, "", ("93.184.216.35", 0)),
+            ]
+            calls: list[Any] = []
+
+            async def always_refuse(request: Any, **kwargs: Any) -> Any:
+                calls.append(request.url.host)
+                raise httpx.ConnectError("refused", request=request)
+
+            with patch.object(fetcher._client, "send", new=always_refuse):
+                with pytest.raises(KaguraFetchError, match="network error"):
+                    await fetcher.fetch("https://example.com/doc")
+            # Both validated addresses were tried before giving up.
+            assert calls == ["93.184.216.34", "93.184.216.35"]
+
+
+@pytest.mark.asyncio
+async def test_redirect_target_is_independently_pinned() -> None:
+    """Each redirect hop pins to its own validated IP with its own Host header."""
+    async with Fetcher() as fetcher:
+
+        def fake_getaddrinfo(host: str, *args: Any, **kwargs: Any) -> Any:
+            return {
+                "example.com": [(0, 0, 0, "", ("93.184.216.34", 0))],
+                "cdn.example.com": [(0, 0, 0, "", ("93.184.216.99", 0))],
+            }[host]
+
+        sent: list[Any] = []
+
+        async def fake_send(request: Any, **kwargs: Any) -> Any:
+            sent.append(request)
+            if len(sent) == 1:
+                return _mock_response(
+                    status_code=302,
+                    headers={"Location": "https://cdn.example.com/file"},
+                )
+            return _mock_response(chunks=[b"ok"])
+
+        with patch("socket.getaddrinfo", side_effect=fake_getaddrinfo):
+            with patch.object(fetcher._client, "send", new=fake_send):
+                await fetcher.fetch("https://example.com/start")
+
+        assert sent[0].url.host == "93.184.216.34"
+        assert sent[0].headers["Host"] == "example.com"
+        assert sent[1].url.host == "93.184.216.99"
+        assert sent[1].headers["Host"] == "cdn.example.com"
+
+
 @pytest.mark.asyncio
 async def test_local_file_path(tmp_path: Any) -> None:
     pdf = tmp_path / "doc.pdf"
