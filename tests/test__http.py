@@ -12,7 +12,7 @@ from unittest.mock import MagicMock
 import httpx
 import pytest
 
-from kagura_memory._http import extract_detail
+from kagura_memory._http import extract_detail, validate_https_url
 
 
 def _response_with_json(payload: object) -> MagicMock:
@@ -164,3 +164,67 @@ def test_unicode_decode_error_returns_empty():
     resp = MagicMock(spec=httpx.Response)
     resp.json.side_effect = UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
     assert extract_detail(resp) == ""
+
+
+# ---------------------------------------------------------------------------
+# validate_https_url — HTTPS enforcement with a localhost dev exception (#189)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://api.example.com",
+        "https://localhost",  # https always fine, localhost or not
+        "https://localhost.evil.com",
+    ],
+)
+def test_https_always_allowed(url: str):
+    """Any https:// URL passes regardless of host."""
+    validate_https_url(url)  # must not raise
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://localhost",
+        "http://localhost/",
+        "http://localhost:8080",
+        "http://localhost:8080/mcp",
+        "http://localhost?ready=1",
+        "http://127.0.0.1",
+        "http://127.0.0.1:5000/path",
+        "http://[::1]",
+        "http://[::1]:9000/mcp",
+    ],
+)
+def test_localhost_http_allowed(url: str):
+    """Genuine loopback hosts (optionally with port/path/query) are allowed over plain HTTP."""
+    validate_https_url(url)  # must not raise
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        # The motivating bypass from #189: attacker host with a "localhost" prefix.
+        "http://localhost.evil.com",
+        "http://localhost.evil.com/steal",
+        "http://127.0.0.1.evil.com",
+        "http://[::1].evil.com",
+        # userinfo trick — "localhost" appears before an "@" delimiting the real host.
+        "http://localhost@evil.com",
+        "http://127.0.0.1@evil.com",
+        # plain remote host
+        "http://evil.com",
+    ],
+)
+def test_http_non_localhost_rejected(url: str):
+    """Plain-HTTP URLs whose real host is not loopback must be rejected."""
+    with pytest.raises(ValueError, match="must use HTTPS"):
+        validate_https_url(url)
+
+
+def test_reject_message_includes_label_and_url():
+    """The error surfaces the caller-supplied label and the offending URL."""
+    with pytest.raises(ValueError, match=r"MCP URL must use HTTPS.*localhost\.evil\.com"):
+        validate_https_url("http://localhost.evil.com", label="MCP URL")
