@@ -770,3 +770,59 @@ def test_update_profile_is_file_lock_guarded(tmp_path: Path, monkeypatch: pytest
 
     assert calls == [True]  # acquired exactly once, exclusively
     assert load_credentials_file(path).get_profile().access_token == "locked-write"
+
+
+def test_delete_profile_is_file_lock_guarded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """delete_profile wraps its read-modify-write in the cross-process file lock.
+
+    Without the lock, a logout (delete) racing a concurrent token refresh (update)
+    in a sibling kagura-mcp process can clobber a freshly written token (#190).
+    """
+    import kagura_memory._filelock as fl
+    from kagura_memory.auth.credentials import delete_profile
+
+    path = tmp_path / "creds.json"
+    cf = CredentialsFile()
+    cf.set_profile("alice", _sample_creds())
+    cf.set_profile("bob", _sample_creds())
+    save_credentials_file(cf, path)
+
+    calls: list[bool] = []
+    real_file_lock = fl.file_lock
+
+    def spy_file_lock(target: Path, *, exclusive: bool = True):
+        calls.append(exclusive)
+        return real_file_lock(target, exclusive=exclusive)
+
+    monkeypatch.setattr(fl, "file_lock", spy_file_lock)
+
+    delete_profile("alice", path)
+
+    assert calls == [True]  # acquired exactly once, exclusively
+    assert "alice" not in load_credentials_file(path).profiles
+    assert "bob" in load_credentials_file(path).profiles
+
+
+def test_delete_profile_no_op_is_lock_guarded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """The absent-profile early return still happens under the lock (no TOCTOU)."""
+    import kagura_memory._filelock as fl
+    from kagura_memory.auth.credentials import delete_profile
+
+    path = tmp_path / "creds.json"
+    cf = CredentialsFile()
+    cf.set_profile("alice", _sample_creds())
+    save_credentials_file(cf, path)
+
+    calls: list[bool] = []
+    real_file_lock = fl.file_lock
+
+    def spy_file_lock(target: Path, *, exclusive: bool = True):
+        calls.append(exclusive)
+        return real_file_lock(target, exclusive=exclusive)
+
+    monkeypatch.setattr(fl, "file_lock", spy_file_lock)
+
+    delete_profile("does-not-exist", path)
+
+    assert calls == [True]  # lock acquired before the membership check
+    assert "alice" in load_credentials_file(path).profiles

@@ -379,13 +379,24 @@ def delete_profile(
     profile_name: str,
     path: Path | None = None,
 ) -> None:
-    """Remove a profile and save. No-op if the profile is absent."""
+    """Remove a profile and save. No-op if the profile is absent.
+
+    The read-modify-write is wrapped in the same cross-process advisory
+    :func:`kagura_memory._filelock.file_lock` as :func:`update_profile`, so a
+    ``kagura auth logout`` (delete) racing a concurrent token refresh (update)
+    in a sibling ``kagura-mcp`` process cannot clobber a freshly written token
+    (#190). The absent-profile early return runs *inside* the lock so the
+    membership check and the save observe one consistent snapshot (no TOCTOU).
+    """
+    from .._filelock import file_lock
+
     path = _resolve_path(path)
-    cf = load_credentials_file(path)
-    if profile_name not in cf.profiles:
-        return
-    cf.delete_profile(profile_name)
-    save_credentials_file(cf, path)
+    with file_lock(path, exclusive=True):
+        cf = load_credentials_file(path)
+        if profile_name not in cf.profiles:
+            return
+        cf.delete_profile(profile_name)
+        save_credentials_file(cf, path)
 
 
 def delete_credentials_file(path: Path | None = None) -> None:
