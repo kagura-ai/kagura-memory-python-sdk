@@ -101,6 +101,13 @@ class Fetcher:
             ),
             follow_redirects=False,  # we handle redirects manually for SSRF re-check
             headers={"User-Agent": "kagura-memory-ingest/0.1"},
+            # Pinning rewrites the URL host to the validated IP (#188), which
+            # collapses httpcore's pool key (scheme, host, port) onto the IP.
+            # Disable keepalive reuse so two different hostnames sharing an IP
+            # never reuse a connection opened with the other's SNI/cert. The
+            # fetcher streams one response per request and closes it anyway, so
+            # there is nothing to gain from pooling.
+            limits=httpx.Limits(max_keepalive_connections=0),
         )
 
     async def __aenter__(self) -> Fetcher:
@@ -165,11 +172,11 @@ class Fetcher:
         if not parsed.hostname:
             raise KaguraFetchError("URL has no hostname", url=url)
 
-        await self._validate_hostname(parsed.hostname, url)
+        connect_ip = await self._validate_hostname(parsed.hostname, url)
 
         current_url = url
         for _ in range(self.max_redirects + 1):
-            response = await self._stream_request(current_url)
+            response = await self._stream_request(current_url, connect_ip)
             if response.status_code in (301, 302, 303, 307, 308):
                 # ALL redirect error paths must close the streamed response
                 # before raising — otherwise repeated malformed redirects
@@ -205,7 +212,7 @@ class Fetcher:
                             "redirect URL has embedded credentials (user:pass@host)",
                             url=next_url,
                         )
-                    await self._validate_hostname(next_parsed.hostname, next_url)
+                    connect_ip = await self._validate_hostname(next_parsed.hostname, next_url)
                 finally:
                     await response.aclose()
                 current_url = next_url
@@ -216,8 +223,15 @@ class Fetcher:
 
         raise KaguraFetchError(f"too many redirects (max {self.max_redirects})", url=url)
 
-    async def _validate_hostname(self, hostname: str, url: str) -> None:
-        """Resolve ``hostname`` and reject if any IP is in the denylist."""
+    async def _validate_hostname(self, hostname: str, url: str) -> str:
+        """Resolve ``hostname``, reject blocked IPs, and return one to pin to.
+
+        Every resolved IP is checked against the denylist (a single blocked
+        address rejects the whole hostname). The returned IP is then used as
+        the connection target in :meth:`_stream_request`, so httpx connects to
+        exactly the address we validated rather than re-resolving the hostname
+        at connect time — which is what closes the DNS-rebinding window (#188).
+        """
         try:
             addrs = await asyncio.to_thread(
                 socket.getaddrinfo, hostname, None, 0, socket.SOCK_STREAM
@@ -226,21 +240,43 @@ class Fetcher:
             raise KaguraFetchError(f"hostname resolution failed: {e}", url=url) from e
         # info[4] is the sockaddr; first element is the IP string for both
         # AF_INET and AF_INET6. Coerce explicitly because pyright reads the
-        # tuple as ``str | int``.
-        ips: set[str] = {str(info[4][0]) for info in addrs}
+        # tuple as ``str | int``. Keep resolution order so the pinned IP is
+        # deterministic (we pin the first, having validated them all).
+        ips: list[str] = [str(info[4][0]) for info in addrs]
         if not ips:
             raise KaguraFetchError(f"no IP addresses for {hostname!r}", url=url)
-        blocked = sorted(ip for ip in ips if is_blocked_ip(ip))
+        blocked = sorted({ip for ip in ips if is_blocked_ip(ip)})
         if blocked:
             raise KaguraFetchError(
                 f"hostname {hostname!r} resolved to blocked IP(s): {', '.join(blocked)}",
                 url=url,
             )
+        return ips[0]
 
-    async def _stream_request(self, url: str) -> httpx.Response:
-        """Issue a streaming GET. Caller is responsible for closing the response."""
+    async def _stream_request(self, url: str, connect_ip: str) -> httpx.Response:
+        """Issue a streaming GET pinned to ``connect_ip``.
+
+        The request URL's host is rewritten to the pre-validated IP so httpx
+        connects to exactly that address with no connect-time re-resolution
+        (#188). The original ``Host`` header is preserved for virtual-host
+        routing, and the TLS SNI + certificate hostname verification use the
+        real hostname via the ``sni_hostname`` request extension — so HTTPS
+        certificates are still validated against the hostname, not the IP. The
+        extension is inert for plain ``http``. Caller closes the response.
+        """
+        parsed = httpx.URL(url)
+        pinned_url = parsed.copy_with(host=connect_ip)
+        # ``netloc`` renders host[:port] with correct IPv6 bracketing; URL
+        # credentials are already rejected in _fetch_url, so no userinfo leaks
+        # into the Host header.
+        host_header = parsed.netloc.decode("ascii")
         try:
-            request = self._client.build_request("GET", url)
+            request = self._client.build_request(
+                "GET",
+                pinned_url,
+                headers={"Host": host_header},
+                extensions={"sni_hostname": parsed.host},
+            )
             response = await self._client.send(request, stream=True)
         except httpx.HTTPError as e:
             raise KaguraFetchError(f"network error: {e}", url=url) from e
