@@ -250,6 +250,51 @@ async def test_pin_falls_back_to_next_validated_ip_on_connect_failure() -> None:
 
 
 @pytest.mark.asyncio
+async def test_non_connect_error_is_not_retried_across_ips() -> None:
+    """A non-connect httpx error fails fast — fallback is only for connect failures."""
+    async with Fetcher() as fetcher:
+        with patch("socket.getaddrinfo") as mock_getaddrinfo:
+            mock_getaddrinfo.return_value = [
+                (0, 0, 0, "", ("93.184.216.34", 0)),
+                (0, 0, 0, "", ("93.184.216.35", 0)),
+            ]
+            calls: list[Any] = []
+
+            async def boom(request: Any, **kwargs: Any) -> Any:
+                calls.append(request.url.host)
+                raise httpx.ReadError("stream broke", request=request)
+
+            with patch.object(fetcher._client, "send", new=boom):
+                with pytest.raises(KaguraFetchError, match="network error"):
+                    await fetcher.fetch("https://example.com/doc")
+            # Only the first IP was attempted — a non-connect error is not a
+            # reachability problem, so we do not try the other validated address.
+            assert calls == ["93.184.216.34"]
+
+
+@pytest.mark.asyncio
+async def test_all_validated_ips_unreachable_raises() -> None:
+    """When every validated IP fails to connect, the last error surfaces."""
+    async with Fetcher() as fetcher:
+        with patch("socket.getaddrinfo") as mock_getaddrinfo:
+            mock_getaddrinfo.return_value = [
+                (0, 0, 0, "", ("93.184.216.34", 0)),
+                (0, 0, 0, "", ("93.184.216.35", 0)),
+            ]
+            calls: list[Any] = []
+
+            async def always_refuse(request: Any, **kwargs: Any) -> Any:
+                calls.append(request.url.host)
+                raise httpx.ConnectError("refused", request=request)
+
+            with patch.object(fetcher._client, "send", new=always_refuse):
+                with pytest.raises(KaguraFetchError, match="network error"):
+                    await fetcher.fetch("https://example.com/doc")
+            # Both validated addresses were tried before giving up.
+            assert calls == ["93.184.216.34", "93.184.216.35"]
+
+
+@pytest.mark.asyncio
 async def test_redirect_target_is_independently_pinned() -> None:
     """Each redirect hop pins to its own validated IP with its own Host header."""
     async with Fetcher() as fetcher:
