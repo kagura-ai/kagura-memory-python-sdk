@@ -220,6 +220,36 @@ async def test_pin_targets_a_validated_ip_when_multiple_resolve() -> None:
 
 
 @pytest.mark.asyncio
+async def test_pin_falls_back_to_next_validated_ip_on_connect_failure() -> None:
+    """A connect-level failure on the first validated IP falls back to the next.
+
+    Restores the multi-address robustness (e.g. IPv6→IPv4 on a broken-IPv6 host)
+    that pinning a single IP would otherwise drop — without ever connecting to an
+    unvalidated address, since both candidates passed the denylist.
+    """
+    async with Fetcher() as fetcher:
+        with patch("socket.getaddrinfo") as mock_getaddrinfo:
+            # IPv6 first (as RFC 6724 ordering often yields), then IPv4.
+            mock_getaddrinfo.return_value = [
+                (0, 0, 0, "", ("2606:2800:220:1:248:1893:25c8:1946", 0)),
+                (0, 0, 0, "", ("93.184.216.34", 0)),
+            ]
+            attempted: list[str] = []
+
+            async def flaky_send(request: Any, **kwargs: Any) -> Any:
+                attempted.append(request.url.host)
+                if len(attempted) == 1:
+                    raise httpx.ConnectError("network unreachable", request=request)
+                return _mock_response(chunks=[b"ok"])
+
+            with patch.object(fetcher._client, "send", new=flaky_send):
+                result = await fetcher.fetch("https://example.com/doc")
+            assert result.body == b"ok"
+            # First the IPv6 address was tried, then the IPv4 fallback connected.
+            assert attempted == ["2606:2800:220:1:248:1893:25c8:1946", "93.184.216.34"]
+
+
+@pytest.mark.asyncio
 async def test_redirect_target_is_independently_pinned() -> None:
     """Each redirect hop pins to its own validated IP with its own Host header."""
     async with Fetcher() as fetcher:

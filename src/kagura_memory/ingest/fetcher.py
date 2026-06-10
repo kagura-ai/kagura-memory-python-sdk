@@ -172,11 +172,11 @@ class Fetcher:
         if not parsed.hostname:
             raise KaguraFetchError("URL has no hostname", url=url)
 
-        connect_ip = await self._validate_hostname(parsed.hostname, url)
+        connect_ips = await self._validate_hostname(parsed.hostname, url)
 
         current_url = url
         for _ in range(self.max_redirects + 1):
-            response = await self._stream_request(current_url, connect_ip)
+            response = await self._stream_request(current_url, connect_ips)
             if response.status_code in (301, 302, 303, 307, 308):
                 # ALL redirect error paths must close the streamed response
                 # before raising — otherwise repeated malformed redirects
@@ -212,7 +212,7 @@ class Fetcher:
                             "redirect URL has embedded credentials (user:pass@host)",
                             url=next_url,
                         )
-                    connect_ip = await self._validate_hostname(next_parsed.hostname, next_url)
+                    connect_ips = await self._validate_hostname(next_parsed.hostname, next_url)
                 finally:
                     await response.aclose()
                 current_url = next_url
@@ -223,14 +223,17 @@ class Fetcher:
 
         raise KaguraFetchError(f"too many redirects (max {self.max_redirects})", url=url)
 
-    async def _validate_hostname(self, hostname: str, url: str) -> str:
-        """Resolve ``hostname``, reject blocked IPs, and return one to pin to.
+    async def _validate_hostname(self, hostname: str, url: str) -> list[str]:
+        """Resolve ``hostname``, reject blocked IPs, and return the safe set.
 
         Every resolved IP is checked against the denylist (a single blocked
-        address rejects the whole hostname). The returned IP is then used as
-        the connection target in :meth:`_stream_request`, so httpx connects to
-        exactly the address we validated rather than re-resolving the hostname
+        address rejects the whole hostname). The returned IPs are then used as
+        the connection targets in :meth:`_stream_request`, so httpx connects to
+        exactly the addresses we validated rather than re-resolving the hostname
         at connect time — which is what closes the DNS-rebinding window (#188).
+        The full validated set is returned (resolution order preserved) so the
+        caller can fall back across addresses, e.g. IPv6→IPv4 on a host whose
+        IPv6 path is broken, without ever connecting to an unvalidated IP.
         """
         try:
             addrs = await asyncio.to_thread(
@@ -240,9 +243,9 @@ class Fetcher:
             raise KaguraFetchError(f"hostname resolution failed: {e}", url=url) from e
         # info[4] is the sockaddr; first element is the IP string for both
         # AF_INET and AF_INET6. Coerce explicitly because pyright reads the
-        # tuple as ``str | int``. Keep resolution order so the pinned IP is
-        # deterministic (we pin the first, having validated them all).
-        ips: list[str] = [str(info[4][0]) for info in addrs]
+        # tuple as ``str | int``. Dedup while preserving resolution order so the
+        # connect order is deterministic (we validate every address first).
+        ips: list[str] = list(dict.fromkeys(str(info[4][0]) for info in addrs))
         if not ips:
             raise KaguraFetchError(f"no IP addresses for {hostname!r}", url=url)
         blocked = sorted({ip for ip in ips if is_blocked_ip(ip)})
@@ -251,36 +254,47 @@ class Fetcher:
                 f"hostname {hostname!r} resolved to blocked IP(s): {', '.join(blocked)}",
                 url=url,
             )
-        return ips[0]
+        return ips
 
-    async def _stream_request(self, url: str, connect_ip: str) -> httpx.Response:
-        """Issue a streaming GET pinned to ``connect_ip``.
+    async def _stream_request(self, url: str, connect_ips: list[str]) -> httpx.Response:
+        """Issue a streaming GET pinned to one of the pre-validated ``connect_ips``.
 
-        The request URL's host is rewritten to the pre-validated IP so httpx
+        The request URL's host is rewritten to a pre-validated IP so httpx
         connects to exactly that address with no connect-time re-resolution
         (#188). The original ``Host`` header is preserved for virtual-host
         routing, and the TLS SNI + certificate hostname verification use the
         real hostname via the ``sni_hostname`` request extension — so HTTPS
         certificates are still validated against the hostname, not the IP. The
         extension is inert for plain ``http``. Caller closes the response.
+
+        Addresses are tried in resolution order; a *connection-level* failure
+        (e.g. a host whose IPv6 address is unreachable) falls back to the next
+        validated address, restoring the multi-address robustness that pinning
+        a single IP would otherwise drop. Every candidate has already passed the
+        denylist, so fallback never connects to an unvalidated IP. Non-connect
+        HTTP errors are not retried.
         """
         parsed = httpx.URL(url)
-        pinned_url = parsed.copy_with(host=connect_ip)
-        # ``netloc`` renders host[:port] with correct IPv6 bracketing; URL
-        # credentials are already rejected in _fetch_url, so no userinfo leaks
-        # into the Host header.
+        # ``netloc`` strips userinfo and renders host[:port] with correct IPv6
+        # bracketing, so the Host header always carries the real hostname.
         host_header = parsed.netloc.decode("ascii")
-        try:
-            request = self._client.build_request(
-                "GET",
-                pinned_url,
-                headers={"Host": host_header},
-                extensions={"sni_hostname": parsed.host},
-            )
-            response = await self._client.send(request, stream=True)
-        except httpx.HTTPError as e:
-            raise KaguraFetchError(f"network error: {e}", url=url) from e
-        return response
+        last_exc: httpx.HTTPError | None = None
+        for connect_ip in connect_ips:
+            pinned_url = parsed.copy_with(host=connect_ip)
+            try:
+                request = self._client.build_request(
+                    "GET",
+                    pinned_url,
+                    headers={"Host": host_header},
+                    extensions={"sni_hostname": parsed.host},
+                )
+                return await self._client.send(request, stream=True)
+            except (httpx.ConnectError, httpx.ConnectTimeout) as e:
+                last_exc = e  # try the next validated address
+                continue
+            except httpx.HTTPError as e:
+                raise KaguraFetchError(f"network error: {e}", url=url) from e
+        raise KaguraFetchError(f"network error: {last_exc}", url=url) from last_exc
 
     async def _read_body(
         self,
