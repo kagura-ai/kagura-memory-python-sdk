@@ -74,6 +74,15 @@ def _format_validation_errors(errors: list[Any]) -> str:
     return "; ".join(parts)
 
 
+# Plain-HTTP is permitted only for genuine loopback hosts. The host token must be
+# followed by a boundary — a port (``:\d+``), a path/query/fragment delimiter, or
+# end-of-string — so a prefix-match attack like ``http://localhost.evil.com`` or a
+# userinfo trick like ``http://localhost@evil.com`` cannot smuggle an external host
+# past the check (#189). Scheme matching stays case-sensitive to preserve prior
+# behavior; the trigger below is the lowercase ``http://`` literal.
+_LOCALHOST_HTTP_RE = re.compile(r"^http://(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?(?:[/?#]|$)")
+
+
 def validate_https_url(url: str, *, label: str = "URL") -> None:
     """Enforce HTTPS except for localhost development.
 
@@ -82,11 +91,9 @@ def validate_https_url(url: str, *, label: str = "URL") -> None:
         label: Human-readable label for error messages.
 
     Raises:
-        ValueError: If URL uses HTTP and is not localhost.
+        ValueError: If URL uses HTTP and is not a loopback host.
     """
-    if url.startswith("http://") and not any(
-        url.startswith(f"http://{h}") for h in ("localhost", "127.0.0.1", "[::1]")
-    ):
+    if url.startswith("http://") and not _LOCALHOST_HTTP_RE.match(url):
         raise ValueError(
             f"{label} must use HTTPS for security (got: {url}). "
             "HTTP is only allowed for localhost development."
