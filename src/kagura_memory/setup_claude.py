@@ -86,16 +86,22 @@ Ask the user what to remember if $ARGUMENTS is empty.
 
 
 def _read_json_safe(path: Path) -> dict[str, Any]:
-    """Read a JSON file, returning {} on missing file or parse error."""
+    """Read a UTF-8 JSON file, returning {} on missing/unreadable/parse error.
+
+    Reads are pinned to UTF-8 so config is decoded identically on every
+    locale (issue #197: the OS default codec is cp932 on Japanese Windows,
+    which raised UnicodeDecodeError on UTF-8 content). A foreign-encoding or
+    otherwise corrupt file falls back to an empty dict rather than crashing.
+    """
     try:
-        return json.loads(path.read_text())
-    except (FileNotFoundError, json.JSONDecodeError):
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
         return {}
 
 
 def _write_json(path: Path, data: dict[str, Any]) -> None:
-    """Write a dict as formatted JSON."""
-    path.write_text(json.dumps(data, indent=2) + "\n")
+    """Write a dict as formatted UTF-8 JSON (locale-independent, issue #197)."""
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
 
 def _validate_not_empty(value: str, name: str) -> str:
@@ -429,7 +435,7 @@ def _install_skills(project_dir: Path, context_id: str) -> list[Path]:
         ("kagura-remember.md", SKILL_REMEMBER),
     ]:
         path = commands_dir / filename
-        path.write_text(template.format(context_id=context_id))
+        path.write_text(template.format(context_id=context_id), encoding="utf-8")
         paths.append(path)
 
     return paths
@@ -439,7 +445,7 @@ def _check_gitignore(project_dir: Path) -> list[str]:
     """Check which secret files are missing from .gitignore."""
     secret_files = [".kagura.json", ".mcp.json"]
     try:
-        content = (project_dir / ".gitignore").read_text()
+        content = (project_dir / ".gitignore").read_text(encoding="utf-8")
     except FileNotFoundError:
         return secret_files
     return [f for f in secret_files if f not in content]
@@ -478,14 +484,9 @@ def run_setup_claude(
 
     project = Path(project_dir).resolve()
 
-    # Load existing config from project dir (not cwd)
-    existing_config: dict[str, Any] = {}
-    project_config = project / ".kagura.json"
-    if project_config.exists():
-        try:
-            existing_config = json.loads(project_config.read_text())
-        except (json.JSONDecodeError, OSError):
-            pass
+    # Load existing config from project dir (not cwd). _read_json_safe pins
+    # UTF-8 and swallows missing/foreign-encoding/corrupt files (issue #197).
+    existing_config = _read_json_safe(project / ".kagura.json")
 
     # 1. API Key
     resolved_api_key = api_key or existing_config.get("api_key")
