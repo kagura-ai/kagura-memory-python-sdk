@@ -1106,11 +1106,11 @@ def test_refresh_success_echo_survives_cp932_stdout(patched_default_path: Path, 
     """`auth refresh` prints a check glyph absent from cp932; on a Japanese
     Windows console (cp932 stdout) that raised UnicodeEncodeError. The CLI must
     reconfigure stdout to UTF-8 so the success path completes cleanly."""
-    import kagura_memory.auth.cli as auth_cli
+    from kagura_memory.auth import cli as cli_mod
 
-    monkeypatch.setattr(auth_cli, "make_oauth_client", lambda *a, **k: _async_ctx())
+    monkeypatch.setattr(cli_mod, "make_oauth_client", lambda *a, **k: _async_ctx())
     monkeypatch.setattr(
-        auth_cli,
+        cli_mod,
         "refresh_access_token",
         AsyncMock(return_value=_mock_token_response(access_token="atok-rotated")),
     )

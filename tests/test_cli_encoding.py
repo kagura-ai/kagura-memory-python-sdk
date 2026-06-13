@@ -7,8 +7,10 @@ to be red before the fix and green after, independent of the host locale.
 """
 
 import json
+import sys
 from pathlib import Path
 
+from kagura_memory.cli import _force_utf8_io
 from kagura_memory.config import load_config
 from kagura_memory.setup_claude import _read_json_safe, _write_json
 
@@ -96,3 +98,42 @@ class TestLoadConfigEncoding:
         (tmp_path / ".kagura.json").write_bytes(bytes([0x92, 0x93, 0xFF]))
         with pytest.raises(ValueError, match="Invalid JSON"):
             load_config()
+
+
+class _RecordingStream:
+    """Stand-in stream that records reconfigure() kwargs and can raise."""
+
+    def __init__(self, raise_exc: Exception | None = None) -> None:
+        self.calls: list[dict] = []
+        self._raise = raise_exc
+
+    def reconfigure(self, **kwargs) -> None:
+        self.calls.append(kwargs)
+        if self._raise is not None:
+            raise self._raise
+
+
+class _NoReconfigureStream:
+    """Stand-in stream lacking a reconfigure() method (e.g. a plain pipe)."""
+
+
+class TestForceUtf8Io:
+    def test_reconfigures_streams_to_utf8(self, monkeypatch) -> None:
+        out, err = _RecordingStream(), _RecordingStream()
+        monkeypatch.setattr(sys, "stdout", out)
+        monkeypatch.setattr(sys, "stderr", err)
+        _force_utf8_io()
+        assert out.calls == [{"encoding": "utf-8", "errors": "replace"}]
+        assert err.calls == [{"encoding": "utf-8", "errors": "replace"}]
+
+    def test_skips_stream_without_reconfigure(self, monkeypatch) -> None:
+        # Exercises the `reconfigure is None` branch — must not raise.
+        monkeypatch.setattr(sys, "stdout", _NoReconfigureStream())
+        monkeypatch.setattr(sys, "stderr", _NoReconfigureStream())
+        _force_utf8_io()
+
+    def test_swallows_reconfigure_errors(self, monkeypatch) -> None:
+        # Exercises the except branch — a detached/locked stream must not crash.
+        monkeypatch.setattr(sys, "stdout", _RecordingStream(raise_exc=OSError("detached")))
+        monkeypatch.setattr(sys, "stderr", _RecordingStream(raise_exc=LookupError("bad codec")))
+        _force_utf8_io()
