@@ -1097,8 +1097,8 @@ class KaguraClient:
         if source_id == target_id:
             raise ValueError("source_id and target_id must be different")
         arguments: dict[str, Any] = {
-            "source_id": source_id,
-            "target_id": target_id,
+            "source_context_id": source_id,
+            "target_context_id": target_id,
         }
         if delete_source:
             arguments["delete_source"] = True
