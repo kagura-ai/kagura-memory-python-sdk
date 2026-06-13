@@ -119,11 +119,31 @@ def _run_client_command(
         raise click.ClickException(_exc_message(e)) from e
 
 
+def _force_utf8_io() -> None:
+    """Pin stdout/stderr to UTF-8 so non-ASCII output cannot crash the CLI.
+
+    On Japanese/Chinese Windows the console codec defaults to cp932/cp950/gbk,
+    where status glyphs (e.g. the check mark printed by ``kagura auth refresh``)
+    raised ``UnicodeEncodeError`` and aborted the command (issue #197). UTF-8
+    represents every character; ``errors="replace"`` is a belt-and-braces
+    backstop for any stream that still cannot be reconfigured to UTF-8.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (ValueError, LookupError, OSError):
+            # Stream is detached or refuses reconfiguration; leave it as-is.
+            pass
+
+
 @click.group()
 @click.version_option(package_name="kagura-memory", prog_name="kagura")
 def main():
     """Kagura Memory Cloud CLI - AI-driven memory management."""
-    pass
+    _force_utf8_io()
 
 
 # Register the `kagura auth` sub-group (OAuth2 device-flow). Defined in

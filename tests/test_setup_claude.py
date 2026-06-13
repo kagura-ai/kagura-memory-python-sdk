@@ -344,7 +344,7 @@ class TestInstallSkills:
         assert len(paths) == 2
         for p in paths:
             assert p.exists()
-            content = p.read_text()
+            content = p.read_text(encoding="utf-8")
             assert "ctx-1" in content
 
     def test_skill_filenames(self, project_dir: Path) -> None:
