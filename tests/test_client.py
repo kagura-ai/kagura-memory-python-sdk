@@ -1286,15 +1286,19 @@ async def test_update_context_is_locked():
 
 @pytest.mark.asyncio
 async def test_merge_contexts():
-    """merge_contexts() should call tool with source and target IDs."""
+    """merge_contexts() should call tool with source/target context IDs."""
     client = _make_initialized_client()
 
     with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
         mock.return_value = {"merged": 42, "source_id": "src", "target_id": "tgt"}
         result = await client.merge_contexts(source_id="src", target_id="tgt")
         args = mock.call_args[0][1]
-        assert args["source_id"] == "src"
-        assert args["target_id"] == "tgt"
+        # memory-cloud #990 renamed the MCP params to disambiguate them from
+        # the edge tools' source_id/target_id (which are memory UUIDs).
+        assert args["source_context_id"] == "src"
+        assert args["target_context_id"] == "tgt"
+        assert "source_id" not in args
+        assert "target_id" not in args
         assert "delete_source" not in args
         assert result["merged"] == 42
 
