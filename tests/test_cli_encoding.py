@@ -83,3 +83,16 @@ class TestLoadConfigEncoding:
         result = load_config()
         assert result["model"] == _JP
         assert captured["encoding"] == "utf-8"
+
+    def test_load_config_non_utf8_local_raises_clear_error(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        import pytest
+
+        for key in ("KAGURA_API_KEY", "KAGURA_MCP_URL", "KAGURA_MODEL", "KAGURA_CONTEXT_ID"):
+            monkeypatch.delenv(key, raising=False)
+        monkeypatch.chdir(tmp_path)
+        # cp932-encoded content (the issue #197 scenario): invalid UTF-8 bytes.
+        (tmp_path / ".kagura.json").write_bytes(bytes([0x92, 0x93, 0xFF]))
+        with pytest.raises(ValueError, match="Invalid JSON"):
+            load_config()

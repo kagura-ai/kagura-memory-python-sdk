@@ -25,14 +25,18 @@ def load_config() -> dict[str, Any]:
     if local_config.exists():
         try:
             config = json.loads(local_config.read_text(encoding="utf-8"))
-        except json.JSONDecodeError as e:
-            raise ValueError(f"Invalid JSON in .kagura.json: {e}") from e
+        except (UnicodeDecodeError, json.JSONDecodeError) as e:
+            raise ValueError(
+                f"Invalid JSON or encoding in .kagura.json (expected UTF-8): {e}"
+            ) from e
     # 2. Try home directory if not found locally
     elif (home_config := Path.home() / ".kagura.json").exists():
         try:
             config = json.loads(home_config.read_text(encoding="utf-8"))
-        except json.JSONDecodeError as e:
-            raise ValueError(f"Invalid JSON in ~/.kagura.json: {e}") from e
+        except (UnicodeDecodeError, json.JSONDecodeError) as e:
+            raise ValueError(
+                f"Invalid JSON or encoding in ~/.kagura.json (expected UTF-8): {e}"
+            ) from e
     # 3. Fall back to environment variables
     else:
         config = {
