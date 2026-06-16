@@ -1,9 +1,10 @@
 """Click sub-commands for ``kagura auth``.
 
-Five commands form the public surface:
+Six commands form the public surface:
 
 * ``login``   — RFC 8628 device flow, persist a profile.
 * ``status``  — print the current profile (token redacted).
+* ``list``    — list every stored profile (no secrets); mark the default.
 * ``logout``  — revoke + delete a profile (or the whole file).
 * ``refresh`` — rotate ``access_token``; optional scope expansion.
 * ``token``   — emit ``access_token`` to stdout for CI/scripts.
@@ -18,10 +19,12 @@ with concrete next-step CLI guidance (the precedent set by
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import shutil
 import subprocess
 import sys
+import unicodedata
 import webbrowser
 from datetime import UTC, datetime
 from pathlib import Path
@@ -389,6 +392,141 @@ def _print_mcp_json_mode(project_dir: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# list
+# ---------------------------------------------------------------------------
+
+
+@auth.command(name="list")
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    help="Emit machine-readable JSON (for scripting / CI) instead of a table.",
+)
+def auth_list(as_json: bool) -> None:
+    """List every stored profile; the default is marked with ``*``.
+
+    \b
+    The active profile (used when a command omits --profile) is the
+    default shown here, unless KAGURA_PROFILE is set in the environment —
+    in which case that env value wins and is noted below the table.
+
+    \b
+    Tokens are never printed — use 'kagura auth status' for a single
+    profile's details, or 'kagura auth token' to emit an access token.
+    """
+    cf = load_credentials_file()
+    env_profile = os.getenv("KAGURA_PROFILE")
+
+    if as_json:
+        click.echo(json.dumps(_profiles_as_json(cf), indent=2))
+        return
+
+    if not cf.profiles:
+        raise click.ClickException("No profiles. Run: kagura auth login")
+
+    click.echo()
+    for line in _render_profiles_table(cf):
+        click.echo(line)
+    click.echo()
+    click.echo("  * = default profile  (override with --profile or KAGURA_PROFILE)")
+    if env_profile:
+        if env_profile in cf.profiles:
+            click.echo(
+                f"  Note: KAGURA_PROFILE='{env_profile}' is set — "
+                "it overrides the default for commands run in this environment."
+            )
+        else:
+            click.echo(
+                f"  Warning: KAGURA_PROFILE='{env_profile}' is set but no such profile exists — "
+                "commands that rely on it will fail until you log in or unset it."
+            )
+
+
+def _profiles_as_json(cf: CredentialsFile) -> list[dict[str, object]]:
+    """Build the ``--json`` payload — one entry per profile, no secrets."""
+    return [
+        {
+            "profile": name,
+            "default": name == cf.default_profile,
+            "user_email": creds.user_email,
+            "workspace_name": creds.workspace_name,
+            "workspace_id": creds.workspace_id,
+            "server": creds.server,
+            "scope": creds.scope,
+            "expired": creds.is_expired(),
+            # `expired` is the raw access-token state; `refreshable` is whether
+            # the profile is still usable — a stored refresh_token transparently
+            # rotates an expired access_token on the next request. Scripts should
+            # gate re-login on `refreshable`, not `expired`, to avoid needless
+            # re-auth of perfectly good (merely idle) profiles.
+            "refreshable": bool(creds.refresh_token),
+            "expires_at": creds.expires_at.astimezone(UTC).isoformat(),
+        }
+        for name, creds in cf.profiles.items()
+    ]
+
+
+def _render_profiles_table(cf: CredentialsFile) -> list[str]:
+    """Render the profile table as a list of lines (header + one row each).
+
+    Columns are sized to their widest cell so the table stays aligned
+    regardless of profile-name / email / workspace length.
+    """
+    headers = ("", "PROFILE", "USER", "WORKSPACE", "EXPIRES")
+    rows: list[tuple[str, str, str, str, str]] = [headers]
+    for name, creds in cf.profiles.items():
+        marker = "*" if name == cf.default_profile else ""
+        rows.append(
+            (
+                marker,
+                name,
+                creds.user_email or "<unknown>",
+                creds.workspace_name or "<none>",
+                _format_expires(creds),
+            )
+        )
+
+    # Size columns by terminal-cell width, not len(): East-Asian wide
+    # characters (e.g. a Japanese workspace name) occupy two cells, so
+    # padding on code-point count would misalign every column to their right.
+    widths = [max(_display_width(row[i]) for row in rows) for i in range(len(headers))]
+    return [
+        "  " + "  ".join(_pad_display(cell, widths[i]) for i, cell in enumerate(row)).rstrip()
+        for row in rows
+    ]
+
+
+def _display_width(text: str) -> int:
+    """Terminal cell width of ``text``, counting East-Asian wide/fullwidth as 2."""
+    return sum(2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1 for ch in text)
+
+
+def _pad_display(text: str, width: int) -> str:
+    """Left-justify ``text`` to a target terminal-cell width (wide-char aware)."""
+    return text + " " * max(0, width - _display_width(text))
+
+
+def _format_expires(creds: OAuthCredentials) -> str:
+    """Human-readable expiry for the EXPIRES column.
+
+    ``in 13d 0h 0m`` when the access token is still valid. Once it is past
+    expiry, a stored refresh_token means the next request rotates it
+    transparently, so the profile is still usable — say ``expired
+    (refreshable)`` rather than a bare ``EXPIRED`` that reads as "dead /
+    re-login required" (mirrors ``status``'s auto-refresh wording). Only a
+    profile with no refresh_token is genuinely ``EXPIRED``.
+    """
+    delta = creds.expires_at.astimezone(UTC) - datetime.now(UTC)
+    seconds = delta.total_seconds()
+    if seconds > 0:
+        return f"in {_humanize_delta(seconds)}"
+    if creds.refresh_token:
+        return "expired (refreshable)"
+    return "EXPIRED"
+
+
+# ---------------------------------------------------------------------------
 # logout
 # ---------------------------------------------------------------------------
 
@@ -727,6 +865,7 @@ def _humanize_delta(seconds: float) -> str:
 
 __all__ = [
     "auth",
+    "auth_list",
     "auth_login",
     "auth_logout",
     "auth_refresh",

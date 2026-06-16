@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from click.testing import CliRunner
 
+from kagura_memory.auth.cli import _display_width
 from kagura_memory.auth.credentials import (
     CredentialsFile,
     OAuthCredentials,
@@ -598,6 +599,161 @@ def test_status_reports_url_mode_without_auth(patched_default_path: Path):
         result = runner.invoke(main, ["auth", "status"])
     assert result.exit_code == 0, result.output
     assert "url form (no Authorization header)" in result.output
+
+
+# ---------------------------------------------------------------------------
+# list
+# ---------------------------------------------------------------------------
+
+
+def _seed_two_profiles(tmp_path: Path) -> Path:
+    """Write a two-profile credentials file with 'work' as the default."""
+    path = tmp_path / ".kagura" / "credentials.json"
+    cf = CredentialsFile(
+        default_profile="work",
+        profiles={
+            "work": _make_creds(access_token="atok-work-secret", refresh_token="rtok-work-secret"),
+            "personal": _make_creds(
+                access_token="atok-pers-secret", refresh_token="rtok-pers-secret"
+            ),
+        },
+    )
+    save_credentials_file(cf, path)
+    return path
+
+
+def test_list_empty_errors_with_login_hint(patched_default_path: Path):
+    result = CliRunner().invoke(main, ["auth", "list"])
+    assert result.exit_code != 0
+    assert "kagura auth login" in result.output
+
+
+def test_list_empty_json_emits_empty_array(patched_default_path: Path):
+    result = CliRunner().invoke(main, ["auth", "list", "--json"])
+    assert result.exit_code == 0
+    assert json.loads(result.output) == []
+
+
+def test_list_shows_all_profiles_and_marks_default(patched_default_path: Path):
+    _seed_two_profiles(patched_default_path.parent.parent)
+    result = CliRunner().invoke(main, ["auth", "list"])
+    assert result.exit_code == 0, result.output
+    assert "work" in result.output
+    assert "personal" in result.output
+    # The default profile row is flagged with '*'.
+    work_line = next(line for line in result.output.splitlines() if "work" in line)
+    assert work_line.lstrip().startswith("*")
+    assert "default profile" in result.output
+
+
+def test_list_never_prints_tokens(patched_default_path: Path):
+    _seed_two_profiles(patched_default_path.parent.parent)
+    for args in (["auth", "list"], ["auth", "list", "--json"]):
+        result = CliRunner().invoke(main, args)
+        assert result.exit_code == 0, result.output
+        assert "secret" not in result.output  # neither access nor refresh tokens leak
+
+
+def test_list_json_structure_and_default_flag(patched_default_path: Path):
+    _seed_two_profiles(patched_default_path.parent.parent)
+    result = CliRunner().invoke(main, ["auth", "list", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    by_name = {entry["profile"]: entry for entry in payload}
+    assert by_name["work"]["default"] is True
+    assert by_name["personal"]["default"] is False
+    assert by_name["work"]["user_email"] == "user@example.com"
+    assert by_name["work"]["workspace_name"] == "test-workspace"
+    # `refreshable` is the usability signal; a non-empty refresh_token → True.
+    assert by_name["work"]["refreshable"] is True
+    assert "access_token" not in by_name["work"]
+    assert "refresh_token" not in by_name["work"]
+
+
+def test_list_expired_but_refreshable_is_not_shown_as_dead(patched_default_path: Path):
+    """An expired access_token with a valid refresh_token reads as refreshable, not EXPIRED."""
+    path = patched_default_path
+    cf = CredentialsFile(
+        default_profile="old",
+        profiles={
+            "old": _make_creds(
+                refresh_token="rtok-valid",
+                expires_at=datetime.now(UTC) - timedelta(hours=1),
+            ),
+        },
+    )
+    save_credentials_file(cf, path)
+    result = CliRunner().invoke(main, ["auth", "list"])
+    assert result.exit_code == 0, result.output
+    assert "refreshable" in result.output
+    # Must NOT show a bare "EXPIRED" that implies re-login is required.
+    assert "EXPIRED" not in result.output
+    # JSON keeps the raw access-token state but flags it as still usable.
+    jresult = CliRunner().invoke(main, ["auth", "list", "--json"])
+    payload = json.loads(jresult.output)
+    assert payload[0]["expired"] is True
+    assert payload[0]["refreshable"] is True
+
+
+def test_list_truly_expired_without_refresh_token_shown_as_expired(patched_default_path: Path):
+    """No refresh_token + past expiry → genuinely dead, shown as EXPIRED."""
+    path = patched_default_path
+    cf = CredentialsFile(
+        default_profile="dead",
+        profiles={
+            "dead": _make_creds(
+                refresh_token="",
+                expires_at=datetime.now(UTC) - timedelta(hours=1),
+            ),
+        },
+    )
+    save_credentials_file(cf, path)
+    result = CliRunner().invoke(main, ["auth", "list"])
+    assert result.exit_code == 0, result.output
+    assert "EXPIRED" in result.output
+    assert "refreshable" not in result.output
+
+
+def test_list_aligns_columns_with_wide_characters(patched_default_path: Path):
+    """A double-width (CJK) workspace name must not break column alignment."""
+    path = patched_default_path
+    wide = _make_creds()
+    wide.workspace_name = "個人用メモ"  # 5 wide chars = 10 terminal cells
+    narrow = _make_creds()
+    narrow.workspace_name = "Acme"
+    cf = CredentialsFile(
+        default_profile="wide",
+        profiles={"wide": wide, "narrow": narrow},
+    )
+    save_credentials_file(cf, path)
+    result = CliRunner().invoke(main, ["auth", "list"])
+    assert result.exit_code == 0, result.output
+    lines = [ln for ln in result.output.splitlines() if "in " in ln]
+    # The EXPIRES cell ("in ...") must start at the same *terminal column* on
+    # every row despite the wide workspace name. Measure the cell offset of
+    # "in " with the same wide-char-aware width the renderer uses — a plain
+    # str.index() offset would differ (wide chars are 1 code point but 2 cells)
+    # even when the columns line up correctly.
+    starts = {_display_width(ln[: ln.index("in ")]) for ln in lines}
+    assert len(starts) == 1, f"misaligned EXPIRES column: {lines}"
+
+
+def test_list_notes_env_profile_override(patched_default_path: Path, monkeypatch):
+    _seed_two_profiles(patched_default_path.parent.parent)
+    monkeypatch.setenv("KAGURA_PROFILE", "personal")
+    result = CliRunner().invoke(main, ["auth", "list"])
+    assert result.exit_code == 0, result.output
+    assert "KAGURA_PROFILE" in result.output
+    assert "personal" in result.output
+
+
+def test_list_warns_when_env_profile_missing(patched_default_path: Path, monkeypatch):
+    _seed_two_profiles(patched_default_path.parent.parent)
+    monkeypatch.setenv("KAGURA_PROFILE", "ghost")
+    result = CliRunner().invoke(main, ["auth", "list"])
+    assert result.exit_code == 0, result.output
+    assert "ghost" in result.output
+    assert "no such profile" in result.output
 
 
 # ---------------------------------------------------------------------------
