@@ -902,7 +902,14 @@ class KaguraClient:
 
         Returns:
             API response with deletion results
+
+        Raises:
+            ValueError: If neither ``memory_id`` nor ``query`` is provided —
+                ``forget`` always targets a specific memory or a search; an
+                unqualified call would be an ambiguous no-op.
         """
+        if not memory_id and not query:
+            raise ValueError("Provide either memory_id or query")
         arguments: dict[str, Any] = {"context_id": context_id}
         if memory_id:
             arguments["memory_id"] = memory_id

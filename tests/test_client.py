@@ -876,6 +876,19 @@ async def test_forget_by_query():
 
 
 @pytest.mark.asyncio
+async def test_forget_requires_target():
+    """forget() with neither memory_id nor query raises rather than sending a no-op."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        with pytest.raises(ValueError, match="memory_id or query"):
+            await client.forget(context_id="ctx")
+        mock.assert_not_called()
+
+    await client.close()
+
+
+@pytest.mark.asyncio
 async def test_explore_calls_tool():
     """explore() should assemble correct arguments."""
     client = _make_initialized_client()
