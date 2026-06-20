@@ -141,9 +141,18 @@ class Fetcher:
 
         # URL form takes precedence: anything starting with a scheme like
         # http://, https://, ftp://, file://, ... is parsed as a URL.
+        #
+        # Exception: a Windows drive-letter path ("C:\\Users\\f\\doc.pdf" or
+        # "C:/Users/f/doc.pdf") is mis-parsed by urlsplit as scheme="c" with no
+        # authority, which would otherwise be rejected as an unsupported scheme
+        # and break *all* absolute-path local-file ingestion on Windows. A real
+        # URL scheme we serve is multi-character; a single ASCII letter with no
+        # netloc is a drive letter, so route it to the local-file path instead.
         parsed = urlsplit(source)
-        if parsed.scheme:
-            if parsed.scheme.lower() not in _ALLOWED_SCHEMES:
+        scheme = parsed.scheme.lower()
+        is_windows_drive = len(scheme) == 1 and scheme.isalpha() and not parsed.netloc
+        if scheme and not is_windows_drive:
+            if scheme not in _ALLOWED_SCHEMES:
                 raise KaguraFetchError(
                     f"unsupported scheme {parsed.scheme!r}; only http(s) is allowed",
                     url=source,
