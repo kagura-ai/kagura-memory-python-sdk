@@ -27,7 +27,7 @@ This SDK connects your Python code to [Kagura Memory Cloud](https://github.com/k
 | **`KaguraClient`** | MCP (JSON-RPC) | Direct memory ops — remember, recall, explore, reference, forget |
 | **`ResourceClient`** | REST API | External data ingestion — push data from Slack, CI/CD, CRM into Kagura |
 | **`FilesClient`** | REST + presigned PUT | File uploads with sha256 integrity binding (R2) |
-| **`FileIngestor`** | CLI + SDK | Document ingestion — PDF text → memory graph + R2 archive (Phase 1; image/PPT/Excel in Phase 2) |
+| **`FileIngestor`** | CLI + SDK | Document ingestion — PDF/Office/HTML/EPUB, audio & YouTube transcripts → memory graph + R2 archive |
 
 ## 60-second demo
 
@@ -49,7 +49,7 @@ kagura recall "report findings" -k 5        # search across sections
 kagura files download-url <file_id>          # short-lived GET on the original
 ```
 
-Phase 1 ingests **text only**. A vision provider (Gemini 2.5 Flash by default) is configured and validated, but the orchestrator does not currently call it — no extractor in Phase 1 emits images, so neither `_image.preprocess()` nor `Provider.describe_image()` is invoked. Image-based OCR memories land in Phase 2. Pass `--no-vision` to skip provider configuration entirely, or `--dry-run` to see token / cost estimates without calling an LLM.
+Ingestion extracts **text** — from PDFs, Office/HTML/EPUB documents, audio/video transcripts, and YouTube captions. Images embedded in a document are detected and counted (`IngestResult.skipped_images`) but not yet OCR'd: a vision provider (Gemini 2.5 Flash by default) is configured and validated, but the orchestrator does not currently invoke `Provider.describe_image()` — image-to-text memories are a planned follow-up. Pass `--no-vision` to skip provider configuration entirely, or `--dry-run` to see token / cost estimates without calling an LLM.
 
 ## Installation
 
@@ -304,7 +304,7 @@ Runnable: [`examples/files_upload.py`](examples/files_upload.py).
 
 | SDK | Min memory-cloud | Notes |
 |---|---|---|
-| 0.27.0 – 0.29.x | 0.17.1 | **Agent memory substrate.** `load_pinned` + `delivery_mode` pin-on-write, `recall_upcoming`, `feedback`, `set_state`/`get_state`, and the `trust_tier` recall filter each need a memory-cloud carrying the matching [#885](https://github.com/kagura-ai/memory-cloud/issues/885) agent-substrate APIs (≈ v0.23.0+); against an older server those specific tools return an MCP "tool not found". `MIN_SERVER_VERSION` stays **0.17.1** — the rest of the SDK still works on 0.17.1+. **v0.29.0 also changed error handling (breaking): MCP tool methods now raise `KaguraNotFoundError`/`KaguraError` instead of returning `{"status":"error"}` dicts** (see the KaguraClient error-handling note above). |
+| 0.27.0 – 0.31.x | 0.17.1 | **Agent memory substrate.** `load_pinned` + `delivery_mode` pin-on-write, `recall_upcoming`, `feedback`, `set_state`/`get_state`, and the `trust_tier` recall filter each need a memory-cloud carrying the matching [#885](https://github.com/kagura-ai/memory-cloud/issues/885) agent-substrate APIs (≈ v0.23.0+); against an older server those specific tools return an MCP "tool not found". `MIN_SERVER_VERSION` stays **0.17.1** — the rest of the SDK still works on 0.17.1+. **v0.29.0 also changed error handling (breaking): MCP tool methods now raise `KaguraNotFoundError`/`KaguraError` instead of returning `{"status":"error"}` dicts** (see the KaguraClient error-handling note above). |
 | 0.15.0 – 0.20.x | 0.15.1 | `FilesClient` + R2 checksum binding. `list_tags()` additionally needs **0.15.4** — `MIN_SERVER_VERSION` is intentionally not bumped, only that one method requires the newer server. |
 | 0.14.x | 0.15.1 | `FilesClient` + R2 checksum binding (`x-amz-checksum-sha256` on PUT) |
 | 0.13.x | 0.13.0 | Pre-`FilesClient` |
@@ -327,6 +327,8 @@ kagura auth login --no-browser                       # SSH / headless
 kagura auth login --profile work                     # named profile for a second workspace
 
 kagura auth status                                   # show profile, server, expiry, scope
+kagura auth list                                     # list all stored profiles (default marked *)
+kagura auth list --json                              # machine-readable profile list
 kagura auth refresh                                  # manual token rotation
 kagura auth refresh --scope "memory:write"           # incremental consent (re-runs device flow)
 kagura auth token                                    # raw access_token to stdout (CI use)
@@ -423,8 +425,8 @@ kagura ingest https://example.com/report.pdf --tags "Q1,research"
 # Preview cost / sections without calling any LLM
 kagura ingest ./report.pdf --dry-run
 
-# Skip vision-provider configuration entirely (Phase 1 already ingests
-# text only; this becomes meaningful once Phase 2 image extraction lands)
+# Skip vision-provider configuration entirely (images are not OCR'd yet, so
+# this just avoids validating a vision provider you don't need)
 kagura ingest ./report.pdf --no-vision
 
 # Storage: skip the R2 archive (no file_id stamped on the overview memory)
@@ -440,7 +442,7 @@ For the SDK-level `FileIngestor` API, see [`examples/ingest_pdf.py`](examples/in
 
 Provider configuration (env vars, picked up automatically via `litellm`):
 - `ANTHROPIC_API_KEY` — text summarization (default model `claude-sonnet-4-6` via the `claude` preset)
-- `GEMINI_API_KEY` — reserved for vision OCR (default model `gemini/gemini-2.5-flash` via the `gemini` preset); not invoked in Phase 1
+- `GEMINI_API_KEY` — audio/video transcription (default model `gemini/gemini-2.5-flash` via the `gemini` preset); also the default vision provider for image OCR, which is configured but not yet invoked (see above)
 - Override per invocation: `--text-provider {claude|gemini|ollama}`, `--vision-provider {claude|gemini|ollama}`
 
 ## Claude Code Integration

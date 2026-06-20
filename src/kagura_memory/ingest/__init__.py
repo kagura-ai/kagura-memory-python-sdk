@@ -5,9 +5,12 @@ high-level entry point is :class:`FileIngestor`; the ``kagura ingest`` CLI
 subcommand is a thin wrapper around it.
 
 Supported inputs: PDF, plain text / Markdown, HTML, DOCX, XLSX, PPTX, EPUB,
-images (vision), audio/video transcription, and YouTube transcripts; a URL may
-optionally be rendered with a headless browser for JS-heavy pages. Each
-parser's heavy dependency is opt-in via a ``kagura-memory[ingest-*]`` extra.
+audio/video transcription, and YouTube transcripts; a URL may optionally be
+rendered with a headless browser for JS-heavy pages. Each parser's heavy
+dependency is opt-in via a ``kagura-memory[ingest-*]`` extra. Images embedded
+in documents are detected and counted but not yet OCR'd — a vision
+:class:`Provider` exists (``describe_image``) but the orchestrator does not
+call it yet, so such images are reported via ``IngestResult.skipped_images``.
 
 The public surface is intentionally small:
 
