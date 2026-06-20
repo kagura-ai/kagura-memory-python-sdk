@@ -15,6 +15,7 @@ exact IP validated here — see :meth:`Fetcher._stream_request` (#188).
 from __future__ import annotations
 
 import ipaddress
+import os
 from pathlib import Path
 
 _BLOCKED_NETWORKS: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...] = (
@@ -64,8 +65,29 @@ def is_blocked_ip(ip_str: str) -> bool:
     return any(ip in net for net in _BLOCKED_NETWORKS)
 
 
+def _blocked_prefixes() -> tuple[Path, ...]:
+    """Sensitive directory prefixes to default-deny for the running platform.
+
+    ``~/.ssh`` is always included (resolved against the current ``$HOME``). On
+    Windows the system directory (``%SystemRoot%``, typically ``C:\\Windows``)
+    and ``%ProgramData%`` are blocked; on POSIX the directories in
+    :data:`_DEFAULT_BLOCKED_PATH_PREFIXES` are used. The POSIX list is left out
+    on Windows because a drive-rooted path can never live under ``/etc`` et al.
+    """
+    prefixes: list[Path] = [Path.home() / ".ssh"]
+    if os.name == "nt":
+        system_root = os.environ.get("SystemRoot") or os.environ.get("windir") or r"C:\Windows"
+        prefixes.append(Path(system_root))
+        program_data = os.environ.get("ProgramData")
+        if program_data:
+            prefixes.append(Path(program_data))
+    else:
+        prefixes.extend(Path(p) for p in _DEFAULT_BLOCKED_PATH_PREFIXES)
+    return tuple(prefixes)
+
+
 def is_blocked_system_path(path: Path) -> bool:
-    """True iff the absolute path matches a default-deny prefix.
+    """True iff the absolute path is inside a sensitive system directory.
 
     Args:
         path: Filesystem path to test. Must already be resolved to an
@@ -74,14 +96,13 @@ def is_blocked_system_path(path: Path) -> bool:
             path on rejection.
 
     Returns:
-        ``True`` if the absolute path starts with a sensitive system
+        ``True`` if the absolute path is at or under a default-blocked system
         directory, ``False`` otherwise.
+
+    Matching uses :meth:`pathlib.PurePath.is_relative_to`, so a prefix only
+    matches on a path-segment boundary — ``/var/log`` blocks ``/var/log/x`` but
+    not ``/varlog`` — and comparison is case-insensitive on Windows.
     """
     if not path.is_absolute():
         return False
-    s = str(path)
-    if s.startswith(str(Path.home() / ".ssh")):
-        return True
-    return any(
-        s == prefix or s.startswith(prefix + "/") for prefix in _DEFAULT_BLOCKED_PATH_PREFIXES
-    )
+    return any(path.is_relative_to(prefix) for prefix in _blocked_prefixes())
