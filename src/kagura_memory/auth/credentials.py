@@ -359,11 +359,11 @@ def update_profile(
     The read-modify-write is serialized two ways: the in-process
     :class:`asyncio.Lock` held in :class:`_SharedCredentialsState` coalesces
     refreshes within a single process, and a cross-process advisory
-    :func:`kagura_memory._filelock.file_lock` (POSIX ``fcntl``; a no-op on
-    Windows pending a follow-up) wraps the load→set→save so concurrent writers
-    in *different* processes — e.g. multiple ``kagura-mcp`` proxy children —
-    cannot lose an update. The lock is on a sibling ``credentials.json.lock``,
-    not the file itself, so it never races the atomic ``os.replace`` in
+    :func:`kagura_memory._filelock.file_lock` (POSIX ``fcntl`` or Windows
+    ``msvcrt``) wraps the load→set→save so concurrent writers in *different*
+    processes — e.g. multiple ``kagura-mcp`` proxy children — cannot lose an
+    update. The lock is on a sibling ``credentials.json.lock``, not the file
+    itself, so it never races the atomic ``os.replace`` in
     :func:`save_credentials_file`.
     """
     from .._filelock import file_lock
