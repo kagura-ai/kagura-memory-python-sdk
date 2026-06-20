@@ -296,7 +296,10 @@ class KaguraAgent:
             count = len(data) if isinstance(data, list) else "N/A"
             self.logger.detail(f"Cached {label}", f"{count} items" if count != "N/A" else "")
 
-        return data
+        # Return a copy on the miss path too: callers must never get a live
+        # reference into the cache (the hit path above already deep-copies), or
+        # a downstream mutation would silently corrupt the cached entry.
+        return copy.deepcopy(data)
 
     async def _get_tools_with_cache(self) -> list[dict[str, Any]]:
         """
@@ -378,10 +381,13 @@ class KaguraAgent:
         if not usage:
             return None
 
+        # Coerce ``or 0``: a provider may expose the attribute set to ``None``
+        # (getattr's default only applies when the attribute is absent), which
+        # would fail LLMUsage's int validation — mirror the Ollama path above.
         return LLMUsage(
-            prompt_tokens=getattr(usage, "prompt_tokens", 0),
-            completion_tokens=getattr(usage, "completion_tokens", 0),
-            total_tokens=getattr(usage, "total_tokens", 0),
+            prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
+            completion_tokens=getattr(usage, "completion_tokens", 0) or 0,
+            total_tokens=getattr(usage, "total_tokens", 0) or 0,
             model=self.model,
         )
 
@@ -425,6 +431,9 @@ class KaguraAgent:
             except Exception as e:
                 if attempt == self.max_retries - 1:
                     raise KaguraLLMError(f"Unexpected LLM error: {e}") from e
+                self.logger.warning(
+                    f"LLM call failed (attempt {attempt + 1}/{self.max_retries}), retrying: {e}"
+                )
                 await asyncio.sleep(2**attempt)
 
         raise KaguraLLMError("Max retries exceeded")
@@ -500,10 +509,36 @@ class KaguraAgent:
         except httpx.RequestError as e:
             raise KaguraLLMError(f"Ollama connection failed: {e}") from e
 
-        body = resp.json()
+        # With stream=True, Ollama returns newline-delimited JSON chunks rather
+        # than a single object, so resp.json() would fail; merge them first.
+        body = self._merge_ollama_stream(resp.text) if self._ollama_stream else resp.json()
         content = body.get("message", {}).get("content", "")
         data = json.loads(content or "{}")
         return data, body
+
+    @staticmethod
+    def _merge_ollama_stream(raw: str) -> dict[str, Any]:
+        """Collapse Ollama's newline-delimited streaming chunks into one body.
+
+        With ``stream: true`` Ollama emits one JSON object per line: the message
+        content is split across chunks and the token counts arrive on the final
+        ``done`` chunk. Concatenate the content and keep the last chunk's other
+        fields, so the merged dict matches the non-streaming response shape and
+        :meth:`_extract_usage` still finds ``prompt_eval_count`` / ``eval_count``.
+        """
+        merged: dict[str, Any] = {}
+        parts: list[str] = []
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            chunk = json.loads(line)
+            piece = chunk.get("message", {}).get("content", "")
+            if piece:
+                parts.append(piece)
+            merged = chunk
+        merged["message"] = {"role": "assistant", "content": "".join(parts)}
+        return merged
 
     async def _analyze_session(
         self, session: Session, use_enhanced_context: bool = True
@@ -622,22 +657,25 @@ class KaguraAgent:
                 self.logger.warning(f"Recall failed: {e}")
                 continue
 
-            for mem in result.get("results", []):
-                recalled.append(
-                    Memory(
-                        memory_id=mem["memory_id"],
-                        summary=mem["summary"],
-                        score=mem.get("score", 0.0),
-                    )
+            query_results = [
+                Memory(
+                    memory_id=mem["memory_id"],
+                    summary=mem["summary"],
+                    score=mem.get("score", 0.0),
                 )
+                for mem in result.get("results", [])
+            ]
+            recalled.extend(query_results)
 
             actions.append(f"recall: {query}")
-            self.logger.detail("Found memories", len(recalled))
+            self.logger.detail("Found memories", len(query_results))
 
-            # Deep mode: explore if results found
-            if deep and recalled:
-                self.logger.action("Deep exploration", f"seed={recalled[0].memory_id}")
-                seed_id = recalled[0].memory_id
+            # Deep mode: explore from THIS query's top hit. Seeding from
+            # ``recalled[0]`` would always re-explore the first query's first
+            # result on every later iteration (the list accumulates).
+            if deep and query_results:
+                seed_id = query_results[0].memory_id
+                self.logger.action("Deep exploration", f"seed={seed_id}")
 
                 try:
                     explore_result = await self.client.explore(

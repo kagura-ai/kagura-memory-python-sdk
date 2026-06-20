@@ -430,6 +430,63 @@ async def test_call_ollama_success():
 
 
 @pytest.mark.asyncio
+async def test_call_ollama_stream_merges_ndjson():
+    """With ollama_stream=True, _call_ollama merges NDJSON chunks into one body."""
+    agent = KaguraAgent(api_key="test", model="ollama/qwen3:30b", ollama_stream=True)
+
+    chunks = [
+        {"message": {"role": "assistant", "content": '{"should_'}, "done": False},
+        {"message": {"role": "assistant", "content": 'remember": true}'}, "done": False},
+        {
+            "message": {"role": "assistant", "content": ""},
+            "done": True,
+            "prompt_eval_count": 100,
+            "eval_count": 50,
+        },
+    ]
+    ndjson = "\n".join(json.dumps(c) for c in chunks)
+
+    mock_client = AsyncMock()
+    mock_resp = MagicMock()
+    mock_resp.text = ndjson
+    mock_resp.raise_for_status = MagicMock()
+    mock_client.post.return_value = mock_resp
+    agent._ollama_client = mock_client
+
+    data, resp = await agent._call_ollama([{"role": "user", "content": "test"}], 0.3)
+
+    # The split content reassembles into valid JSON.
+    assert data == {"should_remember": True}
+    assert resp["message"]["content"] == '{"should_remember": true}'
+    # Token counts from the final chunk survive the merge.
+    usage = agent._extract_usage(resp)
+    assert usage is not None
+    assert usage.prompt_tokens == 100
+    assert usage.completion_tokens == 50
+    await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_litellm_usage_coerces_none_token_counts():
+    """A litellm usage object exposing None counts must not crash LLMUsage."""
+    agent = KaguraAgent(api_key="test", model="gpt-5.4-nano")
+
+    usage_obj = MagicMock()
+    usage_obj.prompt_tokens = None
+    usage_obj.completion_tokens = None
+    usage_obj.total_tokens = None
+    response = MagicMock()
+    response.usage = usage_obj
+
+    usage = agent._extract_usage(response)
+    assert usage is not None
+    assert usage.prompt_tokens == 0
+    assert usage.completion_tokens == 0
+    assert usage.total_tokens == 0
+    await agent.close()
+
+
+@pytest.mark.asyncio
 async def test_ollama_usage_extraction():
     """_extract_usage should handle Ollama response dict format."""
     agent = KaguraAgent(api_key="test", model="ollama/qwen3:30b")
