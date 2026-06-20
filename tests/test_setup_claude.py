@@ -99,11 +99,12 @@ class TestSelectOrCreateContext:
             )
             assert result == "ctx-abc"
 
-    @patch("kagura_memory.setup_claude.asyncio")
     @patch("kagura_memory.setup_claude._create_context")
-    def test_interactive_create_new(self, mock_create: AsyncMock, mock_asyncio: MagicMock) -> None:
+    def test_interactive_create_new(self, mock_create: AsyncMock) -> None:
         """Interactive: no contexts, user creates a new one."""
-        mock_asyncio.run.return_value = {"context_id": "ctx-new", "name": "test"}
+        # Let the real asyncio.run await the AsyncMock coroutine (mocking
+        # asyncio wholesale would leave the coroutine un-awaited).
+        mock_create.return_value = {"context_id": "ctx-new", "name": "test"}
         with patch("kagura_memory.setup_claude.click") as mock_click:
             mock_click.prompt.side_effect = ["my-project", "A summary"]
             mock_click.echo = MagicMock()
@@ -118,13 +119,12 @@ class TestSelectOrCreateContext:
             )
             assert result == "ctx-new"
 
-    @patch("kagura_memory.setup_claude.asyncio")
     @patch("kagura_memory.setup_claude._create_context")
-    def test_interactive_create_new_from_list(
-        self, mock_create: AsyncMock, mock_asyncio: MagicMock
-    ) -> None:
+    def test_interactive_create_new_from_list(self, mock_create: AsyncMock) -> None:
         """Interactive: contexts exist, user chooses 'create new'."""
-        mock_asyncio.run.return_value = {"context_id": "ctx-brand-new", "name": "new-proj"}
+        # Let the real asyncio.run await the AsyncMock coroutine (mocking
+        # asyncio wholesale would leave the coroutine un-awaited).
+        mock_create.return_value = {"context_id": "ctx-brand-new", "name": "new-proj"}
         with patch("kagura_memory.setup_claude.click") as mock_click:
             mock_click.prompt.side_effect = [2, "new-proj", ""]
             mock_click.echo = MagicMock()
