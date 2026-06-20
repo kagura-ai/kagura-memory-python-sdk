@@ -16,6 +16,7 @@ from kagura_memory import (
     KaguraError,
     KaguraNotFoundError,
     KaguraQuotaError,
+    KaguraRateLimitError,
     MemoryListResponse,
     MemoryStatsResponse,
     RollbackResult,
@@ -146,6 +147,29 @@ async def test_initialize_session_non_401_http_error_surfaces_class_name():
     msg = str(exc_info.value)
     assert msg != "HTTP 503: "
     assert msg.endswith("HTTPStatusError") or "HTTP 503: " in msg and len(msg.split(": ", 1)[1]) > 0
+
+
+@pytest.mark.asyncio
+async def test_http_429_raises_rate_limit_with_retry_after():
+    """A 429 surfaces as KaguraRateLimitError carrying the Retry-After seconds."""
+    client = KaguraClient(api_key="test", mcp_url="https://test.com/mcp")
+
+    mock_response = MagicMock()
+    mock_response.status_code = 429
+    mock_response.headers = {"Retry-After": "12"}
+    mock_response.json.return_value = {"detail": "slow down"}
+    mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
+        "429", request=MagicMock(), response=mock_response
+    )
+
+    with patch.object(client._client, "post", new_callable=AsyncMock) as mock_post:
+        mock_post.return_value = mock_response
+        with pytest.raises(KaguraRateLimitError) as exc_info:
+            await client._initialize_session()
+
+    assert exc_info.value.retry_after == 12
+    assert "slow down" in str(exc_info.value)
+    await client.close()
 
     await client.close()
 
