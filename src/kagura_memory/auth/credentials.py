@@ -375,6 +375,29 @@ def update_profile(
         save_credentials_file(cf, path)
 
 
+def set_default_profile(profile_name: str, path: Path | None = None) -> None:
+    """Set ``default_profile`` to an existing profile (backs ``kagura auth use``).
+
+    Unlike :func:`CredentialsFile.set_profile`'s implicit first-wins promotion,
+    this is a *deliberate* default selection. The read-modify-write is wrapped in
+    the same cross-process advisory :func:`kagura_memory._filelock.file_lock` as
+    :func:`update_profile` so a concurrent refresh/login cannot clobber it.
+
+    Raises:
+        KeyError: If ``profile_name`` is not an existing profile — selecting a
+            non-existent default would silently break resolution.
+    """
+    from .._filelock import file_lock
+
+    path = _resolve_path(path)
+    with file_lock(path, exclusive=True):
+        cf = load_credentials_file(path)
+        if profile_name not in cf.profiles:
+            raise KeyError(profile_name)
+        cf.default_profile = profile_name
+        save_credentials_file(cf, path)
+
+
 def delete_profile(
     profile_name: str,
     path: Path | None = None,

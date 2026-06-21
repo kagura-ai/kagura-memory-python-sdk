@@ -22,15 +22,74 @@ one-way.
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
-from .auth.credentials import KaguraOAuth, get_shared_state
+from .auth.credentials import KaguraOAuth, get_shared_state, load_credentials_file
 from .config import load_config
 from .exceptions import KaguraAuthError
 
+if TYPE_CHECKING:
+    from .auth.credentials import _SharedCredentialsState
+
 _DEFAULT_MCP_URL = "https://memory.kagura-ai.com/mcp"
+
+_logger = logging.getLogger("kagura_memory")
+
+# Profiles already warned about this process, so the multi-profile ambiguity
+# note (issue #203) fires at most once per active profile per process rather
+# than on every client construction. Reset by :func:`reset_profile_warnings`.
+_warned_profiles: set[str] = set()
+
+
+def reset_profile_warnings() -> None:
+    """Clear the once-per-process ambiguity-warning dedup set (test hook)."""
+    _warned_profiles.clear()
+
+
+def _strict_profile_required() -> bool:
+    """True when ``KAGURA_REQUIRE_PROFILE`` opts into strict resolution (#203)."""
+    return os.getenv("KAGURA_REQUIRE_PROFILE", "").strip().lower() in {"1", "true", "yes"}
+
+
+def _check_profile_ambiguity(state: _SharedCredentialsState) -> None:
+    """Warn (or, under strict mode, raise) on an implicit multi-profile default.
+
+    Only fires when resolution fell back to ``default_profile`` (no explicit
+    ``profile`` arg and no ``KAGURA_PROFILE``) AND more than one profile is
+    configured — a single-profile setup is unambiguous and stays silent. The
+    note names the active profile + workspace so a misdirected write to the
+    wrong account is caught. Honors ``KAGURA_REQUIRE_PROFILE`` (issue #203).
+    """
+    cf = load_credentials_file()
+    if len(cf.profiles) < 2:
+        return  # single profile: unambiguous
+
+    name = state.profile_name
+    creds = state.credentials
+    workspace = creds.workspace_name or creds.workspace_id or "unknown workspace"
+
+    if _strict_profile_required():
+        available = ", ".join(sorted(cf.profiles))
+        raise KaguraAuthError(
+            f"Multiple profiles configured and none selected; refusing to use the "
+            f"implicit default '{name}' because KAGURA_REQUIRE_PROFILE is set.\n"
+            f"  Select one explicitly: kagura auth use <name>, --profile <name>, "
+            f"or KAGURA_PROFILE=<name>\n"
+            f"  Available profiles: {available}"
+        )
+
+    if name not in _warned_profiles:
+        _warned_profiles.add(name)
+        _logger.warning(
+            "kagura: using profile '%s' (workspace '%s') — set a default with "
+            "'kagura auth use <name>' or pass --profile to silence this notice.",
+            name,
+            workspace,
+        )
+
 
 # Which precedence branch produced a ``_StaticAuth``. CLI-layer code uses
 # this to resolve ``workspace_id`` from the same source as ``api_key`` —
@@ -130,6 +189,11 @@ def _resolve_auth(
     target_profile = profile or os.getenv("KAGURA_PROFILE")
     state = get_shared_state(profile=target_profile)
     if state is not None:
+        if target_profile is None:
+            # No explicit selection — resolution fell back to default_profile.
+            # Warn (or hard-error under strict mode) when the default is
+            # ambiguous because multiple profiles are configured (issue #203).
+            _check_profile_ambiguity(state)
         return _OAuthAuth(
             oauth=KaguraOAuth(state),
             mcp_url=mcp_url or state.credentials.mcp_url,

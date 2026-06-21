@@ -1,10 +1,11 @@
 """Click sub-commands for ``kagura auth``.
 
-Six commands form the public surface:
+Seven commands form the public surface:
 
 * ``login``   — RFC 8628 device flow, persist a profile.
 * ``status``  — print the current profile (token redacted).
 * ``list``    — list every stored profile (no secrets); mark the default.
+* ``use``     — set the default profile deliberately (``kubectl use-context``).
 * ``logout``  — revoke + delete a profile (or the whole file).
 * ``refresh`` — rotate ``access_token``; optional scope expansion.
 * ``token``   — emit ``access_token`` to stdout for CI/scripts.
@@ -48,6 +49,7 @@ from .credentials import (
     load_credentials_file,
     reset_state_cache,
     save_credentials_file,
+    set_default_profile,
     update_profile,
 )
 from .device_flow import (
@@ -394,6 +396,31 @@ def _print_mcp_json_mode(project_dir: Path) -> None:
 # ---------------------------------------------------------------------------
 # list
 # ---------------------------------------------------------------------------
+
+
+@auth.command(name="use")
+@click.argument("name")
+def auth_use(name: str) -> None:
+    """Set the default profile used when no --profile / KAGURA_PROFILE is given.
+
+    \b
+    Like 'kubectl config use-context' / 'gcloud config set account': makes the
+    active account a deliberate choice instead of "whoever logged in first".
+    """
+    cf = load_credentials_file()
+    if name not in cf.profiles:
+        available = ", ".join(sorted(cf.profiles)) or "(none — run: kagura auth login)"
+        raise click.ClickException(f"Profile '{name}' not found. Available: {available}")
+    set_default_profile(name)
+    creds = cf.profiles[name]
+    workspace = creds.workspace_name or creds.workspace_id or "unknown workspace"
+    click.echo(f"Default profile set to '{name}' (workspace '{workspace}').")
+    env_profile = os.getenv("KAGURA_PROFILE")
+    if env_profile:
+        click.echo(
+            f"  Note: KAGURA_PROFILE='{env_profile}' is set and overrides this "
+            "default for commands run in this environment."
+        )
 
 
 @auth.command(name="list")
