@@ -127,6 +127,94 @@ async def test_happy_path_returns_rendered_html(monkeypatch: pytest.MonkeyPatch)
     page.route.assert_awaited_once()
 
 
+# --- DNS-rebinding pin (#195) ------------------------------------------------
+
+
+def test_build_host_resolver_rules_pins_host_and_blocks_others() -> None:
+    from kagura_memory.ingest._browser import _build_host_resolver_rules
+
+    rule = _build_host_resolver_rules("example.com", "93.184.216.34")
+    assert rule == "MAP example.com 93.184.216.34, MAP * ~NOTFOUND"
+
+
+@pytest.mark.asyncio
+async def test_resolve_validated_returns_safe_ip(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_unblocked_resolver(monkeypatch)
+    fetcher = BrowserFetcher()
+    ip = await fetcher._resolve_validated("example.com", "https://example.com/")
+    assert ip == "93.184.216.34"
+
+
+@pytest.mark.asyncio
+async def test_resolve_validated_rejects_blocked_ip(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_blocked_resolver(monkeypatch)
+    fetcher = BrowserFetcher()
+    with pytest.raises(KaguraFetchError, match="blocked IP"):
+        await fetcher._resolve_validated("internal.example.com", "https://internal.example.com/")
+
+
+@pytest.mark.asyncio
+async def test_resolve_validated_rejects_empty_resolution(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(_browser.socket, "getaddrinfo", lambda *a, **k: [])
+    fetcher = BrowserFetcher()
+    with pytest.raises(KaguraFetchError, match="no IP addresses"):
+        await fetcher._resolve_validated("example.com", "https://example.com/")
+
+
+@pytest.mark.asyncio
+async def test_resolve_validated_fails_closed_on_resolver_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def boom(host: str, *a: Any, **k: Any) -> Any:
+        raise UnicodeError("malformed IDN host")
+
+    monkeypatch.setattr(_browser.socket, "getaddrinfo", boom)
+    fetcher = BrowserFetcher()
+    with pytest.raises(KaguraFetchError, match="resolution failed"):
+        await fetcher._resolve_validated("xn--bad..host", "https://xn--bad..host/")
+
+
+@pytest.mark.asyncio
+async def test_fetch_launches_chromium_pinned_to_validated_ip(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The central regression test: fetch pins Chromium's resolver to the IP."""
+    _patch_unblocked_resolver(monkeypatch)
+    factory, _page, _ctx = _make_fake_playwright()
+    monkeypatch.setattr(_browser, "_load_async_playwright", lambda: factory)
+
+    async with BrowserFetcher() as fetcher:
+        await fetcher.fetch("https://example.com/")
+
+    launch = factory().start.return_value.chromium.launch
+    args = launch.await_args.kwargs["args"]
+    assert "--host-resolver-rules=MAP example.com 93.184.216.34, MAP * ~NOTFOUND" in args
+
+
+@pytest.mark.asyncio
+async def test_fetch_pins_each_host_per_fetch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each fetch launches its own Chromium with a fresh, host-specific pin."""
+
+    def resolver(host: str, *a: Any, **k: Any) -> Any:
+        ip = "93.184.216.34" if host == "a.example.com" else "93.184.216.99"
+        return [(2, 1, 6, "", (ip, 0))]
+
+    monkeypatch.setattr(_browser.socket, "getaddrinfo", resolver)
+    factory, _page, _ctx = _make_fake_playwright()
+    monkeypatch.setattr(_browser, "_load_async_playwright", lambda: factory)
+    launch = factory().start.return_value.chromium.launch
+
+    async with BrowserFetcher() as fetcher:
+        await fetcher.fetch("https://a.example.com/")
+        first = launch.await_args.kwargs["args"]
+        await fetcher.fetch("https://b.example.com/")
+        second = launch.await_args.kwargs["args"]
+
+    assert any("MAP a.example.com 93.184.216.34" in a for a in first)
+    assert any("MAP b.example.com 93.184.216.99" in a for a in second)
+    assert launch.await_count == 2  # one launch per fetch (not shared/stale)
+
+
 # --- SSRF guards -------------------------------------------------------------
 
 
