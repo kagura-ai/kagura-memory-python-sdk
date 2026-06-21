@@ -1,0 +1,22 @@
+{
+  "name": "kagura-memory",
+  "version": "0.31.0",
+  "description": "Thin Claude Code skills over the Kagura Memory CLI: doctor, auth, setup, document ingestion, resource tokens, and R2 file uploads.",
+  "author": {
+    "name": "Kagura AI, Inc.",
+    "url": "https://github.com/kagura-ai"
+  },
+  "homepage": "https://github.com/kagura-ai/kagura-memory-python-sdk",
+  "repository": "https://github.com/kagura-ai/kagura-memory-python-sdk",
+  "license": "MIT",
+  "keywords": [
+    "memory",
+    "mcp",
+    "kagura",
+    "claude-code",
+    "ingestion",
+    "rag",
+    "ai-agent",
+    "developer-tools"
+  ]
+}
