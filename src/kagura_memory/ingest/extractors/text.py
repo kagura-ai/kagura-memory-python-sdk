@@ -15,7 +15,7 @@ from typing import ClassVar
 from ...exceptions import KaguraIngestError
 from .._types import ExtractedContent, ExtractedSection
 from ._util import MAX_TOTAL_TEXT_CHARS as _MAX_TOTAL_TEXT_CHARS
-from ._util import filename_title
+from ._util import SectionBuilder, filename_title
 
 # Every decoded character costs at least one UTF-8 byte (and errors="replace"
 # emits exactly one U+FFFD per undecodable byte), so the decoded length never
@@ -61,31 +61,15 @@ class TextExtractor:
 
     @staticmethod
     def _split_sections(text: str) -> list[ExtractedSection]:
-        sections: list[ExtractedSection] = []
-        heading: str | None = None
-        depth = 1
-        body: list[str] = []
+        builder = SectionBuilder()  # default join: "\n".join + strip
         fence_marker: str | None = None  # the opening run (e.g. "```") while inside a fence
-
-        def flush() -> None:
-            joined = "\n".join(body).strip()
-            if joined or heading:
-                sections.append(
-                    ExtractedSection(
-                        heading=heading,
-                        body_text=joined,
-                        page_range=None,
-                        depth=depth,
-                        anchor=heading,
-                    )
-                )
 
         for line in text.splitlines():
             fence = _FENCE.match(line)
             if fence_marker is None:
                 if fence:
                     fence_marker = fence.group(1)
-                    body.append(line)
+                    builder.add_body(line)
                     continue
             else:
                 # Inside a fence: only a run of the SAME char, at least as long
@@ -98,18 +82,14 @@ class TextExtractor:
                         and not info.strip()
                     ):
                         fence_marker = None
-                body.append(line)
+                builder.add_body(line)
                 continue
             m = _ATX_HEADING.match(line)
             if m:
-                flush()
-                heading = m.group(2).strip() or None
-                depth = len(m.group(1))
-                body = []
+                builder.add_heading(m.group(2).strip() or None, len(m.group(1)))
             else:
-                body.append(line)
-        flush()
-        return sections
+                builder.add_body(line)
+        return builder.finish()
 
     @staticmethod
     def _title(sections: list[ExtractedSection], source_uri: str | None) -> str | None:

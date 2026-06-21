@@ -13,7 +13,7 @@ from typing import Any, ClassVar
 from ...exceptions import KaguraIngestError
 from .._types import ExtractedContent, ExtractedSection
 from ._util import MAX_TOTAL_TEXT_CHARS as _MAX_TOTAL_TEXT_CHARS
-from ._util import filename_title
+from ._util import SectionBuilder, filename_title
 
 # Cap on input bytes (HTML is not compressed, but a hostile page can still be
 # arbitrarily large). Derived from the shared text ceiling so the safety cap
@@ -67,41 +67,23 @@ class HtmlExtractor:
     def _split_sections(soup: Any) -> list[ExtractedSection]:
         from bs4 import NavigableString, Tag  # type: ignore[import-untyped]
 
-        sections: list[ExtractedSection] = []
-        heading: str | None = None
-        depth = 1
-        body: list[str] = []
-
-        def flush() -> None:
-            text = _WS.sub(" ", " ".join(body)).strip()
-            if text or heading:
-                sections.append(
-                    ExtractedSection(
-                        heading=heading,
-                        body_text=text,
-                        page_range=None,
-                        depth=depth,
-                        anchor=heading,
-                    )
-                )
+        # HTML collapses runs of whitespace (including newlines) to single
+        # spaces, unlike the default newline-join used by text/DOCX.
+        builder = SectionBuilder(join=lambda parts: _WS.sub(" ", " ".join(parts)).strip())
 
         # Walk the <body> only so <head>/<title> text never leaks into the
         # leading section. Fragments without a <body> fall back to the root.
         root = soup.body or soup
         for node in root.descendants:
             if isinstance(node, Tag) and node.name in _HEADING_NAMES:
-                flush()
-                heading = node.get_text(" ", strip=True) or None
-                depth = int(node.name[1])
-                body = []
+                builder.add_heading(node.get_text(" ", strip=True) or None, int(node.name[1]))
             elif isinstance(node, NavigableString):
                 # Skip strings that belong to a heading (already captured) so
                 # heading text is not duplicated into the following body.
                 if node.find_parent(_HEADING_RE) is not None:
                     continue
-                body.append(str(node))
-        flush()
-        return sections
+                builder.add_body(str(node))
+        return builder.finish()
 
     @staticmethod
     def _title(soup: Any, source_uri: str | None) -> str | None:
