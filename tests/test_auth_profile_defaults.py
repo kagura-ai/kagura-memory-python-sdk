@@ -176,3 +176,27 @@ def test_cli_auth_use_unknown_profile_errors(creds_path) -> None:
     assert result.exit_code != 0
     assert "not found" in result.output
     assert "work" in result.output  # lists available profiles
+
+
+def test_cli_auth_use_notes_env_profile_override(creds_path, monkeypatch) -> None:
+    """When KAGURA_PROFILE is set, `auth use` warns it overrides the new default."""
+    _write_profiles(creds_path, ["work", "personal"], default="work")
+    monkeypatch.setenv("KAGURA_PROFILE", "work")
+    result = CliRunner().invoke(auth_group, ["use", "personal"])
+    assert result.exit_code == 0, result.output
+    assert "KAGURA_PROFILE" in result.output
+    assert "overrides" in result.output
+
+
+def test_cli_auth_use_handles_concurrent_delete(creds_path, monkeypatch) -> None:
+    """A logout racing the locked write (KeyError) surfaces a clean CLI error."""
+    _write_profiles(creds_path, ["work", "personal"], default="work")
+
+    def _raise_keyerror(_name: str) -> None:
+        raise KeyError(_name)
+
+    monkeypatch.setattr("kagura_memory.auth.cli.set_default_profile", _raise_keyerror)
+    result = CliRunner().invoke(auth_group, ["use", "personal"])
+    assert result.exit_code != 0
+    assert "no longer exists" in result.output
+    assert "Traceback" not in result.output  # clean ClickException, not a crash
