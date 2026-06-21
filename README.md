@@ -1,6 +1,9 @@
 <p align="center">
   <a href="https://github.com/kagura-ai/memory-cloud">
-    <img src="https://raw.githubusercontent.com/kagura-ai/kagura-memory-python-sdk/main/assets/kagura-logo.svg" alt="Kagura Ai" width="300">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/kagura-ai/kagura-memory-python-sdk/main/assets/kagura-logo-dark.svg">
+      <img src="https://raw.githubusercontent.com/kagura-ai/kagura-memory-python-sdk/main/assets/kagura-logo.svg" alt="Kagura AI" width="320">
+    </picture>
   </a>
   <br>
   <strong>Memory SDK</strong> — Python client for <a href="https://github.com/kagura-ai/memory-cloud">Kagura Memory Cloud</a>
@@ -15,6 +18,13 @@
   <a href="https://github.com/kagura-ai/kagura-memory-python-sdk/blob/main/LICENSE"><img src="https://img.shields.io/pypi/l/kagura-memory" alt="License: MIT"></a>
   <a href="https://modelcontextprotocol.io/"><img src="https://img.shields.io/badge/MCP-Streamable_HTTP-purple.svg" alt="MCP"></a>
   <a href="https://microsoft.github.io/pyright/"><img src="https://microsoft.github.io/pyright/img/pyright_badge.svg" alt="Checked with pyright"></a>
+</p>
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/kagura-ai/kagura-memory-python-sdk/main/assets/cli-demo.gif"
+       alt="Recalling memories from Claude Code via the Kagura Memory MCP" width="760">
+  <br>
+  <em>Recall past memories straight from Claude Code — Kagura Memory over MCP.</em>
 </p>
 
 ## What is this?
