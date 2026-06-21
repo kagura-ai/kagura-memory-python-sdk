@@ -1267,6 +1267,13 @@ class KaguraClient:
             "target_id": target_id,
         }
         result = await self._call_tool_checked("delete_edge", arguments)
+        # The server confirms a delete with {"status": "success"} and NO
+        # "deleted" key; a missing edge comes back as a status=="error" response
+        # that _call_tool_checked already raised above. So reaching here means
+        # deletion was confirmed — the default True is load-bearing and must not
+        # be "fixed" to False (that would report failure on every real delete).
+        # The .get() still honors an explicit "deleted" flag should the server
+        # contract ever add one. (Verified against memory-cloud edge.py.)
         return bool(result.get("deleted", True))
 
     async def get_usage(self) -> UsageInfo:
