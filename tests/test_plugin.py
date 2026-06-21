@@ -30,7 +30,7 @@ def test_plugin_json_valid_and_required_keys() -> None:
     data = _load(PLUGIN_JSON)
     for key in ("name", "version", "description", "author", "license"):
         assert key in data, f"plugin.json missing '{key}'"
-    assert data["name"] == "kagura-memory"
+    assert data["name"] == "kagura-cli"
     assert data["license"] == "MIT"
     assert _SEMVER.match(data["version"]), data["version"]
 
@@ -40,10 +40,10 @@ def test_marketplace_json_valid_and_entry() -> None:
     data = _load(MARKETPLACE_JSON)
     for key in ("name", "description", "owner", "plugins"):
         assert key in data, f"marketplace.json missing '{key}'"
-    assert data["name"] == "kagura-memory"
+    assert data["name"] == "kagura-cli"
     assert isinstance(data["plugins"], list) and len(data["plugins"]) == 1
     entry = data["plugins"][0]
-    assert entry["name"] == "kagura-memory"
+    assert entry["name"] == "kagura-cli"
     assert entry["source"] == "./"
 
 

@@ -1,6 +1,6 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
-  "name": "kagura-memory",
+  "name": "kagura-cli",
   "description": "Thin Claude Code skills over the Kagura Memory CLI (doctor / auth / setup / ingest / resource / files).",
   "owner": {
     "name": "Kagura AI, Inc.",
@@ -8,7 +8,7 @@
   },
   "plugins": [
     {
-      "name": "kagura-memory",
+      "name": "kagura-cli",
       "source": "./",
       "version": "0.31.0",
       "category": "ai"
