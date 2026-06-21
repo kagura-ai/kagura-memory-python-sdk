@@ -485,6 +485,11 @@ def test_extract_content_handles_bad_response() -> None:
     assert _audio._extract_content(object()) == ""  # no .choices → AttributeError path
 
 
+def test_extract_finish_reason_handles_bad_response() -> None:
+    # No .choices → AttributeError path → None (treated as not length-truncated).
+    assert _audio._extract_finish_reason(object()) is None
+
+
 def test_extract_usage_handles_non_int_tokens() -> None:
     class _BadUsage:
         prompt_tokens = "oops"  # int() raises ValueError → defaults to zeros

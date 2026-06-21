@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import sys
+import types
 from pathlib import Path
 
 import pytest
 
+from kagura_memory.ingest import _safety
 from kagura_memory.ingest._safety import (
     _blocked_prefixes,
     is_blocked_ip,
@@ -91,6 +93,29 @@ def test_is_blocked_system_path_distinguishes_prefix_match_from_exact() -> None:
 def test_blocked_prefixes_includes_ssh_dir() -> None:
     """~/.ssh is always blocked, regardless of platform."""
     assert (Path.home() / ".ssh") in _blocked_prefixes()
+
+
+def test_blocked_prefixes_windows_branch(monkeypatch) -> None:
+    """Cover the Windows prefix branch on any host (CI runs Linux).
+
+    Inject a fake ``os`` into the module rather than patching the real
+    ``os.name`` — the latter corrupts pytest's own platform checks.
+    """
+    fake_os = types.SimpleNamespace(
+        name="nt",
+        environ={"SystemRoot": r"C:\Windows", "ProgramData": r"C:\ProgramData"},
+    )
+    monkeypatch.setattr(_safety, "os", fake_os)
+    joined = " ".join(str(p) for p in _blocked_prefixes())
+    assert "Windows" in joined
+    assert "ProgramData" in joined
+
+
+def test_blocked_prefixes_posix_branch(monkeypatch) -> None:
+    """Cover the POSIX prefix branch on any host (dev runs Windows)."""
+    monkeypatch.setattr(_safety, "os", types.SimpleNamespace(name="posix", environ={}))
+    joined = " ".join(str(p) for p in _blocked_prefixes())
+    assert "etc" in joined and "proc" in joined  # POSIX system dirs present
 
 
 @_WINDOWS_ONLY

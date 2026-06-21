@@ -466,6 +466,19 @@ async def test_call_ollama_stream_merges_ndjson():
     await agent.close()
 
 
+def test_merge_ollama_stream_skips_blank_lines_and_empty_content():
+    """_merge_ollama_stream ignores blank lines and empty-content chunks."""
+    raw = (
+        "\n"
+        "   \n"  # blank / whitespace-only lines are skipped
+        '{"message": {"content": ""}, "done": false}\n'  # empty content not appended
+        '{"message": {"content": "x"}, "done": true, "eval_count": 1}\n'
+    )
+    merged = KaguraAgent._merge_ollama_stream(raw)
+    assert merged["message"]["content"] == "x"
+    assert merged.get("eval_count") == 1
+
+
 @pytest.mark.asyncio
 async def test_litellm_usage_coerces_none_token_counts():
     """A litellm usage object exposing None counts must not crash LLMUsage."""
