@@ -411,7 +411,13 @@ def auth_use(name: str) -> None:
     if name not in cf.profiles:
         available = ", ".join(sorted(cf.profiles)) or "(none — run: kagura auth login)"
         raise click.ClickException(f"Profile '{name}' not found. Available: {available}")
-    set_default_profile(name)
+    try:
+        # set_default_profile re-checks under the cross-process lock; a concurrent
+        # logout between the read above and the write would raise KeyError —
+        # surface it as a clean CLI error, not a traceback.
+        set_default_profile(name)
+    except KeyError as e:
+        raise click.ClickException(f"Profile '{name}' no longer exists.") from e
     creds = cf.profiles[name]
     workspace = creds.workspace_name or creds.workspace_id or "unknown workspace"
     click.echo(f"Default profile set to '{name}' (workspace '{workspace}').")

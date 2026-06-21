@@ -38,10 +38,12 @@ _DEFAULT_MCP_URL = "https://memory.kagura-ai.com/mcp"
 
 _logger = logging.getLogger("kagura_memory")
 
-# Profiles already warned about this process, so the multi-profile ambiguity
-# note (issue #203) fires at most once per active profile per process rather
-# than on every client construction. Reset by :func:`reset_profile_warnings`.
-_warned_profiles: set[str] = set()
+# (credentials-file path, profile name) pairs already warned about this process,
+# so the multi-profile ambiguity note (issue #203) fires at most once per active
+# profile per file per process rather than on every client construction. Keyed by
+# path too so two different credential files that share a default name (e.g.
+# "default") don't suppress each other. Reset by :func:`reset_profile_warnings`.
+_warned_profiles: set[tuple[str, str]] = set()
 
 
 def reset_profile_warnings() -> None:
@@ -81,8 +83,9 @@ def _check_profile_ambiguity(state: _SharedCredentialsState) -> None:
             f"  Available profiles: {available}"
         )
 
-    if name not in _warned_profiles:
-        _warned_profiles.add(name)
+    warn_key = (str(state.path), name)
+    if warn_key not in _warned_profiles:
+        _warned_profiles.add(warn_key)
         _logger.warning(
             "kagura: using profile '%s' (workspace '%s') — set a default with "
             "'kagura auth use <name>' or pass --profile to silence this notice.",

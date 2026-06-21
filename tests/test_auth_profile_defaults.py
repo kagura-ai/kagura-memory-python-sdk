@@ -135,6 +135,30 @@ def test_strict_mode_allows_explicit_profile(creds_path, monkeypatch) -> None:
     assert result.workspace_id == "ws-id"
 
 
+def test_strict_raise_not_suppressed_by_prior_warning(creds_path, caplog, monkeypatch) -> None:
+    """A prior non-strict warning must not let the dedup set swallow a strict raise."""
+    _write_profiles(creds_path, ["work", "personal"], default="work")
+    with caplog.at_level(logging.WARNING, logger="kagura_memory"):
+        _resolve_auth(api_key=None, mcp_url=None, profile=None)
+    assert any("using profile 'work'" in r.getMessage() for r in caplog.records)
+    monkeypatch.setenv("KAGURA_REQUIRE_PROFILE", "1")
+    with pytest.raises(KaguraAuthError, match="KAGURA_REQUIRE_PROFILE"):
+        _resolve_auth(api_key=None, mcp_url=None, profile=None)
+
+
+def test_stale_default_profile_fails_closed(creds_path, monkeypatch) -> None:
+    """default_profile pointing at a missing profile fails closed (characterization).
+
+    With real profiles present but the default name stale, resolution finds no
+    OAuth state and falls through; with no api_key/.kagura.json fallback it
+    raises rather than silently picking another account.
+    """
+    _write_profiles(creds_path, ["work", "personal"], default="ghost")
+    monkeypatch.setattr("kagura_memory._auth.load_config", lambda: {})
+    with pytest.raises(KaguraAuthError, match="No credentials found"):
+        _resolve_auth(api_key=None, mcp_url=None, profile=None)
+
+
 # --- CLI: auth use -----------------------------------------------------------
 
 
