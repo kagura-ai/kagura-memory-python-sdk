@@ -26,5 +26,5 @@
       <circle cx="60.2" cy="87" r="8" stroke="none"/>
     </g>
   </g>
-  <text x="132" y="78" font-family="'Noto Sans JP', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" font-size="56" font-weight="700" letter-spacing="-1.5"><tspan fill="#1f2328">Kagura</tspan><tspan fill="#faa916"> AI</tspan></text>
+  <text x="132" y="78" font-family="'Noto Sans JP', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" font-size="56" font-weight="700" letter-spacing="-1.5"><tspan fill="#f0f6fc">Kagura</tspan><tspan fill="#faa916"> AI</tspan></text>
 </svg>
