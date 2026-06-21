@@ -14,7 +14,7 @@ from typing import Any, ClassVar
 from ...exceptions import KaguraIngestError
 from .._types import ExtractedContent, ExtractedSection
 from ._util import MAX_TOTAL_TEXT_CHARS as _MAX_TOTAL_TEXT_CHARS
-from ._util import filename_title
+from ._util import SectionBuilder, filename_title
 
 # DOCX is a ZIP container — guard against zip bombs by capping the number of
 # paragraphs walked and the total decoded text length.
@@ -62,27 +62,13 @@ class DocxExtractor:
 
     @classmethod
     def _split_sections(cls, document: Any) -> list[ExtractedSection]:
-        sections: list[ExtractedSection] = []
-        heading: str | None = None
-        depth = 1
-        body: list[str] = []
+        builder = SectionBuilder()  # default join: "\n".join + strip
         total_chars = 0
         para_count = 0
 
-        def flush() -> None:
-            text = "\n".join(body).strip()
-            if text or heading:
-                sections.append(
-                    ExtractedSection(
-                        heading=heading,
-                        body_text=text,
-                        page_range=None,
-                        depth=depth,
-                        anchor=heading,
-                    )
-                )
-
         for para in document.paragraphs:
+            # Decompression-bomb caps stay inline (format-specific), guarding the
+            # walk before any text is accumulated into the shared builder.
             para_count += 1
             if para_count > _MAX_PARAGRAPHS:
                 raise KaguraIngestError(
@@ -96,14 +82,10 @@ class DocxExtractor:
                 )
             level = cls._heading_level(para)
             if level is not None:
-                flush()
-                heading = text.strip() or None
-                depth = level
-                body = []
+                builder.add_heading(text.strip() or None, level)
             else:
-                body.append(text)
-        flush()
-        return sections
+                builder.add_body(text)
+        return builder.finish()
 
     @staticmethod
     def _heading_level(para: Any) -> int | None:
