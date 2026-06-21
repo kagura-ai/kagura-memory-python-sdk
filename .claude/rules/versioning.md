@@ -37,10 +37,11 @@ While `MAJOR` is `0`, breaking changes bump MINOR instead.
 
 Use `/release patch|minor|major` to:
 1. Bump `__version__` in `__init__.py`
-2. `uv lock`
-3. Commit: `chore(release): vX.Y.Z`
-4. Tag: `vX.Y.Z`
-5. Push commit + tag → CI publishes to PyPI
+2. Sync the plugin manifests (`.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json`) to the same version — they ship from this repo and `tests/test_plugin.py` fails CI if they drift from `__version__`
+3. `uv lock`
+4. Commit: `chore(release): vX.Y.Z`
+5. Tag: `vX.Y.Z`
+6. Push commit + tag → CI publishes to PyPI
 
 ### Test release
 

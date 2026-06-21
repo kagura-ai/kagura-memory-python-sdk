@@ -41,6 +41,15 @@ Edit `__version__` in `src/kagura_memory/__init__.py` to the new version.
 
 Check if `MIN_SERVER_VERSION` in `src/kagura_memory/client.py` needs updating for this release (e.g., if new methods require a newer server version). Update if necessary.
 
+### 4c. Sync the plugin manifest versions
+
+The in-repo Claude Code plugin (`kagura-cli`) ships from this repo and is released together with the package, so its version must match `__version__`. Set both to the new version:
+
+- `.claude-plugin/plugin.json` → `"version"`
+- `.claude-plugin/marketplace.json` → `plugins[0].version`
+
+`tests/test_plugin.py::test_plugin_and_marketplace_versions_synced` enforces this — if you skip it, `/quality` (and CI) will fail.
+
 ### 5. Update lock file
 
 ```bash
@@ -56,7 +65,7 @@ uv build
 ### 7. Commit and tag
 
 ```bash
-git add src/kagura_memory/__init__.py uv.lock
+git add src/kagura_memory/__init__.py uv.lock .claude-plugin/plugin.json .claude-plugin/marketplace.json
 git commit -m "chore(release): vX.Y.Z"
 git tag vX.Y.Z
 ```
