@@ -32,11 +32,14 @@ from kagura_memory.auth.credentials import (
 )
 from kagura_memory.auth.device_flow import TokenResponse
 
-# The cross-process refresh-dedup tests rely on fcntl serializing two
-# independent open descriptions of the same lock file; gate them to POSIX (CI
-# runs Linux). The Windows msvcrt backend is unit-tested in test_filelock.py.
+# Gate POSIX-specific behaviour to non-Windows (CI runs Linux):
+#   - the cross-process refresh-dedup tests rely on fcntl serializing two
+#     independent open descriptions of the same lock file (the Windows msvcrt
+#     backend is unit-tested in test_filelock.py); and
+#   - the 0600/0700 file-mode tests assert POSIX permission bits, which
+#     os.chmod cannot set on Windows (NTFS uses ACLs).
 _POSIX_ONLY_CREDS = pytest.mark.skipif(
-    sys.platform == "win32", reason="cross-process dedup test uses POSIX fcntl"
+    sys.platform == "win32", reason="POSIX-only: fcntl serialization / chmod permission bits"
 )
 
 
@@ -181,6 +184,7 @@ def test_save_and_load_round_trip(tmp_path: Path):
     assert restored.get_profile().access_token == "atok-1"
 
 
+@_POSIX_ONLY_CREDS
 def test_save_enforces_file_mode_0600(tmp_path: Path):
     path = tmp_path / "creds.json"
     cf = CredentialsFile()
@@ -189,6 +193,7 @@ def test_save_enforces_file_mode_0600(tmp_path: Path):
     assert stat.S_IMODE(path.stat().st_mode) == CREDENTIALS_FILE_MODE
 
 
+@_POSIX_ONLY_CREDS
 def test_save_enforces_dir_mode_0700(tmp_path: Path):
     path = tmp_path / "subdir" / "creds.json"
     cf = CredentialsFile()
@@ -253,6 +258,7 @@ def test_delete_profile_no_op_when_missing(tmp_path: Path):
     assert "alice" in restored.profiles  # untouched
 
 
+@_POSIX_ONLY_CREDS
 def test_load_fixes_loose_file_perms(tmp_path: Path):
     """File written 0644 should be coerced back to 0600 on read."""
     path = tmp_path / "creds.json"

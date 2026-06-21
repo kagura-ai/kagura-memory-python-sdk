@@ -335,7 +335,10 @@ async def test_local_file_path(tmp_path: Any) -> None:
         assert result.body.startswith(b"%PDF-")
         assert result.source_type == "file"
         assert result.source_uri.startswith("file://")
-        assert str(pdf) in result.source_uri
+        # Compare against the canonical file URI rather than a raw-string
+        # substring: on Windows ``str(pdf)`` uses backslashes while ``as_uri()``
+        # uses forward slashes, so a substring check is not portable.
+        assert result.source_uri == pdf.resolve().as_uri()
 
 
 @pytest.mark.asyncio

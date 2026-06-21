@@ -66,15 +66,21 @@ def test_file_lock_creates_parent_dir(tmp_path: Path):
         assert target.parent.is_dir()
 
 
-def test_file_lock_noop_when_fcntl_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """On a platform without fcntl the CM degrades to a no-op (no lock file)."""
+def test_file_lock_noop_when_no_backend(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """With neither fcntl nor msvcrt the CM degrades to a no-op (no lock file).
+
+    Both backends are stubbed out (not just ``fcntl``) so this exercises the
+    no-op path on every platform — on Windows ``fcntl`` is already absent but
+    the real ``msvcrt`` backend would otherwise take over and create a lock
+    file, masking the no-op branch.
+    """
     import builtins
 
     real_import = builtins.__import__
 
     def fake_import(name: str, *args: object, **kwargs: object):
-        if name == "fcntl":
-            raise ImportError("simulated no fcntl (Windows)")
+        if name in ("fcntl", "msvcrt"):
+            raise ImportError(f"simulated missing {name}")
         return real_import(name, *args, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr(builtins, "__import__", fake_import)

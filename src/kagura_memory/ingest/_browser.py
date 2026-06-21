@@ -192,8 +192,10 @@ class BrowserFetcher:
         self._resolve_cache = {}
 
         context = await self._browser.new_context()
-        page = await context.new_page()
         try:
+            # new_page() is inside the try so a failure here still closes the
+            # freshly-created context (otherwise it would leak a browser context).
+            page = await context.new_page()
             await page.route("**/*", self._route_handler)
             try:
                 response = await page.goto(

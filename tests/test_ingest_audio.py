@@ -39,8 +39,9 @@ class _Message:
 
 
 class _Choice:
-    def __init__(self, content: str) -> None:
+    def __init__(self, content: str, finish_reason: str | None = None) -> None:
         self.message = _Message(content)
+        self.finish_reason = finish_reason
 
 
 class _Usage:
@@ -50,8 +51,15 @@ class _Usage:
 
 
 class _Response:
-    def __init__(self, content: str, *, prompt: int = 1000, completion: int = 200) -> None:
-        self.choices = [_Choice(content)]
+    def __init__(
+        self,
+        content: str,
+        *,
+        prompt: int = 1000,
+        completion: int = 200,
+        finish_reason: str | None = None,
+    ) -> None:
+        self.choices = [_Choice(content, finish_reason)]
         self.usage = _Usage(prompt, completion)
 
 
@@ -321,6 +329,20 @@ async def test_truncated_json_raises() -> None:
 
 
 @pytest.mark.asyncio
+async def test_truncation_by_finish_reason_fails_fast() -> None:
+    # Valid, parseable JSON but the model hit its output-token cap
+    # (finish_reason="length"): the transcript is silently incomplete. Detect it
+    # and fail fast — an identical retry would just truncate again and re-bill.
+    truncated = _Response(_GOOD_JSON, finish_reason="length")
+    mod = _mock_litellm([truncated, truncated])
+    with patch.object(_audio, "_load_litellm", return_value=mod):
+        with pytest.raises(KaguraIngestError, match="truncated"):
+            await transcribe_audio(b"x", mime="audio/mpeg", source_uri="a.mp3")
+    # No retry on deterministic truncation: exactly one provider call.
+    assert mod.acompletion.await_count == 1
+
+
+@pytest.mark.asyncio
 async def test_retry_recovers_after_first_bad_response() -> None:
     bad = _Response("nonsense")
     good = _Response(_segments_json([{"start": 0, "end": 1, "text": "recovered"}]))
@@ -461,6 +483,11 @@ def test_parse_segments_clamps_end_before_start() -> None:
 
 def test_extract_content_handles_bad_response() -> None:
     assert _audio._extract_content(object()) == ""  # no .choices → AttributeError path
+
+
+def test_extract_finish_reason_handles_bad_response() -> None:
+    # No .choices → AttributeError path → None (treated as not length-truncated).
+    assert _audio._extract_finish_reason(object()) is None
 
 
 def test_extract_usage_handles_non_int_tokens() -> None:

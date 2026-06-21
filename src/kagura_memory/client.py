@@ -9,9 +9,8 @@ import httpx
 from pydantic import BaseModel as _BaseModel
 
 from ._auth import _resolve_auth, _StaticAuth
-from ._http import SDK_VERSION, base_url_from_mcp, validate_https_url
+from ._http import SDK_VERSION, base_url_from_mcp, raise_for_kagura_status, validate_https_url
 from .exceptions import (
-    KaguraAuthError,
     KaguraConnectionError,
     KaguraError,
     KaguraNotFoundError,
@@ -165,9 +164,7 @@ class KaguraClient:
                 raise KaguraConnectionError("No session ID returned from server")
 
         except httpx.HTTPStatusError as e:
-            if e.response.status_code == 401:
-                raise KaguraAuthError("Authentication failed. Check your API key.") from e
-            raise KaguraConnectionError(f"HTTP {e.response.status_code}: {_exc_message(e)}") from e
+            raise_for_kagura_status(e)
         except httpx.RequestError as e:
             raise KaguraConnectionError(f"Connection failed: {_exc_message(e)}") from e
 
@@ -209,9 +206,7 @@ class KaguraClient:
             return data.get("result", {})
 
         except httpx.HTTPStatusError as e:
-            if e.response.status_code == 401:
-                raise KaguraAuthError("Authentication failed") from e
-            raise KaguraConnectionError(f"HTTP {e.response.status_code}") from e
+            raise_for_kagura_status(e)
         except httpx.RequestError as e:
             raise KaguraConnectionError(f"Connection failed: {_exc_message(e)}") from e
 
@@ -237,9 +232,7 @@ class KaguraClient:
             response.raise_for_status()
             return model.model_validate(response.json())
         except httpx.HTTPStatusError as e:
-            if e.response.status_code == 401:
-                raise KaguraAuthError("Authentication failed. Check your API key.") from e
-            raise KaguraConnectionError(f"HTTP {e.response.status_code}") from e
+            raise_for_kagura_status(e)
         except httpx.RequestError as e:
             raise KaguraConnectionError(f"Connection failed: {_exc_message(e)}") from e
         except (ValueError, TypeError) as e:
@@ -431,8 +424,10 @@ class KaguraClient:
             API response with results list
 
         Raises:
-            ValueError: If neither ``context_id`` nor ``context_ids`` is provided,
-                or ``context_ids`` has fewer than 2 or more than 20 IDs.
+            ValueError: If ``query`` is empty/whitespace; if neither
+                ``context_id`` nor ``context_ids`` is provided; if
+                ``context_ids`` has fewer than 2 or more than 20 IDs; or if
+                ``search_mode`` is not one of "hybrid"/"semantic"/"keyword".
         """
         if not isinstance(query, str) or not query.strip():
             raise ValueError("query must be a non-empty string")
@@ -902,7 +897,14 @@ class KaguraClient:
 
         Returns:
             API response with deletion results
+
+        Raises:
+            ValueError: If neither ``memory_id`` nor ``query`` is provided —
+                ``forget`` always targets a specific memory or a search; an
+                unqualified call would be an ambiguous no-op.
         """
+        if not memory_id and not query:
+            raise ValueError("Provide either memory_id or query")
         arguments: dict[str, Any] = {"context_id": context_id}
         if memory_id:
             arguments["memory_id"] = memory_id
@@ -1265,6 +1267,13 @@ class KaguraClient:
             "target_id": target_id,
         }
         result = await self._call_tool_checked("delete_edge", arguments)
+        # The server confirms a delete with {"status": "success"} and NO
+        # "deleted" key; a missing edge comes back as a status=="error" response
+        # that _call_tool_checked already raised above. So reaching here means
+        # deletion was confirmed — the default True is load-bearing and must not
+        # be "fixed" to False (that would report failure on every real delete).
+        # The .get() still honors an explicit "deleted" flag should the server
+        # contract ever add one. (Verified against memory-cloud edge.py.)
         return bool(result.get("deleted", True))
 
     async def get_usage(self) -> UsageInfo:

@@ -285,9 +285,12 @@ async def transcribe_audio(
 
     Sends ``body`` inline (base64) to Gemini via ``litellm.acompletion`` and
     parses the returned ``{segments: [{start, end, text}]}`` JSON into
-    time-windowed sections. Robust to a truncated/partial JSON response: one
-    retry is performed before giving up, after which a malformed transcript
-    raises :class:`KaguraIngestError` pointing at the ffmpeg follow-up.
+    time-windowed sections. Truncation is handled two ways: a transient bad
+    decode (malformed JSON) gets one retry before giving up, while a hard
+    output-token truncation — the model reporting ``finish_reason="length"`` —
+    fails fast, because re-sending the identical request cannot recover. Either
+    way an unusable transcript raises :class:`KaguraIngestError` pointing at the
+    ffmpeg follow-up.
 
     Args:
         body: Raw audio/video bytes.
@@ -358,6 +361,17 @@ async def transcribe_audio(
         attempt_usage = _extract_usage(response, model=model)
         total_prompt += attempt_usage.prompt_tokens
         total_completion += attempt_usage.completion_tokens
+        if _extract_finish_reason(response) == "length":
+            # The model hit its output-token cap. The JSON may still parse, but
+            # the transcript is truncated — and re-sending the identical request
+            # would just truncate again, so fail fast rather than burn a
+            # pointless (billable) retry that cannot recover.
+            raise KaguraIngestError(
+                "transcript was truncated by the model's output-token limit "
+                f"({_DEFAULT_MAX_OUTPUT_TOKENS} tokens) — the audio is too long "
+                "for a single request. Try a shorter clip; splitting long media "
+                "with ffmpeg is a planned follow-up."
+            )
         try:
             segments = _parse_segments(raw)
         except _TranscriptParseError as e:
@@ -403,6 +417,18 @@ def _extract_content(response: Any) -> str:
         return str(response.choices[0].message.content or "")
     except (AttributeError, IndexError, TypeError):
         return ""
+
+
+def _extract_finish_reason(response: Any) -> str | None:
+    """Return the first choice's ``finish_reason``, or ``None`` if unavailable.
+
+    ``"length"`` means the model stopped because it hit its output-token cap, so
+    the content is truncated even when the partial JSON still happens to parse.
+    """
+    try:
+        return response.choices[0].finish_reason
+    except (AttributeError, IndexError, TypeError):
+        return None
 
 
 def _extract_usage(response: Any, *, model: str) -> AudioUsage:

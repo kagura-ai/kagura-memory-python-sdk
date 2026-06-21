@@ -4,9 +4,16 @@ from __future__ import annotations
 
 import re
 from importlib.metadata import version as _pkg_version
-from typing import Any
+from typing import Any, NoReturn
 
 import httpx
+
+from .exceptions import (
+    KaguraAuthError,
+    KaguraConnectionError,
+    KaguraRateLimitError,
+    _exc_message,
+)
 
 SDK_VERSION: str = _pkg_version("kagura-memory")
 """Package version string, shared across client modules."""
@@ -54,6 +61,44 @@ def extract_detail(response: httpx.Response) -> str:
     if isinstance(detail, list):
         return _format_validation_errors(detail)
     return ""
+
+
+def _retry_after_seconds(response: httpx.Response) -> int | None:
+    """Parse a numeric ``Retry-After`` header (delta-seconds), else ``None``.
+
+    Only the integer-seconds form is honored; an HTTP-date ``Retry-After`` (rare
+    for rate limits) is treated as absent rather than mis-parsed.
+    """
+    raw = response.headers.get("Retry-After")
+    if raw is None:
+        return None
+    raw = raw.strip()
+    return int(raw) if raw.isdigit() else None
+
+
+def raise_for_kagura_status(e: httpx.HTTPStatusError) -> NoReturn:
+    """Translate an httpx ``HTTPStatusError`` into the matching Kagura error.
+
+    Maps ``401`` → :class:`~kagura_memory.exceptions.KaguraAuthError`, ``429`` →
+    :class:`~kagura_memory.exceptions.KaguraRateLimitError` (honoring a numeric
+    ``Retry-After`` header), and every other status →
+    :class:`~kagura_memory.exceptions.KaguraConnectionError`. The server-supplied
+    ``detail`` (a FastAPI string or validation-error list) is appended when
+    present — surfacing e.g. which field failed a 422 — otherwise the
+    exception's own message is used so the status is never left bare. This
+    function always raises.
+    """
+    response = e.response
+    status = response.status_code
+    if status == 401:
+        raise KaguraAuthError("Authentication failed. Check your API key.") from e
+    detail = extract_detail(response) or _exc_message(e)
+    if status == 429:
+        raise KaguraRateLimitError(
+            f"Rate limit exceeded (HTTP 429): {detail}",
+            retry_after=_retry_after_seconds(response),
+        ) from e
+    raise KaguraConnectionError(f"HTTP {status}: {detail}") from e
 
 
 def _format_validation_errors(errors: list[Any]) -> str:

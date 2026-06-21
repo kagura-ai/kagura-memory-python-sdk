@@ -228,3 +228,17 @@ def test_reject_message_includes_label_and_url():
     """The error surfaces the caller-supplied label and the offending URL."""
     with pytest.raises(ValueError, match=r"MCP URL must use HTTPS.*localhost\.evil\.com"):
         validate_https_url("http://localhost.evil.com", label="MCP URL")
+
+
+def test_retry_after_seconds_parses_digits_else_none():
+    """_retry_after_seconds honors integer seconds, else None (incl. HTTP-date / absent)."""
+    from kagura_memory._http import _retry_after_seconds
+
+    class _Resp:
+        def __init__(self, headers):
+            self.headers = headers
+
+    assert _retry_after_seconds(_Resp({"Retry-After": "30"})) == 30
+    assert _retry_after_seconds(_Resp({"Retry-After": " 45 "})) == 45  # stripped
+    assert _retry_after_seconds(_Resp({"Retry-After": "Wed, 21 Oct 2099 07:28:00 GMT"})) is None
+    assert _retry_after_seconds(_Resp({})) is None

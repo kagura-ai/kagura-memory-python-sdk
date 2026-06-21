@@ -366,10 +366,10 @@ def explore(context_id, memory_id, depth, min_weight):
     default="gemini",
     show_default=True,
     help=(
-        "Vision LLM provider used when image content is extracted "
-        "(Phase 2+). Phase 1 extractors do not yet emit images, so this "
-        "setting is currently a no-op. Pass --no-vision to skip image "
-        "handling configuration entirely."
+        "Vision LLM provider for image OCR. Images are detected but not yet "
+        "OCR'd (the orchestrator does not call describe_image), so this "
+        "setting is currently a no-op. Pass --no-vision to skip vision-"
+        "provider configuration entirely."
     ),
 )
 @click.option(
@@ -501,11 +501,12 @@ def ingest_file(
 
       pip install 'kagura-memory[ingest-pdf]'
 
-    Phase 1 ingests text content only. The vision pipeline (Gemini 2.5 Flash
-    by default) is configured but the bundled PDF extractor does not yet
-    emit page images — image-based OCR memories land in Phase 2. Pass
-    --no-vision to skip vision-provider configuration entirely (no
-    image bytes will be sent to any provider once Phase 2 lands).
+    Text is extracted from documents (PDF/Office/HTML/EPUB), audio/video
+    transcripts, and YouTube captions. Images embedded in a document are
+    detected and counted but not yet OCR'd: a vision provider (Gemini 2.5
+    Flash by default) is configured but the orchestrator does not call
+    describe_image() yet. Pass --no-vision to skip vision-provider
+    configuration entirely.
 
     Examples:
       kagura ingest https://example.com/report.pdf
