@@ -16,13 +16,24 @@ Security
 --------
 Chromium performs its own DNS resolution, redirect following, and
 sub-resource (XHR/fetch/image/script) loading entirely outside the Python
-process, which would bypass a one-shot pre-flight SSRF check. To close that
-gap, every request the browser makes is intercepted via ``page.route`` and
-its host is re-resolved against the same RFC1918/loopback/link-local/IMDS
-denylist used by :class:`Fetcher` (see
-:func:`kagura_memory.ingest._safety.is_blocked_ip`). Requests resolving to a
-blocked IP — including redirect targets and sub-resources — are aborted.
-http(s) sub-resources are also gated by ``allow_http``.
+process, which would bypass a one-shot pre-flight SSRF check.
+
+The DNS-rebinding window is closed the same way :class:`Fetcher` closed it for
+httpx (#188): rather than only checking the hostname pre-flight (which a
+low-TTL attacker can flip between our resolve and Chromium's connect), the
+target host is **pinned to the pre-validated IP** for the lifetime of the
+fetch. Chromium is launched per fetch with ``--host-resolver-rules="MAP <host>
+<validated-ip>, MAP * ~NOTFOUND"``: the target host can only resolve to the IP
+we validated against the RFC1918/loopback/link-local/IMDS denylist, and **every
+other host fails resolution** — so a rebinding redirect or sub-resource can
+never reach an un-validated (internal) IP (#195). A redirect or sub-resource to
+a *different* public host is consequently blocked too; pinning multiple hosts
+dynamically (a local connect-pinning proxy) is a planned follow-up.
+
+The ``page.route`` interceptor is retained as defense-in-depth: it re-resolves
+each request host against :func:`kagura_memory.ingest._safety.is_blocked_ip`,
+gates ``http://`` sub-resources by ``allow_http``, and turns a blocked request
+into a clean abort rather than a raw Chromium net error.
 """
 
 from __future__ import annotations
@@ -47,6 +58,19 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 _ALLOWED_SCHEMES: frozenset[str] = frozenset({"http", "https"})
 _DEFAULT_WAIT_UNTIL: str = "networkidle"
+
+
+def _build_host_resolver_rules(hostname: str, ip: str) -> str:
+    """Chromium ``--host-resolver-rules`` string pinning ``hostname`` to ``ip``.
+
+    The leading ``MAP <host> <ip>`` pins the target host to the IP we already
+    validated against the SSRF denylist. The trailing ``MAP * ~NOTFOUND`` is
+    load-bearing: it forces every *other* host (redirect targets, sub-resource
+    CDNs, XHR) to fail resolution inside Chromium, so a rebinding flip can never
+    reach an un-validated internal IP. Rules are first-match-wins, so the
+    specific host rule takes precedence over the catch-all.
+    """
+    return f"MAP {hostname} {ip}, MAP * ~NOTFOUND"
 
 
 def _load_async_playwright() -> Any:
@@ -127,33 +151,34 @@ class BrowserFetcher:
         self.nav_timeout_ms = int(read_timeout * 1000)
 
         self._playwright: Any = None
-        self._browser: Any = None
         # Per-fetch DNS cache for the route handler so a page with many
         # sub-resources to the same host resolves each host once.
         self._resolve_cache: dict[str, bool] = {}
 
     async def __aenter__(self) -> BrowserFetcher:
-        await self._ensure_browser()
+        await self._ensure_playwright()
         return self
 
     async def __aexit__(self, _exc_type: Any, _exc_val: Any, _exc_tb: Any) -> None:
         await self.close()
 
-    async def _ensure_browser(self) -> None:
-        """Launch Chromium on first use (idempotent)."""
-        if self._browser is not None:
-            return
-        async_playwright = _load_async_playwright()
-        self._playwright = await async_playwright().start()
-        self._browser = await self._playwright.chromium.launch(headless=True)
+    async def _ensure_playwright(self) -> None:
+        """Start the Playwright driver on first use (idempotent).
+
+        The Chromium *browser* is launched per fetch (not here), because each
+        fetch needs its own ``--host-resolver-rules`` pin baked into the launch
+        args (see :meth:`fetch`). Only the driver is shared across fetches.
+        """
+        if self._playwright is None:
+            async_playwright = _load_async_playwright()
+            self._playwright = await async_playwright().start()
 
     async def close(self) -> None:
-        """Tear down the browser and Playwright driver (idempotent)."""
-        if self._browser is not None:
-            try:
-                await self._browser.close()
-            finally:
-                self._browser = None
+        """Stop the Playwright driver (idempotent).
+
+        Per-fetch browsers are closed inside :meth:`fetch`; only the shared
+        driver is torn down here.
+        """
         if self._playwright is not None:
             try:
                 await self._playwright.stop()
@@ -186,44 +211,61 @@ class BrowserFetcher:
         parsed = urlsplit(url)
         hostname = parsed.hostname
         assert hostname is not None  # guaranteed by _validate_url
-        await self._reject_blocked_host(hostname, url)
+        # Resolve + denylist-check once, and KEEP the validated IP so we can pin
+        # Chromium's resolver to it (closing the rebinding window) — not just a
+        # pass/fail check.
+        validated_ip = await self._resolve_validated(hostname, url)
 
-        await self._ensure_browser()
+        await self._ensure_playwright()
         self._resolve_cache = {}
 
-        context = await self._browser.new_context()
+        # Launch a per-fetch Chromium pinned to the validated IP. --host-resolver-
+        # rules is a launch-time flag, and the validated IP is per-fetch, so the
+        # browser cannot be shared across fetches.
+        rules = _build_host_resolver_rules(hostname, validated_ip)
+        browser = await self._playwright.chromium.launch(
+            headless=True, args=[f"--host-resolver-rules={rules}"]
+        )
         try:
-            # new_page() is inside the try so a failure here still closes the
-            # freshly-created context (otherwise it would leak a browser context).
-            page = await context.new_page()
-            await page.route("**/*", self._route_handler)
+            context = await browser.new_context()
             try:
-                response = await page.goto(
-                    url, wait_until=self.wait_until, timeout=self.nav_timeout_ms
-                )
-            except KaguraFetchError:
-                raise
-            except Exception as e:  # noqa: BLE001 - normalized to a domain error below
-                raise KaguraFetchError(f"browser navigation failed: {e}", url=url) from e
+                # new_page() is inside the try so a failure here still closes the
+                # freshly-created context (otherwise it would leak a context).
+                page = await context.new_page()
+                await page.route("**/*", self._route_handler)
+                try:
+                    response = await page.goto(
+                        url, wait_until=self.wait_until, timeout=self.nav_timeout_ms
+                    )
+                except KaguraFetchError:
+                    raise
+                except Exception as e:  # noqa: BLE001 - normalized to a domain error below
+                    raise KaguraFetchError(f"browser navigation failed: {e}", url=url) from e
 
-            # Reject rendered error pages (4xx/5xx) the way Fetcher does via
-            # raise_for_status(). A None response (about:blank, data: URLs)
-            # carries no status and is left to flow through.
-            if response is not None and isinstance(response.status, int) and response.status >= 400:
-                raise KaguraFetchError(
-                    f"browser navigation returned HTTP {response.status}", url=url
-                )
+                # Reject rendered error pages (4xx/5xx) the way Fetcher does via
+                # raise_for_status(). A None response (about:blank, data: URLs)
+                # carries no status and is left to flow through.
+                if (
+                    response is not None
+                    and isinstance(response.status, int)
+                    and response.status >= 400
+                ):
+                    raise KaguraFetchError(
+                        f"browser navigation returned HTTP {response.status}", url=url
+                    )
 
-            html = await page.content()
-            body = html.encode("utf-8")
-            if len(body) > self.max_bytes:
-                raise KaguraFetchError(
-                    f"rendered HTML {len(body)} bytes exceeds max_bytes {self.max_bytes}",
-                    url=url,
-                )
-            final_url = page.url or url
+                html = await page.content()
+                body = html.encode("utf-8")
+                if len(body) > self.max_bytes:
+                    raise KaguraFetchError(
+                        f"rendered HTML {len(body)} bytes exceeds max_bytes {self.max_bytes}",
+                        url=url,
+                    )
+                final_url = page.url or url
+            finally:
+                await context.close()
         finally:
-            await context.close()
+            await browser.close()
 
         return FetchResult(
             body=body,
@@ -260,10 +302,34 @@ class BrowserFetcher:
         if not parsed.hostname:
             raise KaguraFetchError("URL has no hostname", url=url)
 
-    async def _reject_blocked_host(self, hostname: str, url: str) -> None:
-        """Resolve ``hostname`` and raise if any IP is in the denylist."""
-        if await self._host_is_blocked(hostname):
-            raise KaguraFetchError(f"hostname {hostname!r} resolved to a blocked IP", url=url)
+    async def _resolve_validated(self, hostname: str, url: str) -> str:
+        """Resolve ``hostname``, reject blocked IPs, and return a safe IP to pin.
+
+        Mirrors :meth:`Fetcher._validate_hostname`: every resolved IP is checked
+        against the denylist (one blocked address rejects the whole host), and
+        the first validated IP is returned so the caller can pin Chromium's
+        resolver to it. Resolution failure is fail-closed (raises), matching the
+        ``is_blocked_ip`` posture for malformed addresses.
+
+        Raises:
+            KaguraFetchError: resolution failed, returned no addresses, or any
+                resolved IP is in the denylist.
+        """
+        try:
+            addrs = await asyncio.to_thread(
+                socket.getaddrinfo, hostname, None, 0, socket.SOCK_STREAM
+            )
+        except (socket.gaierror, UnicodeError, OSError) as e:
+            raise KaguraFetchError(f"hostname {hostname!r} resolution failed: {e}", url=url) from e
+        ips = list(dict.fromkeys(str(info[4][0]) for info in addrs))
+        if not ips:
+            raise KaguraFetchError(f"no IP addresses for {hostname!r}", url=url)
+        blocked = sorted({ip for ip in ips if is_blocked_ip(ip)})
+        if blocked:
+            raise KaguraFetchError(
+                f"hostname {hostname!r} resolved to a blocked IP: {', '.join(blocked)}", url=url
+            )
+        return ips[0]
 
     async def _host_is_blocked(self, hostname: str) -> bool:
         """True iff ``hostname`` resolves to any blocked IP (cached per fetch).
