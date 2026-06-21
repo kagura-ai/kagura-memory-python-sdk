@@ -47,12 +47,26 @@ def test_marketplace_json_valid_and_entry() -> None:
     assert entry["source"] == "./"
 
 
+def _pkg_version() -> str:
+    """Read ``kagura_memory.__version__`` by parsing the source (no import → no deps)."""
+    init = (REPO_ROOT / "src" / "kagura_memory" / "__init__.py").read_text(encoding="utf-8")
+    match = re.search(r'^__version__ = "([^"]+)"', init, re.MULTILINE)
+    assert match, "could not find __version__ in __init__.py"
+    return match.group(1)
+
+
 def test_plugin_and_marketplace_versions_synced() -> None:
-    # Internal consistency between the two manifests. Keeping these in sync with
-    # kagura_memory.__version__ at release time is a documented follow-up (the
-    # version lives only in __init__.py per .claude/rules/versioning.md, so
-    # coupling here would require wiring /release — see the PR).
-    assert _load(PLUGIN_JSON)["version"] == _load(MARKETPLACE_JSON)["plugins"][0]["version"]
+    # The plugin ships from this repo and is released alongside the package, so its
+    # manifests must track kagura_memory.__version__ (the single source of truth —
+    # .claude/rules/versioning.md). /release bumps all three together; asserting it
+    # here turns any future drift into a CI failure instead of a silent skew.
+    pkg = _pkg_version()
+    plugin_ver = _load(PLUGIN_JSON)["version"]
+    market_ver = _load(MARKETPLACE_JSON)["plugins"][0]["version"]
+    assert plugin_ver == market_ver, f"plugin.json {plugin_ver} != marketplace {market_ver}"
+    assert plugin_ver == pkg, (
+        f"plugin manifests {plugin_ver} != __version__ {pkg} (run /release or sync)"
+    )
 
 
 def _frontmatter(text: str) -> dict[str, str]:
