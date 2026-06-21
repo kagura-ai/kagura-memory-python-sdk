@@ -1,7 +1,7 @@
 {
-  "name": "kagura-memory",
+  "name": "kagura-cli",
   "version": "0.31.0",
-  "description": "Thin Claude Code skills over the Kagura Memory CLI: doctor, auth, setup, document ingestion, resource tokens, and R2 file uploads.",
+  "description": "Thin Claude Code skills over the Kagura Memory CLI (kagura): doctor, auth, setup, document ingestion, resource tokens, and R2 file uploads.",
   "author": {
     "name": "Kagura AI, Inc.",
     "url": "https://github.com/kagura-ai"
