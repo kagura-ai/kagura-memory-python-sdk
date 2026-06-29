@@ -162,6 +162,18 @@ class SecretClient:
                 raise KaguraAuthError(f"Authentication failed. {hint}") from e
             if status == 404:
                 raise KaguraNotFoundError(extract_detail(e.response) or "Not found") from e
+            if status == 403:
+                # The server returns 403 (not 404) for a secret the caller can't
+                # read, to avoid leaking whether it exists. Give an actionable
+                # message rather than a bare "HTTP 403".
+                detail = extract_detail(e.response)
+                msg = (
+                    "Access denied (HTTP 403): you may not have a grant on this secret, "
+                    "it may not exist, or you lack permission for this operation."
+                )
+                if detail:
+                    msg = f"{msg} ({detail})"
+                raise KaguraConnectionError(msg) from e
             detail = extract_detail(e.response)
             msg = f"HTTP {status}: {detail}" if detail else f"HTTP {status}"
             raise KaguraConnectionError(msg) from e
