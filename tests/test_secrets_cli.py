@@ -770,3 +770,37 @@ def test_rotate_no_active_recipients(wired):
     result = CliRunner().invoke(secret, ["rotate", "db"], input="newval\n")
     assert result.exit_code != 0
     assert "no active recipients" in result.output.lower()
+
+
+# --- main CLI: secret-group registration / [secret]-extra fallback ----------
+
+
+def test_register_secret_command_adds_group_when_importable():
+    from kagura_memory import cli as main_cli
+
+    grp = click.Group()
+    main_cli._register_secret_command(grp, import_secret=lambda: click.Command("secret"))
+    assert "secret" in grp.commands
+
+
+def test_register_secret_command_stub_when_extra_missing():
+    from kagura_memory import cli as main_cli
+
+    def missing() -> click.Command:
+        raise ModuleNotFoundError("No module named 'pyrage'", name="pyrage")
+
+    grp = click.Group()
+    main_cli._register_secret_command(grp, import_secret=missing)
+    result = CliRunner().invoke(grp, ["secret", "whatever"])
+    assert result.exit_code != 0
+    assert "[secret]" in result.output
+
+
+def test_register_secret_command_reraises_unrelated_import_error():
+    from kagura_memory import cli as main_cli
+
+    def boom() -> click.Command:
+        raise ModuleNotFoundError("No module named 'numpy'", name="numpy")
+
+    with pytest.raises(ModuleNotFoundError):
+        main_cli._register_secret_command(click.Group(), import_secret=boom)

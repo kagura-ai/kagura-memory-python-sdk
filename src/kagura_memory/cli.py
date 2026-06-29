@@ -152,22 +152,38 @@ def main():
 main.add_command(_auth_group, name="auth")
 
 
-# Register the `kagura secret` sub-group (zero-knowledge secret store, #216).
-# Its crypto deps (pyrage/keyring) ship in the optional ``[secret]`` extra, so
-# the import can fail on a base install — fall back to a stub that points the
-# operator at the extra instead of breaking the whole CLI.
-try:
-    from .secrets.cli import secret as _secret_group
+def _register_secret_command(
+    main_group: click.Group, *, import_secret: Callable[[], click.Command] | None = None
+) -> None:
+    """Register the `kagura secret` sub-group (zero-knowledge secret store, #216).
 
-    main.add_command(_secret_group, name="secret")
-except ModuleNotFoundError as _e:
-    # Only fall back when the optional [secret] deps (pyrage/keyring) are
-    # actually missing — re-raise any other import failure (e.g. a real bug in
-    # secrets.cli) so it isn't silently masked by the "install the extra" stub.
-    if (_e.name or "").split(".")[0] not in {"pyrage", "keyring"}:
-        raise
+    Its crypto deps (pyrage/keyring) ship in the optional ``[secret]`` extra, so
+    the import can fail on a base install — fall back to a stub that points the
+    operator at the extra instead of breaking the whole CLI. Any *other* import
+    failure (e.g. a real bug in ``secrets.cli``) is re-raised so it isn't masked.
 
-    @main.command(name="secret", context_settings={"ignore_unknown_options": True})
+    ``import_secret`` is an injection seam for tests; production uses the real
+    package import.
+    """
+
+    def _default_import() -> click.Command:
+        from .secrets.cli import secret as secret_group
+
+        return secret_group
+
+    importer = import_secret or _default_import
+    try:
+        secret_group: click.Command | None = importer()
+    except ModuleNotFoundError as e:
+        if (e.name or "").split(".")[0] not in {"pyrage", "keyring"}:
+            raise
+        secret_group = None
+
+    if secret_group is not None:
+        main_group.add_command(secret_group, name="secret")
+        return
+
+    @main_group.command(name="secret", context_settings={"ignore_unknown_options": True})
     @click.argument("_args", nargs=-1, type=click.UNPROCESSED)
     def _secret_stub(_args: tuple[str, ...]) -> None:
         """Zero-knowledge secret store (requires the [secret] extra)."""
@@ -175,6 +191,9 @@ except ModuleNotFoundError as _e:
             "the `kagura secret` commands require optional crypto dependencies. "
             "Install them with:  pip install 'kagura-memory[secret]'"
         )
+
+
+_register_secret_command(main)
 
 
 @main.command()
