@@ -42,8 +42,11 @@ class SecretMetaResponse(BaseModel):
     rotation_needed: bool
     current_version: int | None = None
     grant_count: int
-    created_at: str
-    updated_at: str
+    # Timestamps are nullable: the live server returns null for these on some
+    # secrets (the OpenAPI marks them required but untyped). Tolerate null
+    # rather than failing deserialization.
+    created_at: str | None = None
+    updated_at: str | None = None
 
 
 class SecretValueResponse(BaseModel):
