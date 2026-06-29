@@ -110,3 +110,26 @@ class KaguraIngestError(KaguraError):
     effort) and do NOT raise this exception — only fatal orchestration failures
     do (e.g. extractor cannot decode the file, no Provider configured).
     """
+
+
+class KaguraSecretError(KaguraError):
+    """Base error for the zero-knowledge secret client (Issue #216)."""
+
+
+class KaguraCryptoError(KaguraSecretError):
+    """age encryption/decryption or armor (de)framing failed.
+
+    Raised by :mod:`kagura_memory.secrets.crypto` for malformed recipients,
+    decrypt failures (wrong identity / corrupt ciphertext), non-armored input,
+    or a ciphertext that exceeds the server's size cap. The underlying
+    ``pyrage`` error (if any) is preserved via ``__cause__``.
+    """
+
+
+class KaguraKeyCustodyError(KaguraSecretError):
+    """The age private key could not be stored or retrieved securely.
+
+    Raised by :mod:`kagura_memory.secrets.keymanager` when no acceptable
+    custody backend is available (fail-closed) or the keychain rejects a
+    read/write. Repo-dotfile private keys are disallowed by design.
+    """
