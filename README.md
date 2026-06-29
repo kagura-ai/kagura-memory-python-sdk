@@ -29,7 +29,7 @@
 
 ## What is this?
 
-This SDK connects your Python code to [Kagura Memory Cloud](https://github.com/kagura-ai/memory-cloud), giving AI assistants the ability to **remember, search, and learn** from past interactions — and to **ingest documents** (PDFs, URLs) directly into a searchable memory graph. It provides four clients for different use cases:
+This SDK connects your Python code to [Kagura Memory Cloud](https://github.com/kagura-ai/memory-cloud), giving AI assistants the ability to **remember, search, and learn** from past interactions — and to **ingest documents** (PDFs, URLs) directly into a searchable memory graph. It provides **five clients** (plus a document ingestor) for different use cases:
 
 | Client | Protocol | Use Case |
 |--------|----------|----------|
