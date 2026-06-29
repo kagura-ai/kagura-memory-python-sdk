@@ -152,6 +152,26 @@ def main():
 main.add_command(_auth_group, name="auth")
 
 
+# Register the `kagura secret` sub-group (zero-knowledge secret store, #216).
+# Its crypto deps (pyrage/keyring) ship in the optional ``[secret]`` extra, so
+# the import can fail on a base install — fall back to a stub that points the
+# operator at the extra instead of breaking the whole CLI.
+try:
+    from .secrets.cli import secret as _secret_group
+
+    main.add_command(_secret_group, name="secret")
+except ImportError:
+
+    @main.command(name="secret", context_settings={"ignore_unknown_options": True})
+    @click.argument("_args", nargs=-1, type=click.UNPROCESSED)
+    def _secret_stub(_args: tuple[str, ...]) -> None:
+        """Zero-knowledge secret store (requires the [secret] extra)."""
+        raise click.ClickException(
+            "the `kagura secret` commands require optional crypto dependencies. "
+            "Install them with:  pip install 'kagura-memory[secret]'"
+        )
+
+
 @main.command()
 @click.option("--message", "-m", help="Single message to process")
 @click.option("--file", "-f", type=click.File("r"), help="Session JSON file")
