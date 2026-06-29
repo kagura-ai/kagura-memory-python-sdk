@@ -402,6 +402,28 @@ async def test_401_raises_auth_error():
 
 
 @pytest.mark.asyncio
+async def test_403_maps_to_clear_access_denied():
+    # The live server returns 403 (not 404) for a secret the caller can't read
+    # — hide existence. Surface an actionable message, not a bare "HTTP 403".
+    client = _client()
+    with patch.object(client._client, "request", new_callable=AsyncMock) as req:
+        req.return_value = _error_response(403, "")
+        with pytest.raises(KaguraConnectionError, match="(?i)access denied"):
+            await client.fetch_secret("foo")
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_403_appends_server_detail():
+    client = _client()
+    with patch.object(client._client, "request", new_callable=AsyncMock) as req:
+        req.return_value = _error_response(403, "no grant for caller")
+        with pytest.raises(KaguraConnectionError, match="no grant for caller"):
+            await client.fetch_secret("foo")
+    await client.close()
+
+
+@pytest.mark.asyncio
 async def test_generic_http_error_maps_to_connection_error():
     client = _client()
     with patch.object(client._client, "request", new_callable=AsyncMock) as req:
