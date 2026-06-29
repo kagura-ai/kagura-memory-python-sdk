@@ -37,6 +37,7 @@ This SDK connects your Python code to [Kagura Memory Cloud](https://github.com/k
 | **`KaguraClient`** | MCP (JSON-RPC) | Direct memory ops — remember, recall, explore, reference, forget |
 | **`ResourceClient`** | REST API | External data ingestion — push data from Slack, CI/CD, CRM into Kagura |
 | **`FilesClient`** | REST + presigned PUT | File uploads with sha256 integrity binding (R2) |
+| **`SecretClient`** | REST + age crypto | Zero-knowledge secrets — age recipient encryption, **local decryption** (the server only ever stores armored ciphertext) |
 | **`FileIngestor`** | CLI + SDK | Document ingestion — PDF/Office/HTML/EPUB, audio & YouTube transcripts → memory graph + R2 archive |
 
 ## 60-second demo
@@ -310,10 +311,34 @@ Re-uploading bytes whose sha256 already exists in the workspace returns the **ex
 
 Runnable: [`examples/files_upload.py`](examples/files_upload.py).
 
+### SecretClient — Zero-Knowledge Secrets
+
+Client side of the secret store (memory-cloud v0.39.0+, requires the `[secret]` extra: `pip install 'kagura-memory[secret]'`). Secrets are encrypted to recipients' `age`/X25519 public keys and decrypted **locally** — memory-cloud only ever stores armored ciphertext, never plaintext. All crypto is delegated to the audited [`pyrage`](https://pypi.org/project/pyrage/) binding; the age private key is held in your OS keychain (`keyring`) and never transmitted.
+
+```python
+from kagura_memory.secrets.client import SecretClient
+
+async with SecretClient.from_mcp_url(api_key="kagura_...", mcp_url="https://memory.kagura-ai.com/mcp") as client:
+    # Register your public key (lands in `pending` until an owner approves it).
+    me = await client.register_pubkey("age1...", label="laptop")
+
+    # Encrypt-and-store in one call. recipients_snapshot / grant_pubkey_ids are
+    # derived 1:1 from the recipient set, so the server's grant-consistency
+    # invariant holds by construction.
+    actives = [p for p in await client.list_pubkeys() if p.status == "active"]
+    await client.put_secret_for_recipients("db-prod", b"hunter2", actives)
+
+    # Fetch ciphertext (decrypt locally with your own key — not shown here).
+    sv = await client.fetch_secret("db-prod")
+```
+
+Most workflows use the CLI instead — see [`kagura secret`](#zero-knowledge-secrets-kagura-secret) below, which handles keychain custody and the get/put/grant/rotate flows with built-in misuse guards.
+
 ## SDK ↔ memory-cloud Compatibility
 
 | SDK | Min memory-cloud | Notes |
 |---|---|---|
+| 0.33.0+ | 0.17.1 (0.39.0 for `kagura secret`) | **Zero-knowledge secret store.** `SecretClient` / `kagura secret` need memory-cloud **0.39.0+** (the `/api/v1/config/secrets` endpoints). `MIN_SERVER_VERSION` is **not** bumped — the rest of the SDK still works on 0.17.1+; only the secret surface requires 0.39.0. Requires the `[secret]` extra. |
 | 0.27.0 – 0.31.x | 0.17.1 | **Agent memory substrate.** `load_pinned` + `delivery_mode` pin-on-write, `recall_upcoming`, `feedback`, `set_state`/`get_state`, and the `trust_tier` recall filter each need a memory-cloud carrying the matching [#885](https://github.com/kagura-ai/memory-cloud/issues/885) agent-substrate APIs (≈ v0.23.0+); against an older server those specific tools return an MCP "tool not found". `MIN_SERVER_VERSION` stays **0.17.1** — the rest of the SDK still works on 0.17.1+. **v0.29.0 also changed error handling (breaking): MCP tool methods now raise `KaguraNotFoundError`/`KaguraError` instead of returning `{"status":"error"}` dicts** (see the KaguraClient error-handling note above). |
 | 0.15.0 – 0.20.x | 0.15.1 | `FilesClient` + R2 checksum binding. `list_tags()` additionally needs **0.15.4** — `MIN_SERVER_VERSION` is intentionally not bumped, only that one method requires the newer server. |
 | 0.14.x | 0.15.1 | `FilesClient` + R2 checksum binding (`x-amz-checksum-sha256` on PUT) |
@@ -423,6 +448,23 @@ kagura files delete <file-id>
 kagura config show
 ```
 
+### Zero-knowledge secrets (`kagura secret`)
+
+Requires the `[secret]` extra (`pip install 'kagura-memory[secret]'`) and memory-cloud 0.39.0+. Your `age` private key lives in the OS keychain; memory-cloud only ever stores armored ciphertext.
+
+```bash
+kagura secret keygen --label laptop          # generate keypair → keychain, register public key (pending)
+kagura secret approve <pubkey-id>            # owner: approve a pending key (verify its fingerprint out-of-band)
+kagura secret put db-prod < secret.txt       # value from stdin/--from-file — never from argv
+kagura secret get db-prod | psql             # refuses to print to a TTY; pipe it, or use -o FILE (0600) / --reveal
+kagura secret exec --as DATABASE_URL=db-prod -- ./server   # inject into a child env, no disk/scrollback
+kagura secret grant db-prod --to <pubkey-id> # re-encrypt to the expanded recipient set
+kagura secret revoke db-prod --to <pubkey-id># revoke a grant (then `rotate` — revoke ≠ invalidation)
+kagura secret rotate db-prod                 # encrypt a NEW value to the remaining recipients
+kagura secret list                           # secret metadata (never the values)
+kagura secret audit-verify                   # verify the tamper-evident audit chain
+```
+
 ### Document ingestion (`kagura ingest`)
 
 See the [60-second demo](#60-second-demo) above for the happy path. The full option surface:
@@ -490,7 +532,7 @@ kagura process -m "今日の学び：FastAPIのDIはDepends()を使う"
 This repo also ships a thin **Claude Code plugin** under
 [`.claude-plugin/`](.claude-plugin/plugin.json) + [`skills/`](skills/) that wraps
 the high-value CLI commands as skills (`doctor`, `auth`, `setup`, `ingest`,
-`resource`, `files`) — each shells out to the installed `kagura` CLI and returns
+`resource`, `files`, `secret`) — each shells out to the installed `kagura` CLI and returns
 clear guidance when it is not installed/authenticated. The plugin is named
 **`kagura-cli`** (distinct from the `kagura-memory` SDK package and the existing
 `kagura-memory` MCP plugin). Registration in the `kagura-plugins` marketplace (so
@@ -519,6 +561,8 @@ follow-up.
 | Resource Impact (stats) | `ResourceClient` | REST API | API Key |
 | Resource Schema | `ResourceClient` | REST API | API Key |
 | File upload / download-url / delete / list | `FilesClient` | REST + presigned PUT | API Key |
+| Secret pubkey registry (register/list/me/approve/revoke) | `SecretClient` | REST API | API Key / OAuth |
+| Secret put / fetch / list / revoke-grant / audit-verify | `SecretClient` | REST API (age, local decrypt) | API Key / OAuth |
 | Account erasure (GDPR Art.17 / APPI) | — | Web UI only | Session |
 
 Context deletion is a **soft delete** available via `KaguraClient.delete_context()` and `kagura context delete` (the CLI prompts for confirmation). Account erasure (GDPR Art.17 / APPI) is intentionally Web UI only — it is irreversible and requires session authentication and confirmation. `kagura sleep rollback` runs over the MCP API Key but is itself destructive (reverses edge creation, merges, importance updates, promotions, and archives) and the CLI requires `--yes` to skip the interactive confirmation. The server commits per-action without a Saga, so a 5xx response after partial success means SOME actions may have been reversed before the error surfaced — re-run `kagura sleep report` to inspect the post-failure state.
