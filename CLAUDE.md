@@ -2,11 +2,12 @@
 
 ## Overview
 
-Python SDK for Kagura Memory Cloud. Four clients:
+Python SDK for Kagura Memory Cloud. Five clients:
 - `KaguraClient` — MCP client for memory and context operations
 - `KaguraAgent` — LLM-powered session analysis with hooks/skills API
 - `ResourceClient` — REST client for resource token management and data ingestion
 - `FilesClient` — REST + presigned PUT client for file uploads with sha256 integrity binding (server v0.15.1+)
+- `SecretClient` — REST client for the zero-knowledge secret store (age recipient encryption, local decrypt; `[secret]` extra, server v0.39.0+)
 
 ## Development Workflow
 
@@ -32,9 +33,10 @@ uv run pyright src/              # Type check
 - Resource ingestion: `setup_resource`, `ingest_event`, `ingest_events`
 - Resource stats/schema: `get_resource_impact`, `get_resource_schema`
 - **File uploads**: `FilesClient.upload/download_url/delete/list` with R2 sha256 binding (server v0.15.1+)
+- **Zero-knowledge secrets**: `SecretClient` + `kagura secret` — age recipient encryption, local decrypt; private key in OS keychain via `pyrage`/`keyring` (`[secret]` extra, server v0.39.0+)
 - Agent hooks/skills: `@agent.hook("before_process")`, `@agent.skill("name")`
 - Ollama support: `model="ollama/qwen3:30b"` for local LLMs
-- CLI: `kagura doctor`, `kagura auth login/refresh/status/list`, `kagura setup claude`, `kagura ingest <file|url>`, `kagura resource setup/import/stats/schema`, `kagura files upload/list/delete/download-url`, `kagura context search-config`, `kagura sleep history/report/rollback`
+- CLI: `kagura doctor`, `kagura auth login/refresh/status/list`, `kagura setup claude`, `kagura ingest <file|url>`, `kagura resource setup/import/stats/schema`, `kagura files upload/list/delete/download-url`, `kagura secret keygen/put/get/grant/rotate/exec`, `kagura context search-config`, `kagura sleep history/report/rollback`
 
 ## Branch Strategy
 

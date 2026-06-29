@@ -110,6 +110,15 @@ ingest-all = [
     "kagura-memory[ingest-youtube]",
     "kagura-memory[ingest-browser]",
 ]
+# Zero-knowledge secret client (Issue #216) — `kagura secret` CLI.
+# `pyrage` provides the audited Rust `age`/X25519 crypto (no home-grown
+# crypto); armoring is a pure-Python transport wrapper in secrets/crypto.py.
+# `keyring` holds the age private key in the OS keychain (repo-dotfile keys
+# are disallowed). Opt-in so the base install stays crypto-dependency-free.
+secret = [
+    "pyrage>=1.1",
+    "keyring>=24.0",
+]
 
 [project.scripts]
 kagura = "kagura_memory.cli:main"

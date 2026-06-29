@@ -17,7 +17,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PLUGIN_JSON = REPO_ROOT / ".claude-plugin" / "plugin.json"
 MARKETPLACE_JSON = REPO_ROOT / ".claude-plugin" / "marketplace.json"
-SKILLS = ["doctor", "auth", "setup", "ingest", "resource", "files"]
+SKILLS = ["doctor", "auth", "setup", "ingest", "resource", "files", "secret"]
 _SEMVER = re.compile(r"^\d+\.\d+\.\d+$")
 
 
