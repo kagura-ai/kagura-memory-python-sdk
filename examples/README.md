@@ -1,6 +1,6 @@
 # Examples
 
-Runnable scripts for each Kagura Memory SDK client. All read credentials
+Runnable scripts for the Kagura Memory SDK clients. All read credentials
 from the environment:
 
 ```bash
@@ -24,3 +24,11 @@ and a text-LLM key (`ANTHROPIC_API_KEY` for the default `claude` provider).
 `ingest_documents.py` works with any supported format — install the matching
 extra (or `[ingest-all]`); plain text / Markdown need no extra.
 `client_advanced.py`'s `list_tags()` needs memory-cloud server v0.15.4+.
+
+`SecretClient` (zero-knowledge secrets) has no standalone script — it is
+CLI-first, since real use needs OS-keychain key custody and the put/get/grant
+misuse guards. Drive it with `kagura secret` (needs the `[secret]` extra and
+memory-cloud v0.39.0+); see the
+[`kagura secret`](../README.md#zero-knowledge-secrets-kagura-secret) and
+[`SecretClient`](../README.md#secretclient--zero-knowledge-secrets) sections of
+the main README.
