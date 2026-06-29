@@ -5,6 +5,7 @@ touch the real OS keychain. The KeyringStore availability guard is tested by
 monkeypatching ``keyring.get_keyring`` to the fail backend.
 """
 
+import keyring
 import keyring.backends.fail
 import keyring.errors
 import pytest
@@ -56,9 +57,11 @@ def test_enroll_refuses_to_overwrite_existing_key():
     km.enroll()
     before = dict(store.data)
 
-    with pytest.raises(KaguraKeyCustodyError):
+    with pytest.raises(KaguraKeyCustodyError) as exc:
         km.enroll()
 
+    # Must not suggest `secret rotate` (that rotates a value, not the keypair).
+    assert "rotate" not in str(exc.value).lower()
     assert store.data == before  # original key untouched
 
 
@@ -120,3 +123,35 @@ def test_keyringstore_get_wraps_keyring_error(monkeypatch):
     store = KeyringStore()
     with pytest.raises(KaguraKeyCustodyError):
         store.get("identity:default")
+
+
+def test_keyringstore_roundtrip_with_usable_backend(monkeypatch):
+    """get/set/delete against a mocked usable backend (no real OS keychain)."""
+    backing: dict[tuple[str, str], str] = {}
+
+    class _DummyBackend:  # anything that is not keyring.backends.fail.Keyring
+        pass
+
+    def _set(service, name, value):
+        backing[(service, name)] = value
+
+    def _get(service, name):
+        return backing.get((service, name))
+
+    def _delete(service, name):
+        if (service, name) not in backing:
+            raise keyring.errors.PasswordDeleteError("not found")
+        del backing[(service, name)]
+
+    monkeypatch.setattr(keyring, "get_keyring", lambda: _DummyBackend())
+    monkeypatch.setattr(keyring, "set_password", _set)
+    monkeypatch.setattr(keyring, "get_password", _get)
+    monkeypatch.setattr(keyring, "delete_password", _delete)
+
+    store = KeyringStore()
+    assert store.get("identity:default") is None
+    store.set("identity:default", "AGE-SECRET-KEY-1-abc")
+    assert store.get("identity:default") == "AGE-SECRET-KEY-1-abc"
+    store.delete("identity:default")
+    assert store.get("identity:default") is None
+    store.delete("identity:default")  # idempotent: PasswordDeleteError swallowed

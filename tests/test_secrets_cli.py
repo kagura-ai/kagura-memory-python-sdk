@@ -8,8 +8,10 @@ command. Network and keychain are replaced via the module's testable seams
 """
 
 import os
+import subprocess
 import uuid
 
+import click
 import pytest
 from click.testing import CliRunner
 
@@ -537,3 +539,91 @@ def test_keygen_no_keychain_is_clean_error(monkeypatch):
     assert result.exit_code != 0
     assert not isinstance(result.exception, KaguraKeyCustodyError)  # mapped, no traceback
     assert "keychain" in result.output.lower()
+
+
+def test_put_value_read_error_is_clean_error(monkeypatch, wired):
+    def boom(_from_file):
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(secret_cli, "_read_secret_value", boom)
+    result = CliRunner().invoke(secret, ["put", "db"])
+    assert result.exit_code != 0
+    assert not isinstance(result.exception, OSError)  # mapped to ClickException, no traceback
+
+
+def test_rotate_value_read_error_is_clean_error(monkeypatch, wired):
+    def boom(_from_file):
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(secret_cli, "_read_secret_value", boom)
+    result = CliRunner().invoke(secret, ["rotate", "db"])
+    assert result.exit_code != 0
+    assert not isinstance(result.exception, OSError)
+
+
+# --- coverage: helpers, exec_child branches, empty-list paths ----------------
+
+
+def test_exec_child_requires_a_command():
+    with pytest.raises(click.ClickException):
+        secret_cli._exec_child([], {"A": "b"})
+
+
+def test_exec_child_posix_replaces_process(monkeypatch):
+    monkeypatch.setattr(os, "name", "posix")
+    captured = {}
+    monkeypatch.setattr(
+        os, "execvpe", lambda file, argv, env: captured.update(file=file, argv=argv, env=env)
+    )
+    secret_cli._exec_child(["echo", "hi"], {"A": "b"})
+    assert captured == {"file": "echo", "argv": ["echo", "hi"], "env": {"A": "b"}}
+
+
+def test_exec_child_windows_runs_subprocess(monkeypatch):
+    monkeypatch.setattr(os, "name", "nt")
+
+    class _Completed:
+        returncode = 3
+
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _Completed())
+    with pytest.raises(SystemExit) as exc:
+        secret_cli._exec_child(["cmd"], {"A": "b"})
+    assert exc.value.code == 3
+
+
+def test_read_secret_value_from_file_is_verbatim(tmp_path):
+    f = tmp_path / "s.txt"
+    f.write_bytes(b"file-value\n")  # trailing newline preserved for file input
+    assert secret_cli._read_secret_value(str(f)) == b"file-value\n"
+
+
+def test_read_secret_value_prompts_on_tty(monkeypatch):
+    import getpass
+
+    monkeypatch.setattr(secret_cli, "_stdin_isatty", lambda: True)
+    monkeypatch.setattr(getpass, "getpass", lambda prompt="": "typed-secret")
+    assert secret_cli._read_secret_value(None) == b"typed-secret"
+
+
+def test_pubkeys_empty(wired):
+    fake, _ = wired
+    fake.pubkeys = []
+    result = CliRunner().invoke(secret, ["pubkeys"])
+    assert result.exit_code == 0, result.output
+    assert "no pubkeys" in result.output.lower()
+
+
+def test_pubkeys_mine(wired):
+    fake, km = wired
+    fake.pubkeys = [_active_pubkey(km.get_recipient())]
+    result = CliRunner().invoke(secret, ["pubkeys", "--mine"])
+    assert result.exit_code == 0, result.output
+    assert "active" in result.output
+
+
+def test_list_empty(wired):
+    fake, _ = wired
+    fake.secrets = []
+    result = CliRunner().invoke(secret, ["list"])
+    assert result.exit_code == 0, result.output
+    assert "no secrets" in result.output.lower()

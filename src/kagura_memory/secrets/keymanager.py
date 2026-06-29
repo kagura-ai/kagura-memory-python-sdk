@@ -108,7 +108,7 @@ class KeyManager:
         if self.has_key():
             raise KaguraKeyCustodyError(
                 f"a key already exists for profile {self._profile!r}; refusing to "
-                "overwrite. Use `kagura secret rotate` to roll, or delete first."
+                "overwrite it. Delete it first, or enroll under a different --profile."
             )
         identity, recipient = crypto.generate_keypair()
         self._store.set(self._key_name, identity)

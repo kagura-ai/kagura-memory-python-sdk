@@ -85,6 +85,8 @@ def _disable_core_dumps() -> None:
 
         resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     except (ValueError, OSError):
+        # Best-effort hardening: if the limit can't be set (sandboxed/already
+        # lowered), proceed anyway rather than blocking the command.
         pass
 
 
@@ -137,6 +139,8 @@ def _write_secret_file(path: Path, data: bytes) -> None:
             finally:
                 os.close(dir_fd)
         except OSError:
+            # Directory fsync is unsupported on Windows / some filesystems; the
+            # atomic rename above already landed, so skip the durability extra.
             pass
     except BaseException:
         tmp_path.unlink(missing_ok=True)
@@ -309,7 +313,8 @@ def pubkeys(mine: bool) -> None:
 @click.option("--profile", default="default", help="Your key profile (default: default).")
 def put(name: str, to_ids: tuple[str, ...], from_file: str | None, profile: str) -> None:
     """Store a secret. The value is read from stdin or --from-file (never from argv)."""
-    value = _read_secret_value(from_file)
+    with _click_errors():  # a --from-file read error must not surface as a traceback
+        value = _read_secret_value(from_file)
     km = _make_key_manager(profile)
 
     async def _put() -> tuple[SecretPutResponse, list[PubkeyResponse]]:
@@ -453,7 +458,8 @@ def revoke(name: str, to_id: str) -> None:
 @click.option("--profile", default="default", help="Your key profile (default: default).")
 def rotate(name: str, from_file: str | None, profile: str) -> None:
     """Rotate a secret: encrypt a NEW value to the remaining recipients."""
-    new_value = _read_secret_value(from_file)
+    with _click_errors():  # a --from-file read error must not surface as a traceback
+        new_value = _read_secret_value(from_file)
 
     async def _rotate() -> tuple[SecretPutResponse, list[PubkeyResponse]]:
         async with _get_secret_client() as c:

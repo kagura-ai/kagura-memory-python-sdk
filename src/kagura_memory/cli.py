@@ -160,7 +160,12 @@ try:
     from .secrets.cli import secret as _secret_group
 
     main.add_command(_secret_group, name="secret")
-except ImportError:
+except ModuleNotFoundError as _e:
+    # Only fall back when the optional [secret] deps (pyrage/keyring) are
+    # actually missing — re-raise any other import failure (e.g. a real bug in
+    # secrets.cli) so it isn't silently masked by the "install the extra" stub.
+    if (_e.name or "").split(".")[0] not in {"pyrage", "keyring"}:
+        raise
 
     @main.command(name="secret", context_settings={"ignore_unknown_options": True})
     @click.argument("_args", nargs=-1, type=click.UNPROCESSED)
