@@ -46,13 +46,14 @@ jobs:
       - name: Set up Python ${{ matrix.python-version }}
         run: uv python install ${{ matrix.python-version }}
 
-      - name: Install dependencies (with ingest extras)
+      - name: Install dependencies (with ingest + secret extras)
         # Issue #80's ingest module pulls pymupdf + pillow via optional
         # extras. The unit tests for that module import PIL at module
-        # level, so we install the full extras here. Core SDK consumers
-        # are unaffected — extras are opt-in via `pip install
-        # kagura-memory[ingest-pdf]`.
-        run: uv sync --dev --extra ingest-all --python ${{ matrix.python-version }}
+        # level, so we install the full extras here. The `secret` extra
+        # (Issue #216: pyrage + keyring) is likewise imported at module
+        # level by tests/test_secrets_*.py. Core SDK consumers are
+        # unaffected — extras are opt-in via `pip install kagura-memory[...]`.
+        run: uv sync --dev --extra ingest-all --extra secret --python ${{ matrix.python-version }}
 
       - name: Test with coverage
         run: uv run pytest tests/ -v -m "not integration and not eval and not browser and not youtube and not audio" --cov=src/kagura_memory --cov-report=xml --cov-report=term

@@ -41,8 +41,8 @@ class KeyringStore:
     SERVICE = "kagura-secret"
 
     def get(self, name: str) -> str | None:
-        import keyring
-        import keyring.errors
+        import keyring  # type: ignore[import-not-found]
+        import keyring.errors  # type: ignore[import-not-found]
 
         try:
             return keyring.get_password(self.SERVICE, name)
@@ -52,9 +52,9 @@ class KeyringStore:
             raise KaguraKeyCustodyError(f"failed to read key from keychain: {e}") from e
 
     def set(self, name: str, value: str) -> None:
-        import keyring
-        import keyring.backends.fail
-        import keyring.errors
+        import keyring  # type: ignore[import-not-found]
+        import keyring.backends.fail  # type: ignore[import-not-found]
+        import keyring.errors  # type: ignore[import-not-found]
 
         if isinstance(keyring.get_keyring(), keyring.backends.fail.Keyring):
             raise KaguraKeyCustodyError(
@@ -68,8 +68,8 @@ class KeyringStore:
             raise KaguraKeyCustodyError(f"failed to store key in keychain: {e}") from e
 
     def delete(self, name: str) -> None:
-        import keyring
-        import keyring.errors
+        import keyring  # type: ignore[import-not-found]
+        import keyring.errors  # type: ignore[import-not-found]
 
         try:
             keyring.delete_password(self.SERVICE, name)

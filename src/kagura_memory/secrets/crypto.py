@@ -22,7 +22,7 @@ import re
 import textwrap
 from typing import Any
 
-import pyrage as _pyrage
+import pyrage as _pyrage  # type: ignore[import-not-found]
 
 from ..exceptions import KaguraCryptoError
 
