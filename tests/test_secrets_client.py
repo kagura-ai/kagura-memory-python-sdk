@@ -186,6 +186,24 @@ async def test_put_secret_sends_contract_body():
     await client.close()
 
 
+def test_secret_meta_response_allows_null_timestamps():
+    # The live server returns updated_at/created_at as null for some secrets
+    # (caught by live E2E); the model must accept that, not 500 the SDK.
+    m = SecretMetaResponse.model_validate(
+        {
+            "name": "db",
+            "status": "active",
+            "rotation_needed": False,
+            "current_version": 1,
+            "grant_count": 1,
+            "created_at": None,
+            "updated_at": None,
+        }
+    )
+    assert m.created_at is None
+    assert m.updated_at is None
+
+
 @pytest.mark.asyncio
 async def test_list_secrets_returns_list():
     client = _client()
