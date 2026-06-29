@@ -146,3 +146,29 @@ def test_encrypt_rejects_oversize_ciphertext(keypair):
     big = b"A" * crypto.MAX_CIPHERTEXT_BYTES
     with pytest.raises(KaguraCryptoError):
         crypto.encrypt(big, [recipient])
+
+
+def test_encrypt_rejects_regex_valid_but_invalid_recipient():
+    # Matches RECIPIENT_RE but is not a valid bech32 age key → pyrage RecipientError.
+    bogus = "age1" + "q" * 40
+    assert crypto.RECIPIENT_RE.match(bogus)
+    with pytest.raises(KaguraCryptoError):
+        crypto.encrypt(b"x", [bogus])
+
+
+def test_encrypt_wraps_pyrage_encrypt_error(monkeypatch, keypair):
+    _, recipient = keypair
+
+    def boom(_data, _recipients):
+        raise crypto.pyrage.EncryptError("synthetic encrypt failure")
+
+    monkeypatch.setattr(crypto.pyrage, "encrypt", boom)
+    with pytest.raises(KaguraCryptoError):
+        crypto.encrypt(b"x", [recipient])
+
+
+def test_decrypt_rejects_invalid_identity_string(keypair):
+    _, recipient = keypair
+    armored = crypto.encrypt(b"x", [recipient])
+    with pytest.raises(KaguraCryptoError):
+        crypto.decrypt(armored, "AGE-SECRET-KEY-1-NOT-A-REAL-IDENTITY")

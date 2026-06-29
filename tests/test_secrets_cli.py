@@ -7,15 +7,21 @@ command. Network and keychain are replaced via the module's testable seams
 (`_get_secret_client`, `_make_key_manager`, `_stdout_isatty`, `_exec_child`).
 """
 
+import io
 import os
 import subprocess
+import sys
 import uuid
 
 import click
 import pytest
 from click.testing import CliRunner
 
-from kagura_memory.exceptions import KaguraCryptoError, KaguraKeyCustodyError
+from kagura_memory.exceptions import (
+    KaguraAuthError,
+    KaguraCryptoError,
+    KaguraKeyCustodyError,
+)
 from kagura_memory.secrets import cli as secret_cli
 from kagura_memory.secrets import crypto
 from kagura_memory.secrets.cli import secret
@@ -627,3 +633,140 @@ def test_list_empty(wired):
     result = CliRunner().invoke(secret, ["list"])
     assert result.exit_code == 0, result.output
     assert "no secrets" in result.output.lower()
+
+
+# --- coverage: module seams, platform branches, error paths -----------------
+
+
+def test_make_key_manager_returns_keymanager():
+    assert isinstance(secret_cli._make_key_manager("p"), KeyManager)
+
+
+def test_stdout_isatty_returns_bool():
+    assert isinstance(secret_cli._stdout_isatty(), bool)
+
+
+def test_get_secret_client_builds_from_resolved_auth(monkeypatch):
+    from kagura_memory._auth import _StaticAuth
+
+    monkeypatch.setattr(secret_cli, "load_config", lambda: {})
+    monkeypatch.setattr(
+        secret_cli,
+        "_resolve_auth",
+        lambda **_kw: _StaticAuth(
+            api_key="k", mcp_url="https://memory.kagura-ai.com/mcp", source="env"
+        ),
+    )
+    client = secret_cli._get_secret_client()
+    assert client.base_url == "https://memory.kagura-ai.com"
+
+
+def test_get_secret_client_maps_auth_error(monkeypatch):
+    def boom(**_kw):
+        raise KaguraAuthError("no credentials")
+
+    monkeypatch.setattr(secret_cli, "load_config", lambda: {})
+    monkeypatch.setattr(secret_cli, "_resolve_auth", boom)
+    with pytest.raises(click.ClickException):
+        secret_cli._get_secret_client()
+
+
+def test_disable_core_dumps_noop_on_win32(monkeypatch):
+    monkeypatch.setattr(secret_cli.sys, "platform", "win32")
+    secret_cli._disable_core_dumps()  # returns early, no error
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="resource module is POSIX-only")
+def test_disable_core_dumps_swallows_setrlimit_error(monkeypatch):
+    import resource
+
+    monkeypatch.setattr(secret_cli.sys, "platform", "linux")
+
+    def boom(*_a, **_k):
+        raise OSError("cannot lower limit")
+
+    monkeypatch.setattr(resource, "setrlimit", boom)
+    secret_cli._disable_core_dumps()  # swallowed, no error
+
+
+def test_read_secret_value_strips_crlf(monkeypatch):
+    monkeypatch.setattr(secret_cli, "_stdin_isatty", lambda: False)
+    monkeypatch.setattr(
+        secret_cli.click, "get_binary_stream", lambda _name: io.BytesIO(b"secret\r\n")
+    )
+    assert secret_cli._read_secret_value(None) == b"secret"
+
+
+def test_read_secret_value_no_trailing_newline(monkeypatch):
+    monkeypatch.setattr(secret_cli, "_stdin_isatty", lambda: False)
+    monkeypatch.setattr(secret_cli.click, "get_binary_stream", lambda _name: io.BytesIO(b"secret"))
+    assert secret_cli._read_secret_value(None) == b"secret"
+
+
+def test_write_secret_file_cleans_up_temp_on_failure(monkeypatch, tmp_path):
+    def boom(*_a, **_k):
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(os, "replace", boom)
+    with pytest.raises(OSError):
+        secret_cli._write_secret_file(tmp_path / "x", b"data")
+    assert not list(tmp_path.glob(".x.*"))  # temp file cleaned up
+
+
+def test_write_secret_file_survives_dir_fsync_failure(monkeypatch, tmp_path):
+    real_open = os.open
+
+    def fake_open(path, flags, *a, **k):
+        if flags == os.O_RDONLY:  # the parent-dir fsync open
+            raise OSError("no dir fsync")
+        return real_open(path, flags, *a, **k)
+
+    monkeypatch.setattr(os, "open", fake_open)
+    out = tmp_path / "x"
+    secret_cli._write_secret_file(out, b"data")
+    assert out.read_bytes() == b"data"
+
+
+def test_put_no_active_recipient_for_self(wired):
+    fake, _ = wired
+    fake.pubkeys = []  # caller's key is not registered/active
+    result = CliRunner().invoke(secret, ["put", "db"], input="v\n")
+    assert result.exit_code != 0
+    assert "no active recipient" in result.output.lower()
+
+
+def test_grant_unknown_recipient(wired):
+    fake, km = wired
+    r1 = km.get_recipient()
+    fake.pubkeys = [_active_pubkey(r1)]
+    fake.value = SecretValueResponse(
+        name="db",
+        version_number=1,
+        alg="age",
+        ciphertext=crypto.encrypt(b"v", [r1]),
+        blob_ref=None,
+        recipients_snapshot=[km.fingerprint()],
+        rotation_needed=False,
+        created_at="t",
+    )
+    result = CliRunner().invoke(secret, ["grant", "db", "--to", "missing-id"])
+    assert result.exit_code != 0
+    assert "not an active recipient" in result.output.lower()
+
+
+def test_rotate_no_active_recipients(wired):
+    fake, km = wired
+    fake.pubkeys = []  # nobody active
+    fake.value = SecretValueResponse(
+        name="db",
+        version_number=1,
+        alg="age",
+        ciphertext=crypto.encrypt(b"v", [km.get_recipient()]),
+        blob_ref=None,
+        recipients_snapshot=["stale-fp"],
+        rotation_needed=True,
+        created_at="t",
+    )
+    result = CliRunner().invoke(secret, ["rotate", "db"], input="newval\n")
+    assert result.exit_code != 0
+    assert "no active recipients" in result.output.lower()

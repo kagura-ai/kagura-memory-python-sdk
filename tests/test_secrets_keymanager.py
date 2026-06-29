@@ -155,3 +155,17 @@ def test_keyringstore_roundtrip_with_usable_backend(monkeypatch):
     store.delete("identity:default")
     assert store.get("identity:default") is None
     store.delete("identity:default")  # idempotent: PasswordDeleteError swallowed
+
+
+def test_keyringstore_set_wraps_keyring_error(monkeypatch):
+    class _DummyBackend:  # usable backend (not keyring.backends.fail.Keyring)
+        pass
+
+    def boom(*_a, **_k):
+        raise keyring.errors.KeyringError("write failed")
+
+    monkeypatch.setattr(keyring, "get_keyring", lambda: _DummyBackend())
+    monkeypatch.setattr(keyring, "set_password", boom)
+    store = KeyringStore()
+    with pytest.raises(KaguraKeyCustodyError):
+        store.set("identity:default", "AGE-SECRET-KEY-1-x")

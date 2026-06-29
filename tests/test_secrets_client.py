@@ -11,8 +11,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
+from kagura_memory._auth import _OAuthAuth
 from kagura_memory.exceptions import (
     KaguraAuthError,
+    KaguraConnectionError,
     KaguraNotFoundError,
     KaguraSecretError,
 )
@@ -379,3 +381,55 @@ async def test_401_raises_auth_error():
         with pytest.raises(KaguraAuthError):
             await client.list_secrets()
     await client.close()
+
+
+@pytest.mark.asyncio
+async def test_generic_http_error_maps_to_connection_error():
+    client = _client()
+    with patch.object(client._client, "request", new_callable=AsyncMock) as req:
+        req.return_value = _error_response(500, "internal error")
+        with pytest.raises(KaguraConnectionError):
+            await client.list_secrets()
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_request_error_maps_to_connection_error():
+    client = _client()
+    with patch.object(client._client, "request", new_callable=AsyncMock) as req:
+        req.side_effect = httpx.ConnectError("network down")
+        with pytest.raises(KaguraConnectionError):
+            await client.list_secrets()
+    await client.close()
+
+
+# --- construction edges -----------------------------------------------------
+
+
+def test_requires_credentials():
+    with pytest.raises(ValueError, match="requires api_key"):
+        SecretClient()
+
+
+def test_rejects_http_base_url():
+    with pytest.raises(ValueError, match="HTTPS"):
+        SecretClient(api_key="t", base_url="http://insecure.example.com")
+
+
+@pytest.mark.asyncio
+async def test_oauth_construction_via_resolved_auth():
+    resolved = _OAuthAuth(
+        oauth=httpx.BasicAuth("u", "p"),  # stand-in httpx.Auth for the OAuth handler
+        mcp_url="https://memory.kagura-ai.com/mcp",
+        workspace_id="ws-uuid",
+    )
+    client = SecretClient._from_resolved_auth(resolved)
+    assert client.base_url == "https://memory.kagura-ai.com"
+    assert client._oauth is not None
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_async_context_manager_closes():
+    async with SecretClient(api_key="t", base_url="https://test.com") as c:
+        assert c.base_url == "https://test.com"
