@@ -306,6 +306,56 @@ async def test_revoke_grant():
 
 
 @pytest.mark.asyncio
+async def test_delete_secret_success():
+    client = _client()
+    resp = _mock_response(204, None)
+    with patch.object(client._client, "request", new_callable=AsyncMock) as req:
+        req.return_value = resp
+        result = await client.delete_secret("db")
+    assert result is None
+    method, url = req.call_args[0][0], req.call_args[0][1]
+    assert method == "DELETE"
+    assert url.endswith("/api/v1/config/secrets/db")
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_delete_secret_encodes_slash_name_segmentwise():
+    # Slash-containing names must stay addressable: the '/' separators are
+    # structural (the server uses a {name:path} converter), but each segment
+    # is percent-encoded, so a space inside a segment becomes %20.
+    client = _client()
+    resp = _mock_response(204, None)
+    with patch.object(client._client, "request", new_callable=AsyncMock) as req:
+        req.return_value = resp
+        await client.delete_secret("cloudflare/api token")
+    url = req.call_args[0][1]
+    assert url.endswith("/api/v1/config/secrets/cloudflare/api%20token")
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_delete_secret_missing_raises_not_found():
+    client = _client()
+    with patch.object(client._client, "request", new_callable=AsyncMock) as req:
+        req.return_value = _error_response(404, "secret not found")
+        with pytest.raises(KaguraNotFoundError):
+            await client.delete_secret("nope")
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_delete_secret_non_owner_raises_access_denied():
+    # The delete is owner-only: a non-owner (incl. a non-owner admin) gets 403.
+    client = _client()
+    with patch.object(client._client, "request", new_callable=AsyncMock) as req:
+        req.return_value = _error_response(403, "owner only")
+        with pytest.raises(KaguraConnectionError, match="(?i)access denied"):
+            await client.delete_secret("db")
+    await client.close()
+
+
+@pytest.mark.asyncio
 async def test_verify_audit():
     client = _client()
     resp = _mock_response(

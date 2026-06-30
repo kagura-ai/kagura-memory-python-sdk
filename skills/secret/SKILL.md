@@ -1,6 +1,6 @@
 ---
 name: secret
-description: Store and retrieve zero-knowledge secrets with the `kagura secret` CLI — age recipient encryption, local decrypt (memory-cloud never sees plaintext). Use for keygen/enroll, put/get, grant/revoke/rotate, exec-with-injected-env, and audit verification.
+description: Store and retrieve zero-knowledge secrets with the `kagura secret` CLI — age recipient encryption, local decrypt (memory-cloud never sees plaintext). Use for keygen/enroll, put/get, grant/revoke/rotate, owner-only delete, exec-with-injected-env, and audit verification.
 ---
 
 # kagura secret — zero-knowledge secret store
@@ -32,6 +32,7 @@ kagura secret grant db-prod --to <pubkey-id> # re-encrypt to the expanded recipi
 kagura secret revoke db-prod --to <pubkey-id># revoke a grant — then rotate
 kagura secret rotate db-prod                 # encrypt a NEW value to the remaining recipients
 kagura secret list                           # secret metadata (never the values)
+kagura secret delete db-prod                 # owner-only hard delete (cleanup, not invalidation — rotate first; needs memory-cloud 0.41.0+)
 kagura secret audit-verify                   # verify the tamper-evident audit chain
 ```
 
@@ -47,5 +48,11 @@ kagura secret audit-verify                   # verify the tamper-evident audit c
 - **revoke ≠ cryptographic invalidation.** A revoked recipient may still hold a
   fetched copy — after `revoke`, run `kagura secret rotate` *and* regenerate the
   upstream provider credential to actually contain a leak.
+- **delete ≠ invalidation either.** `kagura secret delete` is owner-only cleanup:
+  it removes the stored ciphertext + all versions + grants, but does **not**
+  un-share a value a recipient already fetched, nor rotate the live upstream
+  credential. Confirm with the user before deleting, and steer them to rotate the
+  upstream credential **first**, then delete — never delete on their behalf
+  without that warning.
 - On `keygen`/`approve`, surface the **fingerprint** so the user can verify it
   out-of-band (TOFU) before trusting the key.

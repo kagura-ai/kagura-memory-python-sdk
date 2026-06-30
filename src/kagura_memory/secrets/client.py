@@ -12,6 +12,7 @@ share one shape.
 from __future__ import annotations
 
 from typing import Any, Literal
+from urllib.parse import quote
 
 import httpx
 
@@ -260,6 +261,35 @@ class SecretClient:
         body = {"name": name, "recipient_pubkey_id": recipient_pubkey_id}
         response = await self._request("POST", f"{_BASE}/revoke-grant", json=body)
         return SecretMetaResponse.model_validate(response.json())
+
+    async def delete_secret(self, name: str) -> None:
+        """Hard-delete a secret and all its versions + grants (owner only).
+
+        Wraps ``DELETE /api/v1/config/secrets/{name}`` (memory-cloud v0.41.0).
+        The server appends a ``delete`` entry to the tamper-evident audit chain
+        **before** removal, so :meth:`verify_audit` still passes afterwards.
+
+        **Cleanup, NOT a security control.** Removing the stored ciphertext does
+        not un-share a value a recipient already fetched, nor rotate the live
+        upstream credential. To contain a leak, rotate the upstream credential
+        first, then delete.
+
+        Args:
+            name: Secret name. Slash-containing names (e.g.
+                ``cloudflare/api-token``) are addressable — each path segment is
+                percent-encoded individually so the ``/`` separators stay
+                structural in the URL.
+
+        Raises:
+            KaguraNotFoundError: No such secret (404).
+            KaguraConnectionError: Caller is not the workspace owner (403, the
+                delete is owner-only) or another HTTP/network error.
+        """
+        # Encode each segment but keep the '/' separators so a name like
+        # ``cloudflare/api token`` maps to ``cloudflare/api%20token`` and the
+        # server's ``{name:path}`` converter still routes on the slashes.
+        encoded = "/".join(quote(segment, safe="") for segment in name.split("/"))
+        await self._request("DELETE", f"{_BASE}/{encoded}")
 
     async def verify_audit(self) -> AuditVerifyResponse:
         """Verify the tamper-evident audit chain (owner/admin)."""

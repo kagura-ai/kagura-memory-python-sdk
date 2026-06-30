@@ -131,6 +131,9 @@ class FakeSecretClient:
     async def list_secrets(self):
         return self.secrets
 
+    async def delete_secret(self, name):
+        self.calls["delete"] = name
+
 
 @pytest.fixture
 def km():
@@ -346,6 +349,36 @@ def test_revoke_warns_revoke_is_not_invalidation(wired):
     low = result.output.lower()
     assert "rotate" in low
     assert "not" in low and "invalidate" in low
+
+
+# --- delete: owner-only hard delete, with the rotate-first warning ----------
+
+
+def test_delete_with_yes_skips_confirmation(wired):
+    fake, _ = wired
+    result = CliRunner().invoke(secret, ["delete", "db", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert fake.calls["delete"] == "db"
+    assert "deleted secret 'db'" in result.output.lower()
+
+
+def test_delete_prompts_and_warns_rotate_first(wired):
+    fake, _ = wired
+    result = CliRunner().invoke(secret, ["delete", "db"], input="y\n")
+    assert result.exit_code == 0, result.output
+    assert fake.calls["delete"] == "db"
+    low = result.output.lower()
+    # The confirmation must steer the user to rotate the upstream credential
+    # first and make clear delete is cleanup, not a security control.
+    assert "rotate" in low
+    assert "cleanup" in low and "not a security control" in low
+
+
+def test_delete_abort_does_not_call_server(wired):
+    fake, _ = wired
+    result = CliRunner().invoke(secret, ["delete", "db"], input="n\n")
+    assert result.exit_code != 0  # click.confirm(abort=True) → non-zero exit
+    assert "delete" not in fake.calls  # never reached the server
 
 
 # --- exec: env injection without mutating os.environ ------------------------
