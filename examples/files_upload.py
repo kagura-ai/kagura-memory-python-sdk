@@ -44,6 +44,22 @@ async def main():
             filename="example.txt",
         )
         print(f"Uploaded: id={obj.id} sha256={obj.sha256[:12]}... size={obj.size_bytes}B")
+        # Unbound upload → context_id is None (workspace-scoped, fully listable).
+        print(f"Binding context: {obj.context_id}")
+
+        # Optional: bind a file to an owning context for access control
+        # (server v0.41.0+). binding_context_id is the wire `context_id` —
+        # distinct from `context_id` above (the workspace). The bound context
+        # must be a write-accessible context within the workspace (else
+        # 403 / 422), so this is shown as a snippet rather than executed:
+        #
+        #   bound = await files.upload(
+        #       context_id=ctx,
+        #       source=b"...",
+        #       filename="bound.txt",
+        #       binding_context_id="<owning-context-uuid>",
+        #   )
+        #   print(bound.context_id)  # -> "<owning-context-uuid>"
 
         # Re-uploading identical bytes is idempotent — returns the existing object.
         dup = await files.upload(

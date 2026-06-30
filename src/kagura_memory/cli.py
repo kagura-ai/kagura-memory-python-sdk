@@ -1984,6 +1984,16 @@ async def _remember_file_object(
 @click.option("--context-id", "-c", help="Target context (workspace) UUID")
 @click.option("--content-type", "-t", help="MIME type override (default: sniffed)")
 @click.option(
+    "--binding-context-id",
+    "binding_context_id",
+    default=None,
+    help=(
+        "Optional owning context UUID to bind the file to for access control "
+        "(server v0.41.0+). Distinct from --context-id (the workspace). Must be a "
+        "write-accessible context within the workspace. Omit for a workspace-scoped file."
+    ),
+)
+@click.option(
     "--remember",
     is_flag=True,
     default=False,
@@ -2028,6 +2038,7 @@ def files_upload(
     path: Path,
     context_id: str | None,
     content_type: str | None,
+    binding_context_id: str | None,
     remember: bool,
     summary: str | None,
     memory_type: str,
@@ -2060,6 +2071,7 @@ def files_upload(
             context_id=ctx,
             source=path,
             content_type=content_type,
+            binding_context_id=binding_context_id,
             logger=logger,
         )
         if not remember:

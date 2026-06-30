@@ -37,6 +37,7 @@ SAMPLE_SHA256_HEX = hashlib.sha256(SAMPLE_BODY).hexdigest()
 SAMPLE_SHA256_B64 = base64.b64encode(hashlib.sha256(SAMPLE_BODY).digest()).decode()
 SAMPLE_CTX_ID = "00000000-0000-0000-0000-000000000001"
 SAMPLE_FILE_ID = "10000000-0000-0000-0000-000000000002"
+SAMPLE_BINDING_CTX_ID = "00000000-0000-0000-0000-0000000000bb"
 
 
 def _ok_response(
@@ -88,6 +89,35 @@ def _reserve_response_dict(
         "upload_url": upload_url,
         "expires_at": "2026-05-11T00:05:00Z",
     }
+
+
+# ============================================================================
+# FileObject model — optional context_id binding (#222, server v0.41.0)
+# ============================================================================
+
+
+def test_file_object_reads_context_id_and_ignores_unknown_fields():
+    """FileObject exposes the new nullable context_id and tolerates unknown fields.
+
+    The server's FileObjectOut gained a nullable context_id (the owning context
+    for ACL). The SDK model must surface it AND stay lenient about other future
+    server fields — a strict (extra='forbid') model would 500 the SDK the moment
+    the server adds context_id. This pins both halves of the contract.
+    """
+    fo = FileObject.model_validate(
+        {
+            **_file_object_dict(),
+            "context_id": SAMPLE_BINDING_CTX_ID,
+            "some_future_field": "ignored",  # forward-compat: must not raise
+        }
+    )
+    assert fo.context_id == SAMPLE_BINDING_CTX_ID
+
+
+def test_file_object_context_id_defaults_none_when_absent():
+    """A legacy (NULL-context) file has no context_id key → defaults to None."""
+    fo = FileObject.model_validate(_file_object_dict())
+    assert fo.context_id is None
 
 
 # ============================================================================
@@ -580,6 +610,110 @@ async def test_upload_bytes_requires_filename():
     mock_req.assert_not_called()
     mock_put.assert_not_called()
     await client.close()
+
+
+# ============================================================================
+# upload() — optional context_id binding (#222, server v0.41.0)
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_upload_forwards_binding_context_id_to_reserve():
+    """binding_context_id rides the reserve body as the wire field `context_id`.
+
+    The wire `context_id` is the server's owning-context ACL binding — distinct
+    from the SDK's `context_id` param, which maps to `workspace_id`. Both travel
+    on the same reserve body when a binding is requested.
+    """
+    client = FilesClient(api_key="test", base_url="https://example.com")
+    reserve_resp = _ok_response(201, _reserve_response_dict())
+    confirm_resp = _ok_response(200, _file_object_dict())
+    put_resp = _ok_response(200, {})
+
+    with (
+        patch.object(client._client, "request", new_callable=AsyncMock) as mock_req,
+        patch.object(client._upload_client, "put", new_callable=AsyncMock) as mock_put,
+    ):
+        mock_req.side_effect = [reserve_resp, confirm_resp]
+        mock_put.return_value = put_resp
+
+        await client.upload(
+            context_id=SAMPLE_CTX_ID,
+            source=SAMPLE_BODY,
+            filename="hello.txt",
+            binding_context_id=SAMPLE_BINDING_CTX_ID,
+        )
+
+    reserve_body = mock_req.call_args_list[0][1]["json"]
+    assert reserve_body["workspace_id"] == SAMPLE_CTX_ID
+    assert reserve_body["context_id"] == SAMPLE_BINDING_CTX_ID
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_upload_without_binding_context_id_omits_context_id():
+    """Legacy path: no binding → no `context_id` key in the reserve body (NULL-context)."""
+    client = FilesClient(api_key="test", base_url="https://example.com")
+    reserve_resp = _ok_response(201, _reserve_response_dict())
+    confirm_resp = _ok_response(200, _file_object_dict())
+    put_resp = _ok_response(200, {})
+
+    with (
+        patch.object(client._client, "request", new_callable=AsyncMock) as mock_req,
+        patch.object(client._upload_client, "put", new_callable=AsyncMock) as mock_put,
+    ):
+        mock_req.side_effect = [reserve_resp, confirm_resp]
+        mock_put.return_value = put_resp
+
+        await client.upload(context_id=SAMPLE_CTX_ID, source=SAMPLE_BODY, filename="hello.txt")
+
+    reserve_body = mock_req.call_args_list[0][1]["json"]
+    assert "context_id" not in reserve_body
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_upload_422_binding_context_not_in_workspace_surfaces_detail():
+    """A binding context outside the workspace → 422; the server detail must surface."""
+    client = FilesClient(api_key="test", base_url="https://example.com")
+    reserve_422 = _error_response(422, {"detail": "context does not belong to this workspace"})
+
+    with patch.object(client._client, "request", new_callable=AsyncMock) as mock_req:
+        mock_req.return_value = reserve_422
+        with pytest.raises(KaguraConnectionError, match="does not belong to this workspace"):
+            await client.upload(
+                context_id=SAMPLE_CTX_ID,
+                source=SAMPLE_BODY,
+                filename="hello.txt",
+                binding_context_id=SAMPLE_BINDING_CTX_ID,
+            )
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_upload_403_binding_context_denied_surfaces_detail():
+    """Write-denied on the binding context → 403; the server's reason must surface."""
+    client = FilesClient(
+        api_key="test",
+        base_url="https://example.com",
+        _auth_source="config",
+        _workspace_id_hint="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+    )
+    reserve_403 = _error_response(403, {"detail": "context write denied"})
+
+    with patch.object(client._client, "request", new_callable=AsyncMock) as mock_req:
+        mock_req.return_value = reserve_403
+        with pytest.raises(KaguraConnectionError) as exc_info:
+            await client.upload(
+                context_id=SAMPLE_CTX_ID,
+                source=SAMPLE_BODY,
+                filename="hello.txt",
+                binding_context_id=SAMPLE_BINDING_CTX_ID,
+            )
+        msg = str(exc_info.value)
+    await client.close()
+
+    assert "context write denied" in msg
 
 
 # ============================================================================
