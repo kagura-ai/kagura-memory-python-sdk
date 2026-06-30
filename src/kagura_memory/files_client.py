@@ -354,6 +354,7 @@ class FilesClient:
         source: Path | bytes,
         filename: str | None = None,
         content_type: str | None = None,
+        binding_context_id: str | None = None,
         logger: VerboseLogger | None = None,
     ) -> FileObject:
         """Upload a file to Kagura Memory Cloud.
@@ -384,6 +385,15 @@ class FilesClient:
             content_type: MIME type. When omitted, falls back to
                 :func:`mimetypes.guess_type` and then to
                 ``application/octet-stream``.
+            binding_context_id: Optional owning context to bind the file
+                to for access control (server v0.41.0+). It is sent as the
+                wire ``context_id`` field — **distinct** from the
+                ``context_id`` parameter above, which maps to
+                ``workspace_id``. The caller must have write (EDITOR+)
+                access to this context and it must belong to the upload's
+                workspace, else the server returns 403 / 422 respectively.
+                When omitted the file is NULL-context (workspace-scoped,
+                legacy behaviour) and stays fully listable.
 
         Returns:
             FileObject with the finalized file metadata. When the file
@@ -428,13 +438,18 @@ class FilesClient:
                 f"{resolved_filename} ({size_bytes} bytes)",
                 stage="reserve",
             )
-            reserve_body = {
+            reserve_body: dict[str, Any] = {
                 "workspace_id": context_id,
                 "filename": resolved_filename,
                 "content_type": resolved_content_type,
                 "size_bytes": size_bytes,
                 "sha256": sha256_hex,
             }
+            # Only send context_id when a binding was requested — omitting it
+            # keeps the upload NULL-context (workspace-scoped, legacy behaviour),
+            # which is exactly what the server expects for an unbound file.
+            if binding_context_id is not None:
+                reserve_body["context_id"] = binding_context_id
 
             try:
                 reserve_resp = await self._request(

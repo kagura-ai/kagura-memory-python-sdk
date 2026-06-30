@@ -765,7 +765,19 @@ class FileObject(BaseModel):
     ``status`` is typed as ``str`` (not a ``Literal``) because the server
     may add new lifecycle states over time. Known values today:
     ``reserved``, ``uploaded``, ``confirmed``.
+
+    ``context_id`` is the owning context a file is bound to for access
+    control (server v0.41.0+). It is ``None`` for legacy/workspace-scoped
+    files that were uploaded with no binding context — those stay fully
+    listable and accessible to the workspace.
+
+    ``extra="ignore"`` is explicit (matching the other wire-shape response
+    models): a strict model would 500 the SDK the moment the server adds a
+    field, so forward-compat tolerance is a deliberate contract, not an
+    accident of the pydantic default.
     """
+
+    model_config = ConfigDict(extra="ignore")
 
     id: str
     workspace_id: str
@@ -776,6 +788,7 @@ class FileObject(BaseModel):
     status: str
     created_at: datetime
     uploaded_at: datetime | None = None
+    context_id: str | None = None
 
 
 class FileReserveResponse(BaseModel):

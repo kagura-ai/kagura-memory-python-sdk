@@ -36,7 +36,7 @@ This SDK connects your Python code to [Kagura Memory Cloud](https://github.com/k
 | **`KaguraAgent`** | MCP + LLM | AI-powered — auto-decides what to remember/recall from conversations |
 | **`KaguraClient`** | MCP (JSON-RPC) | Direct memory ops — remember, recall, explore, reference, forget |
 | **`ResourceClient`** | REST API | External data ingestion — push data from Slack, CI/CD, CRM into Kagura |
-| **`FilesClient`** | REST + presigned PUT | File uploads with sha256 integrity binding (R2) |
+| **`FilesClient`** | REST + presigned PUT | File uploads with sha256 integrity binding (R2); optional per-file context binding for ACL |
 | **`SecretClient`** | REST + age crypto | Zero-knowledge secrets — age recipient encryption, **local decryption** (the server only ever stores armored ciphertext) |
 | **`FileIngestor`** | CLI + SDK | Document ingestion — PDF/Office/HTML/EPUB, audio & YouTube transcripts → memory graph + R2 archive |
 
@@ -299,6 +299,17 @@ async with FilesClient.from_mcp_url(api_key="kagura_...", mcp_url="https://memor
     # Upload from bytes — filename is required (server enforces non-empty)
     f2 = await client.upload(context_id="ctx-uuid", source=b"...", filename="payload.bin")
 
+    # Optionally bind a file to an owning context for access control (server
+    # v0.41.0+). binding_context_id is the wire `context_id` — distinct from the
+    # `context_id` arg, which is the workspace. Omit it for a workspace-scoped
+    # (NULL-context) file. FileObject.context_id reflects the binding (or None).
+    f3 = await client.upload(
+        context_id="ctx-uuid",
+        source=Path("./plan.pdf"),
+        binding_context_id="owning-ctx-uuid",
+    )
+    print(f3.context_id)  # -> "owning-ctx-uuid"
+
     # Short-lived presigned GET URL
     url = await client.download_url(f.id)
 
@@ -308,6 +319,8 @@ async with FilesClient.from_mcp_url(api_key="kagura_...", mcp_url="https://memor
 ```
 
 Re-uploading bytes whose sha256 already exists in the workspace returns the **existing `FileObject`** (idempotent dedup happy-path) — no exception.
+
+A file bound via `binding_context_id` routes read/write/list/delete through that context's ACL (server v0.41.0+): you need write (EDITOR+) access to the context, and it must belong to the upload's workspace (else `403` / `422`). A denied **download** surfaces as a `404` (existence-hiding), not a `403`. Unbound uploads stay workspace-scoped and fully listable.
 
 Runnable: [`examples/files_upload.py`](examples/files_upload.py).
 
@@ -338,7 +351,7 @@ Most workflows use the CLI instead — see [`kagura secret`](#zero-knowledge-sec
 
 | SDK | Min memory-cloud | Notes |
 |---|---|---|
-| 0.34.0+ | 0.17.1 (0.41.0 for `kagura secret delete`) | **Owner-only secret delete.** `SecretClient.delete_secret` / `kagura secret delete` need memory-cloud **0.41.0+** (`DELETE /api/v1/config/secrets/{name}`). `MIN_SERVER_VERSION` stays **0.17.1** — only the delete surface requires 0.41.0. |
+| 0.34.0+ | 0.17.1 (0.41.0 for secret delete + file context binding) | **Owner-only secret delete + file context binding.** `SecretClient.delete_secret` / `kagura secret delete` (`DELETE /api/v1/config/secrets/{name}`) and `FilesClient.upload(binding_context_id=…)` / `FileObject.context_id` (context-scoped file ACL) need memory-cloud **0.41.0+**. `MIN_SERVER_VERSION` stays **0.17.1** — only these surfaces require 0.41.0. |
 | 0.33.0+ | 0.17.1 (0.39.0 for `kagura secret`) | **Zero-knowledge secret store.** `SecretClient` / `kagura secret` need memory-cloud **0.39.0+** (the `/api/v1/config/secrets` endpoints). `MIN_SERVER_VERSION` is **not** bumped — the rest of the SDK still works on 0.17.1+; only the secret surface requires 0.39.0. Requires the `[secret]` extra. |
 | 0.27.0 – 0.31.x | 0.17.1 | **Agent memory substrate.** `load_pinned` + `delivery_mode` pin-on-write, `recall_upcoming`, `feedback`, `set_state`/`get_state`, and the `trust_tier` recall filter each need a memory-cloud carrying the matching [#885](https://github.com/kagura-ai/memory-cloud/issues/885) agent-substrate APIs (≈ v0.23.0+); against an older server those specific tools return an MCP "tool not found". `MIN_SERVER_VERSION` stays **0.17.1** — the rest of the SDK still works on 0.17.1+. **v0.29.0 also changed error handling (breaking): MCP tool methods now raise `KaguraNotFoundError`/`KaguraError` instead of returning `{"status":"error"}` dicts** (see the KaguraClient error-handling note above). |
 | 0.15.0 – 0.20.x | 0.15.1 | `FilesClient` + R2 checksum binding. `list_tags()` additionally needs **0.15.4** — `MIN_SERVER_VERSION` is intentionally not bumped, only that one method requires the newer server. |
@@ -441,6 +454,7 @@ kagura sleep rollback <context-id> <report-id> -y    # destructive: prompts unle
 
 # File uploads (R2 checksum binding)
 kagura files upload ./report.pdf -c <context-id>
+kagura files upload ./plan.pdf -c <context-id> --binding-context-id <ctx>   # bind to an owning context for ACL (v0.41.0+)
 kagura files list -c <context-id> --limit 50
 kagura files download-url <file-id>
 kagura files delete <file-id>
@@ -564,7 +578,7 @@ follow-up.
 | Resource Event ingestion | `ResourceClient` | REST API | Resource Token |
 | Resource Impact (stats) | `ResourceClient` | REST API | API Key |
 | Resource Schema | `ResourceClient` | REST API | API Key |
-| File upload / download-url / delete / list | `FilesClient` | REST + presigned PUT | API Key |
+| File upload (optional context binding) / download-url / delete / list | `FilesClient` | REST + presigned PUT | API Key |
 | Secret pubkey registry (register/list/me/approve/revoke) | `SecretClient` | REST API | API Key / OAuth |
 | Secret put / fetch / list / revoke-grant / delete / audit-verify | `SecretClient` | REST API (age, local decrypt) | API Key / OAuth |
 | Account erasure (GDPR Art.17 / APPI) | — | Web UI only | Session |

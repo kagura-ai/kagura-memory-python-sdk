@@ -39,6 +39,7 @@ def _isolate_oauth_state(tmp_path, monkeypatch):
 
 SAMPLE_CTX_ID = "00000000-0000-0000-0000-000000000001"
 SAMPLE_FILE_ID = "10000000-0000-0000-0000-000000000002"
+SAMPLE_BINDING_CTX_ID = "00000000-0000-0000-0000-0000000000bb"
 
 
 def _file_object() -> FileObject:
@@ -105,6 +106,50 @@ def test_files_upload(mock_client_cls, mock_config, tmp_path):
     call = mock_client.upload.call_args
     assert call.kwargs["context_id"] == SAMPLE_CTX_ID
     assert call.kwargs["source"] == p
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.FilesClient")
+def test_files_upload_forwards_binding_context_id(mock_client_cls, mock_config, tmp_path):
+    """`files upload --binding-context-id <ctx>` threads binding_context_id to upload()."""
+    mock_config.return_value = {
+        "api_key": "key",
+        "mcp_url": "https://test.com/mcp",
+        "context_id": SAMPLE_CTX_ID,
+    }
+    mock_client = _mock_files_client("upload", _file_object())
+    _wire_files_client_mock(mock_client_cls, mock_client)
+
+    p = tmp_path / "hello.txt"
+    p.write_text("hi")
+    runner = CliRunner()
+    result = runner.invoke(
+        main, ["files", "upload", str(p), "--binding-context-id", SAMPLE_BINDING_CTX_ID]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert mock_client.upload.call_args.kwargs["binding_context_id"] == SAMPLE_BINDING_CTX_ID
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.FilesClient")
+def test_files_upload_without_binding_flag_passes_none(mock_client_cls, mock_config, tmp_path):
+    """Without --binding-context-id, the CLI passes binding_context_id=None (NULL-context)."""
+    mock_config.return_value = {
+        "api_key": "key",
+        "mcp_url": "https://test.com/mcp",
+        "context_id": SAMPLE_CTX_ID,
+    }
+    mock_client = _mock_files_client("upload", _file_object())
+    _wire_files_client_mock(mock_client_cls, mock_client)
+
+    p = tmp_path / "hello.txt"
+    p.write_text("hi")
+    runner = CliRunner()
+    result = runner.invoke(main, ["files", "upload", str(p)])
+
+    assert result.exit_code == 0, result.output
+    assert mock_client.upload.call_args.kwargs["binding_context_id"] is None
 
 
 def _mock_kagura_client(mock_client_cls: MagicMock) -> MagicMock:
