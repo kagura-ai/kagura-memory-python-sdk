@@ -338,6 +338,7 @@ Most workflows use the CLI instead — see [`kagura secret`](#zero-knowledge-sec
 
 | SDK | Min memory-cloud | Notes |
 |---|---|---|
+| 0.34.0+ | 0.17.1 (0.41.0 for `kagura secret delete`) | **Owner-only secret delete.** `SecretClient.delete_secret` / `kagura secret delete` need memory-cloud **0.41.0+** (`DELETE /api/v1/config/secrets/{name}`). `MIN_SERVER_VERSION` stays **0.17.1** — only the delete surface requires 0.41.0. |
 | 0.33.0+ | 0.17.1 (0.39.0 for `kagura secret`) | **Zero-knowledge secret store.** `SecretClient` / `kagura secret` need memory-cloud **0.39.0+** (the `/api/v1/config/secrets` endpoints). `MIN_SERVER_VERSION` is **not** bumped — the rest of the SDK still works on 0.17.1+; only the secret surface requires 0.39.0. Requires the `[secret]` extra. |
 | 0.27.0 – 0.31.x | 0.17.1 | **Agent memory substrate.** `load_pinned` + `delivery_mode` pin-on-write, `recall_upcoming`, `feedback`, `set_state`/`get_state`, and the `trust_tier` recall filter each need a memory-cloud carrying the matching [#885](https://github.com/kagura-ai/memory-cloud/issues/885) agent-substrate APIs (≈ v0.23.0+); against an older server those specific tools return an MCP "tool not found". `MIN_SERVER_VERSION` stays **0.17.1** — the rest of the SDK still works on 0.17.1+. **v0.29.0 also changed error handling (breaking): MCP tool methods now raise `KaguraNotFoundError`/`KaguraError` instead of returning `{"status":"error"}` dicts** (see the KaguraClient error-handling note above). |
 | 0.15.0 – 0.20.x | 0.15.1 | `FilesClient` + R2 checksum binding. `list_tags()` additionally needs **0.15.4** — `MIN_SERVER_VERSION` is intentionally not bumped, only that one method requires the newer server. |
@@ -462,8 +463,11 @@ kagura secret grant db-prod --to <pubkey-id> # re-encrypt to the expanded recipi
 kagura secret revoke db-prod --to <pubkey-id># revoke a grant (then `rotate` — revoke ≠ invalidation)
 kagura secret rotate db-prod                 # encrypt a NEW value to the remaining recipients
 kagura secret list                           # secret metadata (never the values)
+kagura secret delete db-prod                 # owner-only hard delete (cleanup, not invalidation — rotate first)
 kagura secret audit-verify                   # verify the tamper-evident audit chain
 ```
+
+> **`delete` is cleanup, not a security control.** It removes the stored ciphertext (all versions + grants) but does **not** un-share a value a recipient already fetched, nor rotate the live upstream credential. To contain a leak, rotate the upstream credential first, then delete. Owner-only; needs memory-cloud 0.41.0+.
 
 ### Document ingestion (`kagura ingest`)
 
@@ -562,7 +566,7 @@ follow-up.
 | Resource Schema | `ResourceClient` | REST API | API Key |
 | File upload / download-url / delete / list | `FilesClient` | REST + presigned PUT | API Key |
 | Secret pubkey registry (register/list/me/approve/revoke) | `SecretClient` | REST API | API Key / OAuth |
-| Secret put / fetch / list / revoke-grant / audit-verify | `SecretClient` | REST API (age, local decrypt) | API Key / OAuth |
+| Secret put / fetch / list / revoke-grant / delete / audit-verify | `SecretClient` | REST API (age, local decrypt) | API Key / OAuth |
 | Account erasure (GDPR Art.17 / APPI) | — | Web UI only | Session |
 
 Context deletion is a **soft delete** available via `KaguraClient.delete_context()` and `kagura context delete` (the CLI prompts for confirmation). Account erasure (GDPR Art.17 / APPI) is intentionally Web UI only — it is irreversible and requires session authentication and confirmation. `kagura sleep rollback` runs over the MCP API Key but is itself destructive (reverses edge creation, merges, importance updates, promotions, and archives) and the CLI requires `--yes` to skip the interactive confirmation. The server commits per-action without a Saga, so a 5xx response after partial success means SOME actions may have been reversed before the error surfaced — re-run `kagura sleep report` to inspect the post-failure state.

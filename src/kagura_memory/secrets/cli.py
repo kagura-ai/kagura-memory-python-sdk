@@ -476,6 +476,32 @@ def rotate(name: str, from_file: str | None, profile: str) -> None:
     click.echo("  Remember to regenerate the upstream provider credential (the real token).")
 
 
+@secret.command()
+@click.argument("name")
+@click.option("--yes", "-y", is_flag=True, help="Skip the confirmation prompt.")
+def delete(name: str, yes: bool) -> None:
+    """Hard-delete a secret and all its versions + grants (owner only).
+
+    Delete is CLEANUP, not a security control: it removes the stored ciphertext
+    but does NOT un-share a value a recipient already fetched, nor rotate the
+    live upstream credential. Rotate the upstream credential first, then delete.
+    """
+    if not yes:
+        click.echo(f"About to permanently delete secret '{name}' (all versions + grants).")
+        click.echo("  ⚠ Delete is CLEANUP, not a security control. It removes stored")
+        click.echo("    ciphertext but does NOT un-share a value already fetched, nor")
+        click.echo("    rotate the live upstream credential.")
+        click.echo("    To contain a leak, rotate the upstream credential FIRST, then delete.")
+        click.confirm("Proceed?", abort=True)
+
+    async def _delete() -> None:
+        async with _get_secret_client() as c:
+            await c.delete_secret(name)
+
+    _run(_delete())
+    click.echo(f"✓ deleted secret '{name}'.")
+
+
 @secret.command(name="audit-verify")
 def audit_verify() -> None:
     """Verify the tamper-evident audit chain (owner/admin)."""
