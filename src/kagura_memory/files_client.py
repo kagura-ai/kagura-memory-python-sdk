@@ -26,6 +26,7 @@ import mimetypes
 import uuid
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import parse_qs, urlparse
 
 import httpx
 
@@ -268,10 +269,12 @@ class FilesClient:
                 # targets workspace B). Surface the credential source and
                 # requested workspace prefix so the cause is visible without
                 # leaking the api_key value or Bearer header. The hint shape
-                # adapts to whether the failing request carries a workspace —
-                # file-id-based endpoints (download-url/delete) don't, so the
-                # "workspace not accessible / --context-id" language is
-                # suppressed for those to avoid misleading operators.
+                # adapts to whether the failing request carries a workspace. As
+                # of memory-cloud v0.41.0 every file endpoint (reserve / confirm
+                # / download-url / delete / list) puts workspace_id on the wire,
+                # so the workspace-mismatch heading is emitted for all of them;
+                # the generic "access denied" heading remains only as a
+                # defensive fallback for a request that carries no workspace.
                 raise KaguraConnectionError(
                     _format_workspace_403_hint(
                         auth_source=self._auth_source,
@@ -315,17 +318,20 @@ class FilesClient:
         the documented and observed common cause; parsing the
         S3-XML error body for finer discrimination is out of scope
         for v0.14.0.
+
+        The checksum header is sent **only when the presign signed it**
+        (``X-Amz-SignedHeaders`` contains ``x-amz-checksum-sha256``). A
+        server with R2 checksum binding OFF presigns without it, and
+        sending it anyway makes the SigV4 signature mismatch → R2 rejects
+        with 403 SignatureDoesNotMatch (#226). The sha256 is re-sent at
+        the confirm step regardless, so server-side verification still
+        holds when binding is off.
         """
-        checksum_b64 = base64.b64encode(bytes.fromhex(sha256_hex)).decode()
+        headers = {"Content-Type": content_type}
+        if _presign_signs_checksum(upload_url):
+            headers["x-amz-checksum-sha256"] = base64.b64encode(bytes.fromhex(sha256_hex)).decode()
         try:
-            response = await self._upload_client.put(
-                upload_url,
-                content=body,
-                headers={
-                    "Content-Type": content_type,
-                    "x-amz-checksum-sha256": checksum_b64,
-                },
-            )
+            response = await self._upload_client.put(upload_url, content=body, headers=headers)
             response.raise_for_status()
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 400:
@@ -482,9 +488,13 @@ class FilesClient:
 
             log.action("Confirming upload", stage="confirm")
             confirm_started = True
+            # workspace_id is required on the confirm query string (memory-cloud
+            # v0.41.0); omitting it returns 422 VAL-001 and the upload never
+            # finalizes. context_id is the SDK's name for the workspace on the wire.
             confirm_resp = await self._request(
                 "POST",
                 f"/api/v1/files/{reserve.file_id}/confirm",
+                params={"workspace_id": context_id},
                 json={"sha256": sha256_hex},
             )
             result = FileObject.model_validate(confirm_resp.json())
@@ -514,14 +524,42 @@ class FilesClient:
             )
             raise
 
-    async def download_url(self, file_id: str) -> str:
-        """Return a short-lived presigned GET URL for ``file_id``."""
-        response = await self._request("GET", f"/api/v1/files/{file_id}/download-url")
+    async def download_url(self, file_id: str, *, context_id: str) -> str:
+        """Return a short-lived presigned GET URL for ``file_id``.
+
+        Args:
+            file_id: The file object id.
+            context_id: The owning workspace UUID. **Required** — memory-cloud
+                v0.41.0 scopes file-id lookups to the workspace and returns 422
+                without ``workspace_id`` on the query. Sent as ``workspace_id``
+                (the SDK's consistent ``context_id`` → ``workspace_id`` wire
+                mapping). A file bound to a private context the caller can't
+                read is reported as 404 (existence-hiding); a workspace mismatch
+                (wrong ``context_id``) surfaces as a 403 with an actionable hint.
+        """
+        _validate_context_id(context_id)
+        response = await self._request(
+            "GET",
+            f"/api/v1/files/{file_id}/download-url",
+            params={"workspace_id": context_id},
+        )
         return FileDownloadUrlResponse.model_validate(response.json()).download_url
 
-    async def delete(self, file_id: str) -> None:
-        """Soft-delete a file by id (server hard-deletes after retention)."""
-        await self._request("DELETE", f"/api/v1/files/{file_id}")
+    async def delete(self, file_id: str, *, context_id: str) -> None:
+        """Soft-delete a file by id (server hard-deletes after retention).
+
+        Args:
+            file_id: The file object id.
+            context_id: The owning workspace UUID. **Required** (memory-cloud
+                v0.41.0); sent as ``workspace_id`` on the query. Omitting it
+                returns 422.
+        """
+        _validate_context_id(context_id)
+        await self._request(
+            "DELETE",
+            f"/api/v1/files/{file_id}",
+            params={"workspace_id": context_id},
+        )
 
     async def list(
         self,
@@ -612,10 +650,11 @@ def _extract_requested_workspace(
 ) -> str | None:
     """Recover the ``workspace_id`` the failing request was targeting.
 
-    File endpoints carry workspace_id in either the JSON body (reserve)
-    or the query string (list). Returns ``None`` when the request was
-    file-id based (download-url / delete / confirm) and no workspace
-    information is on the wire.
+    File endpoints carry workspace_id in either the JSON body (reserve) or the
+    query string (confirm / download-url / delete / list, all of which put it
+    on the query as of memory-cloud v0.41.0). Returns ``None`` only as a
+    defensive fallback when neither the body nor the params carries a
+    ``workspace_id`` — no current file request hits that path.
     """
     if json is not None:
         ws = json.get("workspace_id")
@@ -760,6 +799,27 @@ def _validate_context_id(context_id: str) -> None:
             "Use the OAuth profile's workspace_id, a UUID from "
             "`kagura context list`, or run `kagura auth login` first."
         ) from e
+
+
+def _presign_signs_checksum(upload_url: str) -> bool:
+    """True if the presigned URL signed the sha256 checksum header.
+
+    Reads ``X-Amz-SignedHeaders`` from the presigned PUT URL's query and reports
+    whether it lists ``x-amz-checksum-sha256`` (case-insensitive). The SDK must
+    send the checksum header only when the server bound it into the presign (R2
+    checksum binding on). Sending it against a presign that did not sign it
+    invalidates the SigV4 signature and R2 rejects the PUT with 403
+    SignatureDoesNotMatch (#226).
+
+    Args:
+        upload_url: The presigned R2 PUT URL returned by ``/files/reserve``.
+
+    Returns:
+        ``True`` when ``x-amz-checksum-sha256`` is in the signed-headers set,
+        ``False`` otherwise (including when the URL has no query string).
+    """
+    signed = parse_qs(urlparse(upload_url).query).get("X-Amz-SignedHeaders", [""])[0]
+    return "x-amz-checksum-sha256" in signed.lower()
 
 
 def _resolve_content_type(content_type: str | None, filename: str) -> str:

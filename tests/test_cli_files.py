@@ -421,11 +421,30 @@ def test_files_download_url(mock_client_cls, mock_config):
     _wire_files_client_mock(mock_client_cls, mock_client)
 
     runner = CliRunner()
-    result = runner.invoke(main, ["files", "download-url", SAMPLE_FILE_ID])
+    result = runner.invoke(main, ["files", "download-url", SAMPLE_FILE_ID, "-c", SAMPLE_CTX_ID])
 
     assert result.exit_code == 0, result.output
     assert "https://r2.example.com/get/key" in result.output
-    mock_client.download_url.assert_awaited_once_with(SAMPLE_FILE_ID)
+    mock_client.download_url.assert_awaited_once_with(SAMPLE_FILE_ID, context_id=SAMPLE_CTX_ID)
+
+
+@patch("kagura_memory.cli.load_config")
+def test_files_download_url_requires_context(mock_config, monkeypatch, tmp_path):
+    """`files download-url` now needs a resolvable workspace (v0.41.0 breaking change).
+
+    With no --context-id, no OAuth profile, and no .kagura.json context_id, the
+    command errors instead of hitting the server and getting a 422.
+    """
+    mock_config.return_value = {"api_key": "key", "mcp_url": "https://test.com/mcp"}
+    monkeypatch.delenv("KAGURA_PROFILE", raising=False)
+    monkeypatch.setattr(
+        "kagura_memory.auth.credentials.DEFAULT_CREDENTIALS_PATH",
+        tmp_path / "missing-credentials.json",
+    )
+    runner = CliRunner()
+    result = runner.invoke(main, ["files", "download-url", SAMPLE_FILE_ID])
+    assert result.exit_code != 0
+    assert "context_id is missing" in result.output or "--context-id" in result.output
 
 
 @patch("kagura_memory.cli.load_config")
@@ -436,11 +455,11 @@ def test_files_delete(mock_client_cls, mock_config):
     _wire_files_client_mock(mock_client_cls, mock_client)
 
     runner = CliRunner()
-    result = runner.invoke(main, ["files", "delete", SAMPLE_FILE_ID])
+    result = runner.invoke(main, ["files", "delete", SAMPLE_FILE_ID, "-c", SAMPLE_CTX_ID])
 
     assert result.exit_code == 0, result.output
     assert f"Deleted {SAMPLE_FILE_ID}" in result.output
-    mock_client.delete.assert_awaited_once_with(SAMPLE_FILE_ID)
+    mock_client.delete.assert_awaited_once_with(SAMPLE_FILE_ID, context_id=SAMPLE_CTX_ID)
 
 
 @patch("kagura_memory.cli.load_config")

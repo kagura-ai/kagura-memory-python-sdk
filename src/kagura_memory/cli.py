@@ -2099,35 +2099,43 @@ def files_upload(
 
 @files.command(name="download-url")
 @click.argument("file_id")
-def files_download_url(file_id: str):
+@click.option("--context-id", "-c", help="Context (workspace) UUID the file belongs to")
+def files_download_url(file_id: str, context_id: str | None):
     """
     Print a short-lived presigned GET URL for a file.
 
+    The owning context (workspace) is required (server v0.41.0): pass
+    ``--context-id`` or set it in your OAuth profile / .kagura.json.
+
     Example:
-      kagura files download-url <file_id>
+      kagura files download-url <file_id> -c <context-id>
     """
 
-    async def op(client: FilesClient, _ctx: str) -> str:
-        return await client.download_url(file_id)
+    async def op(client: FilesClient, ctx: str) -> str:
+        return await client.download_url(file_id, context_id=ctx)
 
-    _run_files_command(op, None, needs_context=False)
+    _run_files_command(op, context_id)
 
 
 @files.command(name="delete")
 @click.argument("file_id")
-def files_delete(file_id: str):
+@click.option("--context-id", "-c", help="Context (workspace) UUID the file belongs to")
+def files_delete(file_id: str, context_id: str | None):
     """
     Soft-delete a file by id.
 
+    The owning context (workspace) is required (server v0.41.0): pass
+    ``--context-id`` or set it in your OAuth profile / .kagura.json.
+
     Example:
-      kagura files delete <file_id>
+      kagura files delete <file_id> -c <context-id>
     """
 
-    async def op(client: FilesClient, _ctx: str) -> str:
-        await client.delete(file_id)
+    async def op(client: FilesClient, ctx: str) -> str:
+        await client.delete(file_id, context_id=ctx)
         return f"Deleted {file_id}"
 
-    _run_files_command(op, None, needs_context=False)
+    _run_files_command(op, context_id)
 
 
 @files.command(name="list")

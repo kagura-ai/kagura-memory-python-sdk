@@ -57,7 +57,7 @@ kagura ingest ./report.pdf
 
 ```bash
 kagura recall "report findings" -k 5        # search across sections
-kagura files download-url <file_id>          # short-lived GET on the original
+kagura files download-url <file_id> -c <context-id>   # short-lived GET on the original
 ```
 
 Ingestion extracts **text** — from PDFs, Office/HTML/EPUB documents, audio/video transcripts, and YouTube captions. Images embedded in a document are detected and counted (`IngestResult.skipped_images`) but not yet OCR'd: a vision provider (Gemini 2.5 Flash by default) is configured and validated, but the orchestrator does not currently invoke `Provider.describe_image()` — image-to-text memories are a planned follow-up. Pass `--no-vision` to skip provider configuration entirely, or `--dry-run` to see token / cost estimates without calling an LLM.
@@ -310,12 +310,13 @@ async with FilesClient.from_mcp_url(api_key="kagura_...", mcp_url="https://memor
     )
     print(f3.context_id)  # -> "owning-ctx-uuid"
 
-    # Short-lived presigned GET URL
-    url = await client.download_url(f.id)
+    # Short-lived presigned GET URL. download_url / delete require the owning
+    # context_id (workspace) — server v0.41.0 scopes file-id lookups to it.
+    url = await client.download_url(f.id, context_id="ctx-uuid")
 
     # List & delete
     page = await client.list(context_id="ctx-uuid", limit=50)
-    await client.delete(f.id)
+    await client.delete(f.id, context_id="ctx-uuid")
 ```
 
 Re-uploading bytes whose sha256 already exists in the workspace returns the **existing `FileObject`** (idempotent dedup happy-path) — no exception.
@@ -351,6 +352,7 @@ Most workflows use the CLI instead — see [`kagura secret`](#zero-knowledge-sec
 
 | SDK | Min memory-cloud | Notes |
 |---|---|---|
+| 0.35.0+ | 0.17.1 (0.41.0 for file uploads/downloads) | **FilesClient v0.41.0 compatibility (breaking).** memory-cloud 0.41.0 requires `workspace_id` on the query of the file-id endpoints (`confirm`/`download-url`/`delete`) and presigns R2 PUT without the checksum header — so pre-0.35.0 SDKs get 403/422 on every upload/download/delete against it. This SDK sends `workspace_id` on those endpoints (harmlessly ignored by older servers) and only binds the checksum when the presign signed it. **Breaking:** `FilesClient.download_url(file_id, *, context_id)` and `delete(file_id, *, context_id)` now require `context_id`; `kagura files download-url`/`delete` require `-c/--context-id` (or a profile/`.kagura.json` workspace). `MIN_SERVER_VERSION` stays **0.17.1**. |
 | 0.34.0+ | 0.17.1 (0.41.0 for secret delete + file context binding) | **Owner-only secret delete + file context binding.** `SecretClient.delete_secret` / `kagura secret delete` (`DELETE /api/v1/config/secrets/{name}`) and `FilesClient.upload(binding_context_id=…)` / `FileObject.context_id` (context-scoped file ACL) need memory-cloud **0.41.0+**. `MIN_SERVER_VERSION` stays **0.17.1** — only these surfaces require 0.41.0. |
 | 0.33.0+ | 0.17.1 (0.39.0 for `kagura secret`) | **Zero-knowledge secret store.** `SecretClient` / `kagura secret` need memory-cloud **0.39.0+** (the `/api/v1/config/secrets` endpoints). `MIN_SERVER_VERSION` is **not** bumped — the rest of the SDK still works on 0.17.1+; only the secret surface requires 0.39.0. Requires the `[secret]` extra. |
 | 0.27.0 – 0.31.x | 0.17.1 | **Agent memory substrate.** `load_pinned` + `delivery_mode` pin-on-write, `recall_upcoming`, `feedback`, `set_state`/`get_state`, and the `trust_tier` recall filter each need a memory-cloud carrying the matching [#885](https://github.com/kagura-ai/memory-cloud/issues/885) agent-substrate APIs (≈ v0.23.0+); against an older server those specific tools return an MCP "tool not found". `MIN_SERVER_VERSION` stays **0.17.1** — the rest of the SDK still works on 0.17.1+. **v0.29.0 also changed error handling (breaking): MCP tool methods now raise `KaguraNotFoundError`/`KaguraError` instead of returning `{"status":"error"}` dicts** (see the KaguraClient error-handling note above). |
@@ -456,8 +458,8 @@ kagura sleep rollback <context-id> <report-id> -y    # destructive: prompts unle
 kagura files upload ./report.pdf -c <context-id>
 kagura files upload ./plan.pdf -c <context-id> --binding-context-id <ctx>   # bind to an owning context for ACL (v0.41.0+)
 kagura files list -c <context-id> --limit 50
-kagura files download-url <file-id>
-kagura files delete <file-id>
+kagura files download-url <file-id> -c <context-id>   # -c required (server v0.41.0)
+kagura files delete <file-id> -c <context-id>         # -c required (server v0.41.0)
 
 # Config
 kagura config show

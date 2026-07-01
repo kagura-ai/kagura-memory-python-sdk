@@ -21,8 +21,8 @@ binding). Thin wrapper around the installed `kagura` CLI.
 kagura files upload ./data.bin          # upload (sha256-bound presigned PUT)
 kagura files upload ./data.bin --binding-context-id <ctx>   # bind the file to an owning context for ACL (server v0.41.0+)
 kagura files list                       # list stored files
-kagura files download-url <file_id>     # short-lived GET URL
-kagura files delete <file_id>           # delete a file
+kagura files download-url <file_id> -c <ctx>   # short-lived GET URL (context required, server v0.41.0+)
+kagura files delete <file_id> -c <ctx>         # delete a file (context required, server v0.41.0+)
 ```
 
 ## Consume the result

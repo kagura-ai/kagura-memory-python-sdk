@@ -69,8 +69,10 @@ async def main():
         )
         print(f"Dedup happy-path: same id? {dup.id == obj.id}")
 
-        # Short-lived presigned GET URL for the original bytes.
-        url = await files.download_url(obj.id)
+        # Short-lived presigned GET URL for the original bytes. download_url /
+        # delete require the owning context_id (workspace) — server v0.41.0
+        # scopes file-id lookups to it.
+        url = await files.download_url(obj.id, context_id=ctx)
         print(f"Download URL (expires shortly): {url[:60]}...")
 
         # List files in the context, newest first.
@@ -78,7 +80,7 @@ async def main():
         print(f"Files in context: {len(page.files)}")
 
         # Cleanup.
-        await files.delete(obj.id)
+        await files.delete(obj.id, context_id=ctx)
         print(f"Deleted: {obj.id}")
 
 
