@@ -52,8 +52,8 @@ async def test_upload_round_trip_against_live_backend():
         assert file_obj.size_bytes == len(body)
         assert file_obj.status in ("uploaded", "confirmed")
 
-        # Download URL
-        url = await client.download_url(file_obj.id)
+        # Download URL — context_id (workspace) required as of server v0.41.0.
+        url = await client.download_url(file_obj.id, context_id=INTEGRATION_CONTEXT_ID)
         assert url.startswith("http")
 
         # List — uploaded file should appear in the workspace
@@ -61,4 +61,4 @@ async def test_upload_round_trip_against_live_backend():
         assert any(f.id == file_obj.id for f in page.files)
 
         # Clean up
-        await client.delete(file_obj.id)
+        await client.delete(file_obj.id, context_id=INTEGRATION_CONTEXT_ID)

@@ -32,7 +32,7 @@ uv run pyright src/              # Type check
 - Search tuning: `update_search_config` (semantic/bm25 weights, reranking)
 - Resource ingestion: `setup_resource`, `ingest_event`, `ingest_events`
 - Resource stats/schema: `get_resource_impact`, `get_resource_schema`
-- **File uploads**: `FilesClient.upload/download_url/delete/list` with R2 sha256 binding (server v0.15.1+); optional `binding_context_id` binds a file to an owning context for ACL + nullable `FileObject.context_id` (server v0.41.0+)
+- **File uploads**: `FilesClient.upload/download_url/delete/list` with R2 sha256 binding (server v0.15.1+); optional `binding_context_id` binds a file to an owning context for ACL + nullable `FileObject.context_id` (server v0.41.0+). Against v0.41.0 the file-id endpoints require `workspace_id` on the query, so `download_url`/`delete` take a **required** `context_id` and the PUT sends the checksum header only when the presign signed it (#226)
 - **Zero-knowledge secrets**: `SecretClient` + `kagura secret` — age recipient encryption, local decrypt; private key in OS keychain via `pyrage`/`keyring` (`[secret]` extra, server v0.39.0+). Owner-only hard delete via `SecretClient.delete_secret` / `kagura secret delete` (server v0.41.0+)
 - Agent hooks/skills: `@agent.hook("before_process")`, `@agent.skill("name")`
 - Ollama support: `model="ollama/qwen3:30b"` for local LLMs

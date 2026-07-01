@@ -82,8 +82,25 @@ def _file_object_dict(file_id: str = SAMPLE_FILE_ID, status: str = "uploaded") -
 
 def _reserve_response_dict(
     file_id: str = SAMPLE_FILE_ID,
-    upload_url: str = "https://r2.example.com/bucket/key",
+    upload_url: str | None = None,
+    *,
+    sign_checksum: bool = True,
 ) -> dict:
+    """Build a reserve response with a SigV4-style presigned ``upload_url``.
+
+    ``sign_checksum`` controls whether ``X-Amz-SignedHeaders`` lists
+    ``x-amz-checksum-sha256`` — i.e. whether the server enabled R2 checksum
+    binding. The SDK must only send the checksum header when the presign
+    signed it, else R2 rejects the PUT with 403 SignatureDoesNotMatch (#226).
+    """
+    if upload_url is None:
+        signed = "content-length;content-type;host"
+        if sign_checksum:
+            signed += ";x-amz-checksum-sha256"
+        upload_url = (
+            f"https://r2.example.com/bucket/key?X-Amz-SignedHeaders={signed}"
+            "&X-Amz-Signature=deadbeef"
+        )
     return {
         "file_id": file_id,
         "upload_url": upload_url,
@@ -492,6 +509,110 @@ async def test_upload_sends_base64_raw_digest_header():
     await client.close()
 
 
+# ============================================================================
+# upload() — conditional checksum header (#226): only send it when the presign
+# signed it, else R2 rejects the PUT with 403 SignatureDoesNotMatch
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_upload_omits_checksum_header_when_presign_does_not_sign_it():
+    """If X-Amz-SignedHeaders omits the checksum header, the SDK must NOT send it.
+
+    Regression for the live 403: a server with R2 checksum binding OFF presigns
+    without ``x-amz-checksum-sha256`` in SignedHeaders; sending it anyway makes
+    the SigV4 signature mismatch and R2 returns 403 SignatureDoesNotMatch.
+    """
+    client = FilesClient(api_key="test", base_url="https://example.com")
+
+    reserve_resp = _ok_response(201, _reserve_response_dict(sign_checksum=False))
+    confirm_resp = _ok_response(200, _file_object_dict())
+    put_resp = _ok_response(200, {})
+
+    with (
+        patch.object(client._client, "request", new_callable=AsyncMock) as mock_req,
+        patch.object(client._upload_client, "put", new_callable=AsyncMock) as mock_put,
+    ):
+        mock_req.side_effect = [reserve_resp, confirm_resp]
+        mock_put.return_value = put_resp
+
+        await client.upload(context_id=SAMPLE_CTX_ID, source=SAMPLE_BODY, filename="hello.txt")
+
+    put_headers = mock_put.call_args.kwargs["headers"]
+    assert "x-amz-checksum-sha256" not in put_headers
+    # Content-Type is a signed header and must still be sent.
+    assert put_headers["Content-Type"] == "text/plain"
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_upload_sends_checksum_header_when_presign_signs_it():
+    """When the presign DOES sign the checksum header, the SDK still sends it (binding on)."""
+    client = FilesClient(api_key="test", base_url="https://example.com")
+
+    reserve_resp = _ok_response(201, _reserve_response_dict(sign_checksum=True))
+    confirm_resp = _ok_response(200, _file_object_dict())
+    put_resp = _ok_response(200, {})
+
+    with (
+        patch.object(client._client, "request", new_callable=AsyncMock) as mock_req,
+        patch.object(client._upload_client, "put", new_callable=AsyncMock) as mock_put,
+    ):
+        mock_req.side_effect = [reserve_resp, confirm_resp]
+        mock_put.return_value = put_resp
+
+        await client.upload(context_id=SAMPLE_CTX_ID, source=SAMPLE_BODY, filename="hello.txt")
+
+    put_headers = mock_put.call_args.kwargs["headers"]
+    assert put_headers["x-amz-checksum-sha256"] == SAMPLE_SHA256_B64
+    await client.close()
+
+
+def test_presign_signs_checksum_detects_signed_header():
+    """`_presign_signs_checksum` reads X-Amz-SignedHeaders case-insensitively."""
+    from kagura_memory.files_client import _presign_signs_checksum
+
+    on = "https://r2/key?X-Amz-SignedHeaders=content-length;content-type;host;x-amz-checksum-sha256"
+    off = "https://r2/key?X-Amz-SignedHeaders=content-length;content-type;host"
+    assert _presign_signs_checksum(on) is True
+    assert _presign_signs_checksum(off) is False
+    assert _presign_signs_checksum("https://r2/key") is False  # no query at all
+    # Case-insensitive: some SDKs upper-case the header token.
+    assert (
+        _presign_signs_checksum("https://r2/key?X-Amz-SignedHeaders=X-Amz-Checksum-Sha256") is True
+    )
+
+
+@pytest.mark.asyncio
+async def test_upload_confirm_sends_workspace_id_query_param():
+    """The confirm step must carry workspace_id as a query param (#226).
+
+    memory-cloud v0.41.0 requires ``workspace_id`` on the query string of
+    ``POST /api/v1/files/{id}/confirm``; without it the server returns 422
+    (VAL-001, query.workspace_id Field required) and the upload never finalizes.
+    """
+    client = FilesClient(api_key="test", base_url="https://example.com")
+
+    reserve_resp = _ok_response(201, _reserve_response_dict())
+    confirm_resp = _ok_response(200, _file_object_dict())
+    put_resp = _ok_response(200, {})
+
+    with (
+        patch.object(client._client, "request", new_callable=AsyncMock) as mock_req,
+        patch.object(client._upload_client, "put", new_callable=AsyncMock) as mock_put,
+    ):
+        mock_req.side_effect = [reserve_resp, confirm_resp]
+        mock_put.return_value = put_resp
+
+        await client.upload(context_id=SAMPLE_CTX_ID, source=SAMPLE_BODY, filename="hello.txt")
+
+    confirm_call = mock_req.call_args_list[1]
+    assert f"/api/v1/files/{SAMPLE_FILE_ID}/confirm" in confirm_call[0][1]
+    assert confirm_call.kwargs["params"] == {"workspace_id": SAMPLE_CTX_ID}
+    assert confirm_call.kwargs["json"] == {"sha256": SAMPLE_SHA256_HEX}
+    await client.close()
+
+
 @pytest.mark.asyncio
 async def test_upload_from_path(tmp_path: Path):
     """Path source reads bytes from disk and uses path.name as filename."""
@@ -882,7 +1003,7 @@ async def test_request_401_raises_auth_error():
     with patch.object(client._client, "request", new_callable=AsyncMock) as mock_req:
         mock_req.return_value = err_resp
         with pytest.raises(KaguraAuthError):
-            await client.delete("some-file-id")
+            await client.delete("some-file-id", context_id=SAMPLE_CTX_ID)
     await client.close()
 
 
@@ -902,7 +1023,7 @@ async def test_request_403_without_source_includes_sanitized_detail():
     with patch.object(client._client, "request", new_callable=AsyncMock) as mock_req:
         mock_req.return_value = err_resp
         with pytest.raises(KaguraConnectionError) as exc_info:
-            await client.delete("some-file-id")
+            await client.delete("some-file-id", context_id=SAMPLE_CTX_ID)
         msg = str(exc_info.value)
     await client.close()
 
@@ -910,13 +1031,14 @@ async def test_request_403_without_source_includes_sanitized_detail():
 
 
 @pytest.mark.asyncio
-async def test_request_403_without_workspace_uses_generic_heading():
-    """File-id endpoints (no workspace_id on the wire) → generic 403 heading.
+async def test_request_403_delete_emits_workspace_hint():
+    """delete now carries workspace_id (v0.41.0), so its 403 uses the workspace hint.
 
-    download-url / delete don't accept ``--context-id``, so the
-    workspace-mismatch language and the ``--context-id`` recovery hint
-    are misleading for those commands. The hint adapts: keep the
-    source label, drop the workspace-specific lines.
+    Before v0.41.0 the file-id endpoints sent no workspace and got the generic
+    heading; now delete / download-url require ``workspace_id`` on the query
+    string, so a 403 surfaces the workspace-mismatch hint like upload / list.
+    (The generic-heading branch is still covered by the
+    ``_format_workspace_403_hint`` unit tests.)
     """
     client = FilesClient(
         api_key="test-key",
@@ -928,19 +1050,16 @@ async def test_request_403_without_workspace_uses_generic_heading():
     with patch.object(client._client, "request", new_callable=AsyncMock) as mock_req:
         mock_req.return_value = err_resp
         with pytest.raises(KaguraConnectionError) as exc_info:
-            await client.delete("some-file-id")
+            await client.delete("some-file-id", context_id="11111111-2222-3333-4444-555555555555")
         msg = str(exc_info.value)
     await client.close()
 
     assert "HTTP 403" in msg
-    assert "access denied" in msg
-    # workspace-specific language must NOT appear for file-id endpoints.
-    assert "workspace not accessible" not in msg
-    assert "workspace requested:" not in msg
-    assert "--context-id" not in msg
-    # The source provenance and server detail still surface.
+    assert "workspace not accessible" in msg
+    # Source provenance, bound + requested workspace prefixes, and detail surface.
     assert ".kagura.json" in msg
     assert "aaaaaaaa" in msg
+    assert "workspace requested: 11111111" in msg
     assert "insufficient_scope" in msg
 
 
@@ -1117,7 +1236,7 @@ async def test_request_404_raises_not_found():
     with patch.object(client._client, "request", new_callable=AsyncMock) as mock_req:
         mock_req.return_value = err_resp
         with pytest.raises(KaguraNotFoundError, match="file gone"):
-            await client.download_url("some-file-id")
+            await client.download_url("some-file-id", context_id=SAMPLE_CTX_ID)
     await client.close()
 
 
@@ -1129,7 +1248,7 @@ async def test_request_429_raises_quota_error_with_retry_after():
     with patch.object(client._client, "request", new_callable=AsyncMock) as mock_req:
         mock_req.return_value = err_resp
         with pytest.raises(KaguraQuotaError) as exc_info:
-            await client.delete("some-file-id")
+            await client.delete("some-file-id", context_id=SAMPLE_CTX_ID)
         assert exc_info.value.retry_after == 60
     await client.close()
 
@@ -1140,7 +1259,7 @@ async def test_request_network_error_raises_connection_error():
     with patch.object(client._client, "request", new_callable=AsyncMock) as mock_req:
         mock_req.side_effect = httpx.ConnectError("refused")
         with pytest.raises(KaguraConnectionError, match="Connection failed"):
-            await client.delete("some-file-id")
+            await client.delete("some-file-id", context_id=SAMPLE_CTX_ID)
     await client.close()
 
 
@@ -1155,11 +1274,13 @@ async def test_download_url_returns_string():
     resp = _ok_response(200, {"download_url": "https://r2.example.com/get/key?sig=..."})
     with patch.object(client._client, "request", new_callable=AsyncMock) as mock_req:
         mock_req.return_value = resp
-        url = await client.download_url(SAMPLE_FILE_ID)
+        url = await client.download_url(SAMPLE_FILE_ID, context_id=SAMPLE_CTX_ID)
     assert url == "https://r2.example.com/get/key?sig=..."
     call = mock_req.call_args
     assert call[0][0] == "GET"
     assert f"/api/v1/files/{SAMPLE_FILE_ID}/download-url" in call[0][1]
+    # v0.41.0 requires workspace_id on the query string of file-id endpoints (#226).
+    assert call.kwargs["params"] == {"workspace_id": SAMPLE_CTX_ID}
     await client.close()
 
 
@@ -1169,11 +1290,30 @@ async def test_delete_returns_none():
     resp = _ok_response(204, {})
     with patch.object(client._client, "request", new_callable=AsyncMock) as mock_req:
         mock_req.return_value = resp
-        result = await client.delete(SAMPLE_FILE_ID)
+        result = await client.delete(SAMPLE_FILE_ID, context_id=SAMPLE_CTX_ID)
     assert result is None
     call = mock_req.call_args
     assert call[0][0] == "DELETE"
     assert f"/api/v1/files/{SAMPLE_FILE_ID}" in call[0][1]
+    assert call.kwargs["params"] == {"workspace_id": SAMPLE_CTX_ID}
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_download_url_rejects_non_uuid_context_id_locally():
+    """download_url validates context_id before the wire (parity with upload/list)."""
+    client = FilesClient(api_key="test", base_url="https://example.com")
+    with pytest.raises(ValueError, match="context_id must be a UUID"):
+        await client.download_url("some-file-id", context_id="auto")
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_delete_rejects_non_uuid_context_id_locally():
+    """delete validates context_id before the wire (parity with upload/list)."""
+    client = FilesClient(api_key="test", base_url="https://example.com")
+    with pytest.raises(ValueError, match="context_id must be a UUID"):
+        await client.delete("some-file-id", context_id="auto")
     await client.close()
 
 
@@ -1311,7 +1451,7 @@ async def test_request_500_with_non_dict_body_message():
     with patch.object(client._client, "request", new_callable=AsyncMock) as mock_req:
         mock_req.return_value = err_resp
         with pytest.raises(KaguraConnectionError) as exc_info:
-            await client.delete("some-id")
+            await client.delete("some-id", context_id=SAMPLE_CTX_ID)
     # extract_detail returns "" for non-dict bodies; the message has no suffix.
     assert str(exc_info.value) == "HTTP 500"
     await client.close()
