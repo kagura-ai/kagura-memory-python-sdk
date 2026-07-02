@@ -34,7 +34,7 @@ Facts checked against source; line numbers are origin/main of that commit.
 | Invitations create/list/revoke | `backend/src/api/routes/invitations.py:47,173,241` | session only | admin gated via `check_workspace_access` |
 | `GET .../member-quota` | `invitations.py:501` | session only | — |
 | API-key self-mint | `backend/src/api/routes/api_keys.py:191` | `SessionUser` **by explicit decision #252** ("Session-only authentication (no API keys)") | — |
-| Member-credential mint / delete | `backend/src/api/routes/member_credentials.py:277,530` | `SessionUser` | workspace admin/owner (verify at impl) |
+| Member-credential mint / delete | `backend/src/api/routes/member_credentials.py:277,530` | `SessionUser` | **strictly self-only** — mint 403s unless path `user_id` == session user; `check_can_manage` excludes `create` for owner/admin (verified 2026-07-02 adversarial review) |
 
 Enablers that already exist server-side (no need to invent):
 
@@ -53,7 +53,7 @@ Enablers that already exist server-side (no need to invent):
 
 ### D1 (settled by user directive): #225 auth posture = owner-key only
 
-- Server: members + invitations endpoints accept programmatic principals (API key; OAuth Bearer comes along for free via `APIKeyOrSessionUser`) but **any non-session principal must hold OWNER role** on the target workspace — stricter than the session path (which keeps list=member+, add/set-role=admin+, remove=owner). Rationale: conservative first release of a privileged surface; trivially relaxable to admin later; matches `require_workspace_admin_session` precedent of differentiating by auth mode.
+- Server: members + invitations endpoints accept **API-key principals only, gated at OWNER role** on the *path* workspace — stricter than the session path (which keeps list=member+, add/set-role=admin+, remove=owner). **OAuth Bearer → 403 on these endpoints** (2026-07-02 adversarial review: every `kagura auth login` device token carries `memory:read memory:write`, so plain `APIKeyOrSessionUser` would turn every MCP token into a member-management credential — the opposite of "owner キーのみ"). Rationale: conservative first release of a privileged surface; trivially relaxable later; `require_workspace_admin_session` is the precedent for differentiating by auth mode.
 - SDK: normal credential resolver chain (`env > OAuth profile > .kagura.json`) — no special-casing; the server enforces. CLI maps 403 → "requires workspace **owner**" hint.
 
 ### D2 (recommendation — confirm before Phase C): #201 under "owner-key only"
@@ -74,57 +74,112 @@ These are **issue drafts to file on kagura-ai/memory-cloud**. Each gets its own 
 ```markdown
 ## Summary
 Member/invitation management is session-cookie-only (`get_current_user`), so the
-Python SDK / CLI cannot automate it (kagura-memory-python-sdk#225). Switch these
-endpoints to `APIKeyOrSessionUser`, keeping session semantics identical and gating
-ALL non-session principals at workspace-OWNER role.
+Python SDK / CLI cannot automate it (kagura-memory-python-sdk#225). Open the 8
+endpoints below to programmatic auth — API keys only, gated at workspace-OWNER
+role on the PATH workspace — keeping session semantics identical.
 
-## Endpoints
-- workspaces.py: GET/POST /workspaces/{id}/members, PUT/DELETE .../members/{user_id}
-- invitations.py: POST/GET/DELETE invitations, GET member-quota
+## Endpoints (8; session gates unchanged)
+- workspaces.py: GET(member+)/POST(admin+) /api/v1/workspaces/{id}/members,
+  PUT(admin+ #254)/DELETE(owner #217) .../members/{user_id}
+- invitations.py: POST/GET(admin+) .../invitations,
+  DELETE(admin+) .../invitations/{invitation_id:int}, GET(member+) .../member-quota
+- NOT changed: POST /invitations/accept, GET /invitations/pending,
+  public GET /invitations/{token}
 
 ## Contract
-- Session principal: behavior unchanged (list=member+, add/set-role=admin+ with #254
-  guards, remove=owner #217).
-- Programmatic principal (API key or OAuth Bearer): `check_workspace_owner(user_id,
-  path_workspace_id)` required for EVERY endpoint above, else 403 (reason surfaces
-  as today's AuthorizationError shape). Discriminate principal type the same way
-  existing code does (verify: presence of `api_key_workspace_id` / absence of
-  session marker in the user dict).
-- Workspace-scoped API key whose bound workspace != path workspace → 403
-  (leaked-narrow-key hardening; same posture as files.py "identity, not membership").
-- WARN audit log on programmatic deny (mirror require_workspace_owner #389 pattern).
+- Session principal: behavior unchanged.
+- API-key principal: `PermissionService.check_workspace_owner(user_id,
+  path_workspace_id)` IN-HANDLER for every endpoint (require_workspace_owner reads
+  only current_workspace_id, never the path param — wrong gate here).
+- OAuth Bearer principal: **403 on every endpoint** — device tokens carry
+  memory:read/write and must not become member-management credentials; revisit
+  only with a dedicated workspace:admin scope.
+- Principal discrimination (NEW pattern; shared helper, fail-closed): api-key ⇔
+  `"api_key_workspace_id" in user` (key-PRESENCE, never .get() truthiness — global
+  keys carry the key with value None); oauth ⇔ `"oauth_scope" in user`; session ⇔
+  `"sub" in user`.
+- Workspace-scoped key vs foreign path workspace → **uniform 404** (#963 pattern:
+  pass key_workspace_id into PermissionService as contexts.py:751 / memory.py do;
+  files.py has NO such confinement — known gap, not a precedent).
+- Programmatic add/set-role/invite accept roles member|admin|viewer;
+  **role=owner → 422** (no owner-level persistence from a leaked key).
+- Programmatic invitations LIST omits `token`/`invitation_url` (bearer
+  join-credentials must not land in CI logs); token only in POST create response.
+- Rate limit: add ENDPOINT_RATE_LIMITS entries (10/min) for POST invitations +
+  member mutations (today: generic tier limit, up to 1000/min on Pro).
+- Audit: log programmatic SUCCESSES (add/set-role/remove/invite create+revoke)
+  with actor + key prefix + target; WARN on denies (#389 pattern).
+- Pinned wire shapes for SDK: WorkspaceInvitationResponse has **id:int** (no
+  `status` field — derive from is_accepted/is_expired), token, invitation_url,
+  expires_at|null, allowed_context_ids|null; DELETE invitations returns **200
+  {"success": true}** (not 204); invite create requires email (must match
+  invitee's Google account), role member|viewer requires allowed_context_ids
+  (min 1) / ≥1 shared context; 403 "Team invitations require Pro plan" on
+  free/basic (detail strings must stay distinguishable from the role 403); 429 on
+  member-quota exceeded.
 
 ## Tests
-- API key owner: all 7 endpoints succeed.
-- API key admin/member/viewer: 403 on every endpoint (including GET members).
-- Session admin: add/set-role still work (no regression).
-- Workspace-scoped key vs foreign workspace path: 403.
-- OAuth Bearer read-scope on GET members: succeeds for owner; write-scope enforced
-  on mutations (RFC 6750 insufficient_scope path).
+- API-key owner (global + matching scoped): all 8 endpoints succeed.
+- API-key admin/member/viewer: 403 everywhere. OAuth Bearer (any scope): 403.
+- Session admin/member: no regression. Scoped key vs foreign workspace: uniform 404.
+- Global key owner-of-A vs path B (not owner of B): denied.
+- Programmatic role=owner: 422. Programmatic invite list: token absent.
+- Success + deny paths write audit entries.
 ```
 
 ### A2 — feat(credentials): owner-key minting/revocation of member API keys *(only if D2 = (a))*
 
 ```markdown
 ## Summary
-`POST/DELETE /{user_id}/credentials/api-keys[...]` (member_credentials.py:277,530)
-are SessionUser-gated, so an owner cannot provision CI/service-account keys
-headlessly (kagura-memory-python-sdk#201). Swap to the existing dual-mode
-`require_workspace_owner` (#276) so an owner API key can mint & revoke member keys.
-`api_keys.py` (self-mint) stays session-only — decision #252 is NOT relaxed.
+`POST .../credentials/api-keys` (member_credentials.py:276) and the per-id DELETE
+(:530) are SessionUser-gated **and strictly self-only** (owner/admin cannot act on
+others even in the browser — check_can_manage excludes `create`). This issue adds a
+NEW capability: owner-provisioned mint/list/revoke of OTHER members' keys via the
+owner's API key (kagura-memory-python-sdk#201). Session self-mint/self-delete
+semantics unchanged; `api_keys.py` stays session-only — #252 is NOT relaxed.
 
 ## Contract
-- Mint: owner principal (session OR owner API key) → 201 MemberAPIKeyResponse,
-  plaintext key returned exactly once.
-- Add/verify a GET list endpoint for a member's keys (needed for `auth list-keys`);
-  if it exists, gate identically. If not, add it in this issue.
-- Audit log every programmatic mint/revoke (who, target user, key_id prefix).
-- Rate-limit programmatic mint (reuse existing limiter middleware) — key-minting-key
-  is the #252 threat model; owner-only + audit + rate-limit is the mitigation set.
+- Auth framework identical to A1: APIKeyOrSessionUser; OAuth Bearer → 403;
+  in-handler check_workspace_owner(user_id, path_workspace_id); scoped-key
+  mismatch → uniform 404; shared fail-closed principal discriminator.
+- Anti key-self-replication (#252 threat made explicit): programmatic mint 403s
+  when target user_id == caller user_id, and 403s unless the target member's role
+  is member|viewer — strictly privilege-DOWNGRADE provisioning. (Minted keys carry
+  no role of their own: they act as the target user with their live workspace
+  role; platform role hardcoded "user".)
+- Expiry: CreateAPIKeyRequest has NO expiry field today → keys never expire. Add
+  `expires_days: int | None` (1–3650, mirroring /api/v1/config/api-keys), plumb to
+  APIKeyManager.create_key; **required for owner-provisioned mints** (400 if
+  omitted).
+- Plaintext hygiene: today plaintext is re-revealed via GET while is_visible
+  (auto_hide default 10min, encrypted at rest since Migration 035). Programmatic
+  mint forces hidden_at=now (rejects client auto_hide_minutes) → plaintext_key
+  ONLY in the 201 response; programmatic GET list is always metadata-only; and
+  `bound_context_id` is rejected (400) — public-bound keys (#626) stay self-only.
+- List endpoint EXISTS — extend, don't add: GET .../members/{user_id}/credentials
+  (:77) already gives session owner/admin metadata; accept the owner API-key
+  principal. Envelope: MemberCredentialsResponse {api_keys:
+  list[MemberAPIKeyResponse], target_user_role} — NOT a bare array.
+  MemberAPIKeyResponse: **id:int**, name, key_prefix, **plaintext_key** (field
+  name, not api_key), is_visible, visibility_expires_at, created_at,
+  last_used_at, revoked_at, bound_context_id.
+- Revocation: per-id DELETE is a HARD delete today. Relax self-only →
+  self-or-workspace-owner (same target-role restriction); owner-provisioned
+  revocation is a SOFT revoke (revoked_at=now, row retained for forensics);
+  audit entry written before the state change; pin the success status code in
+  OpenAPI at impl time.
+- Rate limit: add ENDPOINT_RATE_LIMITS entry (10/min) for member-credentials
+  paths (currently generic tier limits only). Audit: AuditLog for
+  owner-provisioned mint/revoke (new — regular key creation is unaudited today;
+  only public-bound keys write AuditLog).
 
 ## Tests
-- Owner key mints member key; member/admin key → 403; foreign-workspace owner → 403.
-- Revoke via owner key → 204; minted plaintext never appears in logs.
+- Owner key mints for member/viewer target: 201 with plaintext_key; follow-up GET:
+  plaintext_key null. Mint for SELF: 403. Target owner/admin: 403.
+  bound_context_id: 400. expires_days omitted: 400.
+- member/admin/viewer key: 403. OAuth Bearer: 403. Foreign workspace: uniform 404.
+- Session self-mint/self-delete: unchanged. Owner revoke: soft (revoked_at set,
+  row retained); audit entries for mint+revoke; plaintext never in logs.
 ```
 
 **Gate:** SDK Phase B merges only after A1 is deployed to production (blue-green); Phase C after A2. Local development against `docker-compose` memory-cloud running the A1/A2 branch is fine before that.
@@ -142,7 +197,7 @@ Branch: `225-feat/workspace-member-cli`. All tasks in this repo.
 - Test: `tests/test_workspace_client.py` (new)
 
 **Interfaces:**
-- Produces: `WorkspaceMember(user_id: str, role: str, user_name: str | None, user_email: str | None, joined_at: datetime | None)`; `WorkspaceInvitation(id: str, email: str, role: str, status: str | None, created_at: datetime | None, expires_at: datetime | None)`. Both `extra="ignore"`.
+- Produces: `WorkspaceMember(user_id: str, role: str, user_name: str | None, user_email: str | None, joined_at: datetime | None)`; `WorkspaceInvitation(id: int, email: str | None, role: str, token: str | None, invitation_url: str | None, is_accepted: bool, is_expired: bool, created_at: datetime | None, expires_at: datetime | None, allowed_context_ids: list[str] | None)`. Both `extra="ignore"`. **Server shape verified 2026-07-02:** invitation `id` is an integer PK and there is NO `status` field — pending is derived from `is_accepted`/`is_expired`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -177,19 +232,33 @@ def test_workspace_member_minimal_shape():
     assert m.user_name is None and m.user_email is None
 
 
-def test_workspace_invitation_ignores_unknown_fields():
+def test_workspace_invitation_matches_server_shape():
     inv = WorkspaceInvitation.model_validate(
         {
-            "id": "inv_1",
+            "id": 7,  # integer PK — not a UUID string, not "invitation_id"
+            "workspace_id": "11111111-2222-3333-4444-555555555555",  # extra
             "email": "new@example.com",
             "role": "member",
-            "status": "pending",
+            "token": "tok_0123456789abcdef0123",
+            "invitation_url": "https://memory.kagura-ai.com/invite/tok",
+            "is_accepted": False,
+            "is_expired": False,
             "created_at": "2026-07-01T00:00:00Z",
             "expires_at": "2026-07-08T00:00:00Z",
+            "allowed_context_ids": ["ctx-1"],
             "invited_by": "google_123",  # extra
         }
     )
-    assert inv.id == "inv_1" and inv.status == "pending"
+    assert inv.id == 7 and not inv.is_accepted
+
+
+def test_workspace_invitation_programmatic_list_omits_token():
+    # A1 contract: server omits token/invitation_url on programmatic LIST
+    inv = WorkspaceInvitation.model_validate(
+        {"id": 8, "email": "x@y.com", "role": "viewer",
+         "is_accepted": False, "is_expired": False}
+    )
+    assert inv.token is None and inv.invitation_url is None
 ```
 
 - [ ] **Step 2: Run to verify failure**
@@ -222,16 +291,27 @@ class WorkspaceMember(BaseModel):
 
 
 class WorkspaceInvitation(BaseModel):
-    """A pending workspace invitation (#225). Non-strict like WorkspaceMember."""
+    """A workspace invitation (#225). Non-strict like WorkspaceMember.
+
+    Server shape (``WorkspaceInvitationResponse``): ``id`` is an INTEGER PK
+    and there is no ``status`` field — pending is derived from
+    ``is_accepted``/``is_expired``. ``token``/``invitation_url`` are bearer
+    join-credentials: the server omits them on programmatic LIST responses,
+    so they are optional here and the CLI prints them only on create.
+    """
 
     model_config = ConfigDict(extra="ignore")
 
-    id: str
-    email: str
+    id: int
+    email: str | None = None
     role: str
-    status: str | None = None
+    token: str | None = None
+    invitation_url: str | None = None
+    is_accepted: bool = False
+    is_expired: bool = False
     created_at: datetime | None = None
     expires_at: datetime | None = None
+    allowed_context_ids: list[str] | None = None
 ```
 
 - [ ] **Step 4: Run tests — PASS**, then `uv run ruff check src/ tests/ && uv run pyright src/`
@@ -259,7 +339,7 @@ git commit -m "feat(workspace): add WorkspaceMember/WorkspaceInvitation wire mod
   - `async add_member(workspace_id: str, user_id: str, role: str = "member") -> WorkspaceMember` → `POST .../members` body `{"user_id":..., "role":...}`
   - `async update_member_role(workspace_id: str, user_id: str, role: str) -> WorkspaceMember` → `PUT .../members/{user_id}` body `{"role":...}`
   - `async remove_member(workspace_id: str, user_id: str) -> None` → `DELETE .../members/{user_id}` (expect 204)
-  - `VALID_ASSIGNABLE_ROLES = ("member", "admin")` module constant — `owner` deliberately excluded (issue #225 semantics note: owner promotion belongs to future transfer-ownership); `viewer` excluded until server OpenAPI confirms it is assignable.
+  - `VALID_ASSIGNABLE_ROLES = ("member", "admin", "viewer")` module constant — `owner` deliberately excluded (A1 server contract 422s `role=owner` from programmatic principals; owner promotion belongs to future transfer-ownership). `viewer` confirmed assignable (server regex `^(owner|admin|member|viewer)$`, `workspaces.py:289-299`).
   - async context manager (`__aenter__`/`__aexit__`/`close`) like `FilesClient`.
 
 - [ ] **Step 1: Failing tests** (httpx.MockTransport, same pattern as `tests/test_files_client.py`)
@@ -370,9 +450,9 @@ import httpx
 from ._http import raise_for_kagura_status, validate_https_url
 from .models import WorkspaceInvitation, WorkspaceMember
 
-VALID_ASSIGNABLE_ROLES = ("member", "admin")
+VALID_ASSIGNABLE_ROLES = ("member", "admin", "viewer")
 # "owner" is excluded: promotion overlaps the (out-of-scope) transfer-ownership
-# flow and the server rejects a second owner (#225 semantics note).
+# flow, and the server 422s role=owner from programmatic principals (A1).
 
 
 class WorkspaceClient:
@@ -460,7 +540,7 @@ from .workspace_client import WorkspaceClient  # noqa: F401  (+ __all__ entry)
 - Test: `tests/test_workspace_client.py`
 
 **Interfaces:**
-- Produces: 403 → `KaguraAuthDeniedError("workspace owner API key required — member management is owner-only when called programmatically (workspace=<id>)")`; 404 on `add_member` → `KaguraNotFoundError("user not found — use `kagura workspace invite create <email>` to invite a new user")`; 404 elsewhere → plain `KaguraNotFoundError` with server detail.
+- Produces: 403 → `KaguraAuthDeniedError` that **preserves the server detail** and appends the owner hint only for the uniform authz shape (`"Insufficient permissions"`): `"workspace owner API key required — member management is owner-only when called programmatically; OAuth tokens are not accepted (workspace=<id>)"`. Invitation create can 403 for a *plan gate* (`"Team invitations require Pro plan"`) — that detail must pass through untouched, not be rewritten as a role failure. 404 on `add_member` → `KaguraNotFoundError("user not found — use `kagura workspace invite create <email>` to invite a new user")`; 404 elsewhere → plain `KaguraNotFoundError` with server detail. Note: cross-workspace use of a scoped key surfaces as a **uniform 404** (#963), not 403.
 
 - [ ] **Step 1: Failing tests**
 
@@ -496,39 +576,55 @@ async def test_add_member_404_hints_invite():
 - Test: `tests/test_workspace_client.py`
 
 **Interfaces:**
-- Produces: `create_invitation(workspace_id, email, role="member") -> WorkspaceInvitation`; `list_invitations(workspace_id) -> list[WorkspaceInvitation]`; `revoke_invitation(workspace_id, invitation_id) -> None` (204).
-- Paths: `POST/GET /api/v1/workspaces/{id}/invitations`, `DELETE .../invitations/{invitation_id}` — **verify against `/openapi.json` (tag `invitations`) first**; invitations.py mounts at `/api/v1` with workspace-prefixed paths (`invitations.py:501` shows `/workspaces/{workspace_id}/member-quota`), so this shape is expected but unconfirmed.
-
-- [ ] **Step 0: Verify paths**: `curl -s https://memory.kagura-ai.com/openapi.json | jq '.paths | keys[] | select(test("invitation"))'` — adjust the three paths below if they differ.
-- [ ] **Step 1: Failing tests** — mirror B2's style: create asserts body `{"email":..., "role":...}` and 201→`WorkspaceInvitation`; list returns parsed array; revoke expects DELETE + 204→None; `create_invitation` validates role via `_validate_role`.
+- Produces: `create_invitation(workspace_id, email, role="member", *, allowed_context_ids: list[str] | None = None, expires_in_days: int | None = None) -> WorkspaceInvitation` — client-side `ValueError` when `role in ("member", "viewer")` and no `allowed_context_ids` (server requires ≥1, `invitation_service.py:129-146`); `list_invitations(workspace_id, include_accepted: bool = False) -> list[WorkspaceInvitation]`; `revoke_invitation(workspace_id, invitation_id: int) -> None` — server returns **200 `{"success": true}`**, not 204, and `invitation_id` is an `int` (no URL-encoding concern).
+- Paths **verified 2026-07-02 against origin/main** (`invitations.py:47,173,241` + `main.py:589`): `POST/GET /api/v1/workspaces/{workspace_id}/invitations`, `DELETE /api/v1/workspaces/{workspace_id}/invitations/{invitation_id}`.
+- [ ] **Step 1: Failing tests** — mirror B2's style: create asserts the full body (`email`/`role`/`allowed_context_ids`/`expires_in_days`) and 201→`WorkspaceInvitation`; list returns parsed array; revoke expects DELETE + 200 `{"success": true}`→None; `create_invitation` validates role via `_validate_role` and the member/viewer `allowed_context_ids` precondition.
 
 ```python
+@pytest.mark.asyncio
+async def test_create_invitation_member_requires_contexts_client_side():
+    async with make_client(lambda r: httpx.Response(500)) as c:
+        with pytest.raises(ValueError, match="allowed_context_ids"):
+            await c.create_invitation(WS, "new@x.com", role="member")
+
+
 @pytest.mark.asyncio
 async def test_create_invitation():
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "POST"
         assert request.url.path == f"/api/v1/workspaces/{WS}/invitations"
-        assert json.loads(request.content) == {"email": "new@x.com", "role": "member"}
-        return httpx.Response(201, json={"id": "inv_1", "email": "new@x.com",
-                                         "role": "member", "status": "pending"})
+        assert json.loads(request.content) == {
+            "email": "new@x.com",
+            "role": "member",
+            "allowed_context_ids": ["ctx-1"],
+            "expires_in_days": 7,
+        }
+        return httpx.Response(201, json={
+            "id": 7, "email": "new@x.com", "role": "member",
+            "token": "tok_0123456789abcdef0123",
+            "invitation_url": "https://memory.kagura-ai.com/invite/tok",
+            "is_accepted": False, "is_expired": False,
+        })
 
     async with make_client(handler) as c:
-        inv = await c.create_invitation(WS, "new@x.com")
-    assert inv.id == "inv_1"
+        inv = await c.create_invitation(
+            WS, "new@x.com", allowed_context_ids=["ctx-1"], expires_in_days=7
+        )
+    assert inv.id == 7 and inv.invitation_url is not None
 
 
 @pytest.mark.asyncio
-async def test_revoke_invitation_encodes_id():
+async def test_revoke_invitation_returns_none_on_200_success():
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "DELETE"
-        assert "inv%2F1" in request.url.raw_path.decode()
-        return httpx.Response(204)
+        assert request.url.path == f"/api/v1/workspaces/{WS}/invitations/7"
+        return httpx.Response(200, json={"success": True})  # NOT 204
 
     async with make_client(handler) as c:
-        assert await c.revoke_invitation(WS, "inv/1") is None
+        assert await c.revoke_invitation(WS, 7) is None
 ```
 
-- [ ] **Steps 2–5:** FAIL → implement (same `_request` plumbing, `quote(invitation_id, safe="")`) → PASS + lint → commit `feat(workspace): invitation create/list/revoke (#225)`
+- [ ] **Steps 2–5:** FAIL → implement (same `_request` plumbing; `invitation_id` is an int path segment; `create_invitation` validates role via `_validate_role` and raises `ValueError` for member/viewer without `allowed_context_ids`) → PASS + lint → commit `feat(workspace): invitation create/list/revoke (#225)`
 
 ### Task B5: CLI — `kagura workspace member` + `kagura workspace invite`
 
@@ -542,13 +638,16 @@ async def test_revoke_invitation_encodes_id():
 
 ```
 kagura workspace member list   [--workspace <id>] [--json]
-kagura workspace member add    <user-id> --role member|admin [--workspace <id>]
-kagura workspace member set-role <user-id> --role member|admin [--workspace <id>]
+kagura workspace member add    <user-id> --role member|admin|viewer [--workspace <id>]
+kagura workspace member set-role <user-id> --role member|admin|viewer [--workspace <id>]
 kagura workspace member remove <user-id> [--yes] [--workspace <id>]
-kagura workspace invite create <email> --role member|admin [--workspace <id>]
+kagura workspace invite create <email> --role member|admin|viewer
+                               [--context <uuid>]... [--expires-days N] [--workspace <id>]
 kagura workspace invite list   [--workspace <id>] [--json]
 kagura workspace invite revoke <invitation-id> [--workspace <id>]
 ```
+
+Token hygiene: `invite create` prints `invitation_url` (and token) **once**; `invite list` renders metadata only — the server omits `token`/`invitation_url` for programmatic principals (A1), and the CLI must not try to resurface them. `--context` (repeatable) maps to `allowed_context_ids`, required for `--role member|viewer`.
 
 Notes: `invite create` is a subcommand (not `kagura workspace invite <email>` as sketched in the issue) — click groups can't cleanly take positionals, and it mirrors the existing `kagura resource tokens create/list/revoke` family. Default workspace = same-source resolution via `_resolve_workspace_from_source` (issue #115 rule: never mix one source's key with another's workspace); `--workspace` overrides. `remove` prompts `click.confirm` unless `--yes`.
 
@@ -642,7 +741,7 @@ def member_list(workspace_id: str | None, as_json: bool) -> None:
     _run_workspace_command(_op, workspace_id)
 ```
 
-`add`/`set-role`: `@click.option("--role", type=click.Choice(["member", "admin"]), required=True)`. `remove`: `if not yes: click.confirm(f"Remove {user_id} from workspace {ws}?", abort=True)`. `invite` group mirrors `member` (create/list/revoke). Every command's docstring notes owner-key requirement.
+`add`/`set-role`: `@click.option("--role", type=click.Choice(["member", "admin", "viewer"]), required=True)`. `remove`: `if not yes: click.confirm(f"Remove {user_id} from workspace {ws}?", abort=True)`. `invite` group mirrors `member` (create/list/revoke; create adds `--context` multiple + `--expires-days`). Every command's docstring notes the owner-API-key requirement (OAuth tokens rejected server-side).
 
 - [ ] **Step 4: PASS + lint/typecheck** → **Step 5: Commit** `feat(cli): kagura workspace member/invite command groups (#225)`
 
@@ -675,11 +774,11 @@ Branch: `201-feat/auth-create-key`. **Do not start until D2 is confirmed and A2 
 - Modify: `src/kagura_memory/workspace_client.py`, `src/kagura_memory/models.py`
 - Test: `tests/test_workspace_client.py`
 
-**Interfaces (verify wire shapes against A2's merged OpenAPI before coding):**
-- `MintedMemberKey(id: str, name: str | None, api_key: str, created_at: datetime | None, expires_at: datetime | None)` — `extra="ignore"`; `api_key` present only in the mint response (print-once).
-- `async mint_member_key(workspace_id, user_id, name, expires_days: int | None = None) -> MintedMemberKey` → `POST /api/v1/workspaces/{id}/members/{user_id}/credentials/api-keys`
-- `async list_member_keys(workspace_id, user_id) -> list[MemberKeyInfo]` (A2 adds/confirms endpoint; `MemberKeyInfo` = same model minus `api_key`)
-- `async revoke_member_key(workspace_id, user_id, key_id) -> None` → `DELETE .../credentials/api-keys/{key_id}` (member_credentials.py:530)
+**Interfaces (pinned by A2's contract; re-verify against merged OpenAPI):**
+- `MemberAPIKey(id: int, name: str, key_prefix: str, plaintext_key: str | None, is_visible: bool, visibility_expires_at: datetime | None, created_at: datetime | None, last_used_at: datetime | None, revoked_at: datetime | None)` — `extra="ignore"`; **`id` is `int` and the plaintext field is `plaintext_key`** (not `api_key`), non-null only in the mint 201 response (print-once).
+- `async mint_member_key(workspace_id, user_id, name, expires_days: int) -> MemberAPIKey` → `POST /api/v1/workspaces/{id}/members/{user_id}/credentials/api-keys` — `expires_days` **required** (server 400s without it, per A2); never send `bound_context_id`; server 403s self-targets and owner/admin targets (member/viewer service identities only).
+- `async list_member_keys(workspace_id, user_id) -> list[MemberAPIKey]` → `GET .../members/{user_id}/credentials` — parse the `MemberCredentialsResponse` **envelope** (`api_keys` field + `target_user_role`; NOT a bare array); always metadata-only (`plaintext_key` null).
+- `async revoke_member_key(workspace_id, user_id, key_id: int) -> None` → `DELETE .../credentials/api-keys/{key_id}` (soft revoke server-side per A2; pin the success status code from merged OpenAPI).
 
 - [ ] TDD cycle identical in structure to B2/B4 (failing MockTransport tests asserting method/path/body → implement → pass → commit `feat(workspace): owner-key member API-key mint/list/revoke (#201)`).
 
@@ -692,10 +791,12 @@ Branch: `201-feat/auth-create-key`. **Do not start until D2 is confirmed and A2 
 **Surface (issue #201's proposed names, `--user` marks the owner-provisioning semantics):**
 
 ```
-kagura auth create-key --user <member-user-id> --name <n> [--expires-days N] [--workspace <id>]
+kagura auth create-key --user <member-user-id> --name <n> --expires-days N [--workspace <id>]
 kagura auth list-keys  --user <member-user-id> [--workspace <id>] [--json]
 kagura auth revoke-key <key-id> --user <member-user-id> [--workspace <id>]
 ```
+
+`--expires-days` is **required** (A2: the server 400s owner-provisioned mints without it — never-expiring CI keys are not allowed). `--user` must be another member with role member|viewer; self-targets 403 server-side (anti key-self-replication).
 
 - [ ] `create-key` prints the key **once to stdout**, warning to **stderr**: `⚠ Save this key now — it cannot be shown again.` (mirror `resource tokens create`, `cli.py:1239` region). Never written to config/credentials files.
 - [ ] `revoke-key` prompts `click.confirm` unless `--yes`.
@@ -724,8 +825,11 @@ memory-cloud A2  ──deploy──►  SDK Phase C (#201)  ──merge──►
 
 ## Risks / open items
 
-1. **Invitation & member-credential wire shapes are unverified** — B4 Step 0 / C1 mandate an OpenAPI check; adjust paths/fields there, not by guessing (#226 lesson).
-2. **`viewer` role**: server has a viewer role (workspace-switch fix #1135) but #225 scopes assignable roles to member|admin. If OpenAPI shows viewer is assignable, extend `VALID_ASSIGNABLE_ROLES` + CLI choices in B2/B5 — one-line each.
+1. ~~Invitation & member-credential wire shapes unverified~~ — **verified 2026-07-02** by a 5-agent adversarial review workflow (`wf_a710fae0-0ed`): invitation/key `id` fields are `int`, no invitation `status` field, `DELETE .../invitations/{id}` returns 200 `{"success": true}`, member-key list is an envelope, mint request today is `{name, auto_hide_minutes, bound_context_id}` with **no expiry field**. Re-verify against OpenAPI once A1/A2 merge (fields may evolve during server implementation).
+2. ~~`viewer` role unconfirmed~~ — **confirmed assignable** on all three surfaces (`^(owner|admin|member|viewer)$`); included in `VALID_ASSIGNABLE_ROLES` and CLI choices.
 3. **member-quota endpoint** deliberately out of v1 (not in #225 acceptance criteria); revisit if invite UX needs a capacity pre-check.
-4. **`set-role owner`** stays excluded (server #254 guards + future transfer-ownership command).
+4. **`set-role owner`** stays excluded (server #254 guards + A1's programmatic 422 + future transfer-ownership command).
 5. **D2(b)** (OAuth self-mint) remains available if the user rejects (a); it re-opens the #252 security design and would replace Part C's server half with a scope/consent design issue on memory-cloud.
+6. **OAuth-profile users**: all Part B/C commands are API-key-only server-side (OAuth Bearer → 403 by A1/A2 contract). The CLI resolver chain may pick an OAuth profile; the B3 hint covers this ("OAuth tokens are not accepted").
+7. **403 disambiguation**: invitation create 403s for the Pro-plan gate as well as the role gate — B3 passes server details through instead of blanket-rewriting 403s.
+8. **Pre-existing server hole found during review**: a session ADMIN can create a `role=owner` invitation (`invitations.py:47` is admin-gated and `WorkspaceInvitationCreate.role` accepts the full enum), bypassing the #254 owner-change guard on the role-update path — file as its own memory-cloud bug alongside A1/A2.
