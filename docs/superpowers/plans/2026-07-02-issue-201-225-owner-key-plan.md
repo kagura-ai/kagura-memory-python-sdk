@@ -56,7 +56,7 @@ Enablers that already exist server-side (no need to invent):
 - Server: members + invitations endpoints accept **API-key principals only, gated at OWNER role** on the *path* workspace — stricter than the session path (which keeps list=member+, add/set-role=admin+, remove=owner). **OAuth Bearer → 403 on these endpoints** (2026-07-02 adversarial review: every `kagura auth login` device token carries `memory:read memory:write`, so plain `APIKeyOrSessionUser` would turn every MCP token into a member-management credential — the opposite of "owner キーのみ"). Rationale: conservative first release of a privileged surface; trivially relaxable later; `require_workspace_admin_session` is the precedent for differentiating by auth mode.
 - SDK: normal credential resolver chain (`env > OAuth profile > .kagura.json`) — no special-casing; the server enforces. CLI maps 403 → "requires workspace **owner**" hint.
 
-### D2 (recommendation — confirm before Phase C): #201 under "owner-key only"
+### D2 (CONFIRMED = (a), user 2026-07-02): #201 under "owner-key only"
 
 **Recommended: (a) owner-key provisioning via member-credentials.** Do NOT touch `api_keys.py` (#252 stays intact: a key can never mint a key *for its own principal escalation*). Instead make `member_credentials.py` mint/delete dual-mode gated by `require_workspace_owner`. Then `kagura auth create-key --user <member-id>` lets an owner provision workspace keys for member/service accounts from CI or a headless box — which is exactly the sharp use case in #201's motivation. Risk is bounded: owner-key → member-scoped key is privilege *down*grade, and denials/mints get audit logs.
 - Issue #201 is then **closed** with a decision note: OAuth *self*-mint stays deferred (dashboard workaround documented in the issue body); owner-key provisioning covers headless/CI.
@@ -69,7 +69,7 @@ Enablers that already exist server-side (no need to invent):
 
 These are **issue drafts to file on kagura-ai/memory-cloud**. Each gets its own in-repo plan per that repo's conventions; this SDK plan only pins the contract the SDK will consume.
 
-### A1 — feat(workspaces): owner-key programmatic access to member + invitation endpoints
+### A1 — feat(workspaces): owner-key programmatic access to member + invitation endpoints — **FILED: memory-cloud#1164** (milestone v0.42.0)
 
 ```markdown
 ## Summary
@@ -127,7 +127,7 @@ role on the PATH workspace — keeping session semantics identical.
 - Success + deny paths write audit entries.
 ```
 
-### A2 — feat(credentials): owner-key minting/revocation of member API keys *(only if D2 = (a))*
+### A2 — feat(credentials): owner-key provisioning of member API keys *(D2 = (a), confirmed 2026-07-02)* — **FILED: memory-cloud#1165** (milestone v0.42.0)
 
 ```markdown
 ## Summary
@@ -813,11 +813,11 @@ kagura auth revoke-key <key-id> --user <member-user-id> [--workspace <id>]
 ## Sequencing & gates
 
 ```
-D1 ✔ (user directive)          D2 confirm (recommend (a))
+D1 ✔ (user directive)          D2 ✔ = (a) (user, 2026-07-02)
         │                              │
         ▼                              ▼
-memory-cloud A1  ──deploy──►  SDK Phase B (#225)  ──merge──► release
-memory-cloud A2  ──deploy──►  SDK Phase C (#201)  ──merge──► release
+memory-cloud#1164 ──deploy──►  SDK Phase B (#225)  ──merge──► release
+memory-cloud#1165 ──deploy──►  SDK Phase C (#201)  ──merge──► release
 ```
 
 - A1 and A2 are independent server PRs; B and C are independent SDK PRs. B does not block C or vice versa; both block on their server halves.
@@ -832,4 +832,4 @@ memory-cloud A2  ──deploy──►  SDK Phase C (#201)  ──merge──►
 5. **D2(b)** (OAuth self-mint) remains available if the user rejects (a); it re-opens the #252 security design and would replace Part C's server half with a scope/consent design issue on memory-cloud.
 6. **OAuth-profile users**: all Part B/C commands are API-key-only server-side (OAuth Bearer → 403 by A1/A2 contract). The CLI resolver chain may pick an OAuth profile; the B3 hint covers this ("OAuth tokens are not accepted").
 7. **403 disambiguation**: invitation create 403s for the Pro-plan gate as well as the role gate — B3 passes server details through instead of blanket-rewriting 403s.
-8. **Pre-existing server hole found during review**: a session ADMIN can create a `role=owner` invitation (`invitations.py:47` is admin-gated and `WorkspaceInvitationCreate.role` accepts the full enum), bypassing the #254 owner-change guard on the role-update path — file as its own memory-cloud bug alongside A1/A2.
+8. **Pre-existing server hole found during review**: a session ADMIN can create a `role=owner` invitation (`invitations.py:47` is admin-gated and `WorkspaceInvitationCreate.role` accepts the full enum), bypassing the #254 owner-change guard on the role-update path — **filed as memory-cloud#1166**.
