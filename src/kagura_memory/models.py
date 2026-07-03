@@ -971,3 +971,27 @@ class WorkspaceInvitation(BaseModel):
     created_at: datetime | None = None
     expires_at: datetime | None = None
     allowed_context_ids: list[str] | None = None
+
+
+class MemberAPIKey(BaseModel):
+    """A member API key row (#201, server v0.42.0+). Non-strict.
+
+    Server shape (``MemberAPIKeyResponse``): ``id`` is an INTEGER PK and
+    the plaintext field is named ``plaintext_key`` — non-null ONLY in the
+    mint 201 response. Owner-provisioned keys are force-hidden at
+    creation, so no later call ever returns the plaintext.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    id: int
+    name: str
+    key_prefix: str
+    plaintext_key: str | None = None
+    is_visible: bool = False
+    visibility_expires_at: datetime | None = None
+    created_at: datetime | None = None
+    last_used_at: datetime | None = None
+    revoked_at: datetime | None = None
+    expires_at: datetime | None = None
+    bound_context_id: str | None = None

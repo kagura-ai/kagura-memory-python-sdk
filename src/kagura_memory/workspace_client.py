@@ -44,7 +44,7 @@ from .exceptions import (
     KaguraQuotaError,
     _exc_message,
 )
-from .models import WorkspaceInvitation, WorkspaceMember
+from .models import MemberAPIKey, WorkspaceInvitation, WorkspaceMember
 
 VALID_ASSIGNABLE_ROLES = ("member", "admin", "viewer")
 # "owner" is excluded: the server 422s programmatic role=owner on member
@@ -347,6 +347,63 @@ class WorkspaceClient:
         )
 
     # -------------------------------------------------------------------
+    # Member API keys (#201, memory-cloud#1165)
+    # -------------------------------------------------------------------
+
+    async def mint_member_key(
+        self, workspace_id: str, user_id: str, name: str, expires_days: int
+    ) -> MemberAPIKey:
+        """Mint an API key for ANOTHER member (owner key required).
+
+        Privilege-downgrade provisioning only: the server 403s
+        self-targets ("An owner key cannot mint keys for itself") and
+        owner/admin targets — mint for member/viewer service identities.
+        ``expires_days`` is required by the server for owner-provisioned
+        mints (never-expiring CI keys are not allowed). The returned
+        ``plaintext_key`` is shown exactly once — owner-provisioned keys
+        are force-hidden at creation, so no later call returns it.
+        """
+        _validate_workspace_id(workspace_id)
+        if not 1 <= int(expires_days) <= 3650:
+            raise ValueError(f"expires_days must be 1-3650, got {expires_days!r}")
+        resp = await self._request(
+            "POST",
+            f"/api/v1/workspaces/{workspace_id}/members/"
+            f"{quote(user_id, safe='')}/credentials/api-keys",
+            json={"name": name, "expires_days": int(expires_days)},
+        )
+        return MemberAPIKey.model_validate(resp.json())
+
+    async def list_member_keys(self, workspace_id: str, user_id: str) -> list[MemberAPIKey]:
+        """List a member's API keys — metadata only.
+
+        The server wraps the rows in a ``MemberCredentialsResponse``
+        envelope (``api_keys`` + ``target_user_role``) and always nulls
+        ``plaintext_key`` for programmatic callers.
+        """
+        _validate_workspace_id(workspace_id)
+        resp = await self._request(
+            "GET",
+            f"/api/v1/workspaces/{workspace_id}/members/{quote(user_id, safe='')}/credentials",
+        )
+        payload = resp.json()
+        return [MemberAPIKey.model_validate(row) for row in payload.get("api_keys", [])]
+
+    async def revoke_member_key(self, workspace_id: str, user_id: str, key_id: int) -> None:
+        """Revoke a member's API key.
+
+        Owner-provisioned revocations are SOFT server-side (``revoked_at``
+        set, row retained for forensics); success is 200 with a status
+        body, and an already-revoked key surfaces as a uniform 404.
+        """
+        _validate_workspace_id(workspace_id)
+        await self._request(
+            "DELETE",
+            f"/api/v1/workspaces/{workspace_id}/members/"
+            f"{quote(user_id, safe='')}/credentials/api-keys/{int(key_id)}",
+        )
+
+    # -------------------------------------------------------------------
     # Internal helpers
     # -------------------------------------------------------------------
 
@@ -370,9 +427,9 @@ class WorkspaceClient:
         if server_detail and server_detail != _UNIFORM_403:
             return server_detail
         parts = [
-            "Access denied (HTTP 403): workspace member/invitation management "
-            "requires the workspace OWNER's API key when called programmatically "
-            "(OAuth tokens are not accepted)."
+            "Access denied (HTTP 403): workspace member/invitation/credential "
+            "management requires the workspace OWNER's API key when called "
+            "programmatically (OAuth tokens are not accepted)."
         ]
         if self._auth_source is not None:
             label = _SOURCE_LABEL.get(self._auth_source, str(self._auth_source))

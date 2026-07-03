@@ -409,3 +409,119 @@ async def test_422_validation_envelope_names_field():
     async with make_client(lambda r: httpx.Response(422, json=body)) as c:
         with pytest.raises(KaguraConnectionError, match="body.role"):
             await c.create_invitation(WS, "a@b.com", role="admin")
+
+
+# ---------------------------------------------------------------------------
+# Member API keys (#201, memory-cloud#1165)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_mint_member_key_posts_name_and_expiry():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url.path == f"/api/v1/workspaces/{WS}/members/google_2/credentials/api-keys"
+        assert json.loads(request.content) == {"name": "ci-bot", "expires_days": 90}
+        return httpx.Response(
+            201,
+            json={
+                "id": 42,
+                "name": "ci-bot",
+                "key_prefix": "kagura_abcdef123",
+                "plaintext_key": "kagura_abcdef1234567890",
+                "is_visible": False,
+                "visibility_expires_at": None,
+                "created_at": "2026-07-03T00:00:00Z",
+                "last_used_at": None,
+                "revoked_at": None,
+                "expires_at": "2026-10-01T00:00:00Z",
+                "bound_context_id": None,
+            },
+        )
+
+    async with make_client(handler) as c:
+        key = await c.mint_member_key(WS, "google_2", "ci-bot", 90)
+    assert key.id == 42
+    assert key.plaintext_key == "kagura_abcdef1234567890"
+    assert key.expires_at is not None
+
+
+@pytest.mark.asyncio
+async def test_mint_member_key_validates_expiry_bounds():
+    async with make_client(lambda r: httpx.Response(500)) as c:
+        with pytest.raises(ValueError, match="1-3650"):
+            await c.mint_member_key(WS, "google_2", "ci-bot", 0)
+        with pytest.raises(ValueError, match="1-3650"):
+            await c.mint_member_key(WS, "google_2", "ci-bot", 3651)
+
+
+@pytest.mark.asyncio
+async def test_mint_self_target_403_passes_through():
+    msg = "An owner key cannot mint keys for itself. Use session self-mint."
+    async with make_client(lambda r: httpx.Response(403, json=_envelope("AUTH-101", msg))) as c:
+        with pytest.raises(KaguraConnectionError, match="cannot mint keys for itself"):
+            await c.mint_member_key(WS, "owner-self", "x", 30)
+
+
+@pytest.mark.asyncio
+async def test_mint_admin_target_403_passes_through():
+    msg = "Owner-provisioned keys can only be minted for member/viewer targets, not role='admin'."
+    async with make_client(lambda r: httpx.Response(403, json=_envelope("AUTH-101", msg))) as c:
+        with pytest.raises(KaguraConnectionError, match="member/viewer targets"):
+            await c.mint_member_key(WS, "admin-user", "x", 30)
+
+
+@pytest.mark.asyncio
+async def test_list_member_keys_parses_envelope():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert request.url.path == f"/api/v1/workspaces/{WS}/members/google_2/credentials"
+        return httpx.Response(
+            200,
+            json={
+                "api_keys": [
+                    {
+                        "id": 42,
+                        "name": "ci-bot",
+                        "key_prefix": "kagura_abcdef123",
+                        "plaintext_key": None,  # always null programmatically
+                        "is_visible": False,
+                        "created_at": "2026-07-03T00:00:00Z",
+                        "revoked_at": None,
+                        "expires_at": "2026-10-01T00:00:00Z",
+                    }
+                ],
+                "target_user_role": "member",
+            },
+        )
+
+    async with make_client(handler) as c:
+        keys = await c.list_member_keys(WS, "google_2")
+    assert len(keys) == 1
+    assert keys[0].id == 42 and keys[0].plaintext_key is None
+
+
+@pytest.mark.asyncio
+async def test_revoke_member_key_accepts_200_status_body():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "DELETE"
+        assert (
+            request.url.path == f"/api/v1/workspaces/{WS}/members/google_2/credentials/api-keys/42"
+        )
+        return httpx.Response(200, json={"status": "revoked", "key_id": 42})
+
+    async with make_client(handler) as c:
+        assert await c.revoke_member_key(WS, "google_2", 42) is None
+
+
+@pytest.mark.asyncio
+async def test_member_key_user_id_segment_encoded():
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.raw_path.decode()
+        return httpx.Response(200, json={"api_keys": [], "target_user_role": "member"})
+
+    async with make_client(handler) as c:
+        await c.list_member_keys(WS, "a/b#c")
+    assert "a%2Fb%23c" in seen["path"]

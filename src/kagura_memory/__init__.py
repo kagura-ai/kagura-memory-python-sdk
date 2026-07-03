@@ -46,6 +46,7 @@ from .models import (
     IngestResult,
     ListTagsResponse,
     LLMUsage,
+    MemberAPIKey,
     Memory,
     MemoryInfo,
     MemoryListItem,
@@ -179,6 +180,7 @@ __all__ = [
     # Workspace member management (#225, server v0.42.0+)
     "WorkspaceMember",
     "WorkspaceInvitation",
+    "MemberAPIKey",
     # File ingestion (Issue #80)
     "FileIngestor",
     "IngestResult",

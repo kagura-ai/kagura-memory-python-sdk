@@ -2454,5 +2454,119 @@ def invite_revoke(invitation_id: int, workspace_id: str | None):
     _run_workspace_command(op, workspace_id)
 
 
+# ---------------------------------------------------------------------------
+# Owner-provisioned member API keys (#201, server v0.42.0+)
+# ---------------------------------------------------------------------------
+
+
+@click.command(name="create-key")
+@click.option(
+    "--user",
+    "-u",
+    "user_id",
+    required=True,
+    help="Target member's user id (must hold member/viewer role; not yourself)",
+)
+@click.option("--name", "-n", "key_name", required=True, help="Key name (unique per workspace)")
+@click.option(
+    "--expires-days",
+    type=click.IntRange(1, 3650),
+    required=True,
+    help="Key lifetime in days (required — never-expiring provisioned keys are not allowed)",
+)
+@click.option("--workspace", "-w", "workspace_id", help=_WORKSPACE_OPT_HELP)
+def auth_create_key(user_id: str, key_name: str, expires_days: int, workspace_id: str | None):
+    """
+    Mint an API key for another workspace member (owner API key required).
+
+    The key is printed ONCE and never persisted — save it immediately.
+    Owner-provisioned keys are privilege-downgrade provisioning for
+    member/viewer service identities: the server rejects self-targets
+    and owner/admin targets. For your own key, use the web dashboard.
+
+    Example:
+      kagura auth create-key --user google_1234 --name ci-bot --expires-days 90
+    """
+
+    async def op(client: WorkspaceClient, ws: str) -> str:
+        key = await client.mint_member_key(ws, user_id, key_name, expires_days)
+        click.echo("⚠ Save this key now — it cannot be shown again.", err=True)
+        expires = key.expires_at.date().isoformat() if key.expires_at else "never"
+        return (
+            f"Key #{key.id} '{key.name}' for {user_id} "
+            f"(prefix={key.key_prefix}, expires={expires})\n"
+            f"{key.plaintext_key or '(no plaintext returned)'}"
+        )
+
+    _run_workspace_command(op, workspace_id)
+
+
+@click.command(name="list-keys")
+@click.option("--user", "-u", "user_id", required=True, help="Target member's user id")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Raw JSON output")
+@click.option("--workspace", "-w", "workspace_id", help=_WORKSPACE_OPT_HELP)
+def auth_list_keys(user_id: str, as_json: bool, workspace_id: str | None):
+    """
+    List a member's API keys — metadata only, never the plaintext.
+
+    Example:
+      kagura auth list-keys --user google_1234
+    """
+
+    async def op(client: WorkspaceClient, ws: str) -> str:
+        keys = await client.list_member_keys(ws, user_id)
+        if as_json:
+            return json.dumps(
+                [k.model_dump(mode="json", exclude={"plaintext_key"}) for k in keys],
+                indent=2,
+                ensure_ascii=False,
+            )
+        lines = [f"{'ID':<6} {'NAME':<24} {'PREFIX':<18} {'CREATED':<12} {'EXPIRES':<12} REVOKED"]
+        for k in keys:
+            created = k.created_at.date().isoformat() if k.created_at else "-"
+            expires = k.expires_at.date().isoformat() if k.expires_at else "never"
+            revoked = k.revoked_at.date().isoformat() if k.revoked_at else "-"
+            lines.append(
+                f"{k.id:<6} {k.name:<24} {k.key_prefix:<18} {created:<12} {expires:<12} {revoked}"
+            )
+        return "\n".join(lines)
+
+    _run_workspace_command(op, workspace_id)
+
+
+@click.command(name="revoke-key")
+@click.argument("key_id", type=int)
+@click.option("--user", "-u", "user_id", required=True, help="The member the key belongs to")
+@click.option("--yes", "-y", is_flag=True, default=False, help="Skip confirmation")
+@click.option("--workspace", "-w", "workspace_id", help=_WORKSPACE_OPT_HELP)
+def auth_revoke_key(key_id: int, user_id: str, yes: bool, workspace_id: str | None):
+    """
+    Revoke a member's API key by its integer id (see `list-keys`).
+
+    Server-side this is a soft revoke — the row is kept for audit.
+
+    Example:
+      kagura auth revoke-key 42 --user google_1234 --yes
+    """
+    if not yes:
+        # Confirm before entering the event loop (python.md: never block it).
+        click.confirm(f"Revoke key #{key_id} of {user_id}?", abort=True)
+
+    async def op(client: WorkspaceClient, ws: str) -> str:
+        await client.revoke_member_key(ws, user_id, key_id)
+        return f"Revoked key #{key_id} of {user_id}"
+
+    _run_workspace_command(op, workspace_id)
+
+
+# `kagura auth` lives in auth/cli.py; these owner-provisioning commands are
+# defined here because they ride the workspace-command plumbing
+# (_run_workspace_command / WorkspaceClient) — attaching avoids a circular
+# import between auth/cli.py and this module.
+_auth_group.add_command(auth_create_key)
+_auth_group.add_command(auth_list_keys)
+_auth_group.add_command(auth_revoke_key)
+
+
 if __name__ == "__main__":  # pragma: no cover
     main()
