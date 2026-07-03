@@ -262,9 +262,7 @@ def test_envelope_validation_errors_appended():
             "error": "VAL-001",
             "message": "Request validation failed",
             "details": {
-                "errors": [
-                    {"loc": ["body", "role"], "msg": "Value error, role=owner", "type": "v"}
-                ]
+                "errors": [{"loc": ["body", "role"], "msg": "Value error, role=owner", "type": "v"}]
             },
         }
     )

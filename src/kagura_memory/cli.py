@@ -27,6 +27,7 @@ from .logger import VerboseLogger
 from .models import FileObject, Message, ProcessResult, ResourceEventRequest, Session
 from .resource_client import ResourceClient
 from .setup_claude import run_setup_claude
+from .workspace_client import WorkspaceClient
 
 _PROGRESS_CHOICES = ["rich", "json", "none"]
 
@@ -2161,6 +2162,296 @@ def files_list(context_id: str | None, limit: int, cursor: str | None):
         return result.model_dump_json(indent=2)
 
     _run_files_command(op, context_id)
+
+
+# ---------------------------------------------------------------------------
+# Workspace member / invitation management (#225, server v0.42.0+)
+# ---------------------------------------------------------------------------
+
+
+def _run_workspace_command(
+    operation: Callable[[WorkspaceClient, str], Awaitable[Any]],
+    workspace_id: str | None,
+) -> None:
+    """Execute a WorkspaceClient operation with standard boilerplate.
+
+    Resolves credentials via the canonical SDK chain and pairs the target
+    workspace with the SAME credential source (issue #115) unless the
+    operator overrides it with ``--workspace``. These endpoints require
+    the workspace OWNER's static API key (server v0.42.0): an OAuth
+    profile still resolves and connects, but the server rejects it with
+    an actionable 403 — better than failing client-side, since the same
+    message channel also covers the deployment kill-switch case.
+    """
+    try:
+        config = load_config()
+        auth = _resolve_auth(api_key=None, mcp_url=None, profile=None, config=config)
+        try:
+            ws_id = _resolve_workspace_from_source(auth, config, workspace_id)
+        except click.ClickException as e:
+            # The shared resolver names the files flag; these commands
+            # spell the same override --workspace.
+            e.message = e.message.replace("--context-id", "--workspace")
+            raise
+        client = WorkspaceClient._from_resolved_auth(
+            auth, workspace_id_hint=_bound_workspace_for_hint(auth, config)
+        )
+
+        async def _run() -> Any:
+            async with client:
+                return await operation(client, ws_id)
+
+        result = asyncio.run(_run())
+        if result is not None:
+            click.echo(result)
+    except click.ClickException:
+        raise
+    except Exception as e:
+        raise click.ClickException(_exc_message(e)) from e
+
+
+_WORKSPACE_OPT_HELP = "Workspace UUID (default: the credential source's workspace)"
+
+
+@main.group()
+def workspace():
+    """Workspace administration (owner API key required, server v0.42.0+)."""
+    pass
+
+
+@workspace.group()
+def member():
+    """Manage workspace members.
+
+    Requires the workspace OWNER's static API key — OAuth tokens are
+    rejected by the server on this surface.
+    """
+    pass
+
+
+@member.command(name="list")
+@click.option("--workspace", "-w", "workspace_id", help=_WORKSPACE_OPT_HELP)
+@click.option("--json", "as_json", is_flag=True, default=False, help="Raw JSON output")
+def member_list(workspace_id: str | None, as_json: bool):
+    """
+    List workspace members with role, email, and join date.
+
+    Example:
+      kagura workspace member list -w <workspace-uuid>
+    """
+
+    async def op(client: WorkspaceClient, ws: str) -> str:
+        members = await client.list_members(ws)
+        if as_json:
+            return json.dumps(
+                [m.model_dump(mode="json") for m in members], indent=2, ensure_ascii=False
+            )
+        lines = [f"{'USER':<28} {'ROLE':<8} {'EMAIL':<30} JOINED"]
+        for m in members:
+            joined = m.joined_at.date().isoformat() if m.joined_at else "-"
+            lines.append(f"{m.user_id:<28} {m.role:<8} {m.user_email or '-':<30} {joined}")
+        return "\n".join(lines)
+
+    _run_workspace_command(op, workspace_id)
+
+
+@member.command(name="add")
+@click.argument("user_id")
+@click.option(
+    "--role",
+    type=click.Choice(["member", "admin", "viewer"]),
+    required=True,
+    help="Role for the new member (owner cannot be assigned programmatically)",
+)
+@click.option("--workspace", "-w", "workspace_id", help=_WORKSPACE_OPT_HELP)
+def member_add(user_id: str, role: str, workspace_id: str | None):
+    """
+    Add an ALREADY-REGISTERED user to the workspace by user id.
+
+    The server does not validate that USER_ID exists (v0.42.0) — a typo
+    creates a dangling membership row. Prefer
+    `kagura workspace invite create <email>` for onboarding.
+
+    Example:
+      kagura workspace member add google_1234 --role member
+    """
+
+    async def op(client: WorkspaceClient, ws: str) -> str:
+        m = await client.add_member(ws, user_id, role=role)
+        return f"Added {m.user_id} as {m.role}"
+
+    _run_workspace_command(op, workspace_id)
+
+
+@member.command(name="set-role")
+@click.argument("user_id")
+@click.option(
+    "--role",
+    type=click.Choice(["member", "admin", "viewer"]),
+    required=True,
+    help="New role (owner changes go through the ownership transfer flow)",
+)
+@click.option("--workspace", "-w", "workspace_id", help=_WORKSPACE_OPT_HELP)
+def member_set_role(user_id: str, role: str, workspace_id: str | None):
+    """
+    Change a member's role.
+
+    Example:
+      kagura workspace member set-role google_1234 --role admin
+    """
+
+    async def op(client: WorkspaceClient, ws: str) -> str:
+        m = await client.update_member_role(ws, user_id, role=role)
+        return f"{m.user_id} is now {m.role}"
+
+    _run_workspace_command(op, workspace_id)
+
+
+@member.command(name="remove")
+@click.argument("user_id")
+@click.option("--yes", "-y", is_flag=True, default=False, help="Skip confirmation")
+@click.option("--workspace", "-w", "workspace_id", help=_WORKSPACE_OPT_HELP)
+def member_remove(user_id: str, yes: bool, workspace_id: str | None):
+    """
+    Remove a member from the workspace.
+
+    Prompts for confirmation unless --yes is passed.
+
+    Example:
+      kagura workspace member remove google_1234 --yes
+    """
+    if not yes:
+        target = workspace_id or "the default workspace"
+        # Confirm before entering the event loop (python.md: never block it).
+        click.confirm(f"Remove {user_id} from {target}?", abort=True)
+
+    async def op(client: WorkspaceClient, ws: str) -> str:
+        await client.remove_member(ws, user_id)
+        return f"Removed {user_id}"
+
+    _run_workspace_command(op, workspace_id)
+
+
+@workspace.group()
+def invite():
+    """Manage workspace invitations.
+
+    Requires the workspace OWNER's static API key — OAuth tokens are
+    rejected by the server on this surface.
+    """
+    pass
+
+
+@invite.command(name="create")
+@click.argument("email")
+@click.option(
+    "--role",
+    type=click.Choice(["member", "admin", "viewer"]),
+    default="member",
+    show_default=True,
+    help="Role granted on accept (owner invitations are not supported)",
+)
+@click.option(
+    "--context",
+    "-c",
+    "context_ids",
+    multiple=True,
+    help="Context UUID the invitee may access (repeatable; required for member/viewer)",
+)
+@click.option(
+    "--expires-days",
+    type=click.Choice(["7", "30", "90", "365"]),
+    default=None,
+    help="Expiry preset (server accepts only these; omit = never expires)",
+)
+@click.option("--workspace", "-w", "workspace_id", help=_WORKSPACE_OPT_HELP)
+def invite_create(
+    email: str,
+    role: str,
+    context_ids: tuple[str, ...],
+    expires_days: str | None,
+    workspace_id: str | None,
+):
+    """
+    Invite a not-yet-registered user by EMAIL.
+
+    The invitation URL is printed ONCE — it is a join credential and is
+    never shown again (invite list returns metadata only).
+
+    Example:
+      kagura workspace invite create new@example.com --role member -c <context-uuid>
+    """
+
+    async def op(client: WorkspaceClient, ws: str) -> str:
+        inv = await client.create_invitation(
+            ws,
+            email,
+            role=role,
+            allowed_context_ids=list(context_ids) or None,
+            expires_in_days=int(expires_days) if expires_days else None,
+        )
+        click.echo(
+            "⚠ The invitation URL below is shown once — treat it as a join credential.",
+            err=True,
+        )
+        expires = inv.expires_at.date().isoformat() if inv.expires_at else "never"
+        return (
+            f"Invitation #{inv.id} → {inv.email} (role={inv.role}, expires={expires})\n"
+            f"{inv.invitation_url or inv.token or '(no url returned)'}"
+        )
+
+    _run_workspace_command(op, workspace_id)
+
+
+@invite.command(name="list")
+@click.option("--include-accepted", is_flag=True, default=False, help="Include accepted rows")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Raw JSON output")
+@click.option("--workspace", "-w", "workspace_id", help=_WORKSPACE_OPT_HELP)
+def invite_list(include_accepted: bool, as_json: bool, workspace_id: str | None):
+    """
+    List invitations (pending by default).
+
+    Tokens/URLs are never shown here — the server nulls them for API-key
+    callers, and the JSON output drops the fields entirely.
+
+    Example:
+      kagura workspace invite list
+    """
+
+    async def op(client: WorkspaceClient, ws: str) -> str:
+        invs = await client.list_invitations(ws, include_accepted=include_accepted)
+        if as_json:
+            return json.dumps(
+                [i.model_dump(mode="json", exclude={"token", "invitation_url"}) for i in invs],
+                indent=2,
+                ensure_ascii=False,
+            )
+        lines = [f"{'ID':<6} {'EMAIL':<30} {'ROLE':<8} {'STATE':<9} EXPIRES"]
+        for i in invs:
+            state = "accepted" if i.is_accepted else ("expired" if i.is_expired else "pending")
+            expires = i.expires_at.date().isoformat() if i.expires_at else "never"
+            lines.append(f"{i.id:<6} {i.email or '-':<30} {i.role:<8} {state:<9} {expires}")
+        return "\n".join(lines)
+
+    _run_workspace_command(op, workspace_id)
+
+
+@invite.command(name="revoke")
+@click.argument("invitation_id", type=int)
+@click.option("--workspace", "-w", "workspace_id", help=_WORKSPACE_OPT_HELP)
+def invite_revoke(invitation_id: int, workspace_id: str | None):
+    """
+    Revoke a pending invitation by its integer id (see `invite list`).
+
+    Example:
+      kagura workspace invite revoke 7
+    """
+
+    async def op(client: WorkspaceClient, ws: str) -> str:
+        await client.revoke_invitation(ws, invitation_id)
+        return f"Revoked invitation #{invitation_id}"
+
+    _run_workspace_command(op, workspace_id)
 
 
 if __name__ == "__main__":  # pragma: no cover
