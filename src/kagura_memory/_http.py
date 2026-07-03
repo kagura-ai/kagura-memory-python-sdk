@@ -37,7 +37,7 @@ def base_url_from_mcp(mcp_url: str) -> str:
 def extract_detail(response: httpx.Response) -> str:
     """Return a useful server-supplied error string from an httpx response.
 
-    Handles three response shapes:
+    Handles four response shapes:
 
     - ``{"detail": "string"}`` — returned as-is (FastAPI HTTPException default).
     - ``{"detail": [{"loc": [...], "msg": "...", ...}, ...]}`` — FastAPI's
@@ -45,9 +45,14 @@ def extract_detail(response: httpx.Response) -> str:
       is formatted as ``"<loc.path>: <msg>"`` and joined with ``"; "``. Without
       this, a 422 surfaces to the caller as a bare ``"HTTP 422"`` with no hint
       at which field failed validation.
-    - Anything else — non-JSON body, non-dict body, missing ``detail``, or a
-      ``detail`` of unexpected type — returns an empty string so callers can
-      fall back to ``response.text`` or just print the status.
+    - ``{"error": "<CODE>", "message": "string", "details": {...}}`` — the
+      memory-cloud canonical envelope (most errors render this way, not
+      ``detail``). Returns ``message``; when ``details.errors`` carries a
+      validation list it is appended so a 422 names the failing field instead
+      of the generic "Request validation failed".
+    - Anything else — non-JSON body, non-dict body, missing ``detail`` and
+      ``message``, or values of unexpected type — returns an empty string so
+      callers can fall back to ``response.text`` or just print the status.
     """
     try:
         body = response.json()
@@ -60,6 +65,16 @@ def extract_detail(response: httpx.Response) -> str:
         return detail
     if isinstance(detail, list):
         return _format_validation_errors(detail)
+    message = body.get("message")
+    if isinstance(message, str) and message:
+        details = body.get("details")
+        if isinstance(details, dict):
+            errors = details.get("errors")
+            if isinstance(errors, list):
+                formatted = _format_validation_errors(errors)
+                if formatted:
+                    return f"{message}: {formatted}"
+        return message
     return ""
 
 

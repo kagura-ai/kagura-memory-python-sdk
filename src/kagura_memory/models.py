@@ -921,3 +921,53 @@ class IngestResult(BaseModel):
         should combine ``success`` with ``not errors``.
         """
         return self.overview_id is not None
+
+
+# ---------------------------------------------------------------------------
+# Workspace member / invitation management (#225, server v0.42.0+)
+# ---------------------------------------------------------------------------
+
+
+class WorkspaceMember(BaseModel):
+    """A workspace member row (#225).
+
+    ``extra="ignore"`` — the list endpoint decorates rows with display
+    fields the SDK does not model (``credentials_status``,
+    ``last_login_at``, ``allowed_context_ids``) and may add more; ignore
+    them instead of breaking deserialization (#222 lesson).
+    ``user_name``/``user_email`` are populated by the list endpoint only;
+    add/set-role responses carry the minimal ``user_id``/``role``/
+    ``joined_at`` shape.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    user_id: str
+    role: str
+    user_name: str | None = None
+    user_email: str | None = None
+    joined_at: datetime | None = None
+
+
+class WorkspaceInvitation(BaseModel):
+    """A workspace invitation (#225). Non-strict like :class:`WorkspaceMember`.
+
+    Server shape (``WorkspaceInvitationResponse``): ``id`` is an INTEGER PK
+    and there is no ``status`` field — pending is derived from
+    ``is_accepted``/``is_expired``. ``token``/``invitation_url`` are bearer
+    join-credentials: the server nulls them on programmatic LIST responses,
+    so they are optional here and the CLI prints them only on create.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    id: int
+    email: str | None = None
+    role: str
+    token: str | None = None
+    invitation_url: str | None = None
+    is_accepted: bool = False
+    is_expired: bool = False
+    created_at: datetime | None = None
+    expires_at: datetime | None = None
+    allowed_context_ids: list[str] | None = None

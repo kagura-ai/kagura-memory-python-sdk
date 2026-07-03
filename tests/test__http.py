@@ -242,3 +242,48 @@ def test_retry_after_seconds_parses_digits_else_none():
     assert _retry_after_seconds(_Resp({"Retry-After": " 45 "})) == 45  # stripped
     assert _retry_after_seconds(_Resp({"Retry-After": "Wed, 21 Oct 2099 07:28:00 GMT"})) is None
     assert _retry_after_seconds(_Resp({})) is None
+
+
+# ---------------------------------------------------------------------------
+# memory-cloud canonical envelope ({"error", "message", "details"})
+# ---------------------------------------------------------------------------
+
+
+def test_envelope_message_returned():
+    resp = _response_with_json(
+        {"error": "AUTH-101", "message": "Insufficient permissions", "details": {}}
+    )
+    assert extract_detail(resp) == "Insufficient permissions"
+
+
+def test_envelope_validation_errors_appended():
+    resp = _response_with_json(
+        {
+            "error": "VAL-001",
+            "message": "Request validation failed",
+            "details": {
+                "errors": [
+                    {"loc": ["body", "role"], "msg": "Value error, role=owner", "type": "v"}
+                ]
+            },
+        }
+    )
+    assert extract_detail(resp) == "Request validation failed: body.role: Value error, role=owner"
+
+
+def test_envelope_with_malformed_details_falls_back_to_message():
+    resp = _response_with_json(
+        {"error": "REQ-001", "message": "expires_days is required", "details": "oops"}
+    )
+    assert extract_detail(resp) == "expires_days is required"
+
+
+def test_detail_takes_precedence_over_message():
+    # A body carrying both shapes keeps the legacy FastAPI semantics.
+    resp = _response_with_json({"detail": "from detail", "message": "from message"})
+    assert extract_detail(resp) == "from detail"
+
+
+def test_non_string_message_returns_empty():
+    resp = _response_with_json({"error": "X", "message": 42, "details": {}})
+    assert extract_detail(resp) == ""
