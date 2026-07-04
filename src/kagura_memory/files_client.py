@@ -25,7 +25,7 @@ import hashlib
 import mimetypes
 import uuid
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 import httpx
@@ -42,15 +42,13 @@ from ._http import (
     base_url_from_mcp,
     extract_detail,
     sanitize_server_detail,
-    validate_https_url,
 )
+from ._rest_base import KaguraRestClient
 from .auth.credentials import KaguraOAuth
 from .exceptions import (
-    KaguraAuthError,
     KaguraConnectionError,
+    KaguraError,
     KaguraIntegrityError,
-    KaguraNotFoundError,
-    KaguraQuotaError,
     _exc_message,
 )
 from .logger import VerboseLogger, normalize_logger
@@ -62,7 +60,7 @@ from .models import (
 )
 
 
-class FilesClient:
+class FilesClient(KaguraRestClient):
     """REST API client for Kagura Memory Cloud file objects.
 
     Authentication: ``Authorization: Bearer <api_key>`` (set once in
@@ -89,11 +87,9 @@ class FilesClient:
         _auth_source: _AuthSource | None = None,
         _workspace_id_hint: str | None = None,
     ) -> None:
-        """Initialize FilesClient with a static API key.
+        """Initialize FilesClient (see :class:`KaguraRestClient`).
 
-        For OAuth profile resolution (the auto chain env → ``~/.kagura/
-        credentials.json`` → ``.kagura.json``), use :meth:`from_mcp_url`
-        which runs the resolver and selects the right transport.
+        Adds the R2 upload leg on top of the shared spine:
 
         Args:
             api_key: Kagura API key (Bearer token). Required unless
@@ -102,54 +98,23 @@ class FilesClient:
             timeout: API request timeout in seconds.
             upload_timeout: R2 PUT timeout in seconds (defaults to 5
                 minutes to accommodate large files on slow networks).
-            _oauth: Private. ``from_mcp_url`` passes a ``KaguraOAuth``
-                instance for OAuth profile authentication. Public
-                callers should not set this.
-            _auth_source: Private. Provenance tag describing which
-                ``_resolve_auth`` branch produced the credentials.
-                When set, drives the actionable 403 hint that surfaces
-                cross-source workspace mismatches (issue #115).
-            _workspace_id_hint: Private. The workspace UUID associated
-                with the credential source — used only for the 403
-                hint, never sent on the wire. Sending workspace_id is
-                still the caller's responsibility via ``context_id=``.
+            _oauth: Private. OAuth handler from ``from_mcp_url``.
+            _auth_source: Private. Credential provenance for the 403
+                cross-source hint (issue #115).
+            _workspace_id_hint: Private. Source-bound workspace UUID for
+                the 403 hint — never sent on the wire.
 
         Raises:
             ValueError: If neither ``api_key`` nor ``_oauth`` is given.
-                The OAuth path is intentionally not auto-resolved here
-                so that bare ``FilesClient()`` does not silently read
-                ``~/.kagura/credentials.json`` — that's the
-                ``from_mcp_url`` factory's job.
         """
-        if api_key is None and _oauth is None:
-            raise ValueError(
-                "FilesClient requires api_key, or use FilesClient.from_mcp_url(...) "
-                "to resolve credentials from environment, OAuth profile, or .kagura.json."
-            )
-
-        stripped_url = base_url.rstrip("/")
-        validate_https_url(stripped_url, label="Base URL")
-
-        self.base_url = stripped_url
-        if _oauth is not None:
-            # OAuth path: KaguraOAuth injects a fresh access_token per request
-            # and coordinates refresh via the process-wide credentials lock.
-            self._client = httpx.AsyncClient(
-                timeout=timeout,
-                headers={"User-Agent": f"kagura-memory-sdk/{SDK_VERSION}"},
-                auth=_oauth,
-            )
-        else:
-            # Static path: bake the bearer header once. ``api_key`` is not
-            # stored as an instance attribute (per python.md "Never store
-            # API keys as instance attributes").
-            self._client = httpx.AsyncClient(
-                timeout=timeout,
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "User-Agent": f"kagura-memory-sdk/{SDK_VERSION}",
-                },
-            )
+        super().__init__(
+            api_key,
+            base_url,
+            timeout,
+            _oauth=_oauth,
+            _auth_source=_auth_source,
+            _workspace_id_hint=_workspace_id_hint,
+        )
         # Defense in depth: never pass auth= or an Authorization header here.
         # Bearer / OAuth credentials must not reach R2 — the presigned PUT
         # carries its own short-lived SigV4 signature. A separate httpx client
@@ -158,14 +123,6 @@ class FilesClient:
             timeout=upload_timeout,
             headers={"User-Agent": f"kagura-memory-sdk/{SDK_VERSION}"},
         )
-        # Provenance for the 403 cross-source hint. Neither field is sent
-        # on the wire — they only flavor error messages so a workspace
-        # mismatch surfaces as something actionable instead of a bare
-        # "HTTP 403". Storing the source label and a workspace UUID is
-        # not sensitive (no api_key value is retained — see python.md
-        # "Never store API keys as instance attributes").
-        self._auth_source: _AuthSource | None = _auth_source
-        self._workspace_id_hint: str | None = _workspace_id_hint
 
     @classmethod
     def from_mcp_url(
@@ -251,57 +208,28 @@ class FilesClient:
     # Internal HTTP helpers
     # -------------------------------------------------------------------
 
-    async def _request(
+    def _error_403(
         self,
-        method: Literal["GET", "POST", "DELETE"],
-        path: str,
+        e: httpx.HTTPStatusError,
         *,
-        json: dict[str, Any] | None = None,
-        params: dict[str, Any] | None = None,
-    ) -> httpx.Response:
-        """Make an authenticated request with standard error mapping."""
-        url = f"{self.base_url}{path}"
-        try:
-            response = await self._client.request(method, url, json=json, params=params)
-            response.raise_for_status()
-            return response
-        except httpx.HTTPStatusError as e:
-            status = e.response.status_code
-            if status == 401:
-                raise KaguraAuthError("Authentication failed. Check your API key.") from e
-            if status == 403:
-                # Issue #115: a workspace-mismatch 403 is the operator's most
-                # common 403 cause (api_key bound to workspace A, request
-                # targets workspace B). Surface the credential source and
-                # requested workspace prefix so the cause is visible without
-                # leaking the api_key value or Bearer header. The hint shape
-                # adapts to whether the failing request carries a workspace. As
-                # of memory-cloud v0.41.0 every file endpoint (reserve / confirm
-                # / download-url / delete / list) puts workspace_id on the wire,
-                # so the workspace-mismatch heading is emitted for all of them;
-                # the generic "access denied" heading remains only as a
-                # defensive fallback for a request that carries no workspace.
-                raise KaguraConnectionError(
-                    _format_workspace_403_hint(
-                        auth_source=self._auth_source,
-                        source_workspace_hint=self._workspace_id_hint,
-                        requested_workspace=_extract_requested_workspace(json, params),
-                        server_detail=extract_detail(e.response),
-                    )
-                ) from e
-            if status == 404:
-                raise KaguraNotFoundError(extract_detail(e.response) or "Not found") from e
-            if status == 429:
-                retry_after = e.response.headers.get("Retry-After")
-                raise KaguraQuotaError(
-                    "Quota exceeded. Try again later.",
-                    retry_after=int(retry_after) if retry_after else None,
-                ) from e
-            detail = extract_detail(e.response)
-            msg = f"HTTP {status}: {detail}" if detail else f"HTTP {status}"
-            raise KaguraConnectionError(msg) from e
-        except httpx.RequestError as e:
-            raise KaguraConnectionError(f"Connection failed: {_exc_message(e)}") from e
+        request_json: dict[str, Any] | None,
+        request_params: dict[str, Any] | None,
+    ) -> KaguraError:
+        # Issue #115: a workspace-mismatch 403 is the operator's most common
+        # 403 cause (api_key bound to workspace A, request targets workspace
+        # B). Surface the credential source and requested workspace prefix so
+        # the cause is visible without leaking the api_key value or Bearer
+        # header. As of memory-cloud v0.41.0 every file endpoint puts
+        # workspace_id on the wire, so the workspace-mismatch heading covers
+        # them all; the generic heading remains a defensive fallback.
+        return KaguraConnectionError(
+            _format_workspace_403_hint(
+                auth_source=self._auth_source,
+                source_workspace_hint=self._workspace_id_hint,
+                requested_workspace=_extract_requested_workspace(request_json, request_params),
+                server_detail=extract_detail(e.response),
+            )
+        )
 
     async def _put_to_object_store(
         self,
@@ -611,27 +539,11 @@ class FilesClient:
     # -------------------------------------------------------------------
 
     async def close(self) -> None:
-        """Close both HTTP clients.
-
-        Uses try/finally so the second client is still closed if the
-        first raises during teardown — otherwise we would leak the
-        upload client's connection pool on a flaky API client close.
-        """
+        """Close both HTTP clients (API + unauthenticated R2 leg)."""
         try:
-            await self._client.aclose()
+            await super().close()
         finally:
             await self._upload_client.aclose()
-
-    async def __aenter__(self) -> FilesClient:
-        return self
-
-    async def __aexit__(
-        self,
-        _exc_type: type[BaseException] | None,
-        _exc_val: BaseException | None,
-        _exc_tb: Any,
-    ) -> None:
-        await self.close()
 
 
 # ---------------------------------------------------------------------------

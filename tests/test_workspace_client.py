@@ -653,7 +653,8 @@ def test_from_mcp_url_static_source(monkeypatch):
     from kagura_memory._auth import _StaticAuth
 
     resolved = _StaticAuth(api_key="kagura_env_x", mcp_url="https://test.com/mcp", source="env")
-    monkeypatch.setattr("kagura_memory.workspace_client._resolve_auth", lambda **kw: resolved)
+    # from_mcp_url lives on KaguraRestClient since #229 — patch the base module.
+    monkeypatch.setattr("kagura_memory._rest_base._resolve_auth", lambda **kw: resolved)
     c = WorkspaceClient.from_mcp_url()
     try:
         assert c.base_url == "https://test.com"

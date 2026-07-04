@@ -5,18 +5,13 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any, Literal
 
-import httpx
-
-from ._auth import _AuthSource, _OAuthAuth, _resolve_auth, _StaticAuth
-from ._http import SDK_VERSION, base_url_from_mcp, extract_detail, validate_https_url
+from ._auth import _AuthSource, _OAuthAuth, _StaticAuth
+from ._rest_base import KaguraRestClient
 from .auth.credentials import KaguraOAuth
 from .client import KaguraClient
 from .exceptions import (
     KaguraAuthError,
-    KaguraConnectionError,
     KaguraNotFoundError,
-    KaguraQuotaError,
-    _exc_message,
 )
 from .logger import VerboseLogger, normalize_logger
 from .models import (
@@ -59,7 +54,7 @@ _SETUP_OAUTH_NOT_SUPPORTED_MSG = (
 )
 
 
-class ResourceClient:
+class ResourceClient(KaguraRestClient):
     """REST API client for Kagura Memory Cloud Resource Tokens.
 
     Handles two authentication modes:
@@ -81,103 +76,23 @@ class ResourceClient:
         *,
         _oauth: KaguraOAuth | None = None,
         _auth_source: _AuthSource | None = None,
+        _workspace_id_hint: str | None = None,
     ) -> None:
-        """Initialize ResourceClient with a static API key.
+        """Initialize ResourceClient (see :class:`KaguraRestClient`).
 
-        For OAuth profile resolution (the auto chain env → ``~/.kagura/
-        credentials.json`` → ``.kagura.json``), use :meth:`from_mcp_url`
-        which runs the resolver and selects the right transport.
-
-        Args:
-            api_key: Kagura API key (Bearer token). Required unless
-                ``_oauth`` is supplied (see ``from_mcp_url``).
-            base_url: REST API base URL (without path).
-            timeout: Request timeout in seconds.
-            _oauth: Private. ``from_mcp_url`` passes a ``KaguraOAuth``
-                instance for OAuth profile authentication. Public
-                callers should not set this.
-            _auth_source: Private. Provenance tag describing which
-                ``_resolve_auth`` branch produced the credentials.
-                Stored for parity with :class:`FilesClient` so future
-                surfaces (e.g. 403 hints) can reuse the convention.
-
-        Raises:
-            ValueError: If neither ``api_key`` nor ``_oauth`` is given.
-                The OAuth path is intentionally not auto-resolved here
-                so that bare ``ResourceClient()`` does not silently read
-                ``~/.kagura/credentials.json`` — that's the
-                ``from_mcp_url`` factory's job.
+        Adds ``_mcp_url`` (None until :meth:`_from_resolved_auth` stamps
+        it) — :meth:`setup_resource` needs the ORIGINAL MCP URL, which the
+        REST ``base_url`` no longer carries.
         """
-        if api_key is None and _oauth is None:
-            raise ValueError(
-                "ResourceClient requires api_key, or use ResourceClient.from_mcp_url(...) "
-                "to resolve credentials from environment, OAuth profile, or .kagura.json."
-            )
-
-        stripped_url = base_url.rstrip("/")
-        validate_https_url(stripped_url, label="Base URL")
-
-        self.base_url = stripped_url
-        self._mcp_url: str | None = None  # Set by from_mcp_url for setup_resource
-        # ``_oauth`` is stored because :meth:`setup_resource` branches on it
-        # to refuse OAuth mode (constructing a KaguraClient from a static
-        # api_key scraped out of the Authorization header would not work
-        # when the header is absent in the OAuth path).
-        self._oauth: KaguraOAuth | None = _oauth
-        self._auth_source: _AuthSource | None = _auth_source
-        if _oauth is not None:
-            # OAuth path: KaguraOAuth injects a fresh access_token per request
-            # and coordinates refresh via the process-wide credentials lock.
-            self._client = httpx.AsyncClient(
-                timeout=timeout,
-                headers={"User-Agent": f"kagura-memory-sdk/{SDK_VERSION}"},
-                auth=_oauth,
-            )
-        else:
-            # Static path: bake the bearer header once. ``api_key`` is not
-            # stored as an instance attribute (per python.md "Never store
-            # API keys as instance attributes").
-            self._client = httpx.AsyncClient(
-                timeout=timeout,
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "User-Agent": f"kagura-memory-sdk/{SDK_VERSION}",
-                },
-            )
-
-    @classmethod
-    def from_mcp_url(
-        cls,
-        api_key: str | None = None,
-        mcp_url: str | None = None,
-        timeout: float = 30.0,
-        *,
-        profile: str | None = None,
-    ) -> ResourceClient:
-        """Create ResourceClient by resolving credentials from the SDK chain.
-
-        Runs :func:`_resolve_auth` with the same precedence chain as
-        :class:`KaguraClient` and :class:`FilesClient`: explicit
-        ``api_key`` > ``KAGURA_API_KEY`` env > OAuth profile from
-        ``~/.kagura/credentials.json`` > ``.kagura.json``. The chosen
-        credential source picks the transport: a static API key bakes
-        the Bearer header once; an OAuth profile installs a
-        ``KaguraOAuth`` httpx.Auth handler with automatic refresh.
-
-        The REST ``base_url`` is derived from the resolved ``mcp_url``
-        (strips ``/mcp`` and any ``/mcp/w/{workspace_id}`` suffix).
-
-        Args:
-            api_key: Explicit Kagura API key. Skips the resolution chain.
-            mcp_url: Explicit MCP URL. When omitted, the OAuth profile's
-                stored ``mcp_url`` is used (or the default).
-            timeout: Request timeout in seconds.
-            profile: Named OAuth profile to load (overrides
-                ``KAGURA_PROFILE`` env and the credentials file's
-                ``default_profile``).
-        """
-        resolved = _resolve_auth(api_key=api_key, mcp_url=mcp_url, profile=profile)
-        return cls._from_resolved_auth(resolved, timeout=timeout)
+        super().__init__(
+            api_key,
+            base_url,
+            timeout,
+            _oauth=_oauth,
+            _auth_source=_auth_source,
+            _workspace_id_hint=_workspace_id_hint,
+        )
+        self._mcp_url: str | None = None
 
     @classmethod
     def _from_resolved_auth(
@@ -185,96 +100,19 @@ class ResourceClient:
         resolved: _StaticAuth | _OAuthAuth,
         *,
         timeout: float = 30.0,
+        workspace_id_hint: str | None = None,
     ) -> ResourceClient:
-        """Construct from a pre-resolved auth — internal CLI helper.
+        """Construct from a pre-resolved auth, stamping ``_mcp_url``.
 
-        Shared by :meth:`from_mcp_url` (SDK entry) and the CLI. Mirrors
-        :meth:`FilesClient._from_resolved_auth` so the two REST clients
-        share one construction shape; downstream code (including the
-        CLI's ``_run_resource_command``) can treat them symmetrically.
-
-        Stores ``mcp_url`` on the instance so :meth:`setup_resource` can
-        reach the MCP endpoint — the resolved auth always carries one,
-        whether sourced from the OAuth profile or the priority-4 config.
+        ``setup_resource()`` needs the ORIGINAL MCP URL to build its
+        MCP session — the resolved auth always carries one, whether
+        sourced from the OAuth profile or the priority-4 config.
         """
-        base_url = base_url_from_mcp(resolved.mcp_url.rstrip("/"))
-        if isinstance(resolved, _StaticAuth):
-            instance = cls(
-                api_key=resolved.api_key,
-                base_url=base_url,
-                timeout=timeout,
-                _auth_source=resolved.source,
-            )
-        else:
-            instance = cls(
-                base_url=base_url,
-                timeout=timeout,
-                _oauth=resolved.oauth,
-                _auth_source="oauth",
-            )
+        instance = super()._from_resolved_auth(
+            resolved, timeout=timeout, workspace_id_hint=workspace_id_hint
+        )
         instance._mcp_url = resolved.mcp_url.rstrip("/")
         return instance
-
-    async def _request(
-        self,
-        method: Literal["GET", "POST", "PATCH", "DELETE"],
-        path: str,
-        *,
-        json: dict[str, Any] | None = None,
-        params: dict[str, Any] | None = None,
-        extra_headers: dict[str, str] | None = None,
-    ) -> httpx.Response:
-        """Make an HTTP request with standard error handling.
-
-        Args:
-            method: HTTP method (GET, POST, PATCH, DELETE).
-            path: API path (e.g. ``/api/v1/resource-tokens``).
-            json: Request body.
-            params: Query parameters.
-            extra_headers: Per-request headers (e.g. X-Resource-API-Key).
-
-        Returns:
-            httpx.Response object.
-
-        Raises:
-            KaguraAuthError: On 401 responses.
-            KaguraQuotaError: On 429 responses.
-            KaguraConnectionError: On other HTTP/network errors.
-        """
-        url = f"{self.base_url}{path}"
-        try:
-            response = await self._client.request(
-                method,
-                url,
-                json=json,
-                params=params,
-                headers=extra_headers,
-            )
-            response.raise_for_status()
-            return response
-
-        except httpx.HTTPStatusError as e:
-            status = e.response.status_code
-            if status == 401:
-                hint = (
-                    "Re-run `kagura auth login` or inspect ~/.kagura/credentials.json."
-                    if self._oauth is not None
-                    else "Check your API key."
-                )
-                raise KaguraAuthError(f"Authentication failed. {hint}") from e
-            if status == 404:
-                raise KaguraNotFoundError(extract_detail(e.response) or "Not found") from e
-            if status == 429:
-                retry_after = e.response.headers.get("Retry-After")
-                raise KaguraQuotaError(
-                    "Quota exceeded. Try again later.",
-                    retry_after=int(retry_after) if retry_after else None,
-                ) from e
-            detail = extract_detail(e.response)
-            msg = f"HTTP {status}: {detail}" if detail else f"HTTP {status}"
-            raise KaguraConnectionError(msg) from e
-        except httpx.RequestError as e:
-            raise KaguraConnectionError(f"Connection failed: {_exc_message(e)}") from e
 
     # -------------------------------------------------------------------
     # Token CRUD (Bearer auth)
@@ -661,20 +499,3 @@ class ResourceClient:
     # -------------------------------------------------------------------
     # Lifecycle
     # -------------------------------------------------------------------
-
-    async def close(self) -> None:
-        """Close the HTTP client."""
-        await self._client.aclose()
-
-    async def __aenter__(self) -> ResourceClient:
-        """Async context manager entry."""
-        return self
-
-    async def __aexit__(
-        self,
-        _exc_type: type[BaseException] | None,
-        _exc_val: BaseException | None,
-        _exc_tb: Any,
-    ) -> None:
-        """Async context manager exit."""
-        await self.close()

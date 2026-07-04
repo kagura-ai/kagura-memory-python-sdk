@@ -11,20 +11,17 @@ share one shape.
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any
 from urllib.parse import quote
 
 import httpx
 
-from .._auth import _AuthSource, _OAuthAuth, _resolve_auth, _StaticAuth
-from .._http import SDK_VERSION, base_url_from_mcp, extract_detail, validate_https_url
-from ..auth.credentials import KaguraOAuth
+from .._http import extract_detail
+from .._rest_base import KaguraRestClient
 from ..exceptions import (
-    KaguraAuthError,
     KaguraConnectionError,
-    KaguraNotFoundError,
+    KaguraError,
     KaguraSecretError,
-    _exc_message,
 )
 from . import crypto
 from .models import (
@@ -38,7 +35,7 @@ from .models import (
 _BASE = "/api/v1/config/secrets"
 
 
-class SecretClient:
+class SecretClient(KaguraRestClient):
     """REST client for the secret store's pubkey-registry and secret endpoints.
 
     All methods may raise:
@@ -48,138 +45,31 @@ class SecretClient:
             server returns when a put's grant set is inconsistent).
     """
 
-    def __init__(
+    # ---- KaguraRestClient hooks -----------------------------------------
+
+    def _error_403(
         self,
-        api_key: str | None = None,
-        base_url: str = "https://memory.kagura-ai.com",
-        timeout: float = 30.0,
+        e: httpx.HTTPStatusError,
         *,
-        _oauth: KaguraOAuth | None = None,
-        _auth_source: _AuthSource | None = None,
-    ) -> None:
-        """Initialize with a static API key, or via :meth:`from_mcp_url` for OAuth.
-
-        Args:
-            api_key: Kagura API key (Bearer). Required unless ``_oauth`` is given.
-            base_url: REST API base URL (without path).
-            timeout: Request timeout in seconds.
-            _oauth: Private. ``from_mcp_url`` supplies a ``KaguraOAuth`` handler.
-            _auth_source: Private. Provenance tag from ``_resolve_auth``.
-
-        Raises:
-            ValueError: If neither ``api_key`` nor ``_oauth`` is provided.
-        """
-        if api_key is None and _oauth is None:
-            raise ValueError(
-                "SecretClient requires api_key, or use SecretClient.from_mcp_url(...) "
-                "to resolve credentials from environment, OAuth profile, or .kagura.json."
-            )
-
-        stripped_url = base_url.rstrip("/")
-        validate_https_url(stripped_url, label="Base URL")
-        self.base_url = stripped_url
-        self._oauth = _oauth
-        self._auth_source = _auth_source
-        if _oauth is not None:
-            self._client = httpx.AsyncClient(
-                timeout=timeout,
-                headers={"User-Agent": f"kagura-memory-sdk/{SDK_VERSION}"},
-                auth=_oauth,
-            )
-        else:
-            # ``api_key`` is baked into the header, not stored as an attribute
-            # (python.md: "Never store API keys as instance attributes").
-            self._client = httpx.AsyncClient(
-                timeout=timeout,
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "User-Agent": f"kagura-memory-sdk/{SDK_VERSION}",
-                },
-            )
-
-    @classmethod
-    def from_mcp_url(
-        cls,
-        api_key: str | None = None,
-        mcp_url: str | None = None,
-        timeout: float = 30.0,
-        *,
-        profile: str | None = None,
-    ) -> SecretClient:
-        """Create a client by resolving credentials from the SDK auth chain.
-
-        Same precedence as the other REST clients: explicit ``api_key`` >
-        ``KAGURA_API_KEY`` > OAuth profile > ``.kagura.json``. The REST
-        ``base_url`` is derived from the resolved ``mcp_url``.
-        """
-        resolved = _resolve_auth(api_key=api_key, mcp_url=mcp_url, profile=profile)
-        return cls._from_resolved_auth(resolved, timeout=timeout)
-
-    @classmethod
-    def _from_resolved_auth(
-        cls,
-        resolved: _StaticAuth | _OAuthAuth,
-        *,
-        timeout: float = 30.0,
-    ) -> SecretClient:
-        """Construct from a pre-resolved auth — internal CLI helper."""
-        base_url = base_url_from_mcp(resolved.mcp_url.rstrip("/"))
-        if isinstance(resolved, _StaticAuth):
-            return cls(
-                api_key=resolved.api_key,
-                base_url=base_url,
-                timeout=timeout,
-                _auth_source=resolved.source,
-            )
-        return cls(
-            base_url=base_url,
-            timeout=timeout,
-            _oauth=resolved.oauth,
-            _auth_source="oauth",
+        request_json: dict[str, Any] | None,
+        request_params: dict[str, Any] | None,
+    ) -> KaguraError:
+        # The server returns 403 (not 404) for a secret the caller can't
+        # read, to avoid leaking whether it exists. Give an actionable
+        # message rather than a bare "HTTP 403".
+        detail = extract_detail(e.response)
+        msg = (
+            "Access denied (HTTP 403): you may not have a grant on this secret, "
+            "it may not exist, or you lack permission for this operation."
         )
+        if detail:
+            msg = f"{msg} ({detail})"
+        return KaguraConnectionError(msg)
 
-    async def _request(
-        self,
-        method: Literal["GET", "POST", "PATCH", "DELETE"],
-        path: str,
-        *,
-        json: dict[str, Any] | None = None,
-        params: dict[str, Any] | None = None,
-    ) -> httpx.Response:
-        """Make an HTTP request with standard Kagura error mapping."""
-        url = f"{self.base_url}{path}"
-        try:
-            response = await self._client.request(method, url, json=json, params=params)
-            response.raise_for_status()
-            return response
-        except httpx.HTTPStatusError as e:
-            status = e.response.status_code
-            if status == 401:
-                hint = (
-                    "Re-run `kagura auth login` or inspect ~/.kagura/credentials.json."
-                    if self._oauth is not None
-                    else "Check your API key."
-                )
-                raise KaguraAuthError(f"Authentication failed. {hint}") from e
-            if status == 404:
-                raise KaguraNotFoundError(extract_detail(e.response) or "Not found") from e
-            if status == 403:
-                # The server returns 403 (not 404) for a secret the caller can't
-                # read, to avoid leaking whether it exists. Give an actionable
-                # message rather than a bare "HTTP 403".
-                detail = extract_detail(e.response)
-                msg = (
-                    "Access denied (HTTP 403): you may not have a grant on this secret, "
-                    "it may not exist, or you lack permission for this operation."
-                )
-                if detail:
-                    msg = f"{msg} ({detail})"
-                raise KaguraConnectionError(msg) from e
-            detail = extract_detail(e.response)
-            msg = f"HTTP {status}: {detail}" if detail else f"HTTP {status}"
-            raise KaguraConnectionError(msg) from e
-        except httpx.RequestError as e:
-            raise KaguraConnectionError(f"Connection failed: {_exc_message(e)}") from e
+    def _error_429(self, e: httpx.HTTPStatusError) -> KaguraError:
+        # Historical mapping preserved (#229 is zero-behavior-change): the
+        # secret surface has always rendered 429 through the generic branch.
+        return self._generic_error(e)
 
     # -- pubkey registry -----------------------------------------------------
 
@@ -338,18 +228,3 @@ class SecretClient:
         )
 
     # -- lifecycle -----------------------------------------------------------
-
-    async def close(self) -> None:
-        """Close the HTTP client."""
-        await self._client.aclose()
-
-    async def __aenter__(self) -> SecretClient:
-        return self
-
-    async def __aexit__(
-        self,
-        _exc_type: type[BaseException] | None,
-        _exc_val: BaseException | None,
-        _exc_tb: Any,
-    ) -> None:
-        await self.close()

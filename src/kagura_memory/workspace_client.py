@@ -6,47 +6,25 @@ OAuth Bearer tokens outright ("Use a workspace-owner API key"). The web
 UI (session auth) keeps its own per-endpoint role semantics — this
 client only ever sees the programmatic contract.
 
-Construction and credential resolution mirror
-:class:`~kagura_memory.files_client.FilesClient`; see that module for the
-resolver rationale (#115/#118). Error bodies arrive in the memory-cloud
-canonical envelope (``{"error", "message", "details"}``) or the legacy
-FastAPI ``{"detail": ...}`` shape — both are handled by
-:func:`~kagura_memory._http.extract_detail`.
+Construction, credential resolution, lifecycle, and the base error
+mapping live in :class:`~kagura_memory._rest_base.KaguraRestClient`
+(#229); this module keeps only the workspace-specific wire contract:
+the owner-key 403 hint and the detail-carrying 429 quota mapping.
 """
 
 from __future__ import annotations
 
 import uuid
-from typing import Any, Literal
+from typing import Any
 from urllib.parse import quote
 
 import httpx
 from pydantic import ValidationError
 
-from ._auth import (
-    _SOURCE_LABEL,
-    _AuthSource,
-    _OAuthAuth,
-    _resolve_auth,
-    _StaticAuth,
-)
-from ._http import (
-    SDK_VERSION,
-    _retry_after_seconds,
-    base_url_from_mcp,
-    extract_detail,
-    sanitize_server_detail,
-    validate_https_url,
-)
-from .auth.credentials import KaguraOAuth
-from .exceptions import (
-    KaguraAuthError,
-    KaguraConnectionError,
-    KaguraError,
-    KaguraNotFoundError,
-    KaguraQuotaError,
-    _exc_message,
-)
+from ._auth import _SOURCE_LABEL
+from ._http import _retry_after_seconds, extract_detail, sanitize_server_detail
+from ._rest_base import KaguraRestClient
+from .exceptions import KaguraConnectionError, KaguraError, KaguraQuotaError
 from .models import MemberAPIKey, WorkspaceInvitation, WorkspaceMember
 
 VALID_ASSIGNABLE_ROLES = ("member", "admin", "viewer")
@@ -91,7 +69,7 @@ def _require_int(value: object, label: str) -> int:
     return value
 
 
-class WorkspaceClient:
+class WorkspaceClient(KaguraRestClient):
     """REST API client for workspace member / invitation management.
 
     Requires the workspace OWNER's API key when called programmatically
@@ -110,141 +88,6 @@ class WorkspaceClient:
             here does NOT prove the resource is absent.
         KaguraQuotaError: Member quota or rate limit exceeded (429)
     """
-
-    def __init__(
-        self,
-        api_key: str | None = None,
-        base_url: str = "https://memory.kagura-ai.com",
-        timeout: float = 30.0,
-        *,
-        _oauth: KaguraOAuth | None = None,
-        _auth_source: _AuthSource | None = None,
-        _workspace_id_hint: str | None = None,
-    ) -> None:
-        """Initialize WorkspaceClient with a static API key.
-
-        For credential resolution (the auto chain env → ``~/.kagura/
-        credentials.json`` → ``.kagura.json``), use :meth:`from_mcp_url`.
-
-        Args:
-            api_key: Kagura API key (Bearer token). Required unless
-                ``_oauth`` is supplied (see ``from_mcp_url``).
-            base_url: REST API base URL (without path).
-            timeout: API request timeout in seconds.
-            _oauth: Private. ``from_mcp_url`` passes a ``KaguraOAuth``
-                instance when the resolver picked an OAuth profile. Kept
-                for construction parity — the server rejects OAuth on
-                this surface with an actionable 403, which is a better
-                operator experience than failing client-side with a
-                generic credential error.
-            _auth_source: Private. Provenance tag from ``_resolve_auth``;
-                drives the actionable 403 hint (issue #115).
-            _workspace_id_hint: Private. Workspace UUID associated with
-                the credential source — 403 hint display only, never sent
-                on the wire.
-
-        Raises:
-            ValueError: If neither ``api_key`` nor ``_oauth`` is given.
-        """
-        if api_key is None and _oauth is None:
-            raise ValueError(
-                "WorkspaceClient requires api_key, or use "
-                "WorkspaceClient.from_mcp_url(...) to resolve credentials from "
-                "environment, OAuth profile, or .kagura.json."
-            )
-
-        stripped_url = base_url.rstrip("/")
-        validate_https_url(stripped_url, label="Base URL")
-        self.base_url = stripped_url
-
-        if _oauth is not None:
-            self._client = httpx.AsyncClient(
-                timeout=timeout,
-                headers={"User-Agent": f"kagura-memory-sdk/{SDK_VERSION}"},
-                auth=_oauth,
-            )
-        else:
-            # Bake the bearer header once; api_key is not stored as an
-            # instance attribute (python.md "Never store API keys ...").
-            self._client = httpx.AsyncClient(
-                timeout=timeout,
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "User-Agent": f"kagura-memory-sdk/{SDK_VERSION}",
-                },
-            )
-        self._auth_source: _AuthSource | None = _auth_source
-        self._workspace_id_hint: str | None = _workspace_id_hint
-        # The auth HANDLE (not a raw key) — resource_client precedent; drives
-        # the 401 recovery hint (OAuth users must re-login, not "check a key").
-        self._oauth: KaguraOAuth | None = _oauth
-
-    @classmethod
-    def from_mcp_url(
-        cls,
-        api_key: str | None = None,
-        mcp_url: str | None = None,
-        timeout: float = 30.0,
-        *,
-        profile: str | None = None,
-    ) -> WorkspaceClient:
-        """Create WorkspaceClient by resolving credentials from the SDK chain.
-
-        Same precedence as :meth:`FilesClient.from_mcp_url`: explicit
-        ``api_key`` > ``KAGURA_API_KEY`` env > OAuth profile >
-        ``.kagura.json``. Note that the server accepts only static owner
-        API keys on this surface; an OAuth profile will connect but every
-        call returns an actionable 403.
-
-        Args:
-            api_key: Explicit Kagura API key. Skips the resolution chain.
-            mcp_url: Explicit MCP URL. When omitted, the resolved
-                credential source's stored URL is used.
-            timeout: API request timeout in seconds.
-            profile: Named OAuth profile to load.
-        """
-        resolved = _resolve_auth(api_key=api_key, mcp_url=mcp_url, profile=profile)
-        return cls._from_resolved_auth(resolved, timeout=timeout)
-
-    @classmethod
-    def _from_resolved_auth(
-        cls,
-        resolved: _StaticAuth | _OAuthAuth,
-        *,
-        timeout: float = 30.0,
-        workspace_id_hint: str | None = None,
-    ) -> WorkspaceClient:
-        """Construct from a pre-resolved auth — internal CLI helper.
-
-        Mirrors ``FilesClient._from_resolved_auth`` so the CLI can resolve
-        once and pair api_key with its same-source workspace (#115).
-        """
-        base_url = base_url_from_mcp(resolved.mcp_url.rstrip("/"))
-        if isinstance(resolved, _StaticAuth):
-            return cls(
-                api_key=resolved.api_key,
-                base_url=base_url,
-                timeout=timeout,
-                _auth_source=resolved.source,
-                _workspace_id_hint=workspace_id_hint,
-            )
-        return cls(
-            base_url=base_url,
-            timeout=timeout,
-            _oauth=resolved.oauth,
-            _auth_source="oauth",
-            _workspace_id_hint=resolved.workspace_id,
-        )
-
-    async def __aenter__(self) -> WorkspaceClient:
-        return self
-
-    async def __aexit__(self, *exc_info: object) -> None:
-        await self.close()
-
-    async def close(self) -> None:
-        """Close the underlying HTTP client."""
-        await self._client.aclose()
 
     # -------------------------------------------------------------------
     # Members
@@ -492,68 +335,22 @@ class WorkspaceClient:
             parts.append(hint + " — is this key the workspace owner's?")
         return " ".join(parts)
 
-    def _json(self, resp: httpx.Response) -> Any:
-        """Parse a 2xx body as JSON, mapping garbage to a Kagura error.
+    # ---- KaguraRestClient hooks -----------------------------------------
 
-        A proxy/CDN can 200 with an HTML maintenance page; that must not
-        surface as a raw ``json.JSONDecodeError`` traceback.
-        """
-        try:
-            return resp.json()
-        except ValueError as exc:
-            raise KaguraConnectionError(
-                f"Server returned a non-JSON body (HTTP {resp.status_code}) for "
-                f"{resp.request.method} {resp.request.url.path}."
-            ) from exc
-
-    def _expect_list(self, resp: httpx.Response) -> list[Any]:
-        """Parse a 2xx body that the contract says is a JSON array."""
-        payload = self._json(resp)
-        if not isinstance(payload, list):
-            raise KaguraConnectionError(
-                f"Unexpected response shape for {resp.request.method} "
-                f"{resp.request.url.path}: expected a JSON array, got "
-                f"{type(payload).__name__}."
-            )
-        return payload
-
-    async def _request(
+    def _error_403(
         self,
-        method: Literal["GET", "POST", "PUT", "DELETE"],
-        path: str,
+        e: httpx.HTTPStatusError,
         *,
-        json: dict[str, Any] | None = None,
-        params: dict[str, Any] | None = None,
-    ) -> httpx.Response:
-        """Make an authenticated request with standard error mapping."""
-        url = f"{self.base_url}{path}"
-        try:
-            response = await self._client.request(method, url, json=json, params=params)
-            response.raise_for_status()
-            return response
-        except httpx.HTTPStatusError as e:
-            status = e.response.status_code
-            detail = extract_detail(e.response)
-            if status == 401:
-                hint = (
-                    "Re-run `kagura auth login` or inspect ~/.kagura/credentials.json."
-                    if self._oauth is not None
-                    else "Check your API key."
-                )
-                raise KaguraAuthError(f"Authentication failed. {hint}") from e
-            if status == 403:
-                raise KaguraConnectionError(self._format_403(detail)) from e
-            if status == 404:
-                raise KaguraNotFoundError(detail or "Not found") from e
-            if status == 429:
-                # Invite-create quota exhaustion ("Member limit reached ...")
-                # and generic rate limiting both surface as 429 — keep the
-                # server message, it names the cause and the fix.
-                raise KaguraQuotaError(
-                    detail or "Quota exceeded. Try again later.",
-                    retry_after=_retry_after_seconds(e.response),
-                ) from e
-            msg = f"HTTP {status}: {detail}" if detail else f"HTTP {status}"
-            raise KaguraConnectionError(msg) from e
-        except httpx.RequestError as e:
-            raise KaguraConnectionError(f"Connection failed: {_exc_message(e)}") from e
+        request_json: dict[str, Any] | None,
+        request_params: dict[str, Any] | None,
+    ) -> KaguraError:
+        return KaguraConnectionError(self._format_403(extract_detail(e.response)))
+
+    def _error_429(self, e: httpx.HTTPStatusError) -> KaguraError:
+        # Invite-create quota exhaustion ("Member limit reached ...") and
+        # generic rate limiting both surface as 429 — keep the server
+        # message, it names the cause and the fix.
+        return KaguraQuotaError(
+            extract_detail(e.response) or "Quota exceeded. Try again later.",
+            retry_after=_retry_after_seconds(e.response),
+        )
