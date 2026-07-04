@@ -523,3 +523,27 @@ async def test_oauth_construction_via_resolved_auth():
 async def test_async_context_manager_closes():
     async with SecretClient(api_key="t", base_url="https://test.com") as c:
         assert c.base_url == "https://test.com"
+
+
+@pytest.mark.asyncio
+async def test_429_stays_generic_connection_error():
+    """#229 contract: the secret surface keeps its historical 429 mapping.
+
+    Unlike the other REST clients (KaguraQuotaError), SecretClient has
+    always rendered 429 through the generic branch — pin that so the
+    shared-base refactor cannot silently change the exception type.
+    """
+    client = SecretClient(api_key="kagura_test")
+    resp = httpx.Response(
+        429,
+        json={"detail": "slow down"},
+        request=httpx.Request("GET", "https://x/api/v1/config/secrets"),
+    )
+    with patch.object(
+        client._client,
+        "request",
+        AsyncMock(side_effect=httpx.HTTPStatusError("429", request=resp.request, response=resp)),
+    ):
+        with pytest.raises(KaguraConnectionError, match="HTTP 429: slow down"):
+            await client.list_secrets()
+    await client.close()

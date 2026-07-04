@@ -239,7 +239,10 @@ class KaguraRestClient:
             response.raise_for_status()
             return response
         except httpx.HTTPStatusError as e:
-            self._raise_for_status_error(e, request_json=json, request_params=params)
+            # The dispatcher is NoReturn; the explicit ``raise`` never
+            # executes but makes the no-fall-through control flow visible
+            # to readers and analyzers (CodeQL py/mixed-returns).
+            raise self._raise_for_status_error(e, request_json=json, request_params=params)
         except httpx.RequestError as e:
             raise KaguraConnectionError(f"Connection failed: {_exc_message(e)}") from e
 
