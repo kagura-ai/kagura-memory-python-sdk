@@ -734,3 +734,16 @@ async def test_network_error_maps_to_connection_error():
     async with make_client(handler) as c:
         with pytest.raises(KaguraConnectionError, match="Connection failed"):
             await c.list_members(WS)
+
+
+@pytest.mark.asyncio
+async def test_list_member_keys_rejects_null_or_non_list_api_keys_field():
+    # Copilot review (PR #228): guard the api_keys FIELD, not just the envelope.
+    async with make_client(
+        lambda r: httpx.Response(200, json={"api_keys": None, "target_user_role": "member"})
+    ) as c:
+        with pytest.raises(KaguraConnectionError, match="api_keys"):
+            await c.list_member_keys(WS, "u2")
+    async with make_client(lambda r: httpx.Response(200, json={"api_keys": {"oops": 1}})) as c:
+        with pytest.raises(KaguraConnectionError, match="api_keys"):
+            await c.list_member_keys(WS, "u2")
