@@ -11,7 +11,7 @@ share one shape.
 
 from __future__ import annotations
 
-from typing import Any, NoReturn
+from typing import Any
 from urllib.parse import quote
 
 import httpx
@@ -20,6 +20,7 @@ from .._http import extract_detail
 from .._rest_base import KaguraRestClient
 from ..exceptions import (
     KaguraConnectionError,
+    KaguraError,
     KaguraSecretError,
 )
 from . import crypto
@@ -46,13 +47,13 @@ class SecretClient(KaguraRestClient):
 
     # ---- KaguraRestClient hooks -----------------------------------------
 
-    def _raise_403(
+    def _error_403(
         self,
         e: httpx.HTTPStatusError,
         *,
         request_json: dict[str, Any] | None,
         request_params: dict[str, Any] | None,
-    ) -> NoReturn:
+    ) -> KaguraError:
         # The server returns 403 (not 404) for a secret the caller can't
         # read, to avoid leaking whether it exists. Give an actionable
         # message rather than a bare "HTTP 403".
@@ -63,12 +64,12 @@ class SecretClient(KaguraRestClient):
         )
         if detail:
             msg = f"{msg} ({detail})"
-        raise KaguraConnectionError(msg) from e
+        return KaguraConnectionError(msg)
 
-    def _raise_429(self, e: httpx.HTTPStatusError) -> NoReturn:
+    def _error_429(self, e: httpx.HTTPStatusError) -> KaguraError:
         # Historical mapping preserved (#229 is zero-behavior-change): the
         # secret surface has always rendered 429 through the generic branch.
-        self._raise_generic(e)
+        return self._generic_error(e)
 
     # -- pubkey registry -----------------------------------------------------
 

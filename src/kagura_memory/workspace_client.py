@@ -15,7 +15,7 @@ the owner-key 403 hint and the detail-carrying 429 quota mapping.
 from __future__ import annotations
 
 import uuid
-from typing import Any, NoReturn
+from typing import Any
 from urllib.parse import quote
 
 import httpx
@@ -337,20 +337,20 @@ class WorkspaceClient(KaguraRestClient):
 
     # ---- KaguraRestClient hooks -----------------------------------------
 
-    def _raise_403(
+    def _error_403(
         self,
         e: httpx.HTTPStatusError,
         *,
         request_json: dict[str, Any] | None,
         request_params: dict[str, Any] | None,
-    ) -> NoReturn:
-        raise KaguraConnectionError(self._format_403(extract_detail(e.response))) from e
+    ) -> KaguraError:
+        return KaguraConnectionError(self._format_403(extract_detail(e.response)))
 
-    def _raise_429(self, e: httpx.HTTPStatusError) -> NoReturn:
+    def _error_429(self, e: httpx.HTTPStatusError) -> KaguraError:
         # Invite-create quota exhaustion ("Member limit reached ...") and
         # generic rate limiting both surface as 429 — keep the server
         # message, it names the cause and the fix.
-        raise KaguraQuotaError(
+        return KaguraQuotaError(
             extract_detail(e.response) or "Quota exceeded. Try again later.",
             retry_after=_retry_after_seconds(e.response),
-        ) from e
+        )

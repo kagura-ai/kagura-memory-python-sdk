@@ -25,7 +25,7 @@ import hashlib
 import mimetypes
 import uuid
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 import httpx
@@ -47,6 +47,7 @@ from ._rest_base import KaguraRestClient
 from .auth.credentials import KaguraOAuth
 from .exceptions import (
     KaguraConnectionError,
+    KaguraError,
     KaguraIntegrityError,
     _exc_message,
 )
@@ -207,13 +208,13 @@ class FilesClient(KaguraRestClient):
     # Internal HTTP helpers
     # -------------------------------------------------------------------
 
-    def _raise_403(
+    def _error_403(
         self,
         e: httpx.HTTPStatusError,
         *,
         request_json: dict[str, Any] | None,
         request_params: dict[str, Any] | None,
-    ) -> NoReturn:
+    ) -> KaguraError:
         # Issue #115: a workspace-mismatch 403 is the operator's most common
         # 403 cause (api_key bound to workspace A, request targets workspace
         # B). Surface the credential source and requested workspace prefix so
@@ -221,14 +222,14 @@ class FilesClient(KaguraRestClient):
         # header. As of memory-cloud v0.41.0 every file endpoint puts
         # workspace_id on the wire, so the workspace-mismatch heading covers
         # them all; the generic heading remains a defensive fallback.
-        raise KaguraConnectionError(
+        return KaguraConnectionError(
             _format_workspace_403_hint(
                 auth_source=self._auth_source,
                 source_workspace_hint=self._workspace_id_hint,
                 requested_workspace=_extract_requested_workspace(request_json, request_params),
                 server_detail=extract_detail(e.response),
             )
-        ) from e
+        )
 
     async def _put_to_object_store(
         self,

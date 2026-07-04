@@ -5,8 +5,8 @@ four near-verbatim copies of the same scaffolding, and the copies had
 already drifted (403 credential scrubbing and the OAuth-aware 401 hint
 existed in some clients but not others — found by the #228 review).
 :class:`KaguraRestClient` owns the spine once; each client keeps only
-its wire-contract differences via the ``_raise_401``/``_raise_403``/
-``_raise_429`` hooks (#229).
+its wire-contract differences via the ``_error_401``/``_error_403``/
+``_error_429`` builder hooks (#229).
 
 Invariants the base enforces for every client:
 
@@ -21,7 +21,7 @@ Invariants the base enforces for every client:
 
 from __future__ import annotations
 
-from typing import Any, Literal, NoReturn, Self
+from typing import Any, Literal, Self
 
 import httpx
 
@@ -37,6 +37,7 @@ from .auth.credentials import KaguraOAuth
 from .exceptions import (
     KaguraAuthError,
     KaguraConnectionError,
+    KaguraError,
     KaguraNotFoundError,
     KaguraQuotaError,
     _exc_message,
@@ -49,7 +50,7 @@ class KaguraRestClient:
     """Base class for the Kagura REST API clients.
 
     Subclasses add their domain methods on top of :meth:`_request` and
-    override the ``_raise_*`` hooks where their server contract differs.
+    override the ``_error_*`` builder hooks where their contract differs.
     The default hooks implement the majority behavior:
 
     - 401 → :class:`KaguraAuthError` with an OAuth-aware recovery hint
@@ -239,66 +240,71 @@ class KaguraRestClient:
             response.raise_for_status()
             return response
         except httpx.HTTPStatusError as e:
-            # The dispatcher is NoReturn; the explicit ``raise`` never
-            # executes but makes the no-fall-through control flow visible
-            # to readers and analyzers (CodeQL py/mixed-returns).
-            raise self._raise_for_status_error(e, request_json=json, request_params=params)
+            raise self._map_status_error(e, request_json=json, request_params=params) from e
         except httpx.RequestError as e:
             raise KaguraConnectionError(f"Connection failed: {_exc_message(e)}") from e
 
-    def _raise_for_status_error(
+    def _map_status_error(
         self,
         e: httpx.HTTPStatusError,
         *,
         request_json: dict[str, Any] | None,
         request_params: dict[str, Any] | None,
-    ) -> NoReturn:
-        """Dispatch an HTTP status error to the per-status hooks."""
+    ) -> KaguraError:
+        """Build the Kagura exception for an HTTP status error.
+
+        Hooks RETURN the exception rather than raising it so ``_request``
+        owns the single raise site — one uniform ``from e`` chain, a
+        pyright-enforced ``KaguraError`` contract on every hook, and no
+        NoReturn dispatch that static analysis cannot see through
+        (CodeQL py/mixed-returns vs py/illegal-raise both flagged the
+        raising-hook shape).
+        """
         status = e.response.status_code
         if status == 401:
-            self._raise_401(e)
+            return self._error_401(e)
         if status == 403:
-            self._raise_403(e, request_json=request_json, request_params=request_params)
+            return self._error_403(e, request_json=request_json, request_params=request_params)
         if status == 404:
-            raise KaguraNotFoundError(extract_detail(e.response) or "Not found") from e
+            return KaguraNotFoundError(extract_detail(e.response) or "Not found")
         if status == 429:
-            self._raise_429(e)
-        self._raise_generic(e)
+            return self._error_429(e)
+        return self._generic_error(e)
 
     # ---- per-status hooks (override where the wire contract differs) ----
 
-    def _raise_401(self, e: httpx.HTTPStatusError) -> NoReturn:
-        """401 → auth error with a recovery hint matching the auth mode."""
+    def _error_401(self, e: httpx.HTTPStatusError) -> KaguraError:
+        """401 -> auth error with a recovery hint matching the auth mode."""
         hint = (
             "Re-run `kagura auth login` or inspect ~/.kagura/credentials.json."
             if self._oauth is not None
             else "Check your API key."
         )
-        raise KaguraAuthError(f"Authentication failed. {hint}") from e
+        return KaguraAuthError(f"Authentication failed. {hint}")
 
-    def _raise_403(
+    def _error_403(
         self,
         e: httpx.HTTPStatusError,
         *,
         request_json: dict[str, Any] | None,
         request_params: dict[str, Any] | None,
-    ) -> NoReturn:
-        """403 → generic mapping by default; clients with a richer story
+    ) -> KaguraError:
+        """403 -> generic mapping by default; clients with a richer story
         (workspace hints, secret existence-hiding) override this."""
-        self._raise_generic(e)
+        return self._generic_error(e)
 
-    def _raise_429(self, e: httpx.HTTPStatusError) -> NoReturn:
-        """429 → quota error with a tolerant ``Retry-After`` parse."""
-        raise KaguraQuotaError(
+    def _error_429(self, e: httpx.HTTPStatusError) -> KaguraError:
+        """429 -> quota error with a tolerant ``Retry-After`` parse."""
+        return KaguraQuotaError(
             "Quota exceeded. Try again later.",
             retry_after=_retry_after_seconds(e.response),
-        ) from e
+        )
 
-    def _raise_generic(self, e: httpx.HTTPStatusError) -> NoReturn:
+    def _generic_error(self, e: httpx.HTTPStatusError) -> KaguraError:
         status = e.response.status_code
         detail = extract_detail(e.response)
         msg = f"HTTP {status}: {detail}" if detail else f"HTTP {status}"
-        raise KaguraConnectionError(msg) from e
+        return KaguraConnectionError(msg)
 
     # -------------------------------------------------------------------
     # Response-body helpers
