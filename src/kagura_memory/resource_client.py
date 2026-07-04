@@ -95,7 +95,6 @@ class ResourceClient(KaguraRestClient):
         self._mcp_url: str | None = None
 
     @classmethod
-    @classmethod
     def _from_resolved_auth(
         cls,
         resolved: _StaticAuth | _OAuthAuth,
