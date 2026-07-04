@@ -640,3 +640,97 @@ async def test_401_oauth_client_hints_relogin():
     async with c:
         with pytest.raises(KaguraAuthError, match="kagura auth login"):
             await c.list_members(WS)
+
+
+# ---------------------------------------------------------------------------
+# Coverage completion (codecov/patch on PR #228)
+# ---------------------------------------------------------------------------
+
+
+def test_from_mcp_url_static_source(monkeypatch):
+    import asyncio
+
+    from kagura_memory._auth import _StaticAuth
+
+    resolved = _StaticAuth(api_key="kagura_env_x", mcp_url="https://test.com/mcp", source="env")
+    monkeypatch.setattr("kagura_memory.workspace_client._resolve_auth", lambda **kw: resolved)
+    c = WorkspaceClient.from_mcp_url()
+    try:
+        assert c.base_url == "https://test.com"
+        assert c._auth_source == "env"
+        assert c._oauth is None
+    finally:
+        asyncio.run(c.close())
+
+
+def test_from_resolved_auth_oauth_branch():
+    import asyncio
+
+    from kagura_memory._auth import _OAuthAuth
+
+    def fake_auth(request):
+        return request
+
+    resolved = _OAuthAuth(
+        oauth=fake_auth,  # type: ignore[arg-type]
+        mcp_url="https://test.com/mcp/w/abc",
+        workspace_id=WS,
+    )
+    c = WorkspaceClient._from_resolved_auth(resolved)
+    try:
+        assert c.base_url == "https://test.com"
+        assert c._auth_source == "oauth"
+        assert c._workspace_id_hint == WS
+        assert c._oauth is not None
+    finally:
+        asyncio.run(c.close())
+
+
+@pytest.mark.asyncio
+async def test_mint_shape_mismatch_without_plaintext_points_at_recovery():
+    from kagura_memory.exceptions import KaguraError
+
+    async with make_client(lambda r: httpx.Response(201, json={"unexpected": True})) as c:
+        with pytest.raises(KaguraError, match="list-keys"):
+            await c.mint_member_key(WS, "u2", "ci-bot", 30)
+
+
+@pytest.mark.asyncio
+async def test_list_member_keys_rejects_non_dict_body():
+    async with make_client(lambda r: httpx.Response(200, json=[1, 2])) as c:
+        with pytest.raises(KaguraConnectionError, match="api_keys"):
+            await c.list_member_keys(WS, "u2")
+
+
+@pytest.mark.asyncio
+async def test_uniform_403_hint_names_static_credential_source():
+    c = WorkspaceClient(api_key="kagura_test", _auth_source="config", _workspace_id_hint=WS)
+    await c._client.aclose()
+    c._client = httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda r: httpx.Response(403, json=_envelope("AUTH-101", "Insufficient permissions"))
+        )
+    )
+    async with c:
+        with pytest.raises(KaguraConnectionError) as exc_info:
+            await c.list_members(WS)
+    msg = str(exc_info.value)
+    assert "credential source" in msg
+    assert WS[:8] in msg  # workspace hint prefix, never the full wire value
+
+
+@pytest.mark.asyncio
+async def test_generic_status_maps_to_connection_error():
+    async with make_client(lambda r: httpx.Response(500, json=_envelope("SYS-001", "boom"))) as c:
+        with pytest.raises(KaguraConnectionError, match="HTTP 500: boom"):
+            await c.list_members(WS)
+
+
+@pytest.mark.asyncio
+async def test_network_error_maps_to_connection_error():
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("nope", request=request)
+
+    async with make_client(handler) as c:
+        with pytest.raises(KaguraConnectionError, match="Connection failed"):
+            await c.list_members(WS)

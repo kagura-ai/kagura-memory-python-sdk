@@ -335,3 +335,18 @@ def test_member_list_json_includes_audit_fields(mock_cls, mock_config):
     assert result.exit_code == 0, result.output
     assert '"allowed_context_ids"' in result.output and '"ctx-1"' in result.output
     assert '"credentials_status"' in result.output
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.WorkspaceClient")
+def test_client_error_becomes_click_error(mock_cls, mock_config):
+    """KaguraError from the client surfaces as a clean CLI error, not a traceback."""
+    from kagura_memory.exceptions import KaguraConnectionError
+
+    mock_config.return_value = CONFIG
+    inst = _mock_client(mock_cls)
+    inst.list_members = AsyncMock(side_effect=KaguraConnectionError("owner key required"))
+    result = CliRunner().invoke(main, ["workspace", "member", "list"])
+    assert result.exit_code != 0
+    assert "owner key required" in result.output
+    assert "Traceback" not in result.output
