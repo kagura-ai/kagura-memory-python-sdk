@@ -46,6 +46,7 @@ from .models import (
     IngestResult,
     ListTagsResponse,
     LLMUsage,
+    MemberAPIKey,
     Memory,
     MemoryInfo,
     MemoryListItem,
@@ -88,8 +89,11 @@ from .models import (
     UsageQuota,
     UsageQuotaLimitOnly,
     WorkspaceInfo,
+    WorkspaceInvitation,
+    WorkspaceMember,
 )
 from .resource_client import ResourceClient
+from .workspace_client import WorkspaceClient
 
 __version__ = "0.35.0"
 
@@ -99,6 +103,7 @@ __all__ = [
     "KaguraClient",
     "ResourceClient",
     "FilesClient",
+    "WorkspaceClient",
     "MIN_SERVER_VERSION",
     # Embedding models
     "EmbeddingModel",
@@ -172,6 +177,10 @@ __all__ = [
     # File objects (server v0.15.1+)
     "FileObject",
     "FileListResponse",
+    # Workspace member management (#225, server v0.42.0+)
+    "WorkspaceMember",
+    "WorkspaceInvitation",
+    "MemberAPIKey",
     # File ingestion (Issue #80)
     "FileIngestor",
     "IngestResult",

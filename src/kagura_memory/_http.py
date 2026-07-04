@@ -37,7 +37,7 @@ def base_url_from_mcp(mcp_url: str) -> str:
 def extract_detail(response: httpx.Response) -> str:
     """Return a useful server-supplied error string from an httpx response.
 
-    Handles three response shapes:
+    Handles four response shapes:
 
     - ``{"detail": "string"}`` — returned as-is (FastAPI HTTPException default).
     - ``{"detail": [{"loc": [...], "msg": "...", ...}, ...]}`` — FastAPI's
@@ -45,9 +45,14 @@ def extract_detail(response: httpx.Response) -> str:
       is formatted as ``"<loc.path>: <msg>"`` and joined with ``"; "``. Without
       this, a 422 surfaces to the caller as a bare ``"HTTP 422"`` with no hint
       at which field failed validation.
-    - Anything else — non-JSON body, non-dict body, missing ``detail``, or a
-      ``detail`` of unexpected type — returns an empty string so callers can
-      fall back to ``response.text`` or just print the status.
+    - ``{"error": "<CODE>", "message": "string", "details": {...}}`` — the
+      memory-cloud canonical envelope (most errors render this way, not
+      ``detail``). Returns ``message``; when ``details.errors`` carries a
+      validation list it is appended so a 422 names the failing field instead
+      of the generic "Request validation failed".
+    - Anything else — non-JSON body, non-dict body, missing ``detail`` and
+      ``message``, or values of unexpected type — returns an empty string so
+      callers can fall back to ``response.text`` or just print the status.
     """
     try:
         body = response.json()
@@ -60,7 +65,39 @@ def extract_detail(response: httpx.Response) -> str:
         return detail
     if isinstance(detail, list):
         return _format_validation_errors(detail)
+    message = body.get("message")
+    if isinstance(message, str) and message:
+        details = body.get("details")
+        if isinstance(details, dict):
+            errors = details.get("errors")
+            if isinstance(errors, list):
+                formatted = _format_validation_errors(errors)
+                if formatted:
+                    return f"{message}: {formatted}"
+        return message
     return ""
+
+
+def sanitize_server_detail(detail: str | None) -> str | None:
+    """Drop server-provided detail strings that contain credential markers.
+
+    Server 403 ``detail`` payloads usually surface non-sensitive reasons
+    (scope, deactivation, plan limit) that are valuable to operators —
+    forwarding them helps debugging. But the detail field is operator-
+    facing text the server controls; a future server bug echoing back
+    the Bearer header or api_key would otherwise be passed straight to
+    the user. Drop the detail entirely when it carries any marker that
+    looks credential-shaped. Returns ``None`` when the detail is empty
+    or unsafe to display.
+    """
+    if not detail:
+        return None
+    lowered = detail.lower()
+    # ``api_key=`` covers ``api_key=<value>`` style; ``bearer`` catches
+    # ``Bearer <token>`` echoes; ``authorization`` catches header reflections.
+    if "bearer" in lowered or "authorization" in lowered or "api_key=" in lowered:
+        return None
+    return detail
 
 
 def _retry_after_seconds(response: httpx.Response) -> int | None:

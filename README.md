@@ -348,10 +348,44 @@ async with SecretClient.from_mcp_url(api_key="kagura_...", mcp_url="https://memo
 
 Most workflows use the CLI instead — see [`kagura secret`](#zero-knowledge-secrets-kagura-secret) below, which handles keychain custody and the get/put/grant/rotate flows with built-in misuse guards.
 
+### WorkspaceClient — Workspace Member Management
+
+Owner-key operational tooling for workspace members and invitations (memory-cloud v0.42.0+). Every endpoint requires the **workspace owner's static API key** when called programmatically — OAuth tokens are rejected by the server with an actionable 403, and the assignable roles are `member` / `admin` / `viewer` (owner changes go through the ownership transfer flow):
+
+```python
+from kagura_memory import WorkspaceClient
+
+async with WorkspaceClient.from_mcp_url(api_key="kagura_...") as client:
+    members = await client.list_members("workspace-uuid")
+    for m in members:
+        print(m.user_id, m.role, m.user_email)
+
+    # Invite a new user by email. member/viewer invitations REQUIRE a
+    # context grant (allowed_context_ids, min 1); expires_in_days accepts
+    # only the server presets 7/30/90/365 (None = never expires).
+    inv = await client.create_invitation(
+        "workspace-uuid",
+        "new@example.com",
+        role="member",
+        allowed_context_ids=["context-uuid"],
+        expires_in_days=30,
+    )
+    print(inv.invitation_url)  # shown once — a join credential
+
+    # Role changes / removal
+    await client.update_member_role("workspace-uuid", "google_123", role="admin")
+    await client.remove_member("workspace-uuid", "google_123")
+```
+
+Notes: `add_member` does **not** validate the user id server-side (a typo creates a dangling row — prefer `create_invitation` for onboarding); invitation `id`s are integers with no `status` field (derive pending from `is_accepted`/`is_expired`); listing invitations programmatically returns `token`/`invitation_url` as `None` (server-side token hygiene).
+
+The same client also provisions **member API keys** (memory-cloud [#1165](https://github.com/kagura-ai/memory-cloud/issues/1165)): `mint_member_key(ws, user_id, name, expires_days)` (member/viewer targets only, never yourself — leaked-owner-key self-replication is blocked server-side; `plaintext_key` is returned exactly once), `list_member_keys` (metadata only), and `revoke_member_key` (soft revoke). CLI: `kagura auth create-key|list-keys|revoke-key`.
+
 ## SDK ↔ memory-cloud Compatibility
 
 | SDK | Min memory-cloud | Notes |
 |---|---|---|
+| 0.36.0+ | 0.17.1 (0.42.0 for `kagura workspace` / `kagura auth create-key`) | **Workspace member management + owner-provisioned member keys (owner-key only).** `WorkspaceClient` / `kagura workspace member\|invite` and `mint_member_key`/`list_member_keys`/`revoke_member_key` / `kagura auth create-key\|list-keys\|revoke-key` need memory-cloud **0.42.0+** (owner-key programmatic access, [#1164](https://github.com/kagura-ai/memory-cloud/issues/1164) / [#1165](https://github.com/kagura-ai/memory-cloud/issues/1165)). Requires the workspace **owner's static API key** — OAuth tokens are rejected on this surface, and a deployment can disable it via `enable_owner_key_member_management=false`. Key minting is privilege-downgrade only: member/viewer targets, never self, `expires_days` required. `MIN_SERVER_VERSION` stays **0.17.1**. |
 | 0.35.0+ | 0.17.1 (0.41.0 for file uploads/downloads) | **FilesClient v0.41.0 compatibility (breaking).** memory-cloud 0.41.0 requires `workspace_id` on the query of the file-id endpoints (`confirm`/`download-url`/`delete`) and presigns R2 PUT without the checksum header — so pre-0.35.0 SDKs get 403/422 on every upload/download/delete against it. This SDK sends `workspace_id` on those endpoints (harmlessly ignored by older servers) and only binds the checksum when the presign signed it. **Breaking:** `FilesClient.download_url(file_id, *, context_id)` and `delete(file_id, *, context_id)` now require `context_id`; `kagura files download-url`/`delete` require `-c/--context-id` (or a profile/`.kagura.json` workspace). `MIN_SERVER_VERSION` stays **0.17.1**. |
 | 0.34.0+ | 0.17.1 (0.41.0 for secret delete + file context binding) | **Owner-only secret delete + file context binding.** `SecretClient.delete_secret` / `kagura secret delete` (`DELETE /api/v1/config/secrets/{name}`) and `FilesClient.upload(binding_context_id=…)` / `FileObject.context_id` (context-scoped file ACL) need memory-cloud **0.41.0+**. `MIN_SERVER_VERSION` stays **0.17.1** — only these surfaces require 0.41.0. |
 | 0.33.0+ | 0.17.1 (0.39.0 for `kagura secret`) | **Zero-knowledge secret store.** `SecretClient` / `kagura secret` need memory-cloud **0.39.0+** (the `/api/v1/config/secrets` endpoints). `MIN_SERVER_VERSION` is **not** bumped — the rest of the SDK still works on 0.17.1+; only the secret surface requires 0.39.0. Requires the `[secret]` extra. |
@@ -460,6 +494,20 @@ kagura files upload ./plan.pdf -c <context-id> --binding-context-id <ctx>   # bi
 kagura files list -c <context-id> --limit 50
 kagura files download-url <file-id> -c <context-id>   # -c required (server v0.41.0)
 kagura files delete <file-id> -c <context-id>         # -c required (server v0.41.0)
+
+# Workspace member management — owner API key ONLY (server v0.42.0+; OAuth tokens are rejected)
+kagura workspace member list [--json]
+kagura workspace member add <user-id> --role member|admin|viewer   # user must already exist — prefer invite
+kagura workspace member set-role <user-id> --role member|admin|viewer
+kagura workspace member remove <user-id> --yes
+kagura workspace invite create <email> --role member -c <context-id> --expires-days 30
+kagura workspace invite list [--include-accepted]
+kagura workspace invite revoke <invitation-id>
+
+# Owner-provisioned member API keys — owner API key ONLY (server v0.42.0+)
+kagura auth create-key --user <member-id> --name ci-bot --expires-days 90   # key printed ONCE; member/viewer targets only, never yourself
+kagura auth list-keys --user <member-id>            # metadata only — plaintext is never re-shown
+kagura auth revoke-key <key-id> --user <member-id>  # soft revoke (row kept for audit)
 
 # Config
 kagura config show
