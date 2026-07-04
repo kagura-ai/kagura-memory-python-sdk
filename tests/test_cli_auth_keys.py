@@ -6,7 +6,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from click.testing import CliRunner
 
-from kagura_memory.auth.credentials import reset_state_cache
 from kagura_memory.cli import main
 from kagura_memory.models import MemberAPIKey
 
@@ -16,16 +15,8 @@ PLAINTEXT = "kagura_secret_plaintext_value_0123456789"
 
 
 @pytest.fixture(autouse=True)
-def _isolate_oauth_state(tmp_path, monkeypatch):
-    """Isolate from real ``~/.kagura/credentials.json`` and env (see test_cli_files.py)."""
-    fake_path = tmp_path / "default-credentials.json"
-    monkeypatch.setattr("kagura_memory.auth.credentials.DEFAULT_CREDENTIALS_PATH", fake_path)
-    monkeypatch.delenv("KAGURA_API_KEY", raising=False)
-    monkeypatch.delenv("KAGURA_PROFILE", raising=False)
-    monkeypatch.delenv("KAGURA_MCP_URL", raising=False)
-    reset_state_cache()
-    yield
-    reset_state_cache()
+def _isolate_oauth_state(isolated_kagura_credentials):
+    """Every test here runs against isolated credentials (see conftest)."""
 
 
 CONFIG = {

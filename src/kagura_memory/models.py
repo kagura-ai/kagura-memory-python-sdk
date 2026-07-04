@@ -931,13 +931,15 @@ class IngestResult(BaseModel):
 class WorkspaceMember(BaseModel):
     """A workspace member row (#225).
 
-    ``extra="ignore"`` — the list endpoint decorates rows with display
-    fields the SDK does not model (``credentials_status``,
-    ``last_login_at``, ``allowed_context_ids``) and may add more; ignore
-    them instead of breaking deserialization (#222 lesson).
-    ``user_name``/``user_email`` are populated by the list endpoint only;
+    ``extra="ignore"`` — the server may add fields; ignore them instead of
+    breaking deserialization (#222 lesson). The list endpoint populates
+    the display/audit fields (``user_name``, ``user_email``,
+    ``last_login_at``, ``allowed_context_ids``, ``credentials_status``);
     add/set-role responses carry the minimal ``user_id``/``role``/
-    ``joined_at`` shape.
+    ``joined_at`` shape and leave the rest ``None``.
+    ``credentials_status`` stays an untyped mapping — its inner shape is
+    server-owned display metadata (key counts / visibility booleans) that
+    the SDK forwards without interpreting.
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -947,6 +949,9 @@ class WorkspaceMember(BaseModel):
     user_name: str | None = None
     user_email: str | None = None
     joined_at: datetime | None = None
+    last_login_at: datetime | None = None
+    allowed_context_ids: list[str] | None = None
+    credentials_status: dict[str, Any] | None = None
 
 
 class WorkspaceInvitation(BaseModel):

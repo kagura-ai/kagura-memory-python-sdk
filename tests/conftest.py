@@ -2,6 +2,8 @@
 
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from kagura_memory.auth.credentials import OAuthCredentials
 
 
@@ -58,3 +60,26 @@ def sleep_report_summary_dict(report_id: str = "rid-1") -> dict:
         "llm_calls_made": 3,
         "llm_tokens_used": 1234,
     }
+
+
+@pytest.fixture
+def isolated_kagura_credentials(tmp_path, monkeypatch):
+    """Isolate a test from real ``~/.kagura/credentials.json`` and env.
+
+    CLI tests walk the canonical SDK chain (``env > OAuth profile >
+    .kagura.json``), so a developer's stored OAuth profile or exported
+    ``KAGURA_API_KEY`` would pre-empt config-only fixtures and silently
+    change behavior. Shared home for the per-file autouse wrappers
+    (test_cli_workspace.py / test_cli_auth_keys.py) — one body instead of
+    a copy per file.
+    """
+    from kagura_memory.auth.credentials import reset_state_cache
+
+    fake_path = tmp_path / "default-credentials.json"
+    monkeypatch.setattr("kagura_memory.auth.credentials.DEFAULT_CREDENTIALS_PATH", fake_path)
+    monkeypatch.delenv("KAGURA_API_KEY", raising=False)
+    monkeypatch.delenv("KAGURA_PROFILE", raising=False)
+    monkeypatch.delenv("KAGURA_MCP_URL", raising=False)
+    reset_state_cache()
+    yield
+    reset_state_cache()

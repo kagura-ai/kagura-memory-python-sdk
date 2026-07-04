@@ -78,6 +78,28 @@ def extract_detail(response: httpx.Response) -> str:
     return ""
 
 
+def sanitize_server_detail(detail: str | None) -> str | None:
+    """Drop server-provided detail strings that contain credential markers.
+
+    Server 403 ``detail`` payloads usually surface non-sensitive reasons
+    (scope, deactivation, plan limit) that are valuable to operators —
+    forwarding them helps debugging. But the detail field is operator-
+    facing text the server controls; a future server bug echoing back
+    the Bearer header or api_key would otherwise be passed straight to
+    the user. Drop the detail entirely when it carries any marker that
+    looks credential-shaped. Returns ``None`` when the detail is empty
+    or unsafe to display.
+    """
+    if not detail:
+        return None
+    lowered = detail.lower()
+    # ``api_key=`` covers ``api_key=<value>`` style; ``bearer`` catches
+    # ``Bearer <token>`` echoes; ``authorization`` catches header reflections.
+    if "bearer" in lowered or "authorization" in lowered or "api_key=" in lowered:
+        return None
+    return detail
+
+
 def _retry_after_seconds(response: httpx.Response) -> int | None:
     """Parse a numeric ``Retry-After`` header (delta-seconds), else ``None``.
 

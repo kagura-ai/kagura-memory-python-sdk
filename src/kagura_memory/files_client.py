@@ -37,7 +37,13 @@ from ._auth import (
     _resolve_auth,
     _StaticAuth,
 )
-from ._http import SDK_VERSION, base_url_from_mcp, extract_detail, validate_https_url
+from ._http import (
+    SDK_VERSION,
+    base_url_from_mcp,
+    extract_detail,
+    sanitize_server_detail,
+    validate_https_url,
+)
 from .auth.credentials import KaguraOAuth
 from .exceptions import (
     KaguraAuthError,
@@ -667,26 +673,10 @@ def _extract_requested_workspace(
     return None
 
 
-def _sanitize_server_detail(detail: str | None) -> str | None:
-    """Drop server-provided detail strings that contain credential markers.
-
-    Server 403 ``detail`` payloads usually surface non-sensitive reasons
-    (scope, deactivation, plan limit) that are valuable to operators —
-    forwarding them helps debugging. But the detail field is operator-
-    facing text the server controls; a future server bug echoing back
-    the Bearer header or api_key would otherwise be passed straight to
-    the user. Drop the detail entirely when it carries any marker that
-    looks credential-shaped. Returns ``None`` when the detail is empty
-    or unsafe to display.
-    """
-    if not detail:
-        return None
-    lowered = detail.lower()
-    # ``api_key=`` covers ``api_key=<value>`` style; ``bearer`` catches
-    # ``Bearer <token>`` echoes; ``authorization`` catches header reflections.
-    if "bearer" in lowered or "authorization" in lowered or "api_key=" in lowered:
-        return None
-    return detail
+# _sanitize_server_detail moved to _http.sanitize_server_detail so
+# WorkspaceClient shares the same credential-marker scrubbing; the alias
+# keeps this module's call sites and test imports stable.
+_sanitize_server_detail = sanitize_server_detail
 
 
 def _format_workspace_403_hint(

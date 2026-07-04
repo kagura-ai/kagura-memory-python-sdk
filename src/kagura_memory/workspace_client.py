@@ -21,6 +21,7 @@ from typing import Any, Literal
 from urllib.parse import quote
 
 import httpx
+from pydantic import ValidationError
 
 from ._auth import (
     _SOURCE_LABEL,
@@ -34,12 +35,14 @@ from ._http import (
     _retry_after_seconds,
     base_url_from_mcp,
     extract_detail,
+    sanitize_server_detail,
     validate_https_url,
 )
 from .auth.credentials import KaguraOAuth
 from .exceptions import (
     KaguraAuthError,
     KaguraConnectionError,
+    KaguraError,
     KaguraNotFoundError,
     KaguraQuotaError,
     _exc_message,
@@ -62,12 +65,30 @@ _UNIFORM_403 = "Insufficient permissions"
 # already actionable and must pass through untouched.
 
 
-def _validate_workspace_id(workspace_id: str) -> None:
-    """Reject non-UUID workspace ids before they reach a URL path."""
+def _normalize_workspace_id(workspace_id: str) -> str:
+    """Return the canonical UUID string, rejecting non-UUIDs before the URL.
+
+    ``uuid.UUID`` tolerates non-canonical spellings (``{braces}``,
+    ``urn:uuid:`` prefix, dashless 32-hex); interpolating the RAW input
+    would send those to the server and surface as a misleading uniform
+    404 — normalize instead of just validating.
+    """
     try:
-        uuid.UUID(str(workspace_id))
+        return str(uuid.UUID(str(workspace_id)))
     except (ValueError, TypeError) as exc:
         raise ValueError(f"workspace_id must be a UUID, got {workspace_id!r}") from exc
+
+
+def _require_int(value: object, label: str) -> int:
+    """Strictly require an int — no bool, no float truncation, no str parse.
+
+    ``int(7.9)`` would silently target a DIFFERENT resource id on a
+    destructive endpoint, and ``int("7a")`` raises a bare ValueError with
+    no context; both are worth failing loudly instead.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{label} must be an integer, got {value!r}")
+    return value
 
 
 class WorkspaceClient:
@@ -154,6 +175,9 @@ class WorkspaceClient:
             )
         self._auth_source: _AuthSource | None = _auth_source
         self._workspace_id_hint: str | None = _workspace_id_hint
+        # The auth HANDLE (not a raw key) — resource_client precedent; drives
+        # the 401 recovery hint (OAuth users must re-login, not "check a key").
+        self._oauth: KaguraOAuth | None = _oauth
 
     @classmethod
     def from_mcp_url(
@@ -232,9 +256,9 @@ class WorkspaceClient:
         Rows are ordered owner→viewer then by join date and include
         ``user_name``/``user_email`` when the member has logged in.
         """
-        _validate_workspace_id(workspace_id)
+        workspace_id = _normalize_workspace_id(workspace_id)
         resp = await self._request("GET", f"/api/v1/workspaces/{workspace_id}/members")
-        return [WorkspaceMember.model_validate(row) for row in resp.json()]
+        return [WorkspaceMember.model_validate(row) for row in self._expect_list(resp)]
 
     async def add_member(
         self, workspace_id: str, user_id: str, role: str = "member"
@@ -247,31 +271,31 @@ class WorkspaceClient:
         use this only with a user_id copied from a trusted source.
         Duplicate members are rejected with 422.
         """
-        _validate_workspace_id(workspace_id)
+        workspace_id = _normalize_workspace_id(workspace_id)
         self._validate_role(role)
         resp = await self._request(
             "POST",
             f"/api/v1/workspaces/{workspace_id}/members",
             json={"user_id": user_id, "role": role},
         )
-        return WorkspaceMember.model_validate(resp.json())
+        return WorkspaceMember.model_validate(self._json(resp))
 
     async def update_member_role(
         self, workspace_id: str, user_id: str, role: str
     ) -> WorkspaceMember:
         """Change a member's role (member/admin/viewer only)."""
-        _validate_workspace_id(workspace_id)
+        workspace_id = _normalize_workspace_id(workspace_id)
         self._validate_role(role)
         resp = await self._request(
             "PUT",
             f"/api/v1/workspaces/{workspace_id}/members/{quote(user_id, safe='')}",
             json={"role": role},
         )
-        return WorkspaceMember.model_validate(resp.json())
+        return WorkspaceMember.model_validate(self._json(resp))
 
     async def remove_member(self, workspace_id: str, user_id: str) -> None:
         """Remove a member from the workspace (server returns 204)."""
-        _validate_workspace_id(workspace_id)
+        workspace_id = _normalize_workspace_id(workspace_id)
         await self._request(
             "DELETE",
             f"/api/v1/workspaces/{workspace_id}/members/{quote(user_id, safe='')}",
@@ -304,7 +328,7 @@ class WorkspaceClient:
                 member/viewer invitations, ignored for admin.
             expires_in_days: One of 7/30/90/365, or None = never expires.
         """
-        _validate_workspace_id(workspace_id)
+        workspace_id = _normalize_workspace_id(workspace_id)
         self._validate_role(role)
         if role in ("member", "viewer") and not allowed_context_ids:
             raise ValueError(
@@ -324,26 +348,27 @@ class WorkspaceClient:
         resp = await self._request(
             "POST", f"/api/v1/workspaces/{workspace_id}/invitations", json=body
         )
-        return WorkspaceInvitation.model_validate(resp.json())
+        return WorkspaceInvitation.model_validate(self._json(resp))
 
     async def list_invitations(
         self, workspace_id: str, *, include_accepted: bool = False
     ) -> list[WorkspaceInvitation]:
         """List invitations. ``token``/``invitation_url`` arrive as null
         for programmatic callers (server-side token hygiene, #1164)."""
-        _validate_workspace_id(workspace_id)
+        workspace_id = _normalize_workspace_id(workspace_id)
         params = {"include_accepted": "true"} if include_accepted else None
         resp = await self._request(
             "GET", f"/api/v1/workspaces/{workspace_id}/invitations", params=params
         )
-        return [WorkspaceInvitation.model_validate(row) for row in resp.json()]
+        return [WorkspaceInvitation.model_validate(row) for row in self._expect_list(resp)]
 
     async def revoke_invitation(self, workspace_id: str, invitation_id: int) -> None:
         """Revoke a pending invitation (server returns 200 {"success": true})."""
-        _validate_workspace_id(workspace_id)
+        workspace_id = _normalize_workspace_id(workspace_id)
         await self._request(
             "DELETE",
-            f"/api/v1/workspaces/{workspace_id}/invitations/{int(invitation_id)}",
+            f"/api/v1/workspaces/{workspace_id}/invitations/"
+            f"{_require_int(invitation_id, 'invitation_id')}",
         )
 
     # -------------------------------------------------------------------
@@ -363,16 +388,33 @@ class WorkspaceClient:
         ``plaintext_key`` is shown exactly once — owner-provisioned keys
         are force-hidden at creation, so no later call returns it.
         """
-        _validate_workspace_id(workspace_id)
-        if not 1 <= int(expires_days) <= 3650:
+        workspace_id = _normalize_workspace_id(workspace_id)
+        expires_days = _require_int(expires_days, "expires_days")
+        if not 1 <= expires_days <= 3650:
             raise ValueError(f"expires_days must be 1-3650, got {expires_days!r}")
         resp = await self._request(
             "POST",
             f"/api/v1/workspaces/{workspace_id}/members/"
             f"{quote(user_id, safe='')}/credentials/api-keys",
-            json={"name": name, "expires_days": int(expires_days)},
+            json={"name": name, "expires_days": expires_days},
         )
-        return MemberAPIKey.model_validate(resp.json())
+        payload = self._json(resp)
+        try:
+            return MemberAPIKey.model_validate(payload)
+        except ValidationError as exc:
+            # The key already exists server-side and is force-hidden — a shape
+            # mismatch must not swallow the ONE chance to see the plaintext.
+            plaintext = payload.get("plaintext_key") if isinstance(payload, dict) else None
+            if isinstance(plaintext, str) and plaintext:
+                raise KaguraError(
+                    "Server returned an unexpected mint response shape, but the "
+                    f"key WAS created. Save the plaintext now: {plaintext}"
+                ) from exc
+            raise KaguraError(
+                "Server returned an unexpected mint response shape; the key may "
+                "have been created without displaying its plaintext — check "
+                "`kagura auth list-keys` and revoke/re-mint if present."
+            ) from exc
 
     async def list_member_keys(self, workspace_id: str, user_id: str) -> list[MemberAPIKey]:
         """List a member's API keys — metadata only.
@@ -381,12 +423,17 @@ class WorkspaceClient:
         envelope (``api_keys`` + ``target_user_role``) and always nulls
         ``plaintext_key`` for programmatic callers.
         """
-        _validate_workspace_id(workspace_id)
+        workspace_id = _normalize_workspace_id(workspace_id)
         resp = await self._request(
             "GET",
             f"/api/v1/workspaces/{workspace_id}/members/{quote(user_id, safe='')}/credentials",
         )
-        payload = resp.json()
+        payload = self._json(resp)
+        if not isinstance(payload, dict):
+            raise KaguraConnectionError(
+                "Unexpected response shape from the member-credentials endpoint "
+                f"(expected an object with 'api_keys', got {type(payload).__name__})."
+            )
         return [MemberAPIKey.model_validate(row) for row in payload.get("api_keys", [])]
 
     async def revoke_member_key(self, workspace_id: str, user_id: str, key_id: int) -> None:
@@ -396,11 +443,12 @@ class WorkspaceClient:
         set, row retained for forensics); success is 200 with a status
         body, and an already-revoked key surfaces as a uniform 404.
         """
-        _validate_workspace_id(workspace_id)
+        workspace_id = _normalize_workspace_id(workspace_id)
         await self._request(
             "DELETE",
             f"/api/v1/workspaces/{workspace_id}/members/"
-            f"{quote(user_id, safe='')}/credentials/api-keys/{int(key_id)}",
+            f"{quote(user_id, safe='')}/credentials/api-keys/"
+            f"{_require_int(key_id, 'key_id')}",
         )
 
     # -------------------------------------------------------------------
@@ -424,8 +472,9 @@ class WorkspaceClient:
         deliberately uniform denial gets the owner-key hint, because that
         is the one a non-owner static key actually hits.
         """
-        if server_detail and server_detail != _UNIFORM_403:
-            return server_detail
+        safe_detail = sanitize_server_detail(server_detail)
+        if safe_detail and safe_detail != _UNIFORM_403:
+            return safe_detail
         parts = [
             "Access denied (HTTP 403): workspace member/invitation/credential "
             "management requires the workspace OWNER's API key when called "
@@ -438,6 +487,31 @@ class WorkspaceClient:
                 hint += f" (workspace={self._workspace_id_hint[:8]}…)"
             parts.append(hint + " — is this key the workspace owner's?")
         return " ".join(parts)
+
+    def _json(self, resp: httpx.Response) -> Any:
+        """Parse a 2xx body as JSON, mapping garbage to a Kagura error.
+
+        A proxy/CDN can 200 with an HTML maintenance page; that must not
+        surface as a raw ``json.JSONDecodeError`` traceback.
+        """
+        try:
+            return resp.json()
+        except ValueError as exc:
+            raise KaguraConnectionError(
+                f"Server returned a non-JSON body (HTTP {resp.status_code}) for "
+                f"{resp.request.method} {resp.request.url.path}."
+            ) from exc
+
+    def _expect_list(self, resp: httpx.Response) -> list[Any]:
+        """Parse a 2xx body that the contract says is a JSON array."""
+        payload = self._json(resp)
+        if not isinstance(payload, list):
+            raise KaguraConnectionError(
+                f"Unexpected response shape for {resp.request.method} "
+                f"{resp.request.url.path}: expected a JSON array, got "
+                f"{type(payload).__name__}."
+            )
+        return payload
 
     async def _request(
         self,
@@ -457,7 +531,12 @@ class WorkspaceClient:
             status = e.response.status_code
             detail = extract_detail(e.response)
             if status == 401:
-                raise KaguraAuthError("Authentication failed. Check your API key.") from e
+                hint = (
+                    "Re-run `kagura auth login` or inspect ~/.kagura/credentials.json."
+                    if self._oauth is not None
+                    else "Check your API key."
+                )
+                raise KaguraAuthError(f"Authentication failed. {hint}") from e
             if status == 403:
                 raise KaguraConnectionError(self._format_403(detail)) from e
             if status == 404:

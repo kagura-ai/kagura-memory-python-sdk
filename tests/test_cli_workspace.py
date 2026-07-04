@@ -6,7 +6,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from click.testing import CliRunner
 
-from kagura_memory.auth.credentials import reset_state_cache
 from kagura_memory.cli import main
 from kagura_memory.models import WorkspaceInvitation, WorkspaceMember
 
@@ -14,21 +13,8 @@ WS = "11111111-2222-3333-4444-555555555555"
 
 
 @pytest.fixture(autouse=True)
-def _isolate_oauth_state(tmp_path, monkeypatch):
-    """Isolate from real ``~/.kagura/credentials.json`` and env.
-
-    Same rationale as tests/test_cli_files.py: the workspace CLI walks the
-    canonical SDK chain, so a developer's stored OAuth profile would
-    pre-empt the config-only fixtures.
-    """
-    fake_path = tmp_path / "default-credentials.json"
-    monkeypatch.setattr("kagura_memory.auth.credentials.DEFAULT_CREDENTIALS_PATH", fake_path)
-    monkeypatch.delenv("KAGURA_API_KEY", raising=False)
-    monkeypatch.delenv("KAGURA_PROFILE", raising=False)
-    monkeypatch.delenv("KAGURA_MCP_URL", raising=False)
-    reset_state_cache()
-    yield
-    reset_state_cache()
+def _isolate_oauth_state(isolated_kagura_credentials):
+    """Every test here runs against isolated credentials (see conftest)."""
 
 
 CONFIG = {
@@ -281,3 +267,71 @@ def test_env_key_without_workspace_names_the_workspace_flag(mock_cls, mock_confi
     assert result.exit_code != 0
     assert "--workspace" in result.output
     assert "--context-id" not in result.output
+
+
+# ---------------------------------------------------------------------------
+# Review-fix regressions (xhigh code review, 2026-07-03)
+# ---------------------------------------------------------------------------
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.WorkspaceClient")
+def test_blank_workspace_flag_refused(mock_cls, mock_config):
+    """--workspace "" (e.g. unset $WS in a script) must not silently fall back."""
+    mock_config.return_value = CONFIG
+    inst = _mock_client(mock_cls, remove_member=None)
+    result = CliRunner().invoke(
+        main, ["workspace", "member", "remove", "google_2", "--yes", "--workspace", ""]
+    )
+    assert result.exit_code != 0
+    assert "refusing" in result.output
+    inst.remove_member.assert_not_called()
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.WorkspaceClient")
+def test_auto_workspace_flag_refused(mock_cls, mock_config):
+    mock_config.return_value = CONFIG
+    _mock_client(mock_cls, list_members=[])
+    result = CliRunner().invoke(main, ["workspace", "member", "list", "--workspace", "auto"])
+    assert result.exit_code != 0
+    assert "refusing" in result.output
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.WorkspaceClient")
+def test_member_remove_prompt_names_resolved_workspace(mock_cls, mock_config):
+    """The confirm prompt shows the RESOLVED workspace UUID, not a vague phrase."""
+    mock_config.return_value = CONFIG
+    inst = _mock_client(mock_cls, remove_member=None)
+    result = CliRunner().invoke(main, ["workspace", "member", "remove", "google_2"], input="n\n")
+    assert result.exit_code != 0
+    assert WS in result.output  # resolved UUID visible before aborting
+    inst.remove_member.assert_not_called()
+
+
+def test_invite_create_member_without_context_names_the_flag():
+    result = CliRunner().invoke(main, ["workspace", "invite", "create", "new@x.com"])
+    assert result.exit_code != 0
+    assert "--context" in result.output  # names the real CLI flag
+    assert "allowed_context_ids" not in result.output
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.WorkspaceClient")
+def test_member_list_json_includes_audit_fields(mock_cls, mock_config):
+    """--json carries the server's audit fields (allowed_context_ids etc.)."""
+    mock_config.return_value = CONFIG
+    _mock_client(
+        mock_cls,
+        list_members=[
+            _member(
+                allowed_context_ids=["ctx-1"],
+                credentials_status={"api_key_count": 2},
+            )
+        ],
+    )
+    result = CliRunner().invoke(main, ["workspace", "member", "list", "--json"])
+    assert result.exit_code == 0, result.output
+    assert '"allowed_context_ids"' in result.output and '"ctx-1"' in result.output
+    assert '"credentials_status"' in result.output

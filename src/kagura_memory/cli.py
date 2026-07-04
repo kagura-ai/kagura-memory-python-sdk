@@ -1781,6 +1781,8 @@ def _resolve_workspace_from_source(
     auth: _StaticAuth | _OAuthAuth,
     config: dict[str, Any],
     explicit_ctx: str | None,
+    *,
+    flag: str = "--context-id",
 ) -> str:
     """Resolve workspace_id from the SAME source as ``api_key`` (issue #115).
 
@@ -1818,7 +1820,7 @@ def _resolve_workspace_from_source(
             return auth.workspace_id
         raise click.ClickException(
             "OAuth profile has no workspace bound. Re-run `kagura auth login` "
-            "or pass --context-id <uuid>."
+            f"or pass {flag} <uuid>."
         )
 
     # 3. Static api_key from .kagura.json → workspace must come from the
@@ -1830,14 +1832,14 @@ def _resolve_workspace_from_source(
         raise click.ClickException(
             '.kagura.json has api_key but context_id is missing or "auto". '
             "Set context_id to the workspace UUID bound to this api_key, "
-            "or pass --context-id. (Falling back to the OAuth profile would "
+            f"or pass {flag}. (Falling back to the OAuth profile would "
             "mix credential sources — see issue #115.)"
         )
 
     # 4. env / explicit api_key: no associated workspace source.
     raise click.ClickException(
         f"api_key from {_SOURCE_LABEL[auth.source]} has no associated workspace; "
-        "pass --context-id "
+        f"pass {flag} "
         "(mixing api_key and OAuth profile's workspace is not allowed — see issue #115)."
     )
 
@@ -2172,6 +2174,8 @@ def files_list(context_id: str | None, limit: int, cursor: str | None):
 def _run_workspace_command(
     operation: Callable[[WorkspaceClient, str], Awaitable[Any]],
     workspace_id: str | None,
+    *,
+    confirm: Callable[[str], None] | None = None,
 ) -> None:
     """Execute a WorkspaceClient operation with standard boilerplate.
 
@@ -2182,17 +2186,30 @@ def _run_workspace_command(
     profile still resolves and connects, but the server rejects it with
     an actionable 403 — better than failing client-side, since the same
     message channel also covers the deployment kill-switch case.
+
+    ``confirm`` runs AFTER workspace resolution with the resolved UUID and
+    before any network call — destructive commands prompt against the
+    workspace that will actually be targeted, not the raw flag value
+    (and outside the event loop; python.md "never block it").
     """
+    if workspace_id is not None:
+        stripped_ws = workspace_id.strip()
+        if not stripped_ws or stripped_ws == _CONTEXT_ID_AUTO:
+            # An empty/"auto" override would be silently swallowed by the
+            # resolver's truthiness check and fall back to the credential
+            # source's workspace — fatal on destructive commands run with
+            # --yes (e.g. --workspace "$WS" with $WS unset in a script).
+            raise click.ClickException(
+                "--workspace was provided but empty (or 'auto') — refusing to "
+                "fall back to the credential source's workspace. Pass the "
+                "target workspace UUID."
+            )
     try:
         config = load_config()
         auth = _resolve_auth(api_key=None, mcp_url=None, profile=None, config=config)
-        try:
-            ws_id = _resolve_workspace_from_source(auth, config, workspace_id)
-        except click.ClickException as e:
-            # The shared resolver names the files flag; these commands
-            # spell the same override --workspace.
-            e.message = e.message.replace("--context-id", "--workspace")
-            raise
+        ws_id = _resolve_workspace_from_source(auth, config, workspace_id, flag="--workspace")
+        if confirm is not None:
+            confirm(ws_id)
         client = WorkspaceClient._from_resolved_auth(
             auth, workspace_id_hint=_bound_workspace_for_hint(auth, config)
         )
@@ -2204,7 +2221,7 @@ def _run_workspace_command(
         result = asyncio.run(_run())
         if result is not None:
             click.echo(result)
-    except click.ClickException:
+    except (click.ClickException, click.Abort):
         raise
     except Exception as e:
         raise click.ClickException(_exc_message(e)) from e
@@ -2320,16 +2337,16 @@ def member_remove(user_id: str, yes: bool, workspace_id: str | None):
     Example:
       kagura workspace member remove google_1234 --yes
     """
-    if not yes:
-        target = workspace_id or "the default workspace"
-        # Confirm before entering the event loop (python.md: never block it).
-        click.confirm(f"Remove {user_id} from {target}?", abort=True)
 
     async def op(client: WorkspaceClient, ws: str) -> str:
         await client.remove_member(ws, user_id)
         return f"Removed {user_id}"
 
-    _run_workspace_command(op, workspace_id)
+    def confirm(ws: str) -> None:
+        # Prompt names the RESOLVED workspace UUID, not the raw flag value.
+        click.confirm(f"Remove {user_id} from workspace {ws}?", abort=True)
+
+    _run_workspace_command(op, workspace_id, confirm=None if yes else confirm)
 
 
 @workspace.group()
@@ -2381,6 +2398,14 @@ def invite_create(
     Example:
       kagura workspace invite create new@example.com --role member -c <context-uuid>
     """
+
+    if role in ("member", "viewer") and not context_ids:
+        # Fail here with the CLI flag's real name; the SDK-level guard would
+        # surface "allowed_context_ids", which is not a flag on this command.
+        raise click.UsageError(
+            f"--role {role} requires at least one --context/-c <uuid> "
+            "(the invitee's context grant)."
+        )
 
     async def op(client: WorkspaceClient, ws: str) -> str:
         inv = await client.create_invitation(
@@ -2548,15 +2573,16 @@ def auth_revoke_key(key_id: int, user_id: str, yes: bool, workspace_id: str | No
     Example:
       kagura auth revoke-key 42 --user google_1234 --yes
     """
-    if not yes:
-        # Confirm before entering the event loop (python.md: never block it).
-        click.confirm(f"Revoke key #{key_id} of {user_id}?", abort=True)
 
     async def op(client: WorkspaceClient, ws: str) -> str:
         await client.revoke_member_key(ws, user_id, key_id)
         return f"Revoked key #{key_id} of {user_id}"
 
-    _run_workspace_command(op, workspace_id)
+    def confirm(ws: str) -> None:
+        # Prompt names the RESOLVED workspace UUID, not the raw flag value.
+        click.confirm(f"Revoke key #{key_id} of {user_id} in workspace {ws}?", abort=True)
+
+    _run_workspace_command(op, workspace_id, confirm=None if yes else confirm)
 
 
 # `kagura auth` lives in auth/cli.py; these owner-provisioning commands are

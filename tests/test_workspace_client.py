@@ -40,15 +40,19 @@ def test_workspace_member_ignores_unknown_fields():
             "user_name": "Fumikazu",
             "user_email": "f@example.com",
             "joined_at": "2026-06-01T00:00:00Z",
-            # Server decorations the SDK does not model:
             "credentials_status": {"api_key_count": 1, "api_key_visible": False},
             "last_login_at": "2026-07-01T00:00:00Z",
-            "allowed_context_ids": None,
+            "allowed_context_ids": ["ctx-1"],
+            "some_future_field": "ignored",  # unknown extra must not raise
         }
     )
     assert m.user_id == "google_123"
     assert m.role == "owner"
     assert m.user_name == "Fumikazu"
+    # Audit fields are modeled (member list --json must not drop them):
+    assert m.allowed_context_ids == ["ctx-1"]
+    assert m.credentials_status == {"api_key_count": 1, "api_key_visible": False}
+    assert m.last_login_at is not None
 
 
 def test_workspace_member_minimal_shape():
@@ -525,3 +529,114 @@ async def test_member_key_user_id_segment_encoded():
     async with make_client(handler) as c:
         await c.list_member_keys(WS, "a/b#c")
     assert "a%2Fb%23c" in seen["path"]
+
+
+# ---------------------------------------------------------------------------
+# Review-fix regressions (xhigh code review, 2026-07-03)
+# ---------------------------------------------------------------------------
+
+
+def test_constructor_bakes_bearer_header():
+    # The MockTransport tests swap _client, so assert the REAL constructor
+    # wiring here (mirrors test_files_client's header assertion).
+    import asyncio
+
+    c = WorkspaceClient(api_key="kagura_real_test")
+    try:
+        assert c._client.headers["Authorization"] == "Bearer kagura_real_test"
+        assert c._client.headers["User-Agent"].startswith("kagura-memory-sdk/")
+        assert c._oauth is None
+    finally:
+        asyncio.run(c.close())
+
+
+def test_constructor_oauth_mode_records_handle():
+    import asyncio
+
+    def fake_auth(request):  # httpx accepts a callable auth
+        return request
+
+    c = WorkspaceClient(_oauth=fake_auth)  # type: ignore[arg-type]
+    try:
+        assert c._oauth is not None
+        assert "Authorization" not in c._client.headers
+    finally:
+        asyncio.run(c.close())
+
+
+@pytest.mark.asyncio
+async def test_workspace_id_normalized_to_canonical():
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        return httpx.Response(200, json=[])
+
+    async with make_client(handler) as c:
+        # Windows registry format: braces + uppercase → canonical lowercase
+        await c.list_members("{11111111-2222-3333-4444-555555555555}")
+    assert seen["path"] == f"/api/v1/workspaces/{WS}/members"
+
+
+@pytest.mark.asyncio
+async def test_destructive_ids_require_strict_int():
+    async with make_client(lambda r: httpx.Response(500)) as c:
+        with pytest.raises(ValueError, match="invitation_id must be an integer"):
+            await c.revoke_invitation(WS, 7.9)  # type: ignore[arg-type]
+        with pytest.raises(ValueError, match="key_id must be an integer"):
+            await c.revoke_member_key(WS, "u2", 42.9)  # type: ignore[arg-type]
+        with pytest.raises(ValueError, match="expires_days must be an integer"):
+            await c.mint_member_key(WS, "u2", "x", 90.5)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_mint_salvages_plaintext_on_shape_mismatch():
+    from kagura_memory.exceptions import KaguraError
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        # Server drift: required fields renamed, but the one-time secret is there
+        return httpx.Response(201, json={"plaintext_key": "kagura_salvaged_secret"})
+
+    async with make_client(handler) as c:
+        with pytest.raises(KaguraError, match="kagura_salvaged_secret"):
+            await c.mint_member_key(WS, "u2", "ci-bot", 30)
+
+
+@pytest.mark.asyncio
+async def test_non_json_200_maps_to_kagura_error():
+    async with make_client(lambda r: httpx.Response(200, text="<html>maintenance</html>")) as c:
+        with pytest.raises(KaguraConnectionError, match="non-JSON body"):
+            await c.list_members(WS)
+
+
+@pytest.mark.asyncio
+async def test_list_endpoint_rejects_non_list_body():
+    async with make_client(lambda r: httpx.Response(200, json={"oops": True})) as c:
+        with pytest.raises(KaguraConnectionError, match="expected a JSON array"):
+            await c.list_invitations(WS)
+
+
+@pytest.mark.asyncio
+async def test_403_with_credential_marker_is_scrubbed():
+    # A hostile/buggy 403 echoing credentials must not be printed verbatim.
+    msg = "Denied for Authorization: Bearer kagura_leaked_key_value"
+    async with make_client(lambda r: httpx.Response(403, json=_envelope("AUTH-101", msg))) as c:
+        with pytest.raises(KaguraConnectionError) as exc_info:
+            await c.list_members(WS)
+    assert "kagura_leaked_key_value" not in str(exc_info.value)
+    assert "OWNER's API key" in str(exc_info.value)  # falls back to the hint
+
+
+@pytest.mark.asyncio
+async def test_401_oauth_client_hints_relogin():
+    def fake_auth(request):
+        return request
+
+    c = WorkspaceClient(_oauth=fake_auth)  # type: ignore[arg-type]
+    await c._client.aclose()
+    c._client = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda r: httpx.Response(401, json={"detail": "x"}))
+    )
+    async with c:
+        with pytest.raises(KaguraAuthError, match="kagura auth login"):
+            await c.list_members(WS)
