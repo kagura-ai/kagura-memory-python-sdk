@@ -63,8 +63,10 @@ async def main():
             agent_id,
             include=["pinned", "state"],  # cheap subset, no recall
         )
-        print(f"REST bootstrap degraded={bootstrap.degraded}, "
-              f"components={sorted(bootstrap.components)}")
+        print(
+            f"REST bootstrap degraded={bootstrap.degraded}, "
+            f"components={sorted(bootstrap.components)}"
+        )
 
 
 if __name__ == "__main__":
