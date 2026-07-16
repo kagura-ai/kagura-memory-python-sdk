@@ -34,6 +34,8 @@ from .models import (
     SleepReport,
     SleepReportDetail,
     UsageInfo,
+    _agent_update_payload,
+    _binding_scope_payload,
     _bootstrap_payload,
 )
 
@@ -875,21 +877,18 @@ class KaguraClient:
             KaguraNotFoundError: Agent not found.
             KaguraError: Name conflict or other server-side error.
         """
-        arguments: dict[str, Any] = {"agent_id": agent_id}
-        if name is not None:
-            arguments["name"] = name
-        if description is not None:
-            arguments["description"] = description
-        if framework is not None:
-            arguments["framework"] = framework
-        if environment is not None:
-            arguments["environment"] = environment
-        if version is not None:
-            arguments["version"] = version
-        if status is not None:
-            arguments["status"] = status
-        if enforcement_mode is not None:
-            arguments["enforcement_mode"] = enforcement_mode
+        arguments: dict[str, Any] = {
+            "agent_id": agent_id,
+            **_agent_update_payload(
+                name=name,
+                description=description,
+                framework=framework,
+                environment=environment,
+                version=version,
+                status=status,
+                enforcement_mode=enforcement_mode,
+            ),
+        }
         result = await self._call_tool_checked("update_agent", arguments)
         return Agent.model_validate(result["agent"])
 
@@ -952,13 +951,13 @@ class KaguraClient:
             KaguraNotFoundError: Agent or context not found.
             KaguraError: Duplicate binding or other server-side error.
         """
-        arguments: dict[str, Any] = {"agent_id": agent_id, "context_id": context_id}
-        if can_read is not None:
-            arguments["can_read"] = can_read
-        if write_policy is not None:
-            arguments["write_policy"] = write_policy
-        if is_default is not None:
-            arguments["is_default"] = is_default
+        arguments: dict[str, Any] = {
+            "agent_id": agent_id,
+            "context_id": context_id,
+            **_binding_scope_payload(
+                can_read=can_read, write_policy=write_policy, is_default=is_default
+            ),
+        }
         result = await self._call_tool_checked("bind_agent_context", arguments)
         return AgentBinding.model_validate(result["binding"])
 
@@ -1006,13 +1005,13 @@ class KaguraClient:
             KaguraNotFoundError: Agent or binding not found.
             KaguraError: Other server-side error.
         """
-        arguments: dict[str, Any] = {"agent_id": agent_id, "binding_id": binding_id}
-        if can_read is not None:
-            arguments["can_read"] = can_read
-        if write_policy is not None:
-            arguments["write_policy"] = write_policy
-        if is_default is not None:
-            arguments["is_default"] = is_default
+        arguments: dict[str, Any] = {
+            "agent_id": agent_id,
+            "binding_id": binding_id,
+            **_binding_scope_payload(
+                can_read=can_read, write_policy=write_policy, is_default=is_default
+            ),
+        }
         result = await self._call_tool_checked("update_agent_binding", arguments)
         return AgentBinding.model_validate(result["binding"])
 

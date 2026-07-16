@@ -261,17 +261,9 @@ class WorkspaceClient(KaguraRestClient):
             "GET",
             f"/api/v1/workspaces/{workspace_id}/members/{quote(user_id, safe='')}/credentials",
         )
-        payload = self._json(resp)
-        rows = payload.get("api_keys") if isinstance(payload, dict) else None
-        if not isinstance(rows, list):
-            # Guard the FIELD, not just the envelope: api_keys=null would
-            # TypeError on iteration and api_keys={} would feed dict keys
-            # into model_validate (Copilot review, PR #228).
-            raise KaguraConnectionError(
-                "Unexpected response shape from the member-credentials endpoint "
-                "(expected an object carrying an 'api_keys' array)."
-            )
-        return [MemberAPIKey.model_validate(row) for row in rows]
+        return [
+            MemberAPIKey.model_validate(row) for row in self._expect_wrapped_list(resp, "api_keys")
+        ]
 
     async def revoke_member_key(self, workspace_id: str, user_id: str, key_id: int) -> None:
         """Revoke a member's API key.

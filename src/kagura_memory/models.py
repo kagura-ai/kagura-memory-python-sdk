@@ -1030,6 +1030,66 @@ class AgentBootstrapResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+def _agent_update_payload(
+    *,
+    name: str | None,
+    description: str | None,
+    framework: str | None,
+    environment: str | None,
+    version: str | None,
+    status: str | None,
+    enforcement_mode: str | None,
+) -> dict[str, Any]:
+    """Build the set-only agent-update payload shared by both surfaces.
+
+    ``KaguraClient.update_agent`` (MCP arguments) and
+    ``AgentsClient.update_agent`` (REST PATCH body) carry the same seven
+    optional fields; one builder keeps them in lockstep (the
+    ``_bootstrap_payload`` precedent). ``agent_id`` stays
+    transport-specific (MCP argument vs URL path).
+    """
+    payload: dict[str, Any] = {}
+    if name is not None:
+        payload["name"] = name
+    if description is not None:
+        payload["description"] = description
+    if framework is not None:
+        payload["framework"] = framework
+    if environment is not None:
+        payload["environment"] = environment
+    if version is not None:
+        payload["version"] = version
+    if status is not None:
+        payload["status"] = status
+    if enforcement_mode is not None:
+        payload["enforcement_mode"] = enforcement_mode
+    return payload
+
+
+def _binding_scope_payload(
+    *,
+    can_read: bool | None,
+    write_policy: str | None,
+    is_default: bool | None,
+) -> dict[str, Any]:
+    """Build the omit-when-None binding scope trio shared by all four sites.
+
+    ``bind_agent_context``/``update_agent_binding`` (MCP) and
+    ``bind_context``/``update_binding`` (REST) all carry the same three
+    optional scoping fields. When memory-cloud #1286 ships the reserved
+    ``allowed_memory_types``/``allowed_source_types`` filters, this is
+    the ONE place to add them.
+    """
+    payload: dict[str, Any] = {}
+    if can_read is not None:
+        payload["can_read"] = can_read
+    if write_policy is not None:
+        payload["write_policy"] = write_policy
+    if is_default is not None:
+        payload["is_default"] = is_default
+    return payload
+
+
 class Agent(BaseModel):
     """A workspace-scoped Agent Registry row (memory-cloud #1274).
 

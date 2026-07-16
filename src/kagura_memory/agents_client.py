@@ -25,12 +25,13 @@ from typing import Any, Literal
 
 from ._http import normalize_uuid
 from ._rest_base import KaguraRestClient
-from .exceptions import KaguraConnectionError
 from .models import (
     Agent,
     AgentBinding,
     AgentBootstrapComponentName,
     AgentBootstrapResponse,
+    _agent_update_payload,
+    _binding_scope_payload,
     _bootstrap_payload,
 )
 
@@ -143,14 +144,7 @@ class AgentsClient(KaguraRestClient):
     async def list_agents(self) -> list[Agent]:
         """List the workspace's agents, newest first (owner/admin only)."""
         resp = await self._request("GET", "/api/v1/agents")
-        payload = self._json(resp)
-        rows = payload.get("agents") if isinstance(payload, dict) else None
-        if not isinstance(rows, list):
-            raise KaguraConnectionError(
-                "Unexpected response shape from the agents listing "
-                "(expected an object carrying an 'agents' array)."
-            )
-        return [Agent.model_validate(row) for row in rows]
+        return [Agent.model_validate(row) for row in self._expect_wrapped_list(resp, "agents")]
 
     async def get_agent(self, agent_id: str) -> Agent:
         """Fetch one agent by id (owner/admin only; uniform 404)."""
@@ -180,21 +174,15 @@ class AgentsClient(KaguraRestClient):
         null-clears semantics is not expressible here (clear via the web
         UI or the raw API).
         """
-        body: dict[str, Any] = {}
-        if name is not None:
-            body["name"] = name
-        if description is not None:
-            body["description"] = description
-        if framework is not None:
-            body["framework"] = framework
-        if environment is not None:
-            body["environment"] = environment
-        if version is not None:
-            body["version"] = version
-        if status is not None:
-            body["status"] = status
-        if enforcement_mode is not None:
-            body["enforcement_mode"] = enforcement_mode
+        body = _agent_update_payload(
+            name=name,
+            description=description,
+            framework=framework,
+            environment=environment,
+            version=version,
+            status=status,
+            enforcement_mode=enforcement_mode,
+        )
         resp = await self._request(
             "PATCH",
             f"/api/v1/agents/{normalize_uuid(agent_id, label='agent_id')}",
@@ -235,13 +223,12 @@ class AgentsClient(KaguraRestClient):
         (max one default per agent). ``allowed_memory_types`` /
         ``allowed_source_types`` are reserved (#1286) and not exposed.
         """
-        body: dict[str, Any] = {"context_id": normalize_uuid(context_id, label="context_id")}
-        if can_read is not None:
-            body["can_read"] = can_read
-        if write_policy is not None:
-            body["write_policy"] = write_policy
-        if is_default is not None:
-            body["is_default"] = is_default
+        body: dict[str, Any] = {
+            "context_id": normalize_uuid(context_id, label="context_id"),
+            **_binding_scope_payload(
+                can_read=can_read, write_policy=write_policy, is_default=is_default
+            ),
+        }
         resp = await self._request(
             "POST",
             f"/api/v1/agents/{normalize_uuid(agent_id, label='agent_id')}/bindings",
@@ -255,14 +242,9 @@ class AgentsClient(KaguraRestClient):
             "GET",
             f"/api/v1/agents/{normalize_uuid(agent_id, label='agent_id')}/bindings",
         )
-        payload = self._json(resp)
-        rows = payload.get("bindings") if isinstance(payload, dict) else None
-        if not isinstance(rows, list):
-            raise KaguraConnectionError(
-                "Unexpected response shape from the bindings listing "
-                "(expected an object carrying a 'bindings' array)."
-            )
-        return [AgentBinding.model_validate(row) for row in rows]
+        return [
+            AgentBinding.model_validate(row) for row in self._expect_wrapped_list(resp, "bindings")
+        ]
 
     async def update_binding(
         self,
@@ -279,13 +261,9 @@ class AgentsClient(KaguraRestClient):
         re-:meth:`bind_context` to re-target. Changes are audited with
         old->new values.
         """
-        body: dict[str, Any] = {}
-        if can_read is not None:
-            body["can_read"] = can_read
-        if write_policy is not None:
-            body["write_policy"] = write_policy
-        if is_default is not None:
-            body["is_default"] = is_default
+        body = _binding_scope_payload(
+            can_read=can_read, write_policy=write_policy, is_default=is_default
+        )
         resp = await self._request(
             "PATCH",
             f"/api/v1/agents/{normalize_uuid(agent_id, label='agent_id')}"

@@ -334,3 +334,22 @@ class KaguraRestClient:
                 f"{type(payload).__name__}."
             )
         return payload
+
+    def _expect_wrapped_list(self, resp: httpx.Response, key: str) -> list[Any]:
+        """Parse a 2xx body that wraps a JSON array under ``key``.
+
+        Guards the FIELD, not just the envelope: ``key: null`` would
+        TypeError on iteration and ``key: {}`` would feed dict keys into
+        ``model_validate`` (Copilot review, PR #228 — the rationale used
+        to live only in WorkspaceClient's copy; hoisted at the third
+        call site).
+        """
+        payload = self._json(resp)
+        rows = payload.get(key) if isinstance(payload, dict) else None
+        if not isinstance(rows, list):
+            raise KaguraConnectionError(
+                f"Unexpected response shape for {resp.request.method} "
+                f"{resp.request.url.path}: expected an object carrying "
+                f"a '{key}' array."
+            )
+        return rows
