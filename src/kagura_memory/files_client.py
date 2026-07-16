@@ -23,7 +23,6 @@ import asyncio
 import base64
 import hashlib
 import mimetypes
-import uuid
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
@@ -41,6 +40,7 @@ from ._http import (
     SDK_VERSION,
     base_url_from_mcp,
     extract_detail,
+    normalize_uuid,
     sanitize_server_detail,
 )
 from ._rest_base import KaguraRestClient
@@ -363,12 +363,12 @@ class FilesClient(KaguraRestClient):
         confirmed = False
         try:
             # Pre-flight validators and source preparation can raise too
-            # (ValueError from _validate_context_id, FileNotFoundError /
+            # (ValueError from _normalize_context_id, FileNotFoundError /
             # ValueError from _prepare_source). They live INSIDE the try so
             # those failures also get a terminal kind=error event before
             # propagating — matching the contract documented in the logger
             # module's "terminal-event" docstring.
-            _validate_context_id(context_id)
+            context_id = _normalize_context_id(context_id)
             resolved_filename, body, sha256_hex = await _prepare_source(source, filename)
             size_bytes = len(body)
             resolved_content_type = _resolve_content_type(content_type, resolved_filename)
@@ -471,7 +471,7 @@ class FilesClient(KaguraRestClient):
                 read is reported as 404 (existence-hiding); a workspace mismatch
                 (wrong ``context_id``) surfaces as a 403 with an actionable hint.
         """
-        _validate_context_id(context_id)
+        context_id = _normalize_context_id(context_id)
         response = await self._request(
             "GET",
             f"/api/v1/files/{file_id}/download-url",
@@ -488,7 +488,7 @@ class FilesClient(KaguraRestClient):
                 v0.41.0); sent as ``workspace_id`` on the query. Omitting it
                 returns 422.
         """
-        _validate_context_id(context_id)
+        context_id = _normalize_context_id(context_id)
         await self._request(
             "DELETE",
             f"/api/v1/files/{file_id}",
@@ -519,7 +519,7 @@ class FilesClient(KaguraRestClient):
             ``next_cursor`` (always ``None`` against the current
             server).
         """
-        _validate_context_id(context_id)
+        context_id = _normalize_context_id(context_id)
         params: dict[str, Any] = {"workspace_id": context_id, "limit": limit}
         if cursor is not None:
             params["cursor"] = cursor
@@ -675,8 +675,8 @@ def _extract_existing_file(error: KaguraConnectionError) -> FileObject | None:
     return FileObject.model_validate(existing)
 
 
-def _validate_context_id(context_id: str) -> None:
-    """Fail fast on a non-UUID ``context_id``.
+def _normalize_context_id(context_id: str) -> str:
+    """Canonicalize ``context_id`` before URL/query interpolation.
 
     The server's ``/api/v1/files/*`` endpoints validate ``workspace_id``
     server-side and return 422, but the round-trip masks a class of
@@ -684,8 +684,17 @@ def _validate_context_id(context_id: str) -> None:
     through to the SDK without resolution. Raising locally turns that
     into a clear ``ValueError`` instead of a generic HTTP status.
 
+    Delegates to the shared :func:`~kagura_memory._http.normalize_uuid`
+    so tolerated non-canonical spellings (``{braces}``, ``urn:uuid:``
+    prefix, dashless 32-hex) are CANONICALIZED rather than sent raw —
+    raw spellings pass a validate-only check but surface server-side as
+    a misleading uniform 404 (#236).
+
     Args:
-        context_id: The workspace UUID to validate.
+        context_id: The workspace UUID to canonicalize.
+
+    Returns:
+        The canonical UUID string.
 
     Raises:
         ValueError: If ``context_id`` is not a parseable UUID. The
@@ -694,8 +703,8 @@ def _validate_context_id(context_id: str) -> None:
             two ways the SDK expects ``context_id`` to be sourced.
     """
     try:
-        uuid.UUID(context_id)
-    except (ValueError, TypeError, AttributeError) as e:
+        return normalize_uuid(context_id, label="context_id")
+    except ValueError as e:
         raise ValueError(
             f"context_id must be a UUID; got {context_id!r}. "
             "Use the OAuth profile's workspace_id, a UUID from "
