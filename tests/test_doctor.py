@@ -379,36 +379,42 @@ def test_doctor_reports_provider_key_presence_with_redaction(monkeypatch):
     assert anthropic.details["preview"] is None
 
 
-def test_doctor_warns_when_default_agent_model_key_missing(monkeypatch):
+def test_doctor_warns_when_ingest_text_key_missing(monkeypatch):
     from kagura_memory.doctor import _check_model_key_alignment
 
-    checks = _check_model_key_alignment({})
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    checks = _check_model_key_alignment()
 
     assert any(
         check.status == "warn"
-        and check.details["feature"] == "agent"
-        and check.details["env"] == "OPENAI_API_KEY"
+        and check.details["feature"] == "ingest-text"
+        and check.details["env"] == "ANTHROPIC_API_KEY"
         for check in checks
     )
 
 
-def test_doctor_accepts_config_llm_key_for_agent_model():
+def test_doctor_env_key_passes_for_ingest_text_model(monkeypatch):
     from kagura_memory.doctor import _check_model_key_alignment
 
-    checks = _check_model_key_alignment({"model": "gpt-5.4-nano", "llm_api_key": "sk-local"})
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+
+    checks = _check_model_key_alignment()
 
     assert any(
         check.status == "pass"
-        and check.details["feature"] == "agent"
-        and check.details["credential_source"] == ".kagura.json llm_api_key"
+        and check.details["feature"] == "ingest-text"
+        and check.details["credential_source"] == "ANTHROPIC_API_KEY"
         for check in checks
     )
 
 
-def test_doctor_warns_for_audio_gemini_key_missing():
+def test_doctor_warns_for_audio_gemini_key_missing(monkeypatch):
     from kagura_memory.doctor import _check_model_key_alignment
 
-    checks = _check_model_key_alignment({})
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+
+    checks = _check_model_key_alignment()
 
     assert any(
         check.status == "warn"
@@ -418,27 +424,31 @@ def test_doctor_warns_for_audio_gemini_key_missing():
     )
 
 
-def test_doctor_ollama_model_does_not_require_key():
+def test_doctor_ollama_model_does_not_require_key(monkeypatch):
     from kagura_memory.doctor import _check_model_key_alignment
 
-    checks = _check_model_key_alignment({"model": "ollama/qwen3:30b"})
+    monkeypatch.setattr("kagura_memory.doctor._DEFAULT_INGEST_TEXT_MODEL", "ollama/qwen3:30b")
+
+    checks = _check_model_key_alignment()
 
     assert any(
         check.status == "info"
-        and check.details["feature"] == "agent"
+        and check.details["feature"] == "ingest-text"
         and "no API key is required" in check.message
         for check in checks
     )
 
 
-def test_doctor_unknown_model_provider_is_informational():
+def test_doctor_unknown_model_provider_is_informational(monkeypatch):
     from kagura_memory.doctor import _check_model_key_alignment
 
-    checks = _check_model_key_alignment({"model": "custom/model"})
+    monkeypatch.setattr("kagura_memory.doctor._DEFAULT_INGEST_TEXT_MODEL", "custom/model")
+
+    checks = _check_model_key_alignment()
 
     assert any(
         check.status == "info"
-        and check.details["feature"] == "agent"
+        and check.details["feature"] == "ingest-text"
         and check.details["provider"] is None
         for check in checks
     )
@@ -455,7 +465,7 @@ def test_doctor_model_alignment_skips_empty_model(monkeypatch):
 
     monkeypatch.setattr("kagura_memory.doctor._DEFAULT_INGEST_VISION_MODEL", None)
 
-    checks = _check_model_key_alignment({})
+    checks = _check_model_key_alignment()
 
     assert not any(check.details["feature"] == "ingest-vision" for check in checks)
 
@@ -463,7 +473,10 @@ def test_doctor_model_alignment_skips_empty_model(monkeypatch):
 def test_doctor_llm_warnings_do_not_fail_exit(monkeypatch):
     from kagura_memory.doctor import _check_llm_providers
 
-    checks = _check_llm_providers({})
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+
+    checks = _check_llm_providers()
     report = DoctorReport(checks=checks)
 
     assert any(check.status == "warn" for check in checks)

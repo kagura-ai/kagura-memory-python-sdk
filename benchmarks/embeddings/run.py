@@ -6,7 +6,6 @@ Outputs Rich terminal tables + Markdown report for publishing.
 
 Usage:
     uv run python examples/benchmark_embeddings.py
-    uv run python examples/benchmark_embeddings.py --agent ollama/qwen3:30b
     uv run python examples/benchmark_embeddings.py --cleanup
 """
 
@@ -21,7 +20,7 @@ from datetime import UTC, datetime
 from rich.console import Console
 from rich.table import Table
 
-from kagura_memory import KaguraAgent, KaguraClient, Message, Session
+from kagura_memory import KaguraClient
 from kagura_memory.config import load_config
 
 console = Console()
@@ -38,8 +37,6 @@ console = Console()
 EMBEDDING_MODELS = [
     "qwen3-embedding:8b",
 ]
-
-AGENT_MODEL = "ollama/qwen3:30b"
 
 # ---------------------------------------------------------------------------
 # Domain definitions — 20 domains, each with memories + typed queries
@@ -1716,7 +1713,6 @@ class RecallResult:
     latency_ms: float
     hit: bool  # expected memory found in results
     hit_rank: int | None  # rank of expected memory (1-indexed), None if not found
-    method: str = "direct"  # "direct" or "agent"
 
 
 @dataclass
@@ -1726,7 +1722,6 @@ class DomainResult:
     context_id: str
     remember_latency_ms: float
     recall_results: list[RecallResult] = field(default_factory=list)
-    agent_recall_results: list[RecallResult] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -1734,11 +1729,11 @@ class DomainResult:
 # ---------------------------------------------------------------------------
 
 
-def compute_metrics(results: list[DomainResult], *, use_agent: bool = False) -> dict:
+def compute_metrics(results: list[DomainResult]) -> dict:
     """Compute aggregate metrics from all results."""
     all_recalls: list[RecallResult] = []
     for dr in results:
-        all_recalls.extend(dr.agent_recall_results if use_agent else dr.recall_results)
+        all_recalls.extend(dr.recall_results)
 
     if not all_recalls:
         return {}
@@ -1909,56 +1904,6 @@ def print_summary_tables(
     console.print(t3)
 
 
-def _print_method_comparison(
-    direct: dict[str, dict], agent: dict[str, dict]
-) -> None:
-    """Print side-by-side comparison of direct vs agent recall."""
-    t = Table(title="Direct Recall vs Agent Recall (qwen3:30b)", show_lines=True)
-    t.add_column("Metric", style="bold")
-    t.add_column("Direct", justify="right")
-    t.add_column("Agent", justify="right")
-    t.add_column("Delta", justify="right")
-
-    for model in direct:
-        d, a = direct[model], agent[model]
-        if not d or not a:
-            continue
-        rows = [
-            ("Top-1 Accuracy", d["top1_accuracy"], a["top1_accuracy"], True),
-            ("Top-3 Accuracy", d["top3_accuracy"], a["top3_accuracy"], True),
-            ("MRR", d["mrr"], a["mrr"], True),
-            ("Avg Score", d["avg_score"], a["avg_score"], True),
-            ("Latency p50", d["latency_p50"], a["latency_p50"], False),
-            ("Latency p95", d["latency_p95"], a["latency_p95"], False),
-        ]
-        for label, dv, av, higher_better in rows:
-            if "Accuracy" in label:
-                ds, as_ = f"{dv:.1%}", f"{av:.1%}"
-                delta = av - dv
-                delta_s = f"{delta:+.1%}"
-            elif "Latency" in label:
-                ds, as_ = f"{dv:.0f}ms", f"{av:.0f}ms"
-                delta = av - dv
-                delta_s = f"{delta:+.0f}ms"
-            else:
-                ds, as_ = f"{dv:.3f}", f"{av:.3f}"
-                delta = av - dv
-                delta_s = f"{delta:+.3f}"
-
-            color = ""
-            if delta > 0 and higher_better:
-                color = "[green]"
-            elif delta < 0 and higher_better:
-                color = "[red]"
-            elif delta > 0 and not higher_better:
-                color = "[red]"
-            elif delta < 0 and not higher_better:
-                color = "[green]"
-            t.add_row(label, ds, as_, f"{color}{delta_s}[/]" if color else delta_s)
-
-    console.print(t)
-
-
 # ---------------------------------------------------------------------------
 # Markdown report
 # ---------------------------------------------------------------------------
@@ -1966,7 +1911,6 @@ def _print_method_comparison(
 
 def generate_markdown(
     metrics_by_model: dict[str, dict],
-    agent_metrics_by_model: dict[str, dict],
     all_results: dict[str, list[DomainResult]],
     embedding_info: list[dict],
 ) -> str:
@@ -2059,39 +2003,10 @@ def generate_markdown(
             )
         lines.append("")
 
-    # Direct vs Agent comparison
-    lines += ["## Direct vs Agent Recall Comparison", ""]
-    lines += [
-        f"Agent model: `{AGENT_MODEL}`",
-        "",
-        "| Metric | Direct | Agent | Delta |",
-        "|--------|--------|-------|-------|",
-    ]
-    for model in metrics_by_model:
-        d = metrics_by_model[model]
-        a = agent_metrics_by_model.get(model, {})
-        if not d or not a:
-            continue
-        for label, dk, fmt in [
-            ("Top-1 Accuracy", "top1_accuracy", ".1%"),
-            ("Top-3 Accuracy", "top3_accuracy", ".1%"),
-            ("MRR", "mrr", ".3f"),
-            ("Avg Score", "avg_score", ".3f"),
-            ("Latency p50", "latency_p50", ".0f"),
-            ("Latency p95", "latency_p95", ".0f"),
-        ]:
-            dv, av = d.get(dk, 0), a.get(dk, 0)
-            delta = av - dv
-            suffix = "ms" if "Latency" in label else ""
-            lines.append(
-                f"| {label} | {dv:{fmt}}{suffix} | {av:{fmt}}{suffix} | {delta:+{fmt}}{suffix} |"
-            )
-    lines.append("")
-
     # Detailed per-query results (collapsible)
     lines += ["## Detailed Query Results", ""]
     for model, dr_list in all_results.items():
-        lines += [f"### Direct Recall ({model})", ""]
+        lines += [f"### {model}", ""]
         for dr in dr_list:
             lines += [
                 f"<details><summary>{dr.domain}</summary>",
@@ -2100,24 +2015,6 @@ def generate_markdown(
                 "|------|-----------|-------|------|-----|-------|",
             ]
             for rr in dr.recall_results:
-                hit_str = "HIT" if rr.hit else "MISS"
-                rank_str = str(rr.hit_rank) if rr.hit_rank else "-"
-                lines.append(
-                    f"| {rr.query_type} | {rr.difficulty} | {rr.top_score:.3f} | {rank_str} | {hit_str} | {rr.query} |"
-                )
-            lines += ["", "</details>", ""]
-
-        lines += [f"### Agent Recall ({model} + {AGENT_MODEL})", ""]
-        for dr in dr_list:
-            if not dr.agent_recall_results:
-                continue
-            lines += [
-                f"<details><summary>{dr.domain}</summary>",
-                "",
-                "| Type | Difficulty | Score | Rank | Hit | Query |",
-                "|------|-----------|-------|------|-----|-------|",
-            ]
-            for rr in dr.agent_recall_results:
                 hit_str = "HIT" if rr.hit else "MISS"
                 rank_str = str(rr.hit_rank) if rr.hit_rank else "-"
                 lines.append(
@@ -2285,111 +2182,17 @@ async def run_benchmark(cleanup: bool = False) -> None:
 
             all_results[emb_model] = model_results
 
-        # --- Agent recall (qwen3:30b LLM-optimized) ---
-        console.rule(f"[bold magenta]Agent Recall ({AGENT_MODEL})[/bold magenta]")
-
-        agent = KaguraAgent(
-            api_key=api_key,
-            mcp_url=mcp_url,
-            model=AGENT_MODEL,
-        )
-
-        async with agent:
-            for emb_model, model_results in all_results.items():
-                for dr in model_results:
-                    domain = next(d for d in DOMAINS if d["name"] == dr.domain)
-                    console.print(f"\n[bold magenta]{domain['display_name']}[/] (agent)")
-
-                    for q in domain["queries"]:
-                        session = Session(
-                            messages=[
-                                Message(role="user", content=q["query"]),
-                                Message(role="assistant", content="記憶を検索します。"),
-                            ]
-                        )
-
-                        t0 = time.monotonic()
-                        try:
-                            result = await agent.process(
-                                session,
-                                context_id=dr.context_id,
-                                verbose=0,
-                                recall_k=5,
-                            )
-                            latency = (time.monotonic() - t0) * 1000
-
-                            recalled = result.recalled
-                            top = recalled[0] if recalled else None
-                            top_score = top.score if top else 0.0
-                            top_summary = (
-                                (top.summary[:60] + "...") if top else "NO RECALL"
-                            )
-
-                            # Build hits list matching direct recall format
-                            agent_hits = [
-                                {"summary": r.summary, "score": r.score}
-                                for r in recalled
-                            ]
-                            hit, rank = _check_hit(
-                                agent_hits, domain["memories"], q["expected_idx"]
-                            )
-
-                            rr = RecallResult(
-                                query=q["query"],
-                                query_type=q["type"],
-                                difficulty=q["difficulty"],
-                                expected_idx=q["expected_idx"],
-                                top_score=top_score,
-                                top_summary=top_summary,
-                                all_scores=[r.score for r in recalled],
-                                num_results=len(recalled),
-                                latency_ms=latency,
-                                hit=hit,
-                                hit_rank=rank,
-                                method="agent",
-                            )
-                        except Exception as e:
-                            latency = (time.monotonic() - t0) * 1000
-                            console.print(f"  [red]Agent error: {e}[/]")
-                            rr = RecallResult(
-                                query=q["query"],
-                                query_type=q["type"],
-                                difficulty=q["difficulty"],
-                                expected_idx=q["expected_idx"],
-                                top_score=0.0,
-                                top_summary=f"ERROR: {e}",
-                                all_scores=[],
-                                num_results=0,
-                                latency_ms=latency,
-                                hit=False,
-                                hit_rank=None,
-                                method="agent",
-                            )
-
-                        dr.agent_recall_results.append(rr)
-                        print_live_result(rr)
-
-        # Compute metrics for both methods
+        # Compute metrics
         metrics_by_model = {}
-        agent_metrics_by_model = {}
         for model, drs in all_results.items():
             metrics_by_model[model] = compute_metrics(drs)
-            agent_metrics_by_model[model] = compute_metrics(drs, use_agent=True)
 
         # Terminal summary
-        console.rule("[bold green]Results — Direct Recall[/bold green]")
+        console.rule("[bold green]Results[/bold green]")
         print_summary_tables(metrics_by_model)
 
-        console.rule("[bold green]Results — Agent Recall (qwen3:30b)[/bold green]")
-        print_summary_tables(agent_metrics_by_model)
-
-        # Comparison table
-        _print_method_comparison(metrics_by_model, agent_metrics_by_model)
-
         # Markdown report
-        md = generate_markdown(
-            metrics_by_model, agent_metrics_by_model, all_results, embedding_info
-        )
+        md = generate_markdown(metrics_by_model, all_results, embedding_info)
         md_path = "benchmark_report.md"
         with open(md_path, "w") as f:
             f.write(md)
@@ -2416,20 +2219,6 @@ async def run_benchmark(cleanup: bool = False) -> None:
                             "all_scores": rr.all_scores,
                         }
                         for rr in dr.recall_results
-                    ],
-                    "agent_recalls": [
-                        {
-                            "query": rr.query,
-                            "type": rr.query_type,
-                            "difficulty": rr.difficulty,
-                            "top_score": rr.top_score,
-                            "hit": rr.hit,
-                            "hit_rank": rr.hit_rank,
-                            "latency_ms": rr.latency_ms,
-                            "num_results": rr.num_results,
-                            "all_scores": rr.all_scores,
-                        }
-                        for rr in dr.agent_recall_results
                     ],
                 }
                 for dr in drs

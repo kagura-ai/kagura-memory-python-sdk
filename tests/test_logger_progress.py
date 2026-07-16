@@ -269,20 +269,6 @@ def test_cli_progress_precedence_8_cells(
     assert result.level == expect_level
 
 
-# ---------------------------------------------------------------------------
-# --help no longer says (Phase 2)
-# ---------------------------------------------------------------------------
-
-
-def test_process_help_drops_phase2_for_verbose_and_deep():
-    """Both --verbose and --deep have shipped — help text was stale."""
-    result = CliRunner().invoke(main, ["process", "--help"])
-    assert result.exit_code == 0
-    assert "(Phase 2)" not in result.output, (
-        f"Stale '(Phase 2)' marker still in `kagura process --help`:\n{result.output}"
-    )
-
-
 @pytest.mark.parametrize(
     "command",
     [["ingest", "--help"], ["resource", "import", "--help"], ["files", "upload", "--help"]],

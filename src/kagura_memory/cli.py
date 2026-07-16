@@ -16,7 +16,6 @@ from ._auth import (
     _resolve_auth,
     _StaticAuth,
 )
-from .agent import KaguraAgent
 from .auth.cli import auth as _auth_group
 from .client import KaguraClient
 from .config import load_config
@@ -24,7 +23,7 @@ from .doctor import run_doctor
 from .exceptions import KaguraError, _exc_message
 from .files_client import FilesClient
 from .logger import VerboseLogger
-from .models import FileObject, Message, ProcessResult, ResourceEventRequest, Session
+from .models import FileObject, ResourceEventRequest
 from .resource_client import ResourceClient
 from .setup_claude import run_setup_claude
 from .workspace_client import WorkspaceClient
@@ -195,61 +194,6 @@ def _register_secret_command(
 
 
 _register_secret_command(main)
-
-
-@main.command()
-@click.option("--message", "-m", help="Single message to process")
-@click.option("--file", "-f", type=click.File("r"), help="Session JSON file")
-@click.option("--deep", is_flag=True, help="Enable deep search via memory graph exploration")
-@click.option("--verbose", "-v", count=True, help="Increase verbosity (repeatable: -v, -vv, -vvv)")
-def process(message, file, deep, verbose):
-    """
-    Process session with AI analysis.
-
-    Examples:
-      kagura process -m "Remember this: FastAPI uses Depends() for DI"
-      kagura process -f session.json
-      echo '{"messages":[{"role":"user","content":"test"}]}' | kagura process
-    """
-    try:
-        config = load_config()
-
-        # Parse input
-        if message:
-            session = Session(messages=[Message(role="user", content=message)])
-        elif file:
-            session = Session(**json.load(file))
-        else:
-            if sys.stdin.isatty():
-                raise click.UsageError(
-                    "No input given. Use -m / -f, or pipe a session JSON to stdin. "
-                    "Run `kagura process --help` for examples."
-                )
-            session = Session(**json.load(sys.stdin))
-
-        # KaguraAgent / KaguraClient run the full credential resolution
-        # chain when api_key is None — env > OAuth profile > .kagura.json.
-        agent_kwargs: dict[str, Any] = {"api_key": config.get("api_key") or None}
-        if config.get("mcp_url"):
-            agent_kwargs["mcp_url"] = config["mcp_url"]
-        if config.get("model"):
-            agent_kwargs["model"] = config["model"]
-        if config.get("context_id"):
-            agent_kwargs["context_id"] = config["context_id"]
-        if config.get("llm_api_key"):
-            agent_kwargs["llm_api_key"] = config["llm_api_key"]
-
-        async def _run_agent() -> ProcessResult:
-            async with KaguraAgent(**agent_kwargs) as agent:
-                return await agent.process(session, deep=deep, verbose=verbose)
-
-        result = asyncio.run(_run_agent())
-        click.echo(json.dumps(result.model_dump(), indent=2, ensure_ascii=False))
-
-    except click.ClickException:
-        raise
-    except Exception as e:
-        raise click.ClickException(_exc_message(e)) from e
 
 
 @main.group()

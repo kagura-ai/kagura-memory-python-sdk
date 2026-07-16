@@ -13,7 +13,6 @@ uv run python examples/<script>.py
 |--------|--------|-------|
 | [`client_basics.py`](client_basics.py) | `KaguraClient` | remember / recall / explore / reference / forget |
 | [`client_advanced.py`](client_advanced.py) | `KaguraClient` | recall filters, cross-context recall, `list_tags`, `get_usage`, `get_memory_stats`, `find_duplicates`, `merge_contexts` |
-| [`agent_session.py`](agent_session.py) | `KaguraAgent` | AI-powered session analysis (remember/recall decided by the LLM) |
 | [`agent_bootstrap.py`](agent_bootstrap.py) | `KaguraClient` / `AgentsClient` | one-call agent session-start rehydration (`get_agent_bootstrap`, MCP + REST; server v0.49.0+) |
 | [`resource_tokens.py`](resource_tokens.py) | `ResourceClient` | resource setup, token lifecycle, single + batch event ingestion |
 | [`files_upload.py`](files_upload.py) | `FilesClient` | upload (bytes + dedup), `download_url`, `list`, `delete` |
@@ -23,7 +22,8 @@ uv run python examples/<script>.py
 `ingest_pdf.py` needs the ingest extras (`pip install 'kagura-memory[ingest-pdf]'`)
 and a text-LLM key (`ANTHROPIC_API_KEY` for the default `claude` provider).
 `ingest_documents.py` works with any supported format — install the matching
-extra (or `[ingest-all]`); plain text / Markdown need no extra.
+extra (or `[ingest-all]`); plain text / Markdown need only the base
+`[ingest]` extra (which carries `litellm` for summarization since v0.37.0).
 `client_advanced.py`'s `list_tags()` needs memory-cloud server v0.15.4+.
 
 `SecretClient` (zero-knowledge secrets) has no standalone script — it is

@@ -1,6 +1,5 @@
 """Kagura Memory SDK - AI-driven memory management for Kagura Memory Cloud."""
 
-from .agent import KaguraAgent
 from .agents_client import AgentsClient
 from .client import MIN_SERVER_VERSION, KaguraClient
 from .exceptions import (
@@ -26,7 +25,6 @@ from .models import (
     AgentBootstrapComponentName,
     AgentBootstrapCorrelation,
     AgentBootstrapResponse,
-    Artifact,
     ContextDetail,
     ContextInfo,
     ContextStats,
@@ -38,7 +36,6 @@ from .models import (
     EmbeddingModel,
     EmbeddingModelsResponse,
     EmbeddingStatus,
-    ExploredMemory,
     FailedMemoryInfo,
     FieldDefinition,
     FileListResponse,
@@ -51,19 +48,12 @@ from .models import (
     IngestErrorRecord,
     IngestResult,
     ListTagsResponse,
-    LLMUsage,
     MemberAPIKey,
-    Memory,
-    MemoryInfo,
     MemoryListItem,
     MemoryListResponse,
     MemoryStatItem,
     MemoryStatsResponse,
-    MemoryToStore,
-    Message,
     PaginatedResourceTokensResponse,
-    ProcessResult,
-    RecallQuery,
     ResourceEventBatchRequest,
     ResourceEventBatchResponse,
     ResourceEventItem,
@@ -85,7 +75,6 @@ from .models import (
     SearchConfig,
     ServerFeatures,
     ServerInfo,
-    Session,
     SleepAction,
     SleepReport,
     SleepReportDetail,
@@ -105,7 +94,6 @@ __version__ = "0.36.0"
 
 __all__ = [
     # Core classes
-    "KaguraAgent",
     "KaguraClient",
     "ResourceClient",
     "FilesClient",
@@ -115,17 +103,6 @@ __all__ = [
     # Embedding models
     "EmbeddingModel",
     "EmbeddingModelsResponse",
-    # Models
-    "Session",
-    "Message",
-    "Artifact",
-    "ProcessResult",
-    "Memory",
-    "MemoryInfo",
-    "MemoryToStore",
-    "RecallQuery",
-    "ExploredMemory",
-    "LLMUsage",
     # Usage & context info (v0.6.1)
     "UsageInfo",
     "UsageQuota",

@@ -29,11 +29,10 @@
 
 ## What is this?
 
-This SDK connects your Python code to [Kagura Memory Cloud](https://github.com/kagura-ai/memory-cloud), giving AI assistants the ability to **remember, search, and learn** from past interactions — and to **ingest documents** (PDFs, URLs) directly into a searchable memory graph. It provides **five clients** (plus a document ingestor) for different use cases:
+This SDK connects your Python code to [Kagura Memory Cloud](https://github.com/kagura-ai/memory-cloud), giving AI assistants the ability to **remember, search, and learn** from past interactions — and to **ingest documents** (PDFs, URLs) directly into a searchable memory graph. It provides **four clients** (plus a document ingestor) for different use cases:
 
 | Client | Protocol | Use Case |
 |--------|----------|----------|
-| **`KaguraAgent`** | MCP + LLM | AI-powered — auto-decides what to remember/recall from conversations |
 | **`KaguraClient`** | MCP (JSON-RPC) | Direct memory ops — remember, recall, explore, reference, forget |
 | **`ResourceClient`** | REST API | External data ingestion — push data from Slack, CI/CD, CRM into Kagura |
 | **`FilesClient`** | REST + presigned PUT | File uploads with sha256 integrity binding (R2); optional per-file context binding for ACL |
@@ -113,76 +112,29 @@ Used by the CLI (`kagura` commands) and `load_config()` in Python code:
 {
   "api_key": "kagura_your_api_key",
   "mcp_url": "http://localhost:8080/mcp/w/{workspace_id}",
-  "model": "gpt-5.4-nano",
   "context_id": "auto"
 }
 ```
 
-Or use environment variables: `KAGURA_API_KEY`, `KAGURA_MCP_URL`, `KAGURA_MODEL`, `KAGURA_CONTEXT_ID`
+Or use environment variables: `KAGURA_API_KEY`, `KAGURA_MCP_URL`, `KAGURA_CONTEXT_ID`
 
 > Get your API key from the [Kagura Memory Cloud](https://github.com/kagura-ai/memory-cloud) Web UI: **Integrations > API Keys**
 
-### KaguraAgent — AI-Powered Memory
+> **Looking for `KaguraAgent`?** The LLM-powered session-analysis actor was
+> **removed in v0.37.0** — its role moved to dedicated ecosystem packages:
+> [kagura-agent](https://pypi.org/project/kagura-agent/) (memory-backed
+> autonomous agent) with kagura-brain as its LLM head, while
+> conversation→memory compilation is handled server-side (Memory Analysis)
+> and by the connector workers. This SDK stays a pure substrate client, and
+> base installs no longer pull the `litellm` dependency tree (it now ships
+> with the `[ingest]` extra).
 
-Let the AI analyze conversations and automatically decide what to remember and recall:
+#### Ollama for ingestion
 
-```python
-from kagura_memory import KaguraAgent, Session, Message
-
-agent = KaguraAgent(api_key="kagura_...", model="gpt-5.4-nano")
-
-session = Session(messages=[
-    Message(role="user", content="FastAPIでOAuth2を実装したい"),
-    Message(role="assistant", content="Authlibを使うパターンが推奨です..."),
-    Message(role="user", content="なるほど、これ覚えておいて"),
-])
-
-async with agent:
-    result = await agent.process(session, deep=True, verbose=2)
-    print(f"Remembered: {len(result.remembered)}, Recalled: {len(result.recalled)}")
-```
-
-Supports OpenAI, Claude, Gemini via [LiteLLM](https://github.com/BerriAI/litellm), and **Ollama** for local models:
-
-```python
-# Local LLM via Ollama (no cloud API key needed)
-agent = KaguraAgent(api_key="kagura_...", model="ollama/qwen3:30b")
-```
-
-#### Ollama Local Model Requirements
-
-| Model | Size | Context | Min VRAM | Recommended GPU |
-|-------|------|---------|----------|-----------------|
-| `qwen3:30b` (recommended) | 19 GB | 256K | 24 GB | RTX 4090 or equivalent |
-| `qwen3:14b` | 9.3 GB | 40K | 16 GB | RTX 4080 or equivalent |
-
-**Recommended minimum**: `qwen3:30b` on an RTX 4090 (24 GB VRAM) or equivalent.
-
-Smaller models (< 30B parameters) may produce lower quality memory analysis — summaries may lack searchable keywords, and recall query generation may be less precise.
-
-#### Using Ollama Cloud
-
-For [Ollama Cloud](https://ollama.com/cloud) (hosted, Bearer-authenticated), set the API key in the environment (the `ollama signin` CLI flow does this automatically) and point `ollama_base_url` at the cloud endpoint:
+`kagura ingest` reads `OLLAMA_API_KEY` and `OLLAMA_API_BASE` from the environment (litellm picks them up directly for the `ollama_chat/` route), for both local Ollama and [Ollama Cloud](https://ollama.com/cloud) (`ollama signin` sets the key automatically):
 
 ```bash
-export OLLAMA_API_KEY="..."          # or run `ollama signin`
-```
-
-```python
-# KaguraAgent — Ollama Cloud
-agent = KaguraAgent(
-    api_key="kagura_...",
-    model="ollama/qwen3:30b",
-    ollama_base_url="https://ollama.com",
-    # ollama_api_key picks up OLLAMA_API_KEY from env by default;
-    # pass it explicitly to override.
-)
-```
-
-For ingestion, `kagura ingest` reads `OLLAMA_API_KEY` and `OLLAMA_API_BASE` from the environment (litellm picks them up directly for the `ollama_chat/` route):
-
-```bash
-export OLLAMA_API_KEY="..."
+export OLLAMA_API_KEY="..."          # Ollama Cloud only; local needs no key
 export OLLAMA_API_BASE="https://ollama.com"
 kagura ingest report.pdf --text-provider ollama
 ```
@@ -411,6 +363,7 @@ The same client also provisions **member API keys** (memory-cloud [#1165](https:
 | SDK | Min memory-cloud | Notes |
 |---|---|---|
 | 0.37.0+ | 0.17.1 (0.49.0 for agent bootstrap) | **Agent bootstrap (RFC-0002 P0-3).** `KaguraClient.get_agent_bootstrap()` (MCP) and `AgentsClient.bootstrap()` (REST, `POST /api/v1/agents/{agent_id}/bootstrap`) need memory-cloud **0.49.0+** ([#1276](https://github.com/kagura-ai/memory-cloud/issues/1276)) and a registered agent (agent registry, [#1274](https://github.com/kagura-ai/memory-cloud/issues/1274)). Against an older server the MCP tool returns "tool not found" and the REST route 404s. `MIN_SERVER_VERSION` stays **0.17.1**. |
+| 0.37.0+ | 0.17.1 | **`KaguraAgent` removed (breaking, #233).** The LLM-powered session-analysis actor, its models (`Session`/`Message`/`ProcessResult`/…), and `kagura process` are gone — the actor role lives in [kagura-agent](https://pypi.org/project/kagura-agent/) (with kagura-brain as its LLM head), and conversation→memory compilation is server-side Memory Analysis / connector workers. `litellm` moved from core dependencies to the `[ingest]` extra, so pure-client installs are much lighter; ingestion (including plain text) now requires `pip install 'kagura-memory[ingest]'`. |
 | 0.36.0+ | 0.17.1 (0.42.0 for `kagura workspace` / `kagura auth create-key`) | **Workspace member management + owner-provisioned member keys (owner-key only).** `WorkspaceClient` / `kagura workspace member\|invite` and `mint_member_key`/`list_member_keys`/`revoke_member_key` / `kagura auth create-key\|list-keys\|revoke-key` need memory-cloud **0.42.0+** (owner-key programmatic access, [#1164](https://github.com/kagura-ai/memory-cloud/issues/1164) / [#1165](https://github.com/kagura-ai/memory-cloud/issues/1165)). Requires the workspace **owner's static API key** — OAuth tokens are rejected on this surface, and a deployment can disable it via `enable_owner_key_member_management=false`. Key minting is privilege-downgrade only: member/viewer targets, never self, `expires_days` required. `MIN_SERVER_VERSION` stays **0.17.1**. |
 | 0.35.0+ | 0.17.1 (0.41.0 for file uploads/downloads) | **FilesClient v0.41.0 compatibility (breaking).** memory-cloud 0.41.0 requires `workspace_id` on the query of the file-id endpoints (`confirm`/`download-url`/`delete`) and presigns R2 PUT without the checksum header — so pre-0.35.0 SDKs get 403/422 on every upload/download/delete against it. This SDK sends `workspace_id` on those endpoints (harmlessly ignored by older servers) and only binds the checksum when the presign signed it. **Breaking:** `FilesClient.download_url(file_id, *, context_id)` and `delete(file_id, *, context_id)` now require `context_id`; `kagura files download-url`/`delete` require `-c/--context-id` (or a profile/`.kagura.json` workspace). `MIN_SERVER_VERSION` stays **0.17.1**. |
 | 0.34.0+ | 0.17.1 (0.41.0 for secret delete + file context binding) | **Owner-only secret delete + file context binding.** `SecretClient.delete_secret` / `kagura secret delete` (`DELETE /api/v1/config/secrets/{name}`) and `FilesClient.upload(binding_context_id=…)` / `FileObject.context_id` (context-scoped file ACL) need memory-cloud **0.41.0+**. `MIN_SERVER_VERSION` stays **0.17.1** — only these surfaces require 0.41.0. |
@@ -451,7 +404,7 @@ Two integration paths:
 
 | You want… | Use |
 |---|---|
-| **CLI / `KaguraClient`** (terminal use, scripts, `KaguraAgent`) | `kagura auth login` — refresh happens automatically |
+| **CLI / `KaguraClient`** (terminal use, scripts) | `kagura auth login` — refresh happens automatically |
 | **Claude Code MCP** (Claude Code reads `.mcp.json`) | `kagura setup claude --profile <name>` — OAuth via the refresh-aware `kagura-mcp` proxy (recommended) |
 | **CI / service accounts** | `kagura setup claude` with a long-lived API key from the web UI |
 
@@ -492,9 +445,6 @@ not fail CI.
 ### Other commands
 
 ```bash
-# AI-powered (requires LLM API key)
-kagura process -m "Remember: FastAPI uses Depends() for DI"
-
 # Direct memory operations
 kagura remember -s "FastAPI DI" --content "Use Depends()..." -c dev
 kagura recall "dependency injection" -k 10
@@ -618,7 +568,7 @@ kagura setup claude --api-key kagura_xxx --mcp-url https://memory.kagura-ai.com/
 Or use the CLI directly:
 
 ```bash
-kagura process -m "今日の学び：FastAPIのDIはDepends()を使う"
+kagura remember -s "FastAPIのDIパターン" --content "DIはDepends()を使う" -c dev
 ```
 
 ### Claude Code plugin (CLI-as-skills)

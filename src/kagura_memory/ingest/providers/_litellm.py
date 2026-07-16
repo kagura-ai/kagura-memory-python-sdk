@@ -50,6 +50,25 @@ _VISION_SYSTEM_PROMPT = (
 
 _FALLBACK_CHARS_PER_TOKEN = 4
 
+
+def _import_litellm() -> Any:
+    """Import litellm lazily, mapping a missing install to an actionable error.
+
+    litellm ships with the ``[ingest]`` extra (it left the core
+    dependencies with the KaguraAgent removal, #233). A stripped install
+    reaching an LLM call path needs the install command surfaced, not a
+    bare ``ModuleNotFoundError`` buried inside the generic
+    provider-failure wrapper.
+    """
+    try:
+        import litellm  # type: ignore[import-untyped]
+    except ImportError as exc:
+        raise KaguraLLMError(
+            "litellm is not installed. Install with: pip install 'kagura-memory[ingest]'"
+        ) from exc
+    return litellm
+
+
 # Trusted domain-context block appended AFTER the fixed task prompt when a
 # caller supplies steering. The fixed prompt always comes first and is never
 # replaced — this block only narrows terminology/focus. The label is a fixed
@@ -142,9 +161,8 @@ class LiteLLMProvider:
                 ],
             },
         ]
+        litellm = _import_litellm()
         try:
-            import litellm  # type: ignore[import-untyped]
-
             response = await litellm.acompletion(
                 model=self.vision_model,
                 messages=messages,
@@ -174,9 +192,8 @@ class LiteLLMProvider:
             {"role": "system", "content": system},
             {"role": "user", "content": user_text},
         ]
+        litellm = _import_litellm()
         try:
-            import litellm  # type: ignore[import-untyped]
-
             response = await litellm.acompletion(
                 model=model, messages=messages, max_tokens=max_tokens
             )
