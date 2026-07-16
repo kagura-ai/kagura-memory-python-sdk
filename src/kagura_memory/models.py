@@ -1023,3 +1023,71 @@ class AgentBootstrapResponse(BaseModel):
     components: dict[str, dict[str, Any]] = Field(default_factory=dict)
     correlation: AgentBootstrapCorrelation | None = None
     generated_at: datetime | None = None
+
+
+# ---------------------------------------------------------------------------
+# Agent registry + bindings (#235, server v0.49.0+, RFC-0002 P0-1/P0-2)
+# ---------------------------------------------------------------------------
+
+
+class Agent(BaseModel):
+    """A workspace-scoped Agent Registry row (memory-cloud #1274).
+
+    An agent is a registry entry that anchors context bindings,
+    agent-bound credentials, bootstrap, and audit correlation — it is a
+    resource, NOT a principal (it never authenticates by itself).
+
+    ``status`` (``active`` | ``suspended`` | ``retired``) is the
+    fail-closed kill switch: suspended/retired agents cause every key
+    bound to them to be rejected at verify time. ``enforcement_mode``
+    (``shadow`` | ``enforce``) is the binding enforcement ramp. Both are
+    typed ``str`` (not ``Literal``) for forward compatibility — the
+    server is the authority; request-side params use the closed enums.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    id: str
+    workspace_id: str
+    name: str
+    owner_user_id: str
+    status: str
+    enforcement_mode: str
+    description: str | None = None
+    framework: str | None = None
+    environment: str | None = None
+    version: str | None = None
+    last_seen_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class AgentBinding(BaseModel):
+    """An agent→context binding row (memory-cloud #1275).
+
+    Bindings are **purely subtractive scoping**: the effective permission
+    for an agent-bound request is the existing RBAC decision ∩ binding —
+    ``can_read`` gates reads, ``write_policy`` (``deny`` | ``direct``)
+    gates writes. Under ``enforcement_mode="enforce"`` contexts WITHOUT a
+    binding row are denied for the agent (default-deny); under
+    ``"shadow"`` violations are only logged. ``is_default`` marks the
+    agent's bootstrap default binding (max one per agent).
+
+    ``allowed_memory_types`` / ``allowed_source_types`` are reserved for
+    memory-cloud #1286 (per-memory enforcement) and arrive as ``None``
+    today.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    id: str
+    agent_id: str
+    context_id: str
+    can_read: bool
+    write_policy: str
+    is_default: bool
+    allowed_memory_types: list[str] | None = None
+    allowed_source_types: list[str] | None = None
+    created_by: str
+    created_at: datetime
+    updated_at: datetime

@@ -17,6 +17,8 @@ from .exceptions import (
     _exc_message,
 )
 from .models import (
+    Agent,
+    AgentBinding,
     AgentBootstrapComponentName,
     AgentBootstrapResponse,
     ContextInfo,
@@ -756,6 +758,285 @@ class KaguraClient:
         }
         result = await self._call_tool_checked("get_agent_bootstrap", arguments)
         return AgentBootstrapResponse.model_validate(result)
+
+    async def register_agent(
+        self,
+        name: str,
+        *,
+        description: str | None = None,
+        framework: str | None = None,
+        environment: str | None = None,
+        version: str | None = None,
+    ) -> Agent:
+        """Register an AI agent in the workspace Agent Registry.
+
+        Calls the ``register_agent`` MCP tool (server v0.49.0+, RFC-0002
+        P0-1, memory-cloud #1274). Owner/admin only. An agent is a
+        workspace-scoped registry entry (name unique per workspace) that
+        anchors context bindings, agent-bound credentials,
+        :meth:`get_agent_bootstrap`, and audit correlation — it is a
+        resource, NOT a principal. New agents start with
+        ``status="active"`` and ``enforcement_mode="enforce"``.
+
+        Args:
+            name: Workspace-unique agent name (max 255 chars).
+            description: Optional free-text description (max 10000 chars).
+            framework: Optional framework tag, e.g. ``"claude-code"``,
+                ``"langgraph"`` (max 100 chars).
+            environment: Optional deployment environment, e.g.
+                ``"production"`` (max 100 chars).
+            version: Optional agent build/prompt version (max 100 chars).
+
+        Returns:
+            The created :class:`Agent`.
+
+        Raises:
+            KaguraError: Name conflict, quota exceeded, insufficient role,
+                or other server-side error.
+        """
+        arguments: dict[str, Any] = {"name": name}
+        if description is not None:
+            arguments["description"] = description
+        if framework is not None:
+            arguments["framework"] = framework
+        if environment is not None:
+            arguments["environment"] = environment
+        if version is not None:
+            arguments["version"] = version
+        result = await self._call_tool_checked("register_agent", arguments)
+        return Agent.model_validate(result["agent"])
+
+    async def get_agent(self, agent_id: str) -> Agent:
+        """Fetch one registered agent by id (owner/admin only).
+
+        Args:
+            agent_id: Agent UUID from :meth:`register_agent` /
+                :meth:`list_agents`.
+
+        Returns:
+            The :class:`Agent`.
+
+        Raises:
+            KaguraNotFoundError: Agent not found (uniform 404).
+        """
+        result = await self._call_tool_checked("get_agent", {"agent_id": agent_id})
+        return Agent.model_validate(result["agent"])
+
+    async def list_agents(self) -> list[Agent]:
+        """List the workspace's registered agents, newest first (owner/admin only).
+
+        Returns:
+            List of :class:`Agent` rows in the active workspace.
+        """
+        result = await self._call_tool_checked("list_agents", {})
+        return [Agent.model_validate(a) for a in result.get("agents", [])]
+
+    async def update_agent(
+        self,
+        agent_id: str,
+        *,
+        name: str | None = None,
+        description: str | None = None,
+        framework: str | None = None,
+        environment: str | None = None,
+        version: str | None = None,
+        status: Literal["active", "suspended", "retired"] | None = None,
+        enforcement_mode: Literal["shadow", "enforce"] | None = None,
+    ) -> Agent:
+        """Update a registered agent, including lifecycle transitions.
+
+        Calls the ``update_agent`` MCP tool (owner/admin only).
+        ``status`` is the **fail-closed kill switch**: ``"suspended"`` /
+        ``"retired"`` agents cause every key bound to them to be rejected
+        at verify time. Setting ``enforcement_mode`` from ``"enforce"``
+        to ``"shadow"`` is an audited privilege-widening event (bindings
+        stop being enforced and are only logged).
+
+        Set-only wrapper: omitted fields are left untouched. The server's
+        null-clears-a-metadata-field semantics is not expressible through
+        this wrapper — clear fields via the web UI or the raw API.
+
+        Args:
+            agent_id: Agent UUID to update.
+            name: New workspace-unique name (max 255 chars).
+            description: New description (max 10000 chars).
+            framework: New framework tag (max 100 chars).
+            environment: New environment (max 100 chars).
+            version: New version (max 100 chars).
+            status: Lifecycle state — ``"active"`` | ``"suspended"`` |
+                ``"retired"``.
+            enforcement_mode: Binding enforcement ramp — ``"shadow"`` |
+                ``"enforce"``.
+
+        Returns:
+            The updated :class:`Agent`.
+
+        Raises:
+            KaguraNotFoundError: Agent not found.
+            KaguraError: Name conflict or other server-side error.
+        """
+        arguments: dict[str, Any] = {"agent_id": agent_id}
+        if name is not None:
+            arguments["name"] = name
+        if description is not None:
+            arguments["description"] = description
+        if framework is not None:
+            arguments["framework"] = framework
+        if environment is not None:
+            arguments["environment"] = environment
+        if version is not None:
+            arguments["version"] = version
+        if status is not None:
+            arguments["status"] = status
+        if enforcement_mode is not None:
+            arguments["enforcement_mode"] = enforcement_mode
+        result = await self._call_tool_checked("update_agent", arguments)
+        return Agent.model_validate(result["agent"])
+
+    async def delete_agent(self, agent_id: str) -> bool:
+        """Hard-delete an Agent Registry row (owner/admin only).
+
+        Prefer ``update_agent(status="retired")`` for operational
+        retirement — delete is permanent and cascades every API key bound
+        to the agent (fail-closed).
+
+        Args:
+            agent_id: Agent UUID to delete.
+
+        Returns:
+            ``True`` once the server confirms deletion.
+
+        Raises:
+            KaguraNotFoundError: Agent not found.
+        """
+        result = await self._call_tool_checked("delete_agent", {"agent_id": agent_id})
+        return bool(result.get("deleted", True))
+
+    async def bind_agent_context(
+        self,
+        agent_id: str,
+        context_id: str,
+        *,
+        can_read: bool | None = None,
+        write_policy: Literal["deny", "direct"] | None = None,
+        is_default: bool | None = None,
+    ) -> AgentBinding:
+        """Bind an agent to a context — purely subtractive scoping.
+
+        Calls the ``bind_agent_context`` MCP tool (server v0.49.0+,
+        RFC-0002 P0-2, memory-cloud #1275). Owner/admin only. The
+        effective permission for an agent-bound request is the existing
+        RBAC decision ∩ binding. Under ``enforcement_mode="enforce"``,
+        contexts WITHOUT a binding row are denied for the agent
+        (default-deny); under ``"shadow"``, violations are only logged.
+
+        ``allowed_memory_types``/``allowed_source_types`` are reserved
+        for memory-cloud #1286 and deliberately not exposed here (the
+        server accepts only null until per-memory enforcement ships).
+
+        Args:
+            agent_id: Agent UUID.
+            context_id: Context to bind (must belong to the agent's
+                workspace).
+            can_read: Whether the agent may read this context (server
+                default: ``True``).
+            write_policy: Write gate — ``"deny"`` (server default) or
+                ``"direct"``. ``"staged"`` is reserved for a later phase.
+            is_default: Mark as the agent's bootstrap default binding
+                (max one per agent).
+
+        Returns:
+            The created :class:`AgentBinding`.
+
+        Raises:
+            KaguraNotFoundError: Agent or context not found.
+            KaguraError: Duplicate binding or other server-side error.
+        """
+        arguments: dict[str, Any] = {"agent_id": agent_id, "context_id": context_id}
+        if can_read is not None:
+            arguments["can_read"] = can_read
+        if write_policy is not None:
+            arguments["write_policy"] = write_policy
+        if is_default is not None:
+            arguments["is_default"] = is_default
+        result = await self._call_tool_checked("bind_agent_context", arguments)
+        return AgentBinding.model_validate(result["binding"])
+
+    async def list_agent_bindings(self, agent_id: str) -> list[AgentBinding]:
+        """List an agent's context bindings (owner/admin only).
+
+        Args:
+            agent_id: Agent UUID.
+
+        Returns:
+            List of :class:`AgentBinding` rows.
+
+        Raises:
+            KaguraNotFoundError: Agent not found.
+        """
+        result = await self._call_tool_checked("list_agent_bindings", {"agent_id": agent_id})
+        return [AgentBinding.model_validate(b) for b in result.get("bindings", [])]
+
+    async def update_agent_binding(
+        self,
+        agent_id: str,
+        binding_id: str,
+        *,
+        can_read: bool | None = None,
+        write_policy: Literal["deny", "direct"] | None = None,
+        is_default: bool | None = None,
+    ) -> AgentBinding:
+        """Update a binding's scoping fields (owner/admin only).
+
+        ``context_id`` is immutable — :meth:`unbind_agent_context` and
+        re-:meth:`bind_agent_context` to re-target. Changes are audited
+        with old→new values.
+
+        Args:
+            agent_id: Agent UUID.
+            binding_id: Binding UUID from :meth:`list_agent_bindings`.
+            can_read: New read gate.
+            write_policy: New write gate — ``"deny"`` | ``"direct"``.
+            is_default: New bootstrap-default flag (max one per agent).
+
+        Returns:
+            The updated :class:`AgentBinding`.
+
+        Raises:
+            KaguraNotFoundError: Agent or binding not found.
+            KaguraError: Other server-side error.
+        """
+        arguments: dict[str, Any] = {"agent_id": agent_id, "binding_id": binding_id}
+        if can_read is not None:
+            arguments["can_read"] = can_read
+        if write_policy is not None:
+            arguments["write_policy"] = write_policy
+        if is_default is not None:
+            arguments["is_default"] = is_default
+        result = await self._call_tool_checked("update_agent_binding", arguments)
+        return AgentBinding.model_validate(result["binding"])
+
+    async def unbind_agent_context(self, agent_id: str, binding_id: str) -> bool:
+        """Delete a binding — the agent loses that context (owner/admin only).
+
+        Under ``enforcement_mode="enforce"`` the agent's requests against
+        the unbound context are denied afterwards (uniform
+        ``context_not_found``).
+
+        Args:
+            agent_id: Agent UUID.
+            binding_id: Binding UUID to delete.
+
+        Returns:
+            ``True`` once the server confirms deletion.
+
+        Raises:
+            KaguraNotFoundError: Agent or binding not found.
+        """
+        result = await self._call_tool_checked(
+            "unbind_agent_context", {"agent_id": agent_id, "binding_id": binding_id}
+        )
+        return bool(result.get("deleted", True))
 
     async def list_contexts(self) -> dict[str, Any]:
         """
@@ -1680,7 +1961,13 @@ class KaguraClient:
             return
         code = result.get("error", "unknown")
         message = result.get("message", "Unknown error")
-        if code in ("report_not_found", "context_not_found", "memory_not_found", "agent_not_found"):
+        if code in (
+            "report_not_found",
+            "context_not_found",
+            "memory_not_found",
+            "agent_not_found",
+            "binding_not_found",
+        ):
             raise KaguraNotFoundError(f"{operation}: {message}")
         raise KaguraError(f"{operation} failed ({code}): {message}")
 

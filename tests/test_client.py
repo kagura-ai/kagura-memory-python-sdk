@@ -7,6 +7,8 @@ import pytest
 
 from kagura_memory import (
     MIN_SERVER_VERSION,
+    Agent,
+    AgentBinding,
     AgentBootstrapResponse,
     ContextInfo,
     DuplicatesResponse,
@@ -27,7 +29,12 @@ from kagura_memory import (
     SleepReportDetail,
     UsageInfo,
 )
-from tests.conftest import bootstrap_envelope_dict, sleep_report_summary_dict
+from tests.conftest import (
+    agent_binding_dict,
+    agent_dict,
+    bootstrap_envelope_dict,
+    sleep_report_summary_dict,
+)
 
 # ============================================================================
 # HTTPS enforcement (C-3)
@@ -3410,5 +3417,262 @@ async def test_get_agent_bootstrap_invalid_arguments_raises():
         }
         with pytest.raises(KaguraError, match="invalid_arguments"):
             await client.get_agent_bootstrap("agent-uuid", session_id="bad session")
+
+    await client.close()
+
+
+# ============================================================================
+# Agent registry + bindings (#235, server v0.49.0+)
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_register_agent_minimal():
+    """register_agent() sends name only and parses the agent row."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {"status": "success", "agent": agent_dict()}
+        agent = await client.register_agent("ci-agent")
+        name, args = mock.call_args[0][0], mock.call_args[0][1]
+        assert name == "register_agent"
+        assert args == {"name": "ci-agent"}
+
+    assert isinstance(agent, Agent)
+    assert agent.name == "ci-agent"
+    assert agent.status == "active" and agent.enforcement_mode == "enforce"
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_register_agent_full_args():
+    """register_agent() forwards every optional metadata field."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {"status": "success", "agent": agent_dict()}
+        await client.register_agent(
+            "ci-agent",
+            description="CI runner",
+            framework="claude-code",
+            environment="production",
+            version="1.2.3",
+        )
+        args = mock.call_args[0][1]
+        assert args == {
+            "name": "ci-agent",
+            "description": "CI runner",
+            "framework": "claude-code",
+            "environment": "production",
+            "version": "1.2.3",
+        }
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_get_agent_parses_row():
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {"status": "success", "agent": agent_dict()}
+        agent = await client.get_agent("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+        assert mock.call_args[0][0] == "get_agent"
+        assert mock.call_args[0][1] == {"agent_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"}
+
+    assert agent.workspace_id == "11111111-2222-3333-4444-555555555555"
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_list_agents_parses_rows():
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {
+            "status": "success",
+            "agents": [agent_dict(), agent_dict(name="other")],
+            "count": 2,
+        }
+        agents = await client.list_agents()
+        assert mock.call_args[0][0] == "list_agents"
+        assert mock.call_args[0][1] == {}
+
+    assert [a.name for a in agents] == ["ci-agent", "other"]
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_update_agent_full_args():
+    """update_agent() forwards lifecycle + metadata fields; omits None."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {
+            "status": "success",
+            "agent": agent_dict(status="suspended"),
+            "changed": ["status"],
+        }
+        agent = await client.update_agent(
+            "agent-uuid", status="suspended", enforcement_mode="shadow"
+        )
+        args = mock.call_args[0][1]
+        assert args == {
+            "agent_id": "agent-uuid",
+            "status": "suspended",
+            "enforcement_mode": "shadow",
+        }
+        for key in ("name", "description", "framework", "environment", "version"):
+            assert key not in args
+
+    assert agent.status == "suspended"
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_delete_agent_returns_deleted():
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {"status": "success", "deleted": True, "agent_id": "agent-uuid"}
+        assert await client.delete_agent("agent-uuid") is True
+        assert mock.call_args[0][0] == "delete_agent"
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_bind_agent_context_defaults_omitted():
+    """bind_agent_context() sends only agent_id+context_id when defaults apply."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {"status": "success", "binding": agent_binding_dict()}
+        binding = await client.bind_agent_context("agent-uuid", "ctx-uuid")
+        name, args = mock.call_args[0][0], mock.call_args[0][1]
+        assert name == "bind_agent_context"
+        assert args == {"agent_id": "agent-uuid", "context_id": "ctx-uuid"}
+
+    assert isinstance(binding, AgentBinding)
+    assert binding.write_policy == "deny" and binding.can_read is True
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_bind_agent_context_full_args():
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {
+            "status": "success",
+            "binding": agent_binding_dict(write_policy="direct", is_default=True),
+        }
+        binding = await client.bind_agent_context(
+            "agent-uuid", "ctx-uuid", can_read=True, write_policy="direct", is_default=True
+        )
+        args = mock.call_args[0][1]
+        assert args == {
+            "agent_id": "agent-uuid",
+            "context_id": "ctx-uuid",
+            "can_read": True,
+            "write_policy": "direct",
+            "is_default": True,
+        }
+
+    assert binding.is_default is True
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_list_agent_bindings_parses_rows():
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {
+            "status": "success",
+            "bindings": [agent_binding_dict()],
+            "count": 1,
+        }
+        bindings = await client.list_agent_bindings("agent-uuid")
+        assert mock.call_args[0][1] == {"agent_id": "agent-uuid"}
+
+    assert len(bindings) == 1
+    assert bindings[0].context_id == "11111111-2222-3333-4444-555555555555"
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_update_agent_binding_sends_changes_only():
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {
+            "status": "success",
+            "binding": agent_binding_dict(can_read=False),
+            "changed": ["can_read"],
+        }
+        binding = await client.update_agent_binding("agent-uuid", "binding-uuid", can_read=False)
+        args = mock.call_args[0][1]
+        assert args == {
+            "agent_id": "agent-uuid",
+            "binding_id": "binding-uuid",
+            "can_read": False,
+        }
+
+    assert binding.can_read is False
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_unbind_agent_context_returns_deleted():
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {"status": "success", "deleted": True, "binding_id": "binding-uuid"}
+        assert await client.unbind_agent_context("agent-uuid", "binding-uuid") is True
+        args = mock.call_args[0][1]
+        assert args == {"agent_id": "agent-uuid", "binding_id": "binding-uuid"}
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_binding_not_found_raises_not_found():
+    """binding_not_found domain errors map to KaguraNotFoundError."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {
+            "status": "error",
+            "error": "binding_not_found",
+            "message": "Binding not found.",
+        }
+        with pytest.raises(KaguraNotFoundError, match="Binding not found"):
+            await client.unbind_agent_context("agent-uuid", "binding-uuid")
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_agent_name_conflict_raises_kagura_error():
+    """agent_name_conflict stays a generic KaguraError (not not-found)."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {
+            "status": "error",
+            "error": "agent_name_conflict",
+            "message": "An agent with this name already exists.",
+        }
+        with pytest.raises(KaguraError, match="agent_name_conflict"):
+            await client.register_agent("ci-agent")
 
     await client.close()

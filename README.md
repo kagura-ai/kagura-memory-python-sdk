@@ -208,6 +208,10 @@ agent-bound member keys:
 from kagura_memory import AgentsClient, KaguraClient
 
 async with KaguraClient() as client:  # MCP surface
+    # One-time provisioning (owner/admin): register the agent, bind its context
+    agent = await client.register_agent("ci-agent", framework="claude-code")
+    await client.bind_agent_context(agent.id, "ctx-uuid", is_default=True)
+
     bootstrap = await client.get_agent_bootstrap(
         "agent-uuid",                     # context_id omitted → default binding
         session_id="run-42",              # echoed in the correlation block
@@ -364,7 +368,7 @@ The same client also provisions **member API keys** (memory-cloud [#1165](https:
 
 | SDK | Min memory-cloud | Notes |
 |---|---|---|
-| 0.37.0+ | 0.17.1 (0.49.0 for agent bootstrap) | **Agent bootstrap (RFC-0002 P0-3).** `KaguraClient.get_agent_bootstrap()` (MCP) and `AgentsClient.bootstrap()` (REST, `POST /api/v1/agents/{agent_id}/bootstrap`) need memory-cloud **0.49.0+** ([#1276](https://github.com/kagura-ai/memory-cloud/issues/1276)) and a registered agent (agent registry, [#1274](https://github.com/kagura-ai/memory-cloud/issues/1274)). Against an older server the MCP tool returns "tool not found" and the REST route 404s. `MIN_SERVER_VERSION` stays **0.17.1**. |
+| 0.37.0+ | 0.17.1 (0.49.0 for the agent control plane) | **Agent control plane (RFC-0002 P0-1/2/3).** `KaguraClient.get_agent_bootstrap()` (MCP) and `AgentsClient.bootstrap()` (REST, `POST /api/v1/agents/{agent_id}/bootstrap`) need memory-cloud **0.49.0+** ([#1276](https://github.com/kagura-ai/memory-cloud/issues/1276)); the same release covers the **registry + binding wrappers** (`register_agent`/`get_agent`/`list_agents`/`update_agent`/`delete_agent`, `bind_agent_context`/`list_agent_bindings`/`update_agent_binding`/`unbind_agent_context` on both surfaces — owner/admin-gated server-side, [#1274](https://github.com/kagura-ai/memory-cloud/issues/1274)/[#1275](https://github.com/kagura-ai/memory-cloud/issues/1275)), so an SDK-only consumer can provision the agent + binding that bootstrap requires. Against an older server the MCP tools return "tool not found" and the REST routes 404. `MIN_SERVER_VERSION` stays **0.17.1**. |
 | 0.37.0+ | 0.17.1 | **`KaguraAgent` removed (breaking, #233).** The LLM-powered session-analysis actor, its models (`Session`/`Message`/`ProcessResult`/…), and `kagura process` are gone — the actor role lives in [kagura-agent](https://pypi.org/project/kagura-agent/) (with kagura-brain as its LLM head), and conversation→memory compilation is server-side Memory Analysis / connector workers. `litellm` moved from core dependencies to the `[ingest]` extra, so pure-client installs are much lighter; ingestion (including plain text) now requires `pip install 'kagura-memory[ingest]'`. |
 | 0.36.0+ | 0.17.1 (0.42.0 for `kagura workspace` / `kagura auth create-key`) | **Workspace member management + owner-provisioned member keys (owner-key only).** `WorkspaceClient` / `kagura workspace member\|invite` and `mint_member_key`/`list_member_keys`/`revoke_member_key` / `kagura auth create-key\|list-keys\|revoke-key` need memory-cloud **0.42.0+** (owner-key programmatic access, [#1164](https://github.com/kagura-ai/memory-cloud/issues/1164) / [#1165](https://github.com/kagura-ai/memory-cloud/issues/1165)). Requires the workspace **owner's static API key** — OAuth tokens are rejected on this surface, and a deployment can disable it via `enable_owner_key_member_management=false`. Key minting is privilege-downgrade only: member/viewer targets, never self, `expires_days` required. `MIN_SERVER_VERSION` stays **0.17.1**. |
 | 0.35.0+ | 0.17.1 (0.41.0 for file uploads/downloads) | **FilesClient v0.41.0 compatibility (breaking).** memory-cloud 0.41.0 requires `workspace_id` on the query of the file-id endpoints (`confirm`/`download-url`/`delete`) and presigns R2 PUT without the checksum header — so pre-0.35.0 SDKs get 403/422 on every upload/download/delete against it. This SDK sends `workspace_id` on those endpoints (harmlessly ignored by older servers) and only binds the checksum when the presign signed it. **Breaking:** `FilesClient.download_url(file_id, *, context_id)` and `delete(file_id, *, context_id)` now require `context_id`; `kagura files download-url`/`delete` require `-c/--context-id` (or a profile/`.kagura.json` workspace). `MIN_SERVER_VERSION` stays **0.17.1**. |
@@ -596,6 +600,7 @@ follow-up.
 | Retrieval feedback (feedback) | `KaguraClient` | MCP | API Key |
 | Agent session-state lane (set_state/get_state, TTL) | `KaguraClient` | MCP | API Key |
 | Agent bootstrap (get_agent_bootstrap — one-call session-start rehydration) | `KaguraClient` / `AgentsClient` | MCP + REST | API Key |
+| Agent registry + context bindings (register/list/update/delete, bind/unbind — owner/admin) | `KaguraClient` / `AgentsClient` | MCP + REST | API Key |
 | Context (create/update/list/delete/get_context_info) | `KaguraClient` | MCP | API Key |
 | Workspace (get_usage) | `KaguraClient` | MCP | API Key |
 | Search config (update_search_config) | `KaguraClient` | MCP | API Key |

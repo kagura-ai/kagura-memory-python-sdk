@@ -119,6 +119,65 @@ def bootstrap_envelope_dict(
     }
 
 
+def agent_dict(
+    agent_id: str = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+    name: str = "ci-agent",
+    **overrides,
+) -> dict:
+    """Build a server-shaped Agent Registry row for tests.
+
+    Mirrors ``_serialize_agent`` in
+    ``memory-cloud/backend/src/mcp_server/tools/agent_registry.py`` and
+    the REST ``AgentResponse`` (v0.49.0, RFC-0002 P0-1) — MCP and REST
+    emit the same field set, so both test suites consume one fixture.
+    """
+    row = {
+        "id": agent_id,
+        "workspace_id": "11111111-2222-3333-4444-555555555555",
+        "name": name,
+        "description": None,
+        "owner_user_id": "google_123",
+        "framework": "claude-code",
+        "environment": "production",
+        "version": None,
+        "status": "active",
+        "enforcement_mode": "enforce",
+        "last_seen_at": None,
+        "created_at": "2026-07-16T00:00:00Z",
+        "updated_at": "2026-07-16T00:00:00Z",
+    }
+    row.update(overrides)
+    return row
+
+
+def agent_binding_dict(
+    binding_id: str = "bbbbbbbb-cccc-dddd-eeee-ffffffffffff",
+    agent_id: str = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+    context_id: str = "11111111-2222-3333-4444-555555555555",
+    **overrides,
+) -> dict:
+    """Build a server-shaped agent-context binding row for tests.
+
+    Mirrors ``_serialize_binding`` (MCP) and the REST ``BindingResponse``
+    (v0.49.0, RFC-0002 P0-2).
+    """
+    row = {
+        "id": binding_id,
+        "agent_id": agent_id,
+        "context_id": context_id,
+        "can_read": True,
+        "write_policy": "deny",
+        "is_default": False,
+        "allowed_memory_types": None,
+        "allowed_source_types": None,
+        "created_by": "google_123",
+        "created_at": "2026-07-16T00:00:00Z",
+        "updated_at": "2026-07-16T00:00:00Z",
+    }
+    row.update(overrides)
+    return row
+
+
 @pytest.fixture
 def isolated_kagura_credentials(tmp_path, monkeypatch):
     """Isolate a test from real ``~/.kagura/credentials.json`` and env.
