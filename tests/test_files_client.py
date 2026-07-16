@@ -1318,6 +1318,27 @@ async def test_delete_rejects_non_uuid_context_id_locally():
 
 
 @pytest.mark.asyncio
+async def test_list_canonicalizes_noncanonical_context_id_spelling():
+    """Tolerated non-canonical UUID spellings ({braces}, dashless) are
+    CANONICALIZED before the wire, not sent raw (#236) — a validate-only
+    check let them through and they surfaced server-side as a misleading
+    uniform 404."""
+    client = FilesClient(api_key="test", base_url="https://example.com")
+    resp = _ok_response(200, [])
+    resp.json.return_value = []
+
+    with patch.object(client._client, "request", new_callable=AsyncMock) as mock_req:
+        mock_req.return_value = resp
+        await client.list(context_id=SAMPLE_CTX_ID.replace("-", ""))
+        await client.list(context_id="{" + SAMPLE_CTX_ID + "}")
+
+    for call in mock_req.call_args_list:
+        assert call[1]["params"]["workspace_id"] == SAMPLE_CTX_ID
+
+    await client.close()
+
+
+@pytest.mark.asyncio
 async def test_list_with_legacy_bare_array_response():
     """Server v0.15.x returns bare list[FileObjectOut]; SDK wraps it."""
     client = FilesClient(api_key="test", base_url="https://example.com")
