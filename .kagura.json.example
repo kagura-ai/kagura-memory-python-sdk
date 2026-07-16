@@ -1,6 +1,5 @@
 {
   "api_key": "kagura_your_api_key",
   "mcp_url": "http://localhost:8080/mcp/w/{workspace_id}",
-  "model": "gpt-5.4-nano",
   "context_id": "auto"
 }
