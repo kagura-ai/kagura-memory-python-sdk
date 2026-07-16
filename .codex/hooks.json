@@ -1,0 +1,30 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "INPUT=$(cat); CMD=$(echo \"$INPUT\" | jq -r '.tool_input.command // empty'); if echo \"$CMD\" | grep -qE 'gh pr (merge|create)'; then echo 'Reminder: Before PR, ensure /quality → /simplify → /self-review have been run.' >&2; fi; if echo \"$CMD\" | grep -qE 'git tag v'; then echo 'Reminder: Ensure /quality has passed before tagging a release.' >&2; fi; exit 0"
+          },
+          {
+            "type": "command",
+            "command": "curl -sf http://localhost:8080/health >/dev/null 2>&1 && echo 'Kagura Memory Cloud is connected.  Run /kagura-memory:session-start to restore previous session context.' || true"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "file_path=$(cat | jq -r '.tool_input.file_path // empty'); [ -z \"$file_path\" ] && exit 0; case \"$file_path\" in *.py) uv run ruff format --quiet \"$file_path\" 2>/dev/null;; esac; case \"$file_path\" in */memory/*.md) echo 'Memory updated. Consider /kagura-memory:session-summary to sync with Kagura Memory.' >&2;; esac; exit 0"
+          }
+        ]
+      }
+    ]
+  }
+}
