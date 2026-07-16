@@ -92,7 +92,7 @@ from .models import (
 from .resource_client import ResourceClient
 from .workspace_client import WorkspaceClient
 
-__version__ = "0.36.0"
+__version__ = "0.37.0"
 
 __all__ = [
     # Core classes
