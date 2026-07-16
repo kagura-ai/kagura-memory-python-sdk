@@ -5,8 +5,8 @@ Tests remember/recall quality and performance with 8 query types.
 Outputs Rich terminal tables + Markdown report for publishing.
 
 Usage:
-    uv run python examples/benchmark_embeddings.py
-    uv run python examples/benchmark_embeddings.py --cleanup
+    uv run python benchmarks/embeddings/run.py
+    uv run python benchmarks/embeddings/run.py --cleanup
 """
 
 import asyncio

@@ -29,7 +29,7 @@
 
 ## What is this?
 
-This SDK connects your Python code to [Kagura Memory Cloud](https://github.com/kagura-ai/memory-cloud), giving AI assistants the ability to **remember, search, and learn** from past interactions — and to **ingest documents** (PDFs, URLs) directly into a searchable memory graph. It provides **four clients** (plus a document ingestor) for different use cases:
+This SDK connects your Python code to [Kagura Memory Cloud](https://github.com/kagura-ai/memory-cloud), giving AI assistants the ability to **remember, search, and learn** from past interactions — and to **ingest documents** (PDFs, URLs) directly into a searchable memory graph. It provides **six clients** (plus a document ingestor) for different use cases:
 
 | Client | Protocol | Use Case |
 |--------|----------|----------|
@@ -37,6 +37,8 @@ This SDK connects your Python code to [Kagura Memory Cloud](https://github.com/k
 | **`ResourceClient`** | REST API | External data ingestion — push data from Slack, CI/CD, CRM into Kagura |
 | **`FilesClient`** | REST + presigned PUT | File uploads with sha256 integrity binding (R2); optional per-file context binding for ACL |
 | **`SecretClient`** | REST + age crypto | Zero-knowledge secrets — age recipient encryption, **local decryption** (the server only ever stores armored ciphertext) |
+| **`WorkspaceClient`** | REST API | Workspace member / invitation management + owner-provisioned member keys (owner API key only) |
+| **`AgentsClient`** | REST API | Agent bootstrap — one-call session-start rehydration for API-key-only callers (server v0.49.0+) |
 | **`FileIngestor`** | CLI + SDK | Document ingestion — PDF/Office/HTML/EPUB, audio & YouTube transcripts → memory graph + R2 archive |
 
 ## 60-second demo
