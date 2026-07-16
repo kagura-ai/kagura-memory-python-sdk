@@ -14,7 +14,6 @@ the owner-key 403 hint and the detail-carrying 429 quota mapping.
 
 from __future__ import annotations
 
-import uuid
 from typing import Any
 from urllib.parse import quote
 
@@ -22,7 +21,7 @@ import httpx
 from pydantic import ValidationError
 
 from ._auth import _SOURCE_LABEL
-from ._http import _retry_after_seconds, extract_detail, sanitize_server_detail
+from ._http import _retry_after_seconds, extract_detail, normalize_uuid, sanitize_server_detail
 from ._rest_base import KaguraRestClient
 from .exceptions import KaguraConnectionError, KaguraError, KaguraQuotaError
 from .models import MemberAPIKey, WorkspaceInvitation, WorkspaceMember
@@ -44,17 +43,8 @@ _UNIFORM_403 = "Insufficient permissions"
 
 
 def _normalize_workspace_id(workspace_id: str) -> str:
-    """Return the canonical UUID string, rejecting non-UUIDs before the URL.
-
-    ``uuid.UUID`` tolerates non-canonical spellings (``{braces}``,
-    ``urn:uuid:`` prefix, dashless 32-hex); interpolating the RAW input
-    would send those to the server and surface as a misleading uniform
-    404 — normalize instead of just validating.
-    """
-    try:
-        return str(uuid.UUID(str(workspace_id)))
-    except (ValueError, TypeError) as exc:
-        raise ValueError(f"workspace_id must be a UUID, got {workspace_id!r}") from exc
+    """Canonicalize before URL interpolation — see :func:`normalize_uuid`."""
+    return normalize_uuid(workspace_id, label="workspace_id")
 
 
 def _require_int(value: object, label: str) -> int:

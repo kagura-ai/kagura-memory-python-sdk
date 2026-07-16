@@ -1,6 +1,7 @@
 """Kagura Memory SDK - AI-driven memory management for Kagura Memory Cloud."""
 
 from .agent import KaguraAgent
+from .agents_client import AgentsClient
 from .client import MIN_SERVER_VERSION, KaguraClient
 from .exceptions import (
     KaguraAuthDeniedError,
@@ -20,6 +21,11 @@ from .exceptions import (
 from .files_client import FilesClient
 from .ingest import FileIngestor
 from .models import (
+    AgentBootstrapAgent,
+    AgentBootstrapBinding,
+    AgentBootstrapComponentName,
+    AgentBootstrapCorrelation,
+    AgentBootstrapResponse,
     Artifact,
     ContextDetail,
     ContextInfo,
@@ -104,6 +110,7 @@ __all__ = [
     "ResourceClient",
     "FilesClient",
     "WorkspaceClient",
+    "AgentsClient",
     "MIN_SERVER_VERSION",
     # Embedding models
     "EmbeddingModel",
@@ -181,6 +188,12 @@ __all__ = [
     "WorkspaceMember",
     "WorkspaceInvitation",
     "MemberAPIKey",
+    # Agent bootstrap (#231, server v0.49.0+)
+    "AgentBootstrapAgent",
+    "AgentBootstrapBinding",
+    "AgentBootstrapComponentName",
+    "AgentBootstrapCorrelation",
+    "AgentBootstrapResponse",
     # File ingestion (Issue #80)
     "FileIngestor",
     "IngestResult",

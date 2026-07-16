@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import uuid
 from importlib.metadata import version as _pkg_version
 from typing import Any, NoReturn
 
@@ -163,6 +164,30 @@ def _format_validation_errors(errors: list[Any]) -> str:
 # past the check (#189). Scheme matching stays case-sensitive to preserve prior
 # behavior; the trigger below is the lowercase ``http://`` literal.
 _LOCALHOST_HTTP_RE = re.compile(r"^http://(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?(?:[/?#]|$)")
+
+
+def normalize_uuid(value: object, *, label: str) -> str:
+    """Return the canonical UUID string, rejecting non-UUIDs before URL use.
+
+    ``uuid.UUID`` tolerates non-canonical spellings (``{braces}``,
+    ``urn:uuid:`` prefix, dashless 32-hex); interpolating the RAW input
+    into a URL path would send those to the server and surface as a
+    misleading uniform 404 — normalize instead of just validating.
+
+    Args:
+        value: Candidate UUID. Typed ``object`` because this is a runtime
+            guard at the public-parameter trust boundary: non-string
+            values from untyped callers are coerced via ``str()`` and
+            rejected with the same uniform ValueError.
+        label: Parameter name used in the error message.
+
+    Raises:
+        ValueError: If ``value`` is not a parseable UUID.
+    """
+    try:
+        return str(uuid.UUID(str(value)))
+    except (ValueError, TypeError) as exc:
+        raise ValueError(f"{label} must be a UUID, got {value!r}") from exc
 
 
 def validate_https_url(url: str, *, label: str = "URL") -> None:
