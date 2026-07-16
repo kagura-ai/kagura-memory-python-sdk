@@ -270,8 +270,7 @@ class AgentsClient(KaguraRestClient):
         )
         if not body:
             raise ValueError(
-                "update_binding requires at least one of "
-                "can_read, write_policy, or is_default"
+                "update_binding requires at least one of can_read, write_policy, or is_default"
             )
         resp = await self._request(
             "PATCH",

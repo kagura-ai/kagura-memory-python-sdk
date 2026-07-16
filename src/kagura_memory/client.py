@@ -890,9 +890,7 @@ class KaguraClient:
         )
         if not changes:
             raise ValueError("update_agent requires at least one field to update")
-        result = await self._call_tool_checked(
-            "update_agent", {"agent_id": agent_id, **changes}
-        )
+        result = await self._call_tool_checked("update_agent", {"agent_id": agent_id, **changes})
         return Agent.model_validate(result["agent"])
 
     async def delete_agent(self, agent_id: str) -> bool:
