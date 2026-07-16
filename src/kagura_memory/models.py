@@ -1014,6 +1014,43 @@ Mirrors the server's closed component set; the server rejects unknown
 names with ``invalid_arguments``."""
 
 
+def _bootstrap_payload(
+    *,
+    context_id: str | None,
+    session_id: str | None,
+    query: str | None,
+    recall_k: int | None,
+    pinned_cap: int | None,
+    upcoming_until: str | None,
+    include: list[AgentBootstrapComponentName] | None,
+) -> dict[str, Any]:
+    """Build the omit-when-None bootstrap payload shared by both surfaces.
+
+    ``KaguraClient.get_agent_bootstrap`` (MCP tool arguments) and
+    ``AgentsClient.bootstrap`` (REST JSON body) carry the same seven
+    optional keys; a single builder keeps the two surfaces in lockstep —
+    ``agent_id`` stays transport-specific (MCP argument vs URL path).
+    Lives beside the bootstrap models because it IS the request half of
+    this wire contract.
+    """
+    payload: dict[str, Any] = {}
+    if context_id is not None:
+        payload["context_id"] = context_id
+    if session_id is not None:
+        payload["session_id"] = session_id
+    if query is not None:
+        payload["query"] = query
+    if recall_k is not None:
+        payload["recall_k"] = recall_k
+    if pinned_cap is not None:
+        payload["pinned_cap"] = pinned_cap
+    if upcoming_until is not None:
+        payload["upcoming_until"] = upcoming_until
+    if include is not None:
+        payload["include"] = include
+    return payload
+
+
 class AgentBootstrapBinding(BaseModel):
     """The context binding a bootstrap resolved (``agent.binding``).
 

@@ -32,6 +32,7 @@ from .models import (
     SleepReport,
     SleepReportDetail,
     UsageInfo,
+    _bootstrap_payload,
 )
 
 _T = TypeVar("_T", bound=_BaseModel)
@@ -741,21 +742,18 @@ class KaguraClient:
                 nonexistent and not-yours are indistinguishable by design).
             KaguraError: Invalid arguments or other server-side error.
         """
-        arguments: dict[str, Any] = {"agent_id": agent_id}
-        if context_id is not None:
-            arguments["context_id"] = context_id
-        if session_id is not None:
-            arguments["session_id"] = session_id
-        if query is not None:
-            arguments["query"] = query
-        if recall_k is not None:
-            arguments["recall_k"] = recall_k
-        if pinned_cap is not None:
-            arguments["pinned_cap"] = pinned_cap
-        if upcoming_until is not None:
-            arguments["upcoming_until"] = upcoming_until
-        if include is not None:
-            arguments["include"] = include
+        arguments: dict[str, Any] = {
+            "agent_id": agent_id,
+            **_bootstrap_payload(
+                context_id=context_id,
+                session_id=session_id,
+                query=query,
+                recall_k=recall_k,
+                pinned_cap=pinned_cap,
+                upcoming_until=upcoming_until,
+                include=include,
+            ),
+        }
         result = await self._call_tool_checked("get_agent_bootstrap", arguments)
         return AgentBootstrapResponse.model_validate(result)
 

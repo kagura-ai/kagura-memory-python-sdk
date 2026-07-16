@@ -11,57 +11,19 @@ import json
 import httpx
 import pytest
 
-from kagura_memory.agents_client import AgentsClient, _normalize_agent_id
+from kagura_memory.agents_client import AgentsClient
 from kagura_memory.exceptions import (
     KaguraAuthError,
     KaguraConnectionError,
     KaguraNotFoundError,
 )
 from kagura_memory.models import AgentBootstrapResponse
+from tests.conftest import bootstrap_envelope_dict
 
 AGENT = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 CTX = "11111111-2222-3333-4444-555555555555"
 
-ENVELOPE = {
-    "status": "success",
-    "degraded": False,
-    "agent": {
-        "agent_id": AGENT,
-        "name": "ci-agent",
-        "binding": {"context_id": CTX, "is_default": True},
-    },
-    "context": {
-        "id": CTX,
-        "name": "dev",
-        "display_name": "Dev",
-        "summary": "Dev knowledge base",
-        "usage_guide": "Recall before acting.",
-        "is_private": True,
-        "is_locked": False,
-        "embedding_model": "text-embedding-3-small",
-        "embedding_dimensions": 1536,
-    },
-    "instructions": "Recall before acting.\n\nSTANDARD INSTRUCTIONS",
-    "components": {
-        "pinned": {
-            "status": "ok",
-            "memories": [],
-            "total_available": 0,
-            "truncated": False,
-            "cap": 100,
-        },
-        "recall": {"status": "skipped", "reason": "no_query"},
-        "policy": {"status": "skipped", "reason": "no_policy_bundle"},
-    },
-    "correlation": {
-        "agent_id": AGENT,
-        "session_id": "run-42",
-        "run_id": None,
-        "trace_id": None,
-        "span_id": None,
-    },
-    "generated_at": "2026-07-16T00:00:00Z",
-}
+ENVELOPE = bootstrap_envelope_dict(agent_id=AGENT, context_id=CTX)
 
 
 def make_client(handler) -> AgentsClient:
@@ -99,27 +61,12 @@ def test_envelope_minimal_shape():
 
 
 # ---------------------------------------------------------------------------
-# agent_id normalization
-# ---------------------------------------------------------------------------
-
-
-def test_normalize_agent_id_canonical():
-    assert _normalize_agent_id(AGENT) == AGENT
-
-
-def test_normalize_agent_id_noncanonical_spellings():
-    assert _normalize_agent_id("{" + AGENT + "}") == AGENT
-    assert _normalize_agent_id(AGENT.replace("-", "")) == AGENT
-
-
-def test_normalize_agent_id_rejects_garbage():
-    with pytest.raises(ValueError, match="agent_id must be a UUID"):
-        _normalize_agent_id("not-a-uuid")
-
-
-# ---------------------------------------------------------------------------
 # bootstrap()
 # ---------------------------------------------------------------------------
+# agent_id normalization/rejection is the shared normalize_uuid helper —
+# its spelling matrix is unit-tested once in tests/test__http.py; here only
+# the client-level behavior (path normalization, pre-request rejection) is
+# asserted.
 
 
 @pytest.mark.asyncio

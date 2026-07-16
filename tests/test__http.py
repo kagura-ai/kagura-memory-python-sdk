@@ -12,7 +12,7 @@ from unittest.mock import MagicMock
 import httpx
 import pytest
 
-from kagura_memory._http import extract_detail, validate_https_url
+from kagura_memory._http import extract_detail, normalize_uuid, validate_https_url
 
 
 def _response_with_json(payload: object) -> MagicMock:
@@ -242,6 +242,35 @@ def test_retry_after_seconds_parses_digits_else_none():
     assert _retry_after_seconds(_Resp({"Retry-After": " 45 "})) == 45  # stripped
     assert _retry_after_seconds(_Resp({"Retry-After": "Wed, 21 Oct 2099 07:28:00 GMT"})) is None
     assert _retry_after_seconds(_Resp({})) is None
+
+
+# ---------------------------------------------------------------------------
+# normalize_uuid — shared canonicalize-before-URL-interpolation guard
+# ---------------------------------------------------------------------------
+
+_CANONICAL = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+
+@pytest.mark.parametrize(
+    "spelling",
+    [
+        _CANONICAL,  # canonical passes through unchanged
+        "{" + _CANONICAL + "}",  # braces
+        _CANONICAL.replace("-", ""),  # dashless 32-hex
+        f"urn:uuid:{_CANONICAL}",  # urn prefix
+        _CANONICAL.upper(),  # uppercase → lowercased canonical
+    ],
+)
+def test_normalize_uuid_canonicalizes_tolerated_spellings(spelling: str):
+    """Every spelling ``uuid.UUID`` tolerates must come out canonical."""
+    assert normalize_uuid(spelling, label="agent_id") == _CANONICAL
+
+
+@pytest.mark.parametrize("bad", ["not-a-uuid", "", "../../admin", None, 42])
+def test_normalize_uuid_rejects_non_uuids_with_label(bad):
+    """Garbage (including non-str runtime values) raises with the caller's label."""
+    with pytest.raises(ValueError, match="workspace_id must be a UUID"):
+        normalize_uuid(bad, label="workspace_id")
 
 
 # ---------------------------------------------------------------------------

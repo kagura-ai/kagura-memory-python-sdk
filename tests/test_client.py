@@ -27,7 +27,7 @@ from kagura_memory import (
     SleepReportDetail,
     UsageInfo,
 )
-from tests.conftest import sleep_report_summary_dict
+from tests.conftest import bootstrap_envelope_dict, sleep_report_summary_dict
 
 # ============================================================================
 # HTTPS enforcement (C-3)
@@ -3272,46 +3272,7 @@ async def test_list_tags_arg_validation(kwargs, match):
 # get_agent_bootstrap (#231, server v0.49.0+)
 # ============================================================================
 
-_BOOTSTRAP_ENVELOPE = {
-    "status": "success",
-    "degraded": False,
-    "agent": {
-        "agent_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
-        "name": "ci-agent",
-        "binding": {"context_id": "ctx-uuid", "is_default": True},
-    },
-    "context": {
-        "id": "ctx-uuid",
-        "name": "dev",
-        "display_name": "Dev",
-        "summary": "Dev knowledge base",
-        "usage_guide": "Recall before acting.",
-        "is_private": True,
-        "is_locked": False,
-        "embedding_model": "text-embedding-3-small",
-        "embedding_dimensions": 1536,
-    },
-    "instructions": "Recall before acting.\n\nSTANDARD INSTRUCTIONS",
-    "components": {
-        "pinned": {
-            "status": "ok",
-            "memories": [{"memory_id": "m1", "summary": "Guardrail", "type": "note"}],
-            "total_available": 1,
-            "truncated": False,
-            "cap": 100,
-        },
-        "recall": {"status": "skipped", "reason": "no_query"},
-        "state": {"status": "ok", "entries": []},
-    },
-    "correlation": {
-        "agent_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
-        "session_id": "run-42",
-        "run_id": None,
-        "trace_id": None,
-        "span_id": None,
-    },
-    "generated_at": "2026-07-16T00:00:00Z",
-}
+_BOOTSTRAP_ENVELOPE = bootstrap_envelope_dict()
 
 
 @pytest.mark.asyncio

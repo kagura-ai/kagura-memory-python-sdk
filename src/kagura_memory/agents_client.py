@@ -15,25 +15,13 @@ mapping live in :class:`~kagura_memory._rest_base.KaguraRestClient`
 
 from __future__ import annotations
 
-import uuid
-from typing import Any
-
+from ._http import normalize_uuid
 from ._rest_base import KaguraRestClient
-from .models import AgentBootstrapComponentName, AgentBootstrapResponse
-
-
-def _normalize_agent_id(agent_id: str) -> str:
-    """Return the canonical UUID string, rejecting non-UUIDs before the URL.
-
-    ``uuid.UUID`` tolerates non-canonical spellings (``{braces}``,
-    ``urn:uuid:`` prefix, dashless 32-hex); interpolating the RAW input
-    would send those to the server and surface as a misleading uniform
-    404 — normalize instead of just validating.
-    """
-    try:
-        return str(uuid.UUID(str(agent_id)))
-    except (ValueError, TypeError) as exc:
-        raise ValueError(f"agent_id must be a UUID, got {agent_id!r}") from exc
+from .models import (
+    AgentBootstrapComponentName,
+    AgentBootstrapResponse,
+    _bootstrap_payload,
+)
 
 
 class AgentsClient(KaguraRestClient):
@@ -90,24 +78,18 @@ class AgentsClient(KaguraRestClient):
         Returns:
             :class:`AgentBootstrapResponse` — the composed envelope.
         """
-        body: dict[str, Any] = {}
-        if context_id is not None:
-            body["context_id"] = context_id
-        if session_id is not None:
-            body["session_id"] = session_id
-        if query is not None:
-            body["query"] = query
-        if recall_k is not None:
-            body["recall_k"] = recall_k
-        if pinned_cap is not None:
-            body["pinned_cap"] = pinned_cap
-        if upcoming_until is not None:
-            body["upcoming_until"] = upcoming_until
-        if include is not None:
-            body["include"] = include
+        body = _bootstrap_payload(
+            context_id=context_id,
+            session_id=session_id,
+            query=query,
+            recall_k=recall_k,
+            pinned_cap=pinned_cap,
+            upcoming_until=upcoming_until,
+            include=include,
+        )
         resp = await self._request(
             "POST",
-            f"/api/v1/agents/{_normalize_agent_id(agent_id)}/bootstrap",
+            f"/api/v1/agents/{normalize_uuid(agent_id, label='agent_id')}/bootstrap",
             json=body,
         )
         return AgentBootstrapResponse.model_validate(self._json(resp))

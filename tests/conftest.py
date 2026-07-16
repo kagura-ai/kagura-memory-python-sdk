@@ -62,6 +62,63 @@ def sleep_report_summary_dict(report_id: str = "rid-1") -> dict:
     }
 
 
+def bootstrap_envelope_dict(
+    agent_id: str = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+    context_id: str = "11111111-2222-3333-4444-555555555555",
+) -> dict:
+    """Build a server-shaped ``get_agent_bootstrap`` envelope for tests.
+
+    Mirrors ``build_envelope`` in
+    ``memory-cloud/backend/src/services/agent_bootstrap_service.py``
+    (v0.49.0, RFC-0002 P0-3) so the MCP-surface tests (test_client.py) and
+    the REST-surface tests (test_agents_client.py) consume one wire
+    fixture instead of diverging copies. Per-case variants override only
+    what they assert, e.g. ``{**bootstrap_envelope_dict(),
+    "components": {...}}``.
+    """
+    return {
+        "status": "success",
+        "degraded": False,
+        "agent": {
+            "agent_id": agent_id,
+            "name": "ci-agent",
+            "binding": {"context_id": context_id, "is_default": True},
+        },
+        "context": {
+            "id": context_id,
+            "name": "dev",
+            "display_name": "Dev",
+            "summary": "Dev knowledge base",
+            "usage_guide": "Recall before acting.",
+            "is_private": True,
+            "is_locked": False,
+            "embedding_model": "text-embedding-3-small",
+            "embedding_dimensions": 1536,
+        },
+        "instructions": "Recall before acting.\n\nSTANDARD INSTRUCTIONS",
+        "components": {
+            "pinned": {
+                "status": "ok",
+                "memories": [{"memory_id": "m1", "summary": "Guardrail", "type": "note"}],
+                "total_available": 1,
+                "truncated": False,
+                "cap": 100,
+            },
+            "recall": {"status": "skipped", "reason": "no_query"},
+            "state": {"status": "ok", "entries": []},
+            "policy": {"status": "skipped", "reason": "no_policy_bundle"},
+        },
+        "correlation": {
+            "agent_id": agent_id,
+            "session_id": "run-42",
+            "run_id": None,
+            "trace_id": None,
+            "span_id": None,
+        },
+        "generated_at": "2026-07-16T00:00:00Z",
+    }
+
+
 @pytest.fixture
 def isolated_kagura_credentials(tmp_path, monkeypatch):
     """Isolate a test from real ``~/.kagura/credentials.json`` and env.
