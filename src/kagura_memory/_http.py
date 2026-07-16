@@ -166,7 +166,7 @@ def _format_validation_errors(errors: list[Any]) -> str:
 _LOCALHOST_HTTP_RE = re.compile(r"^http://(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?(?:[/?#]|$)")
 
 
-def normalize_uuid(value: str, *, label: str) -> str:
+def normalize_uuid(value: object, *, label: str) -> str:
     """Return the canonical UUID string, rejecting non-UUIDs before URL use.
 
     ``uuid.UUID`` tolerates non-canonical spellings (``{braces}``,
@@ -175,13 +175,14 @@ def normalize_uuid(value: str, *, label: str) -> str:
     misleading uniform 404 — normalize instead of just validating.
 
     Args:
-        value: Candidate UUID string.
+        value: Candidate UUID. Typed ``object`` because this is a runtime
+            guard at the public-parameter trust boundary: non-string
+            values from untyped callers are coerced via ``str()`` and
+            rejected with the same uniform ValueError.
         label: Parameter name used in the error message.
 
     Raises:
-        ValueError: If ``value`` is not a parseable UUID. The ``str()``
-            coercion and ``TypeError`` catch keep the error uniform for
-            untyped runtime callers passing non-strings.
+        ValueError: If ``value`` is not a parseable UUID.
     """
     try:
         return str(uuid.UUID(str(value)))
