@@ -17,6 +17,8 @@ from .exceptions import (
     _exc_message,
 )
 from .models import (
+    AgentBootstrapComponentName,
+    AgentBootstrapResponse,
     ContextInfo,
     DuplicatesResponse,
     Edge,
@@ -673,6 +675,89 @@ class KaguraClient:
         if key is not None:
             arguments["key"] = key
         return await self._call_tool_checked("get_state", arguments)
+
+    async def get_agent_bootstrap(
+        self,
+        agent_id: str,
+        *,
+        context_id: str | None = None,
+        session_id: str | None = None,
+        query: str | None = None,
+        recall_k: int | None = None,
+        pinned_cap: int | None = None,
+        upcoming_until: str | None = None,
+        include: list[AgentBootstrapComponentName] | None = None,
+    ) -> AgentBootstrapResponse:
+        """Rehydrate an agent's cognitive state in one session-start call.
+
+        Calls the ``get_agent_bootstrap`` MCP tool (server v0.49.0+,
+        RFC-0002 P0-3). The server composes existing primitives — context
+        guide + pinned memories (:meth:`load_pinned`) + a trusted-only
+        :meth:`recall` (only when ``query`` is supplied) + upcoming time
+        memories (:meth:`recall_upcoming`) + the agent-state lane
+        (:meth:`get_state`) — with bounds, ordering, and trust filtering
+        inherited from those standalone tools, not re-specified.
+
+        Components are **fail-soft**: a failing component reports
+        ``{"status": "error", ...}`` under ``components`` while the rest
+        still return, with the top-level ``degraded`` flag set.
+        Identity/authorization failures are total and raise instead.
+
+        Requires memory-cloud v0.49.0+ — older servers return an MCP
+        "tool not found" error. ``MIN_SERVER_VERSION`` is deliberately not
+        bumped; only this method needs the newer server. The REST companion
+        (``POST /api/v1/agents/{agent_id}/bootstrap``) is available via
+        :class:`~kagura_memory.agents_client.AgentsClient` for
+        API-key-only callers such as agent-bound member keys.
+
+        Args:
+            agent_id: Agent UUID from the registry (required).
+            context_id: Target context UUID. Omit to use the agent's
+                default binding.
+            session_id: Opaque correlation id (max 128 chars,
+                ``[A-Za-z0-9._-]``); echoed in the ``correlation`` block.
+            query: Recall query (max 1024 chars). Supplying it enables the
+                trusted-only recall component; omit to skip recall — the
+                server never fabricates a query, so the component reports
+                ``status="skipped"`` even when ``include`` names it.
+            recall_k: Number of recall results; forwarded to recall's
+                ``k`` validation.
+            pinned_cap: Override for the pinned-set cap; clamped by
+                ``load_pinned`` to [1, 1000].
+            upcoming_until: ISO upper bound for upcoming time memories
+                (the lower bound is always now).
+            include: Component selector — a subset of ``"pinned"``,
+                ``"recall"``, ``"upcoming"``, ``"state"``, ``"policy"``.
+                Omit for all components.
+
+        Returns:
+            :class:`AgentBootstrapResponse` — the composed envelope with
+            ``agent`` (identity + resolved binding), ``context``,
+            ``instructions``, per-component payloads in ``components``,
+            the ``correlation`` block, and the ``degraded`` flag.
+
+        Raises:
+            KaguraNotFoundError: Agent or context not found (uniform 404 —
+                nonexistent and not-yours are indistinguishable by design).
+            KaguraError: Invalid arguments or other server-side error.
+        """
+        arguments: dict[str, Any] = {"agent_id": agent_id}
+        if context_id is not None:
+            arguments["context_id"] = context_id
+        if session_id is not None:
+            arguments["session_id"] = session_id
+        if query is not None:
+            arguments["query"] = query
+        if recall_k is not None:
+            arguments["recall_k"] = recall_k
+        if pinned_cap is not None:
+            arguments["pinned_cap"] = pinned_cap
+        if upcoming_until is not None:
+            arguments["upcoming_until"] = upcoming_until
+        if include is not None:
+            arguments["include"] = include
+        result = await self._call_tool_checked("get_agent_bootstrap", arguments)
+        return AgentBootstrapResponse.model_validate(result)
 
     async def list_contexts(self) -> dict[str, Any]:
         """
@@ -1597,7 +1682,7 @@ class KaguraClient:
             return
         code = result.get("error", "unknown")
         message = result.get("message", "Unknown error")
-        if code in ("report_not_found", "context_not_found", "memory_not_found"):
+        if code in ("report_not_found", "context_not_found", "memory_not_found", "agent_not_found"):
             raise KaguraNotFoundError(f"{operation}: {message}")
         raise KaguraError(f"{operation} failed ({code}): {message}")
 

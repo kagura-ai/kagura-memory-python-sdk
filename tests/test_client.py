@@ -7,6 +7,7 @@ import pytest
 
 from kagura_memory import (
     MIN_SERVER_VERSION,
+    AgentBootstrapResponse,
     ContextInfo,
     DuplicatesResponse,
     EmbeddingStatus,
@@ -3265,3 +3266,188 @@ async def test_list_tags_arg_validation(kwargs, match):
             await client.list_tags(context_id="ctx-1", **kwargs)
     finally:
         await client.close()
+
+
+# ============================================================================
+# get_agent_bootstrap (#231, server v0.49.0+)
+# ============================================================================
+
+_BOOTSTRAP_ENVELOPE = {
+    "status": "success",
+    "degraded": False,
+    "agent": {
+        "agent_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        "name": "ci-agent",
+        "binding": {"context_id": "ctx-uuid", "is_default": True},
+    },
+    "context": {
+        "id": "ctx-uuid",
+        "name": "dev",
+        "display_name": "Dev",
+        "summary": "Dev knowledge base",
+        "usage_guide": "Recall before acting.",
+        "is_private": True,
+        "is_locked": False,
+        "embedding_model": "text-embedding-3-small",
+        "embedding_dimensions": 1536,
+    },
+    "instructions": "Recall before acting.\n\nSTANDARD INSTRUCTIONS",
+    "components": {
+        "pinned": {
+            "status": "ok",
+            "memories": [{"memory_id": "m1", "summary": "Guardrail", "type": "note"}],
+            "total_available": 1,
+            "truncated": False,
+            "cap": 100,
+        },
+        "recall": {"status": "skipped", "reason": "no_query"},
+        "state": {"status": "ok", "entries": []},
+    },
+    "correlation": {
+        "agent_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        "session_id": "run-42",
+        "run_id": None,
+        "trace_id": None,
+        "span_id": None,
+    },
+    "generated_at": "2026-07-16T00:00:00Z",
+}
+
+
+@pytest.mark.asyncio
+async def test_get_agent_bootstrap_minimal():
+    """get_agent_bootstrap() sends agent_id only and parses the envelope."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = _BOOTSTRAP_ENVELOPE
+        result = await client.get_agent_bootstrap("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+        name, args = mock.call_args[0][0], mock.call_args[0][1]
+        assert name == "get_agent_bootstrap"
+        assert args == {"agent_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"}
+
+    assert isinstance(result, AgentBootstrapResponse)
+    assert result.degraded is False
+    assert result.agent.name == "ci-agent"
+    assert result.agent.binding is not None and result.agent.binding.is_default is True
+    # The context block reuses ContextDetail (byte-compatible with get_context_info).
+    assert result.context is not None and result.context.name == "dev"
+    # Component payloads stay dicts — shapes belong to the standalone tools.
+    assert result.components["pinned"]["status"] == "ok"
+    assert result.components["recall"] == {"status": "skipped", "reason": "no_query"}
+    assert result.correlation is not None and result.correlation.session_id == "run-42"
+    assert result.generated_at is not None
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_get_agent_bootstrap_full_args():
+    """get_agent_bootstrap() forwards every optional argument."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = _BOOTSTRAP_ENVELOPE
+        await client.get_agent_bootstrap(
+            "agent-uuid",
+            context_id="ctx-uuid",
+            session_id="run-42",
+            query="current task",
+            recall_k=7,
+            pinned_cap=50,
+            upcoming_until="2026-08-01T00:00:00",
+            include=["pinned", "recall"],
+        )
+        args = mock.call_args[0][1]
+        assert args == {
+            "agent_id": "agent-uuid",
+            "context_id": "ctx-uuid",
+            "session_id": "run-42",
+            "query": "current task",
+            "recall_k": 7,
+            "pinned_cap": 50,
+            "upcoming_until": "2026-08-01T00:00:00",
+            "include": ["pinned", "recall"],
+        }
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_get_agent_bootstrap_optional_args_not_sent_when_none():
+    """Omitted optionals must not appear in the tool arguments (server defaults)."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = _BOOTSTRAP_ENVELOPE
+        await client.get_agent_bootstrap("agent-uuid")
+        args = mock.call_args[0][1]
+        for key in (
+            "context_id",
+            "session_id",
+            "query",
+            "recall_k",
+            "pinned_cap",
+            "upcoming_until",
+            "include",
+        ):
+            assert key not in args
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_get_agent_bootstrap_degraded_component():
+    """A failed component parses fail-soft: degraded=True, others intact."""
+    client = _make_initialized_client()
+    envelope = {
+        **_BOOTSTRAP_ENVELOPE,
+        "degraded": True,
+        "components": {
+            "pinned": {"status": "ok", "memories": [], "total_available": 0},
+            "state": {"status": "error", "error": "component_error"},
+        },
+    }
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = envelope
+        result = await client.get_agent_bootstrap("agent-uuid")
+        assert result.degraded is True
+        assert result.components["state"] == {"status": "error", "error": "component_error"}
+        assert result.components["pinned"]["status"] == "ok"
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_get_agent_bootstrap_agent_not_found_raises():
+    """agent_not_found domain errors raise KaguraNotFoundError (uniform 404)."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {
+            "status": "error",
+            "error": "agent_not_found",
+            "message": "Agent not found.",
+        }
+        with pytest.raises(KaguraNotFoundError, match="Agent not found"):
+            await client.get_agent_bootstrap("agent-uuid")
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_get_agent_bootstrap_invalid_arguments_raises():
+    """invalid_arguments domain errors raise the generic KaguraError."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {
+            "status": "error",
+            "error": "invalid_arguments",
+            "message": "'session_id' allows only [A-Za-z0-9._-].",
+        }
+        with pytest.raises(KaguraError, match="invalid_arguments"):
+            await client.get_agent_bootstrap("agent-uuid", session_id="bad session")
+
+    await client.close()

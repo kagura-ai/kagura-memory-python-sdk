@@ -2,13 +2,14 @@
 
 ## Overview
 
-Python SDK for Kagura Memory Cloud. Six clients:
+Python SDK for Kagura Memory Cloud. Seven clients:
 - `KaguraClient` — MCP client for memory and context operations
 - `KaguraAgent` — LLM-powered session analysis with hooks/skills API
 - `ResourceClient` — REST client for resource token management and data ingestion
 - `FilesClient` — REST + presigned PUT client for file uploads with sha256 integrity binding (server v0.15.1+)
 - `SecretClient` — REST client for the zero-knowledge secret store (age recipient encryption, local decrypt; `[secret]` extra, server v0.39.0+)
 - `WorkspaceClient` — REST client for workspace member/invitation management (owner API key only, OAuth rejected; server v0.42.0+)
+- `AgentsClient` — REST companion for agent bootstrap (`POST /api/v1/agents/{agent_id}/bootstrap`; server v0.49.0+)
 
 ## Development Workflow
 
@@ -37,6 +38,7 @@ uv run pyright src/              # Type check
 - **Zero-knowledge secrets**: `SecretClient` + `kagura secret` — age recipient encryption, local decrypt; private key in OS keychain via `pyrage`/`keyring` (`[secret]` extra, server v0.39.0+). Owner-only hard delete via `SecretClient.delete_secret` / `kagura secret delete` (server v0.41.0+)
 - **Workspace member management**: `WorkspaceClient` + `kagura workspace member|invite` — owner-key-only (server v0.42.0+, memory-cloud#1164). Assignable roles member|admin|viewer (owner → 422); member/viewer invites require `allowed_context_ids`; `expires_in_days` presets 7/30/90/365; invitation ids are int with no status field; programmatic invite list nulls `token`/`invitation_url`
 - **Owner-provisioned member keys**: `WorkspaceClient.mint_member_key/list_member_keys/revoke_member_key` + `kagura auth create-key/list-keys/revoke-key` (server v0.42.0+, memory-cloud#1165). Member/viewer targets only, never self; `expires_days` 1-3650 required; plaintext returned once (force-hidden after); revoke is soft
+- **Agent bootstrap**: `KaguraClient.get_agent_bootstrap` (MCP) + `AgentsClient.bootstrap` (REST) — one-call session-start rehydration composing pinned + trusted recall + upcoming + state, fail-soft per component with top-level `degraded` (server v0.49.0+, RFC-0002 P0-3, memory-cloud#1276)
 - Agent hooks/skills: `@agent.hook("before_process")`, `@agent.skill("name")`
 - Ollama support: `model="ollama/qwen3:30b"` for local LLMs
 - CLI: `kagura doctor`, `kagura auth login/refresh/status/list/create-key/list-keys/revoke-key`, `kagura setup claude`, `kagura ingest <file|url>`, `kagura resource setup/import/stats/schema`, `kagura files upload/list/delete/download-url`, `kagura secret keygen/put/get/grant/rotate/delete/exec`, `kagura workspace member list/add/set-role/remove`, `kagura workspace invite create/list/revoke`, `kagura context search-config`, `kagura sleep history/report/rollback`

@@ -241,6 +241,31 @@ async with KaguraClient(api_key="kagura_...", mcp_url="https://...") as client:
     state = await client.get_state(context_id="dev", key="step")  # omit key → all live entries
 ```
 
+#### Agent bootstrap — one-call session-start rehydration (v0.37.0, server v0.49.0+)
+
+`get_agent_bootstrap` composes the primitives above (context guide + pinned +
+trusted-only recall + upcoming time memories + agent state) into one envelope, so an
+agent starts a session with a single round-trip. Components are **fail-soft**: a failing
+component reports `status="error"` while the rest still return (top-level `degraded`
+flag). Also available over REST (`AgentsClient`) for API-key-only callers such as
+agent-bound member keys:
+
+```python
+from kagura_memory import AgentsClient, KaguraClient
+
+async with KaguraClient() as client:  # MCP surface
+    bootstrap = await client.get_agent_bootstrap(
+        "agent-uuid",                     # context_id omitted → default binding
+        session_id="run-42",              # echoed in the correlation block
+        query="current task",             # enables the trusted-only recall component
+        include=["pinned", "recall", "state"],
+    )
+    pinned = bootstrap.components["pinned"]  # {"status": "ok", "memories": [...], ...}
+
+async with AgentsClient.from_mcp_url() as agents:  # REST companion
+    bootstrap = await agents.bootstrap("agent-uuid", include=["pinned"])
+```
+
 > **⚠️ Error handling changed in v0.29.0 (breaking).** Every `KaguraClient` MCP tool
 > method now **raises** on a server domain error instead of returning an error dict:
 > a missing context/memory raises `KaguraNotFoundError`, any other domain error raises
@@ -385,6 +410,7 @@ The same client also provisions **member API keys** (memory-cloud [#1165](https:
 
 | SDK | Min memory-cloud | Notes |
 |---|---|---|
+| 0.37.0+ | 0.17.1 (0.49.0 for agent bootstrap) | **Agent bootstrap (RFC-0002 P0-3).** `KaguraClient.get_agent_bootstrap()` (MCP) and `AgentsClient.bootstrap()` (REST, `POST /api/v1/agents/{agent_id}/bootstrap`) need memory-cloud **0.49.0+** ([#1276](https://github.com/kagura-ai/memory-cloud/issues/1276)) and a registered agent (agent registry, [#1274](https://github.com/kagura-ai/memory-cloud/issues/1274)). Against an older server the MCP tool returns "tool not found" and the REST route 404s. `MIN_SERVER_VERSION` stays **0.17.1**. |
 | 0.36.0+ | 0.17.1 (0.42.0 for `kagura workspace` / `kagura auth create-key`) | **Workspace member management + owner-provisioned member keys (owner-key only).** `WorkspaceClient` / `kagura workspace member\|invite` and `mint_member_key`/`list_member_keys`/`revoke_member_key` / `kagura auth create-key\|list-keys\|revoke-key` need memory-cloud **0.42.0+** (owner-key programmatic access, [#1164](https://github.com/kagura-ai/memory-cloud/issues/1164) / [#1165](https://github.com/kagura-ai/memory-cloud/issues/1165)). Requires the workspace **owner's static API key** — OAuth tokens are rejected on this surface, and a deployment can disable it via `enable_owner_key_member_management=false`. Key minting is privilege-downgrade only: member/viewer targets, never self, `expires_days` required. `MIN_SERVER_VERSION` stays **0.17.1**. |
 | 0.35.0+ | 0.17.1 (0.41.0 for file uploads/downloads) | **FilesClient v0.41.0 compatibility (breaking).** memory-cloud 0.41.0 requires `workspace_id` on the query of the file-id endpoints (`confirm`/`download-url`/`delete`) and presigns R2 PUT without the checksum header — so pre-0.35.0 SDKs get 403/422 on every upload/download/delete against it. This SDK sends `workspace_id` on those endpoints (harmlessly ignored by older servers) and only binds the checksum when the presign signed it. **Breaking:** `FilesClient.download_url(file_id, *, context_id)` and `delete(file_id, *, context_id)` now require `context_id`; `kagura files download-url`/`delete` require `-c/--context-id` (or a profile/`.kagura.json` workspace). `MIN_SERVER_VERSION` stays **0.17.1**. |
 | 0.34.0+ | 0.17.1 (0.41.0 for secret delete + file context binding) | **Owner-only secret delete + file context binding.** `SecretClient.delete_secret` / `kagura secret delete` (`DELETE /api/v1/config/secrets/{name}`) and `FilesClient.upload(binding_context_id=…)` / `FileObject.context_id` (context-scoped file ACL) need memory-cloud **0.41.0+**. `MIN_SERVER_VERSION` stays **0.17.1** — only these surfaces require 0.41.0. |
@@ -617,6 +643,7 @@ follow-up.
 | Time Memory (recall_upcoming) | `KaguraClient` | MCP | API Key |
 | Retrieval feedback (feedback) | `KaguraClient` | MCP | API Key |
 | Agent session-state lane (set_state/get_state, TTL) | `KaguraClient` | MCP | API Key |
+| Agent bootstrap (get_agent_bootstrap — one-call session-start rehydration) | `KaguraClient` / `AgentsClient` | MCP + REST | API Key |
 | Context (create/update/list/delete/get_context_info) | `KaguraClient` | MCP | API Key |
 | Workspace (get_usage) | `KaguraClient` | MCP | API Key |
 | Search config (update_search_config) | `KaguraClient` | MCP | API Key |

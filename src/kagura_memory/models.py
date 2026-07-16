@@ -1000,3 +1000,85 @@ class MemberAPIKey(BaseModel):
     revoked_at: datetime | None = None
     expires_at: datetime | None = None
     bound_context_id: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Agent bootstrap (#231, server v0.49.0+, RFC-0002 P0-3)
+# ---------------------------------------------------------------------------
+
+
+AgentBootstrapComponentName = Literal["pinned", "recall", "upcoming", "state", "policy"]
+"""Valid values for ``get_agent_bootstrap``'s ``include`` component selector.
+
+Mirrors the server's closed component set; the server rejects unknown
+names with ``invalid_arguments``."""
+
+
+class AgentBootstrapBinding(BaseModel):
+    """The context binding a bootstrap resolved (``agent.binding``).
+
+    ``is_default`` is ``True`` when the context came from the agent's
+    default binding (no explicit ``context_id`` was passed).
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    context_id: str
+    is_default: bool = False
+
+
+class AgentBootstrapAgent(BaseModel):
+    """Agent identity block in the bootstrap envelope."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    agent_id: str
+    name: str
+    binding: AgentBootstrapBinding | None = None
+
+
+class AgentBootstrapCorrelation(BaseModel):
+    """Correlation block (RFC-0002 P0-4) — session/run/trace identifiers.
+
+    ``session_id`` echoes the bootstrap argument when given, else the
+    server's baggage-derived session id. ``run_id``/``trace_id``/``span_id``
+    are populated from the per-request correlation context when present.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    agent_id: str | None = None
+    session_id: str | None = None
+    run_id: str | None = None
+    trace_id: str | None = None
+    span_id: str | None = None
+
+
+class AgentBootstrapResponse(BaseModel):
+    """Composed envelope from ``get_agent_bootstrap`` (server v0.49.0+).
+
+    One session-start call that rehydrates an agent's cognitive state by
+    composing existing primitives. Each entry in ``components`` is
+    **fail-soft** and carries its own ``status``: ``"ok"`` (payload
+    inherited from the standalone tool — ``load_pinned``, trusted-only
+    ``recall``, ``recall_upcoming``, ``get_state``), ``"skipped"`` (e.g.
+    recall without a ``query``, with a ``reason``), or ``"error"`` (that
+    component failed; the rest still return and the top-level ``degraded``
+    flag is set). Component payloads stay dicts because their shapes belong
+    to the standalone tools and evolve with them.
+
+    ``context`` reuses :class:`ContextDetail` — the server emits the block
+    byte-compatible with ``get_context_info`` (``search_config`` is not
+    included in bootstrap and keeps its client-side default).
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    status: str = "success"
+    degraded: bool = False
+    agent: AgentBootstrapAgent
+    context: ContextDetail | None = None
+    instructions: str | None = None
+    components: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    correlation: AgentBootstrapCorrelation | None = None
+    generated_at: datetime | None = None

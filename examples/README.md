@@ -14,6 +14,7 @@ uv run python examples/<script>.py
 | [`client_basics.py`](client_basics.py) | `KaguraClient` | remember / recall / explore / reference / forget |
 | [`client_advanced.py`](client_advanced.py) | `KaguraClient` | recall filters, cross-context recall, `list_tags`, `get_usage`, `get_memory_stats`, `find_duplicates`, `merge_contexts` |
 | [`agent_session.py`](agent_session.py) | `KaguraAgent` | AI-powered session analysis (remember/recall decided by the LLM) |
+| [`agent_bootstrap.py`](agent_bootstrap.py) | `KaguraClient` / `AgentsClient` | one-call agent session-start rehydration (`get_agent_bootstrap`, MCP + REST; server v0.49.0+) |
 | [`resource_tokens.py`](resource_tokens.py) | `ResourceClient` | resource setup, token lifecycle, single + batch event ingestion |
 | [`files_upload.py`](files_upload.py) | `FilesClient` | upload (bytes + dedup), `download_url`, `list`, `delete` |
 | [`ingest_pdf.py`](ingest_pdf.py) | `FileIngestor` | PDF → overview + section memories + R2 archive |
