@@ -3534,6 +3534,32 @@ async def test_update_agent_full_args():
 
 
 @pytest.mark.asyncio
+async def test_update_agent_rejects_empty_update():
+    """No-op update_agent() fails fast locally instead of a server 400 (Copilot #239)."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        with pytest.raises(ValueError, match="at least one field"):
+            await client.update_agent("agent-uuid")
+        mock.assert_not_called()
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_update_agent_binding_rejects_empty_update():
+    """No-op update_agent_binding() fails fast locally (Copilot #239)."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        with pytest.raises(ValueError, match="at least one of"):
+            await client.update_agent_binding("agent-uuid", "binding-uuid")
+        mock.assert_not_called()
+
+    await client.close()
+
+
+@pytest.mark.asyncio
 async def test_delete_agent_returns_deleted():
     client = _make_initialized_client()
 

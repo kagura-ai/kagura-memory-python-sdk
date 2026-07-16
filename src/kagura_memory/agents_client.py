@@ -172,7 +172,8 @@ class AgentsClient(KaguraRestClient):
         ``enforce``->``shadow`` is audited as privilege widening.
         Set-only wrapper: omitted fields stay untouched — the server's
         null-clears semantics is not expressible here (clear via the web
-        UI or the raw API).
+        UI or the raw API). Raises ``ValueError`` when called with no
+        fields to update (would be an empty no-op PATCH).
         """
         body = _agent_update_payload(
             name=name,
@@ -183,6 +184,8 @@ class AgentsClient(KaguraRestClient):
             status=status,
             enforcement_mode=enforcement_mode,
         )
+        if not body:
+            raise ValueError("update_agent requires at least one field to update")
         resp = await self._request(
             "PATCH",
             f"/api/v1/agents/{normalize_uuid(agent_id, label='agent_id')}",
@@ -259,11 +262,17 @@ class AgentsClient(KaguraRestClient):
 
         ``context_id`` is immutable — :meth:`unbind_context` and
         re-:meth:`bind_context` to re-target. Changes are audited with
-        old->new values.
+        old->new values. Raises ``ValueError`` when called with no
+        scoping fields (would be an empty no-op PATCH).
         """
         body = _binding_scope_payload(
             can_read=can_read, write_policy=write_policy, is_default=is_default
         )
+        if not body:
+            raise ValueError(
+                "update_binding requires at least one of "
+                "can_read, write_policy, or is_default"
+            )
         resp = await self._request(
             "PATCH",
             f"/api/v1/agents/{normalize_uuid(agent_id, label='agent_id')}"

@@ -874,22 +874,25 @@ class KaguraClient:
             The updated :class:`Agent`.
 
         Raises:
+            ValueError: If no update field is provided (the call would be
+                an empty no-op request).
             KaguraNotFoundError: Agent not found.
             KaguraError: Name conflict or other server-side error.
         """
-        arguments: dict[str, Any] = {
-            "agent_id": agent_id,
-            **_agent_update_payload(
-                name=name,
-                description=description,
-                framework=framework,
-                environment=environment,
-                version=version,
-                status=status,
-                enforcement_mode=enforcement_mode,
-            ),
-        }
-        result = await self._call_tool_checked("update_agent", arguments)
+        changes = _agent_update_payload(
+            name=name,
+            description=description,
+            framework=framework,
+            environment=environment,
+            version=version,
+            status=status,
+            enforcement_mode=enforcement_mode,
+        )
+        if not changes:
+            raise ValueError("update_agent requires at least one field to update")
+        result = await self._call_tool_checked(
+            "update_agent", {"agent_id": agent_id, **changes}
+        )
         return Agent.model_validate(result["agent"])
 
     async def delete_agent(self, agent_id: str) -> bool:
@@ -1002,17 +1005,23 @@ class KaguraClient:
             The updated :class:`AgentBinding`.
 
         Raises:
+            ValueError: If no scoping field is provided (the call would
+                be an empty no-op request).
             KaguraNotFoundError: Agent or binding not found.
             KaguraError: Other server-side error.
         """
-        arguments: dict[str, Any] = {
-            "agent_id": agent_id,
-            "binding_id": binding_id,
-            **_binding_scope_payload(
-                can_read=can_read, write_policy=write_policy, is_default=is_default
-            ),
-        }
-        result = await self._call_tool_checked("update_agent_binding", arguments)
+        changes = _binding_scope_payload(
+            can_read=can_read, write_policy=write_policy, is_default=is_default
+        )
+        if not changes:
+            raise ValueError(
+                "update_agent_binding requires at least one of "
+                "can_read, write_policy, or is_default"
+            )
+        result = await self._call_tool_checked(
+            "update_agent_binding",
+            {"agent_id": agent_id, "binding_id": binding_id, **changes},
+        )
         return AgentBinding.model_validate(result["binding"])
 
     async def unbind_agent_context(self, agent_id: str, binding_id: str) -> bool:

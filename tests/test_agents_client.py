@@ -279,6 +279,38 @@ async def test_update_agent_patches_set_fields_only():
 
 
 @pytest.mark.asyncio
+async def test_update_agent_rejects_empty_update():
+    """No-op REST update_agent() fails fast — never sends an empty PATCH body."""
+    seen = {"called": False}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["called"] = True
+        return httpx.Response(200, json=agent_dict())
+
+    async with make_client(handler) as client:
+        with pytest.raises(ValueError, match="at least one field"):
+            await client.update_agent(AGENT)
+
+    assert seen["called"] is False
+
+
+@pytest.mark.asyncio
+async def test_update_binding_rejects_empty_update():
+    """No-op REST update_binding() fails fast — never sends an empty PATCH body."""
+    seen = {"called": False}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["called"] = True
+        return httpx.Response(200, json=agent_binding_dict())
+
+    async with make_client(handler) as client:
+        with pytest.raises(ValueError, match="at least one of"):
+            await client.update_binding(AGENT, BINDING)
+
+    assert seen["called"] is False
+
+
+@pytest.mark.asyncio
 async def test_delete_agent_returns_none_on_204():
     seen = {}
 
