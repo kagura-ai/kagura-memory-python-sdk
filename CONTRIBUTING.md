@@ -84,4 +84,6 @@ All PRs must pass codecov/patch — every changed line needs a test.
 | `ResourceClient` | REST API | Resource token management + data ingestion |
 | `FilesClient` | REST + presigned PUT | File uploads with R2 sha256 checksum binding |
 | `SecretClient` | REST + age crypto | Zero-knowledge secrets — age recipient encryption, local decrypt (server stores only ciphertext) |
+| `WorkspaceClient` | REST API | Workspace member / invitation management + owner-provisioned member keys (owner API key only) |
+| `AgentsClient` | REST API | Agent control plane — bootstrap, registry CRUD, context bindings (server v0.49.0+) |
 | `FileIngestor` | CLI + SDK | Document ingestion (PDF → memory graph + R2 archive) |
