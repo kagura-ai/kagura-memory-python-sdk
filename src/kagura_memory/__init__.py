@@ -20,6 +20,8 @@ from .exceptions import (
 from .files_client import FilesClient
 from .ingest import FileIngestor
 from .models import (
+    Agent,
+    AgentBinding,
     AgentBootstrapAgent,
     AgentBootstrapBinding,
     AgentBootstrapComponentName,
@@ -165,6 +167,9 @@ __all__ = [
     "WorkspaceMember",
     "WorkspaceInvitation",
     "MemberAPIKey",
+    # Agent registry + bindings (#235, server v0.49.0+)
+    "Agent",
+    "AgentBinding",
     # Agent bootstrap (#231, server v0.49.0+)
     "AgentBootstrapAgent",
     "AgentBootstrapBinding",

@@ -17,8 +17,8 @@ from kagura_memory.exceptions import (
     KaguraConnectionError,
     KaguraNotFoundError,
 )
-from kagura_memory.models import AgentBootstrapResponse
-from tests.conftest import bootstrap_envelope_dict
+from kagura_memory.models import Agent, AgentBinding, AgentBootstrapResponse
+from tests.conftest import agent_binding_dict, agent_dict, bootstrap_envelope_dict
 
 AGENT = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 CTX = "11111111-2222-3333-4444-555555555555"
@@ -185,3 +185,231 @@ def test_constructor_requires_credentials():
 def test_constructor_rejects_plain_http():
     with pytest.raises(Exception, match="HTTPS"):
         AgentsClient(api_key="k", base_url="http://memory.example.com")
+
+
+# ---------------------------------------------------------------------------
+# Registry CRUD (#235, RFC-0002 P0-1 — owner/admin only)
+# ---------------------------------------------------------------------------
+
+BINDING = "bbbbbbbb-cccc-dddd-eeee-ffffffffffff"
+
+
+def test_agent_model_ignores_unknown_fields():
+    agent = Agent.model_validate({**agent_dict(), "some_future_field": "ignored"})
+    assert agent.id == AGENT
+    assert agent.status == "active" and agent.enforcement_mode == "enforce"
+    assert agent.last_seen_at is None
+
+
+def test_agent_binding_model_ignores_unknown_fields():
+    binding = AgentBinding.model_validate({**agent_binding_dict(), "future": 1})
+    assert binding.write_policy == "deny"
+    assert binding.allowed_memory_types is None  # reserved for #1286
+
+
+@pytest.mark.asyncio
+async def test_register_agent_posts_body_and_parses_201():
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["method"] = request.method
+        seen["path"] = request.url.path
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(201, json=agent_dict())
+
+    async with make_client(handler) as client:
+        agent = await client.register_agent("ci-agent", framework="claude-code")
+
+    assert seen["method"] == "POST"
+    assert seen["path"] == "/api/v1/agents"
+    assert seen["body"] == {"name": "ci-agent", "framework": "claude-code"}
+    assert isinstance(agent, Agent) and agent.name == "ci-agent"
+
+
+@pytest.mark.asyncio
+async def test_list_agents_unwraps_envelope():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"agents": [agent_dict()], "count": 1})
+
+    async with make_client(handler) as client:
+        agents = await client.list_agents()
+
+    assert len(agents) == 1 and agents[0].id == AGENT
+
+
+@pytest.mark.asyncio
+async def test_list_agents_rejects_malformed_envelope():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"agents": None})
+
+    async with make_client(handler) as client:
+        with pytest.raises(KaguraConnectionError, match="agents"):
+            await client.list_agents()
+
+
+@pytest.mark.asyncio
+async def test_get_agent_normalizes_id_in_path():
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        return httpx.Response(200, json=agent_dict())
+
+    async with make_client(handler) as client:
+        await client.get_agent(AGENT.replace("-", ""))
+
+    assert seen["path"] == f"/api/v1/agents/{AGENT}"
+
+
+@pytest.mark.asyncio
+async def test_update_agent_patches_set_fields_only():
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["method"] = request.method
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json=agent_dict(status="suspended"))
+
+    async with make_client(handler) as client:
+        agent = await client.update_agent(AGENT, status="suspended")
+
+    assert seen["method"] == "PATCH"
+    assert seen["body"] == {"status": "suspended"}
+    assert agent.status == "suspended"
+
+
+@pytest.mark.asyncio
+async def test_update_agent_rejects_empty_update():
+    """No-op REST update_agent() fails fast — never sends an empty PATCH body."""
+    seen = {"called": False}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["called"] = True
+        return httpx.Response(200, json=agent_dict())
+
+    async with make_client(handler) as client:
+        with pytest.raises(ValueError, match="at least one field"):
+            await client.update_agent(AGENT)
+
+    assert seen["called"] is False
+
+
+@pytest.mark.asyncio
+async def test_update_binding_rejects_empty_update():
+    """No-op REST update_binding() fails fast — never sends an empty PATCH body."""
+    seen = {"called": False}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["called"] = True
+        return httpx.Response(200, json=agent_binding_dict())
+
+    async with make_client(handler) as client:
+        with pytest.raises(ValueError, match="at least one of"):
+            await client.update_binding(AGENT, BINDING)
+
+    assert seen["called"] is False
+
+
+@pytest.mark.asyncio
+async def test_delete_agent_returns_none_on_204():
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["method"] = request.method
+        seen["path"] = request.url.path
+        return httpx.Response(204)
+
+    async with make_client(handler) as client:
+        assert await client.delete_agent(AGENT) is None
+
+    assert seen["method"] == "DELETE"
+    assert seen["path"] == f"/api/v1/agents/{AGENT}"
+
+
+# ---------------------------------------------------------------------------
+# Context bindings (#235, RFC-0002 P0-2 — owner/admin only)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_bind_context_posts_normalized_body():
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(201, json=agent_binding_dict(is_default=True))
+
+    async with make_client(handler) as client:
+        binding = await client.bind_context(
+            AGENT, CTX.replace("-", ""), write_policy="direct", is_default=True
+        )
+
+    assert seen["path"] == f"/api/v1/agents/{AGENT}/bindings"
+    # context_id is canonicalized in the BODY too, not just URL paths.
+    assert seen["body"] == {
+        "context_id": CTX,
+        "write_policy": "direct",
+        "is_default": True,
+    }
+    assert isinstance(binding, AgentBinding) and binding.is_default is True
+
+
+@pytest.mark.asyncio
+async def test_list_bindings_unwraps_envelope():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"bindings": [agent_binding_dict()], "count": 1})
+
+    async with make_client(handler) as client:
+        bindings = await client.list_bindings(AGENT)
+
+    assert len(bindings) == 1 and bindings[0].agent_id == AGENT
+
+
+@pytest.mark.asyncio
+async def test_update_binding_patches_both_ids_normalized():
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["method"] = request.method
+        seen["path"] = request.url.path
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json=agent_binding_dict(can_read=False))
+
+    async with make_client(handler) as client:
+        binding = await client.update_binding(
+            AGENT.replace("-", ""), "{" + BINDING + "}", can_read=False
+        )
+
+    assert seen["method"] == "PATCH"
+    assert seen["path"] == f"/api/v1/agents/{AGENT}/bindings/{BINDING}"
+    assert seen["body"] == {"can_read": False}
+    assert binding.can_read is False
+
+
+@pytest.mark.asyncio
+async def test_unbind_context_deletes_204():
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["method"] = request.method
+        seen["path"] = request.url.path
+        return httpx.Response(204)
+
+    async with make_client(handler) as client:
+        assert await client.unbind_context(AGENT, BINDING) is None
+
+    assert seen["method"] == "DELETE"
+    assert seen["path"] == f"/api/v1/agents/{AGENT}/bindings/{BINDING}"
+
+
+@pytest.mark.asyncio
+async def test_registry_403_maps_to_connection_error():
+    """Non-admin key on the owner/admin-gated registry surface → 403 detail passes through."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, json={"detail": "Insufficient permissions"})
+
+    async with make_client(handler) as client:
+        with pytest.raises(KaguraConnectionError, match="403"):
+            await client.register_agent("ci-agent")
