@@ -31,7 +31,6 @@ classifiers = [
 ]
 
 dependencies = [
-    "litellm>=1.50,<1.82.7",
     "pydantic>=2.0.0",
     "httpx>=0.25.0",
     "click>=8.0.0",
@@ -49,7 +48,13 @@ dev = [
 # File ingestion (Issue #80) — heavy parsing dependencies are opt-in.
 # `httpx` is intentionally NOT listed here: it's already a core dependency
 # (see top of [dependencies]) and listing it again would shadow the core pin.
+# `litellm` moved here from core when the KaguraAgent actor was removed
+# (#233): ingest is its only remaining consumer (summarize/vision/token
+# counting, all lazily imported), so pure-client installs no longer carry
+# the litellm dependency tree. The <1.82.7 exclusion pins out the
+# malware-compromised releases (1.82.7/1.82.8).
 ingest = [
+    "litellm>=1.50,<1.82.7",
     "pillow>=10.4",
 ]
 ingest-pdf = [
@@ -76,10 +81,11 @@ ingest-pptx = [
 ingest-epub = [
     "kagura-memory[ingest-pdf]",
 ]
-# Audio/video transcription (Issue #147) — Gemini via litellm. litellm is
-# already a core dependency, so this extra adds no new package; it exists so
-# audio support is opt-in (parity with the other ingest extras) and the lazy
-# loader can point a stripped install at the right install command. Requires
+# Audio/video transcription (Issue #147) — Gemini via litellm, which the
+# base [ingest] extra already carries, so this extra adds no new package;
+# it exists so audio support is opt-in (parity with the other ingest
+# extras) and the lazy loader can point a stripped install at the right
+# install command. Requires
 # GEMINI_API_KEY at runtime.
 ingest-audio = [
     "kagura-memory[ingest]",

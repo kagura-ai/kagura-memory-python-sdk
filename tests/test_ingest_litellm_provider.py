@@ -408,3 +408,17 @@ def test_extract_text_raises_on_none_content() -> None:
     resp.choices[0].message.content = None
     with pytest.raises(KaguraLLMError, match="empty"):
         _extract_text(resp)
+
+
+def test_missing_litellm_yields_actionable_install_hint(monkeypatch):
+    """A stripped install (no [ingest] extra) must name the install command,
+    not surface a bare ImportError — litellm left the core dependencies with
+    the KaguraAgent removal (#233)."""
+    import sys
+
+    from kagura_memory.ingest.providers._litellm import _import_litellm
+
+    monkeypatch.setitem(sys.modules, "litellm", None)
+
+    with pytest.raises(KaguraLLMError, match=r"kagura-memory\[ingest\]"):
+        _import_litellm()

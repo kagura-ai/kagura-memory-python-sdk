@@ -81,7 +81,6 @@ All PRs must pass codecov/patch — every changed line needs a test.
 | Client | Protocol | Purpose |
 |--------|----------|---------|
 | `KaguraClient` | MCP (JSON-RPC) | Memory + context operations |
-| `KaguraAgent` | MCP + LLM | AI-powered session analysis with hooks/skills |
 | `ResourceClient` | REST API | Resource token management + data ingestion |
 | `FilesClient` | REST + presigned PUT | File uploads with R2 sha256 checksum binding |
 | `SecretClient` | REST + age crypto | Zero-knowledge secrets — age recipient encryption, local decrypt (server stores only ciphertext) |

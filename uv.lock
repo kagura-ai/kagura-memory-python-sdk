@@ -1082,7 +1082,6 @@ source = { editable = "." }
 dependencies = [
     { name = "click" },
     { name = "httpx" },
-    { name = "litellm" },
     { name = "pydantic" },
     { name = "rich" },
 ]
@@ -1096,10 +1095,12 @@ dev = [
     { name = "ruff" },
 ]
 ingest = [
+    { name = "litellm" },
     { name = "pillow" },
 ]
 ingest-all = [
     { name = "beautifulsoup4" },
+    { name = "litellm" },
     { name = "openpyxl" },
     { name = "pillow" },
     { name = "playwright" },
@@ -1109,37 +1110,46 @@ ingest-all = [
     { name = "youtube-transcript-api" },
 ]
 ingest-audio = [
+    { name = "litellm" },
     { name = "pillow" },
 ]
 ingest-browser = [
+    { name = "litellm" },
     { name = "pillow" },
     { name = "playwright" },
 ]
 ingest-docx = [
+    { name = "litellm" },
     { name = "pillow" },
     { name = "python-docx" },
 ]
 ingest-epub = [
+    { name = "litellm" },
     { name = "pillow" },
     { name = "pymupdf" },
 ]
 ingest-html = [
     { name = "beautifulsoup4" },
+    { name = "litellm" },
     { name = "pillow" },
 ]
 ingest-pdf = [
+    { name = "litellm" },
     { name = "pillow" },
     { name = "pymupdf" },
 ]
 ingest-pptx = [
+    { name = "litellm" },
     { name = "pillow" },
     { name = "python-pptx" },
 ]
 ingest-xlsx = [
+    { name = "litellm" },
     { name = "openpyxl" },
     { name = "pillow" },
 ]
 ingest-youtube = [
+    { name = "litellm" },
     { name = "pillow" },
     { name = "youtube-transcript-api" },
 ]
@@ -1164,7 +1174,17 @@ requires-dist = [
     { name = "click", specifier = ">=8.0.0" },
     { name = "httpx", specifier = ">=0.25.0" },
     { name = "keyring", marker = "extra == 'secret'", specifier = ">=24.0" },
-    { name = "litellm", specifier = ">=1.50,<1.82.7" },
+    { name = "litellm", marker = "extra == 'ingest'", specifier = ">=1.50,<1.82.7" },
+    { name = "litellm", marker = "extra == 'ingest-all'", specifier = ">=1.50,<1.82.7" },
+    { name = "litellm", marker = "extra == 'ingest-audio'", specifier = ">=1.50,<1.82.7" },
+    { name = "litellm", marker = "extra == 'ingest-browser'", specifier = ">=1.50,<1.82.7" },
+    { name = "litellm", marker = "extra == 'ingest-docx'", specifier = ">=1.50,<1.82.7" },
+    { name = "litellm", marker = "extra == 'ingest-epub'", specifier = ">=1.50,<1.82.7" },
+    { name = "litellm", marker = "extra == 'ingest-html'", specifier = ">=1.50,<1.82.7" },
+    { name = "litellm", marker = "extra == 'ingest-pdf'", specifier = ">=1.50,<1.82.7" },
+    { name = "litellm", marker = "extra == 'ingest-pptx'", specifier = ">=1.50,<1.82.7" },
+    { name = "litellm", marker = "extra == 'ingest-xlsx'", specifier = ">=1.50,<1.82.7" },
+    { name = "litellm", marker = "extra == 'ingest-youtube'", specifier = ">=1.50,<1.82.7" },
     { name = "openpyxl", marker = "extra == 'ingest-all'", specifier = ">=3.1" },
     { name = "openpyxl", marker = "extra == 'ingest-xlsx'", specifier = ">=3.1" },
     { name = "pillow", marker = "extra == 'ingest'", specifier = ">=10.4" },
