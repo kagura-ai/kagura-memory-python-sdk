@@ -171,7 +171,7 @@ async with KaguraClient(api_key="kagura_...", mcp_url="https://...") as client:
                                filters={"trust_tier": "trusted"})
 ```
 
-#### AI agent memory substrate (v0.28.0–v0.29.0)
+#### AI agent memory substrate
 
 Primitives for autonomous agents — a deterministic load path, a retrieval-feedback
 signal, and a TTL-bounded run-state lane kept separate from knowledge:
@@ -188,10 +188,23 @@ async with KaguraClient(api_key="kagura_...", mcp_url="https://...") as client:
     upcoming = await client.recall_upcoming(context_id="dev", from_="now")
 
     # WHERE axis — deterministic "what's near here" query, nearest first
+    # (SDK v0.38.0, server v0.53.0+). radius_m/k are keyword-only.
     # lat/lon must be JSON numbers; the server 422s string-typed coordinates.
     await client.remember(context_id="dev", summary="Coffee with Sato", content="...",
                           details={"location": {"lat": 35.68, "lon": 139.76, "label": "Tokyo HQ"}})
     nearby = await client.recall_nearby(context_id="dev", lat=35.68, lon=139.76, radius_m=500)
+    # update_memory(details=...) REPLACES details wholesale — no deep-merge. Read the
+    # current value with reference() and re-send location, or this drops off the map.
+
+    # Supersede — store a newer version WITHOUT destroying history (server v0.45.0+).
+    # The old memory is shadowed, not deleted: it leaves default recall but stays
+    # reachable, and deleting the edge restores it. Prefer this over forget() +
+    # remember(), which throws away the history the supersede edge exists to keep.
+    await client.remember(context_id="dev", summary="Deploy target: ap-northeast-1",
+                          content="...", supersedes="old-memory-uuid")
+    # Read the history back. NOTE: a top-level argument, NOT a filters key.
+    history = await client.recall(context_id="dev", query="deploy target",
+                                  include_superseded=True)  # results carry superseded_by
 
     # Retrieval feedback — teach the substrate which recall results were useful
     await client.feedback(context_id="dev", memory_id="uuid", helpful=True, query="OAuth2")
@@ -374,7 +387,7 @@ The same client also provisions **member API keys** (memory-cloud [#1165](https:
 
 | SDK | Min memory-cloud | Notes |
 |---|---|---|
-| 0.38.0+ | 0.17.1 (per-surface: see notes) | **Client-surface parity — four server capabilities the SDK could not reach.** `recall_nearby()` + `details.location` (the WHERE axis) need memory-cloud **0.53.0+** ([#1331](https://github.com/kagura-ai/memory-cloud/issues/1331)); `remember(supersedes=…)` and its read-back counterpart `recall(include_superseded=True)` need **0.45.0+** ([#1208](https://github.com/kagura-ai/memory-cloud/issues/1208)); `list_tags(with_tags=…)` faceted drill-down needs **0.17.2+** ([#830](https://github.com/kagura-ai/memory-cloud/issues/830)); `update_memory(details=…)` works on any server that already accepted `details` on the MCP tool. CLI gains `kagura remember --details/--location`. All four are additive and omitted from the wire when unset, so existing calls are unchanged. `MIN_SERVER_VERSION` stays **0.17.1**. |
+| 0.38.0+ | 0.17.1 (per-surface: see notes) | **Client-surface parity — four server capabilities the SDK could not reach.** `recall_nearby()` + `details.location` (the WHERE axis) need memory-cloud **0.53.0+** ([#1331](https://github.com/kagura-ai/memory-cloud/issues/1331)); `remember(supersedes=…)` and its read-back counterpart `recall(include_superseded=True)` need **0.45.0+** ([#1208](https://github.com/kagura-ai/memory-cloud/issues/1208)); `list_tags(with_tags=…)` faceted drill-down needs **0.17.2+** ([#830](https://github.com/kagura-ai/memory-cloud/issues/830)); `update_memory(details=…)` works on any server that already accepted `details` on the MCP tool, and **replaces `details` wholesale** — the server does not deep-merge, so re-send `location` when revising or the memory drops off `recall_nearby`. CLI gains `kagura remember --details/--location`. All four are additive and omitted from the wire when unset, so existing calls are unchanged. `MIN_SERVER_VERSION` stays **0.17.1**. |
 | 0.37.0+ | 0.17.1 (0.49.0 for the agent control plane) | **Agent control plane (RFC-0002 P0-1/2/3).** `KaguraClient.get_agent_bootstrap()` (MCP) and `AgentsClient.bootstrap()` (REST, `POST /api/v1/agents/{agent_id}/bootstrap`) need memory-cloud **0.49.0+** ([#1276](https://github.com/kagura-ai/memory-cloud/issues/1276)); the same release covers the **registry + binding wrappers** (`register_agent`/`get_agent`/`list_agents`/`update_agent`/`delete_agent` on both surfaces; bindings as `bind_agent_context`/`list_agent_bindings`/`update_agent_binding`/`unbind_agent_context` on `KaguraClient`, mirrored as `bind_context`/`list_bindings`/`update_binding`/`unbind_context` on `AgentsClient` — owner/admin-gated server-side, [#1274](https://github.com/kagura-ai/memory-cloud/issues/1274)/[#1275](https://github.com/kagura-ai/memory-cloud/issues/1275)), so an SDK-only consumer can provision the agent + binding that bootstrap requires. Against an older server the MCP tools return "tool not found" and the REST routes 404. `MIN_SERVER_VERSION` stays **0.17.1**. |
 | 0.37.0+ | 0.17.1 | **`KaguraAgent` removed (breaking, #233).** The LLM-powered session-analysis actor, its models (`Session`/`Message`/`ProcessResult`/…), and `kagura process` are gone — the actor role lives in [kagura-agent](https://pypi.org/project/kagura-agent/) (with kagura-brain as its LLM head), and conversation→memory compilation is server-side Memory Analysis / connector workers. `litellm` moved from core dependencies to the `[ingest]` extra, so pure-client installs are much lighter; ingestion (including plain text) now requires `pip install 'kagura-memory[ingest]'`. |
 | 0.36.0+ | 0.17.1 (0.42.0 for `kagura workspace` / `kagura auth create-key`) | **Workspace member management + owner-provisioned member keys (owner-key only).** `WorkspaceClient` / `kagura workspace member\|invite` and `mint_member_key`/`list_member_keys`/`revoke_member_key` / `kagura auth create-key\|list-keys\|revoke-key` need memory-cloud **0.42.0+** (owner-key programmatic access, [#1164](https://github.com/kagura-ai/memory-cloud/issues/1164) / [#1165](https://github.com/kagura-ai/memory-cloud/issues/1165)). Requires the workspace **owner's static API key** — OAuth tokens are rejected on this surface, and a deployment can disable it via `enable_owner_key_member_management=false`. Key minting is privilege-downgrade only: member/viewer targets, never self, `expires_days` required. `MIN_SERVER_VERSION` stays **0.17.1**. |
@@ -386,7 +399,7 @@ The same client also provisions **member API keys** (memory-cloud [#1165](https:
 | 0.14.x | 0.15.1 | `FilesClient` + R2 checksum binding (`x-amz-checksum-sha256` on PUT) |
 | 0.13.x | 0.13.0 | Pre-`FilesClient` |
 
-`MIN_SERVER_VERSION` in `src/kagura_memory/client.py` is the authoritative floor — the SDK refuses to call newer MCP tools against an older server. When pointing the SDK at a backend with `R2_CHECKSUM_BINDING_ENABLED=true`, the SDK must be v0.14.0+; older versions don't send the signed checksum header and uploads fail with `HTTP 403 SignatureDoesNotMatch`.
+`MIN_SERVER_VERSION` in `src/kagura_memory/client.py` is the SDK's tested floor, and it is **advisory**: `check_server_version()` logs a warning and `kagura doctor` fails against a too-old server, but tool calls never raise on a version mismatch. A newer-than-floor MCP tool called against an older server comes back as an MCP "tool not found" error, and a newer *parameter* on an existing tool may simply be ignored — which is why the per-surface floors above matter. When pointing the SDK at a backend with `R2_CHECKSUM_BINDING_ENABLED=true`, the SDK must be v0.14.0+; older versions don't send the signed checksum header and uploads fail with `HTTP 403 SignatureDoesNotMatch`.
 
 ## CLI
 
@@ -460,6 +473,7 @@ not fail CI.
 ```bash
 # Direct memory operations
 kagura remember -s "FastAPI DI" --content "Use Depends()..." -c dev
+kagura remember -s "Coffee with Sato" --content "..." --location "35.68,139.76,Tokyo HQ"
 kagura recall "dependency injection" -k 10
 kagura explore -m "memory-uuid" --depth 3
 kagura forget -m "memory-uuid"
@@ -606,6 +620,7 @@ follow-up.
 | Time Memory (recall_upcoming) | `KaguraClient` | MCP | API Key |
 | WHERE axis (recall_nearby + `details.location`) | `KaguraClient` | MCP | API Key |
 | Tag vocabulary + faceted drill-down (list_tags, `with_tags`) | `KaguraClient` | MCP | API Key |
+| Supersede / memory history (remember `supersedes=`, recall `include_superseded=`) | `KaguraClient` | MCP | API Key |
 | Retrieval feedback (feedback) | `KaguraClient` | MCP | API Key |
 | Agent session-state lane (set_state/get_state, TTL) | `KaguraClient` | MCP | API Key |
 | Agent bootstrap (get_agent_bootstrap — one-call session-start rehydration) | `KaguraClient` / `AgentsClient` | MCP + REST | API Key |

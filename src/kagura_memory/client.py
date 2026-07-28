@@ -564,7 +564,8 @@ class KaguraClient:
             within the radius, nearest first, each carrying ``distance_m``.
 
         Raises:
-            ValueError: If ``lat`` or ``lon`` is outside its valid range.
+            ValueError: If ``lat`` or ``lon`` is not a number (strings are
+                rejected, not coerced) or is outside its valid range.
         """
         validate_lat_lon(lat, lon)
 
@@ -1148,9 +1149,9 @@ class KaguraClient:
 
         Requires memory-cloud server v0.15.4+ — older servers expose
         ``list_contexts`` and ``recall`` but not ``list_tags``, and will
-        return an MCP "tool not found" error. ``MIN_SERVER_VERSION`` is
-        deliberately not bumped because the rest of the SDK still works
-        against v0.15.1+; only this method needs the newer server.
+        return an MCP "tool not found" error. ``MIN_SERVER_VERSION`` (0.17.1)
+        is deliberately not bumped past that: only this method needs 0.15.4+,
+        and its ``with_tags`` drill-down needs 0.17.2+.
 
         Args:
             context_id: Context ID to list tags from.
