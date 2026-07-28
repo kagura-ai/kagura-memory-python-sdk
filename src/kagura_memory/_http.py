@@ -220,8 +220,9 @@ def validate_lat_lon(lat: object, lon: object) -> None:
                 f"{label} must be a number, got {type(value).__name__} ({value!r}). "
                 "The server rejects string-typed coordinates."
             )
-        # NaN fails every comparison, so this form rejects it; the equivalent
-        # -looking `value < -limit or value > limit` would let NaN through.
+        # NaN fails every comparison, so this form rejects it. Do not rewrite
+        # it as `value < -limit or value > limit` — that looks equivalent but
+        # evaluates False for NaN, letting it through.
         if not -limit <= value <= limit:
             raise ValueError(f"{label} must be between -{limit} and {limit}, got {value}")
 
