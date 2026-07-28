@@ -375,3 +375,24 @@ def test_validate_lat_lon_rejects_nan_and_inf(lat: float, lon: float):
     """
     with pytest.raises(ValueError, match="lat|lon"):
         validate_lat_lon(lat, lon)
+
+
+@pytest.mark.parametrize(
+    ("lat", "lon"),
+    [
+        ("35.68", 139.76),  # the exact footgun the server 422s on
+        (35.68, "139.76"),
+        (None, 0.0),
+        (0.0, None),
+        ([35.68], 0.0),
+        (True, 0.0),  # bool is an int subclass, but never a coordinate
+    ],
+)
+def test_validate_lat_lon_rejects_non_numeric(lat: object, lon: object):
+    """Non-numeric coordinates raise ValueError, not an opaque TypeError.
+
+    A stringified coordinate must fail here rather than on the wire: coercing
+    ``"35.68"`` would only move the server's 422 somewhere less debuggable.
+    """
+    with pytest.raises(ValueError, match="must be a number"):
+        validate_lat_lon(lat, lon)

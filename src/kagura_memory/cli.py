@@ -332,8 +332,9 @@ def doctor(profile, json_output):
 )
 @click.option(
     "--details",
-    help="Structured details as an inline JSON object (e.g. '{\"lat\": 35.68}'). "
-    "Coordinates must be JSON numbers, not strings.",
+    help="Structured details as an inline JSON object. Coordinates live under "
+    "the 'location' key and must be JSON numbers, not strings: "
+    '\'{"location": {"lat": 35.68, "lon": 139.76}}\'',
 )
 @click.option(
     "--location",
