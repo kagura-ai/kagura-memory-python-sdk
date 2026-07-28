@@ -564,7 +564,8 @@ class KaguraClient:
             within the radius, nearest first, each carrying ``distance_m``.
 
         Raises:
-            ValueError: If ``lat`` or ``lon`` is outside its valid range.
+            ValueError: If ``lat`` or ``lon`` is not a number (strings are
+                rejected, not coerced) or is outside its valid range.
         """
         validate_lat_lon(lat, lon)
 
@@ -1146,11 +1147,11 @@ class KaguraClient:
         filters. This is the primary mitigation for tag drift (e.g. ``"auth"``
         vs ``"authentication"`` silently degrading recall precision).
 
-        Requires memory-cloud server v0.15.4+ — older servers expose
-        ``list_contexts`` and ``recall`` but not ``list_tags``, and will
-        return an MCP "tool not found" error. ``MIN_SERVER_VERSION`` is
-        deliberately not bumped because the rest of the SDK still works
-        against v0.15.1+; only this method needs the newer server.
+        Server floors: this tool exists from memory-cloud v0.15.4+ (older
+        servers expose ``list_contexts`` and ``recall`` but not ``list_tags``,
+        and raise an MCP "tool not found"), and the ``with_tags`` drill-down
+        needs v0.17.2+. As elsewhere in this client, ``MIN_SERVER_VERSION`` is
+        not bumped to match — floors are tracked per surface.
 
         Args:
             context_id: Context ID to list tags from.
