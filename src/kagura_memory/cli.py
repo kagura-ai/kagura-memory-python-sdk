@@ -75,6 +75,79 @@ def _parse_tags(tags: str | None) -> list[str] | None:
     return parsed or None
 
 
+def _parse_details(details: str | None) -> dict[str, Any] | None:
+    """Parse a --details JSON object string into a dict, or None if empty.
+
+    Raises:
+        click.UsageError: If the string is not valid JSON, or is valid JSON but
+            not an object (the MCP tool's ``details`` is typed ``object``).
+    """
+    if not details:
+        return None
+    try:
+        parsed = json.loads(details)
+    except json.JSONDecodeError as e:
+        raise click.UsageError(f"Invalid JSON for --details: {_exc_message(e)}") from e
+    if not isinstance(parsed, dict):
+        raise click.UsageError(
+            f"--details must be a JSON object, got {type(parsed).__name__}. "
+            'Example: --details \'{"location": {"lat": 35.68, "lon": 139.76}}\''
+        )
+    return parsed
+
+
+def _parse_location(location: str | None) -> dict[str, Any] | None:
+    """Parse ``lat,lon[,label]`` into a ``details.location`` payload, or None.
+
+    Coordinates are converted to floats because the server rejects string-typed
+    numerics with a 422 by design (memory-cloud #1331).
+
+    Raises:
+        click.UsageError: On wrong arity, non-numeric coordinates, or
+            coordinates outside their valid range.
+    """
+    if not location:
+        return None
+    parts = [p.strip() for p in location.split(",")]
+    if len(parts) not in (2, 3):
+        raise click.UsageError(f"--location must be 'lat,lon' or 'lat,lon,label', got {location!r}")
+    try:
+        lat, lon = float(parts[0]), float(parts[1])
+    except ValueError as e:
+        raise click.UsageError(
+            f"--location lat/lon must be numbers, got {parts[0]!r},{parts[1]!r}"
+        ) from e
+    if not -90 <= lat <= 90:
+        raise click.UsageError(f"--location lat must be between -90 and 90, got {lat}")
+    if not -180 <= lon <= 180:
+        raise click.UsageError(f"--location lon must be between -180 and 180, got {lon}")
+
+    payload: dict[str, Any] = {"lat": lat, "lon": lon}
+    if len(parts) == 3 and parts[2]:
+        payload["label"] = parts[2]
+    return payload
+
+
+def _build_details(details: str | None, location: str | None) -> dict[str, Any] | None:
+    """Combine --details and --location into a single details payload.
+
+    ``--location`` is a shorthand that writes ``details.location``. Supplying
+    both a ``location`` key in --details and --location is rejected rather than
+    silently resolved, so neither value is quietly dropped.
+    """
+    parsed = _parse_details(details)
+    loc = _parse_location(location)
+    if loc is None:
+        return parsed
+    if parsed is not None and "location" in parsed:
+        raise click.UsageError(
+            "--location conflicts with the 'location' key in --details. Use one or the other."
+        )
+    merged = dict(parsed) if parsed else {}
+    merged["location"] = loc
+    return merged
+
+
 def _run_client_command(
     operation: Callable[[KaguraClient, str], Awaitable[dict[str, Any]]],
     context_id: str | None,
@@ -260,6 +333,15 @@ def doctor(profile, json_output):
     "--linked-source-uris",
     help="Comma-separated source URIs to resolve to memories and link",
 )
+@click.option(
+    "--details",
+    help="Structured details as an inline JSON object (e.g. '{\"lat\": 35.68}'). "
+    "Coordinates must be JSON numbers, not strings.",
+)
+@click.option(
+    "--location",
+    help="Shorthand for details.location: 'lat,lon' or 'lat,lon,label'",
+)
 def remember(
     context_id,
     summary,
@@ -271,16 +353,25 @@ def remember(
     source_type,
     linked_memory_ids,
     linked_source_uris,
+    details,
+    location,
 ):
     """
     Store a memory directly (without AI analysis).
+
+    Coordinates in --details must be JSON numbers, not strings: the server
+    rejects string-typed lat/lon with a 422 by design. Note that updating a
+    memory replaces details wholesale, so re-send location when you revise it.
 
     Examples:
       kagura remember -s "FastAPI DI pattern" --content "Use Depends()..."
       kagura remember -c dev -s "OAuth2 setup" --content "..." --tags "auth,oauth"
       kagura remember -s "Spec" --content "$(cat spec.md)" \\
         --source-uri file:///spec.md --source-type file
+      kagura remember -s "Coffee with Sato" --content "..." \\
+        --location "35.68,139.76,Tokyo HQ"
     """
+    details_payload = _build_details(details, location)
 
     async def op(client: KaguraClient, ctx: str) -> dict[str, Any]:
         return await client.remember(
@@ -294,6 +385,7 @@ def remember(
             source_type=source_type,
             linked_memory_ids=_parse_tags(linked_memory_ids),
             linked_source_uris=_parse_tags(linked_source_uris),
+            details=details_payload,
         )
 
     _run_client_command(op, context_id)

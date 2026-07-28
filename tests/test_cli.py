@@ -483,6 +483,163 @@ def test_remember_parses_linked_source_uris(mock_client_cls, mock_config):
     assert kwargs["linked_source_uris"] == ["file:///a.md", "vault://v/b"]
 
 
+# ---------------------------------------------------------------------------
+# remember --details / --location (Issue #241)
+# ---------------------------------------------------------------------------
+
+
+def _remember_cli(mock_client_cls, mock_config, *args):
+    """Invoke `kagura remember` with a wired mock client and return (result, client)."""
+    mock_config.return_value = {
+        "api_key": "key",
+        "mcp_url": "https://test.com/mcp",
+        "context_id": "ctx",
+    }
+    mock_client = _remember_mock_client(mock_client_cls)
+    runner = CliRunner()
+    result = runner.invoke(main, ["remember", "-s", "test", "--content", "data", *args])
+    return result, mock_client
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_remember_parses_details_json(mock_client_cls, mock_config):
+    """--details accepts inline JSON and forwards it as a dict."""
+    result, mock_client = _remember_cli(
+        mock_client_cls,
+        mock_config,
+        "--details",
+        '{"location": {"lat": 35.68, "lon": 139.76}, "note": "HQ"}',
+    )
+    assert result.exit_code == 0
+    details = mock_client.remember.call_args[1]["details"]
+    assert details == {"location": {"lat": 35.68, "lon": 139.76}, "note": "HQ"}
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_remember_details_keeps_coordinates_numeric(mock_client_cls, mock_config):
+    """Issue #241: lat/lon survive JSON parsing as numbers — strings 422 server-side."""
+    result, mock_client = _remember_cli(
+        mock_client_cls,
+        mock_config,
+        "--details",
+        '{"location": {"lat": 35.68, "lon": 139.76}}',
+    )
+    assert result.exit_code == 0
+    loc = mock_client.remember.call_args[1]["details"]["location"]
+    assert isinstance(loc["lat"], float)
+    assert isinstance(loc["lon"], float)
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_remember_omits_details_when_not_given(mock_client_cls, mock_config):
+    """Without --details/--location, remember passes details=None."""
+    result, mock_client = _remember_cli(mock_client_cls, mock_config)
+    assert result.exit_code == 0
+    assert mock_client.remember.call_args[1]["details"] is None
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_remember_rejects_invalid_details_json(mock_client_cls, mock_config):
+    """Malformed --details is a usage error, not a traceback."""
+    result, mock_client = _remember_cli(mock_client_cls, mock_config, "--details", "{not json")
+    assert result.exit_code != 0
+    assert "Invalid JSON" in result.output
+    mock_client.remember.assert_not_called()
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_remember_rejects_non_object_details(mock_client_cls, mock_config):
+    """--details must be a JSON object — a list or scalar cannot carry named fields."""
+    result, mock_client = _remember_cli(mock_client_cls, mock_config, "--details", "[1, 2]")
+    assert result.exit_code != 0
+    assert "JSON object" in result.output
+    mock_client.remember.assert_not_called()
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_remember_location_shorthand(mock_client_cls, mock_config):
+    """--location lat,lon builds details.location with numeric coordinates."""
+    result, mock_client = _remember_cli(mock_client_cls, mock_config, "--location", "35.68,139.76")
+    assert result.exit_code == 0
+    details = mock_client.remember.call_args[1]["details"]
+    assert details == {"location": {"lat": 35.68, "lon": 139.76}}
+    assert isinstance(details["location"]["lat"], float)
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_remember_location_shorthand_with_label(mock_client_cls, mock_config):
+    """--location lat,lon,label attaches the optional label."""
+    result, mock_client = _remember_cli(
+        mock_client_cls, mock_config, "--location", "35.68, 139.76, Tokyo HQ"
+    )
+    assert result.exit_code == 0
+    details = mock_client.remember.call_args[1]["details"]
+    assert details["location"] == {"lat": 35.68, "lon": 139.76, "label": "Tokyo HQ"}
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_remember_location_merges_into_details(mock_client_cls, mock_config):
+    """--location and --details compose: other details keys are preserved."""
+    result, mock_client = _remember_cli(
+        mock_client_cls,
+        mock_config,
+        "--details",
+        '{"note": "HQ"}',
+        "--location",
+        "35.68,139.76",
+    )
+    assert result.exit_code == 0
+    details = mock_client.remember.call_args[1]["details"]
+    assert details == {"note": "HQ", "location": {"lat": 35.68, "lon": 139.76}}
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_remember_rejects_conflicting_location(mock_client_cls, mock_config):
+    """location in --details plus --location is ambiguous — fail, don't silently drop one."""
+    result, mock_client = _remember_cli(
+        mock_client_cls,
+        mock_config,
+        "--details",
+        '{"location": {"lat": 1.0, "lon": 2.0}}',
+        "--location",
+        "35.68,139.76",
+    )
+    assert result.exit_code != 0
+    assert "--location" in result.output
+    mock_client.remember.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "bad",
+    ["35.68", "abc,139.76", "35.68,139.76,label,extra", "91.0,139.76", "35.68,181.0"],
+)
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_remember_rejects_malformed_location(mock_client_cls, mock_config, bad):
+    """--location rejects wrong arity, non-numeric, and out-of-range coordinates."""
+    result, mock_client = _remember_cli(mock_client_cls, mock_config, "--location", bad)
+    assert result.exit_code != 0
+    mock_client.remember.assert_not_called()
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_remember_empty_location_is_unset(mock_client_cls, mock_config):
+    """An empty --location means unset, matching how --tags treats an empty value."""
+    result, mock_client = _remember_cli(mock_client_cls, mock_config, "--location", "")
+    assert result.exit_code == 0
+    assert mock_client.remember.call_args[1]["details"] is None
+
+
 @patch("kagura_memory.cli.load_config")
 @patch("kagura_memory.cli.KaguraClient")
 def test_remember_omits_provenance_when_not_given(mock_client_cls, mock_config):
