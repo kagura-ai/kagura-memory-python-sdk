@@ -79,11 +79,14 @@ def _parse_tags(tags: str | None) -> list[str] | None:
 def _parse_details(details: str | None) -> dict[str, Any] | None:
     """Parse a --details JSON object string into a dict, or None if empty.
 
+    Blank (or whitespace-only) means unset, matching :func:`_parse_tags` — a
+    shell expansion of an empty variable should not be a usage error.
+
     Raises:
         click.UsageError: If the string is not valid JSON, or is valid JSON but
             not an object (the MCP tool's ``details`` is typed ``object``).
     """
-    if not details:
+    if details is None or not details.strip():
         return None
     try:
         parsed = json.loads(details)
@@ -100,11 +103,14 @@ def _parse_details(details: str | None) -> dict[str, Any] | None:
 def _parse_location(location: str | None) -> dict[str, Any] | None:
     """Parse ``lat,lon[,label]`` into a ``details.location`` payload, or None.
 
+    Blank (or whitespace-only) means unset, matching :func:`_parse_tags` and
+    :func:`_parse_details`, rather than failing with a confusing arity error.
+
     Raises:
         click.UsageError: On wrong arity, non-numeric coordinates, or
             coordinates outside their valid range.
     """
-    if not location:
+    if location is None or not location.strip():
         return None
     parts = [p.strip() for p in location.split(",")]
     if len(parts) not in (2, 3):

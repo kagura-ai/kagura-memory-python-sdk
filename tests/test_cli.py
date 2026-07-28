@@ -518,13 +518,29 @@ def test_remember_parses_details_json(mock_client_cls, mock_config):
 
 @pytest.mark.parametrize(
     "args",
-    [(), ("--details", ""), ("--location", "")],
-    ids=["neither-flag", "empty-details", "empty-location"],
+    [
+        (),
+        ("--details", ""),
+        ("--location", ""),
+        ("--details", "   "),
+        ("--location", "  "),
+    ],
+    ids=[
+        "neither-flag",
+        "empty-details",
+        "empty-location",
+        "blank-details",
+        "blank-location",
+    ],
 )
 @patch("kagura_memory.cli.load_config")
 @patch("kagura_memory.cli.KaguraClient")
 def test_remember_details_none_when_unset(mock_client_cls, mock_config, args):
-    """No flag — or an empty value, as --tags already treats it — means details=None."""
+    """No flag — or a blank value, as --tags already treats it — means details=None.
+
+    A whitespace-only value is usually an empty shell variable expanding, not a
+    deliberate request; failing it would be an arbitrary split from ``""``.
+    """
     result, mock_client = _remember_cli(mock_client_cls, mock_config, *args)
     assert result.exit_code == 0
     assert mock_client.remember.call_args[1]["details"] is None
