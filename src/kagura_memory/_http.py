@@ -190,6 +190,28 @@ def normalize_uuid(value: object, *, label: str) -> str:
         raise ValueError(f"{label} must be a UUID, got {value!r}") from exc
 
 
+def validate_lat_lon(lat: float, lon: float) -> None:
+    """Reject coordinates the server would reject anyway (memory-cloud #1331).
+
+    Shared by every geo surface — the ``recall_nearby`` query point and the
+    CLI's ``--location`` write shorthand — so the WHERE axis has one definition
+    of a valid coordinate. Unlike ``radius_m``, which the server clamps, the
+    server *rejects* out-of-range lat/lon, so checking locally only saves a
+    round-trip that could return nothing but a 422.
+
+    Args:
+        lat: Latitude, -90 to 90.
+        lon: Longitude, -180 to 180.
+
+    Raises:
+        ValueError: If either coordinate is outside its valid range.
+    """
+    if not -90 <= lat <= 90:
+        raise ValueError(f"lat must be between -90 and 90, got {lat}")
+    if not -180 <= lon <= 180:
+        raise ValueError(f"lon must be between -180 and 180, got {lon}")
+
+
 def validate_https_url(url: str, *, label: str = "URL") -> None:
     """Enforce HTTPS except for localhost development.
 

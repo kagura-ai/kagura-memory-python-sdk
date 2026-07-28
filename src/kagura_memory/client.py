@@ -9,7 +9,13 @@ import httpx
 from pydantic import BaseModel as _BaseModel
 
 from ._auth import _resolve_auth, _StaticAuth
-from ._http import SDK_VERSION, base_url_from_mcp, raise_for_kagura_status, validate_https_url
+from ._http import (
+    SDK_VERSION,
+    base_url_from_mcp,
+    raise_for_kagura_status,
+    validate_https_url,
+    validate_lat_lon,
+)
 from .exceptions import (
     KaguraConnectionError,
     KaguraError,
@@ -530,22 +536,15 @@ class KaguraClient:
         ``remember(details={"location": {"lat": ..., "lon": ..., "label": ...}})``;
         any memory type can carry one.
 
-        ``lat``/``lon`` must be JSON **numbers**. The server rejects
-        string-typed numerics with a 422 by design, so pass floats rather than
-        pre-formatted strings.
-
         Requires memory-cloud server v0.53.0+ (#1331); older servers return an
-        MCP "tool not found".
-
-        .. note::
-           :meth:`update_memory` replaces ``details`` wholesale — re-send
-           ``location`` when updating details or the memory silently drops off
-           the map.
+        MCP "tool not found". See :meth:`update_memory` for the caveat about
+        revising a memory that carries a location.
 
         Args:
             context_id: Target context UUID.
-            lat: Query latitude, -90 to 90.
-            lon: Query longitude, -180 to 180.
+            lat: Query latitude, -90 to 90. Must be a JSON number — the server
+                rejects string-typed numerics with a 422 by design.
+            lon: Query longitude, -180 to 180. Same numeric requirement.
             radius_m: Search radius in meters (default 1000). The server clamps
                 this to [1, 1000000] rather than rejecting out-of-range values.
             k: Maximum results (default 20, server max 100).
@@ -557,12 +556,7 @@ class KaguraClient:
         Raises:
             ValueError: If ``lat`` or ``lon`` is outside its valid range.
         """
-        # Range-check locally: unlike radius_m (clamped), the server rejects
-        # out-of-range coordinates, so a round-trip would only buy a 422.
-        if not -90 <= lat <= 90:
-            raise ValueError(f"lat must be between -90 and 90, got {lat}")
-        if not -180 <= lon <= 180:
-            raise ValueError(f"lon must be between -180 and 180, got {lon}")
+        validate_lat_lon(lat, lon)
 
         arguments: dict[str, Any] = {
             "context_id": context_id,

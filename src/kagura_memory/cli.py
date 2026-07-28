@@ -16,6 +16,7 @@ from ._auth import (
     _resolve_auth,
     _StaticAuth,
 )
+from ._http import validate_lat_lon
 from .auth.cli import auth as _auth_group
 from .client import KaguraClient
 from .config import load_config
@@ -99,9 +100,6 @@ def _parse_details(details: str | None) -> dict[str, Any] | None:
 def _parse_location(location: str | None) -> dict[str, Any] | None:
     """Parse ``lat,lon[,label]`` into a ``details.location`` payload, or None.
 
-    Coordinates are converted to floats because the server rejects string-typed
-    numerics with a 422 by design (memory-cloud #1331).
-
     Raises:
         click.UsageError: On wrong arity, non-numeric coordinates, or
             coordinates outside their valid range.
@@ -117,10 +115,11 @@ def _parse_location(location: str | None) -> dict[str, Any] | None:
         raise click.UsageError(
             f"--location lat/lon must be numbers, got {parts[0]!r},{parts[1]!r}"
         ) from e
-    if not -90 <= lat <= 90:
-        raise click.UsageError(f"--location lat must be between -90 and 90, got {lat}")
-    if not -180 <= lon <= 180:
-        raise click.UsageError(f"--location lon must be between -180 and 180, got {lon}")
+    # Same range rule as KaguraClient.recall_nearby — one definition, two surfaces.
+    try:
+        validate_lat_lon(lat, lon)
+    except ValueError as e:
+        raise click.UsageError(f"--location {_exc_message(e)}") from e
 
     payload: dict[str, Any] = {"lat": lat, "lon": lon}
     if len(parts) == 3 and parts[2]:
@@ -139,13 +138,11 @@ def _build_details(details: str | None, location: str | None) -> dict[str, Any] 
     loc = _parse_location(location)
     if loc is None:
         return parsed
-    if parsed is not None and "location" in parsed:
+    if parsed and "location" in parsed:
         raise click.UsageError(
             "--location conflicts with the 'location' key in --details. Use one or the other."
         )
-    merged = dict(parsed) if parsed else {}
-    merged["location"] = loc
-    return merged
+    return {**(parsed or {}), "location": loc}
 
 
 def _run_client_command(

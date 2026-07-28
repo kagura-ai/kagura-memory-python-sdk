@@ -516,27 +516,16 @@ def test_remember_parses_details_json(mock_client_cls, mock_config):
     assert details == {"location": {"lat": 35.68, "lon": 139.76}, "note": "HQ"}
 
 
+@pytest.mark.parametrize(
+    "args",
+    [(), ("--details", ""), ("--location", "")],
+    ids=["neither-flag", "empty-details", "empty-location"],
+)
 @patch("kagura_memory.cli.load_config")
 @patch("kagura_memory.cli.KaguraClient")
-def test_remember_details_keeps_coordinates_numeric(mock_client_cls, mock_config):
-    """Issue #241: lat/lon survive JSON parsing as numbers — strings 422 server-side."""
-    result, mock_client = _remember_cli(
-        mock_client_cls,
-        mock_config,
-        "--details",
-        '{"location": {"lat": 35.68, "lon": 139.76}}',
-    )
-    assert result.exit_code == 0
-    loc = mock_client.remember.call_args[1]["details"]["location"]
-    assert isinstance(loc["lat"], float)
-    assert isinstance(loc["lon"], float)
-
-
-@patch("kagura_memory.cli.load_config")
-@patch("kagura_memory.cli.KaguraClient")
-def test_remember_omits_details_when_not_given(mock_client_cls, mock_config):
-    """Without --details/--location, remember passes details=None."""
-    result, mock_client = _remember_cli(mock_client_cls, mock_config)
+def test_remember_details_none_when_unset(mock_client_cls, mock_config, args):
+    """No flag — or an empty value, as --tags already treats it — means details=None."""
+    result, mock_client = _remember_cli(mock_client_cls, mock_config, *args)
     assert result.exit_code == 0
     assert mock_client.remember.call_args[1]["details"] is None
 
@@ -629,15 +618,6 @@ def test_remember_rejects_malformed_location(mock_client_cls, mock_config, bad):
     result, mock_client = _remember_cli(mock_client_cls, mock_config, "--location", bad)
     assert result.exit_code != 0
     mock_client.remember.assert_not_called()
-
-
-@patch("kagura_memory.cli.load_config")
-@patch("kagura_memory.cli.KaguraClient")
-def test_remember_empty_location_is_unset(mock_client_cls, mock_config):
-    """An empty --location means unset, matching how --tags treats an empty value."""
-    result, mock_client = _remember_cli(mock_client_cls, mock_config, "--location", "")
-    assert result.exit_code == 0
-    assert mock_client.remember.call_args[1]["details"] is None
 
 
 @patch("kagura_memory.cli.load_config")

@@ -1283,17 +1283,30 @@ async def test_update_memory_requires_one_id():
     await client.close()
 
 
+@pytest.mark.parametrize(
+    "id_kwargs",
+    [{"memory_id": "mem-1"}, {"external_id": "ext-key"}],
+    ids=["in-place", "upsert"],
+)
 @pytest.mark.asyncio
-async def test_update_memory_passes_details():
-    """Issue #242: update_memory() forwards details so it can be revised after write."""
+async def test_update_memory_passes_details(id_kwargs):
+    """Issue #242: details is forwarded on both the in-place and upsert paths.
+
+    The upsert path matters on its own: before this, ``update_memory(external_id=...)``
+    could only produce a memory with no details at all, which made it useless as a
+    de-duplication safety net.
+    """
     client = _make_initialized_client()
 
     with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
         mock.return_value = {"status": "success", "memory_id": "mem-1"}
         await client.update_memory(
             context_id="ctx",
-            memory_id="mem-1",
+            summary="s",
+            content="c",
+            type="note",
             details={"location": {"lat": 35.68, "lon": 139.76}},
+            **id_kwargs,
         )
         args = mock.call_args[0][1]
         assert args["details"] == {"location": {"lat": 35.68, "lon": 139.76}}
@@ -1310,27 +1323,6 @@ async def test_update_memory_omits_details_when_none():
         mock.return_value = {"status": "success", "memory_id": "mem-1"}
         await client.update_memory(context_id="ctx", memory_id="mem-1", summary="s")
         assert "details" not in mock.call_args[0][1]
-
-    await client.close()
-
-
-@pytest.mark.asyncio
-async def test_update_memory_upsert_carries_details():
-    """Issue #242: the external_id upsert path can carry details, not just create empty ones."""
-    client = _make_initialized_client()
-
-    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
-        mock.return_value = {"status": "success", "memory_id": "mem-new"}
-        await client.update_memory(
-            context_id="ctx",
-            external_id="ext-key",
-            summary="upserted",
-            content="content",
-            type="note",
-            details={"resource_id": "ext-key", "provenance": "sync"},
-        )
-        args = mock.call_args[0][1]
-        assert args["details"] == {"resource_id": "ext-key", "provenance": "sync"}
 
     await client.close()
 
@@ -2190,24 +2182,6 @@ async def test_recall_nearby_passes_all_params():
             assert args["lon"] == 151.21
             assert args["radius_m"] == 5000
             assert args["k"] == 50
-    finally:
-        await client.close()
-
-
-@pytest.mark.asyncio
-async def test_recall_nearby_sends_coordinates_as_numbers():
-    """Issue #241: lat/lon must go out as JSON numbers — the server 422s on strings."""
-    client = _make_initialized_client()
-
-    try:
-        with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
-            mock.return_value = {"results": []}
-            await client.recall_nearby(context_id="ctx", lat=0, lon=0)
-            args = mock.call_args.args[1]
-            assert isinstance(args["lat"], (int, float))
-            assert isinstance(args["lon"], (int, float))
-            assert not isinstance(args["lat"], str)
-            assert not isinstance(args["lon"], str)
     finally:
         await client.close()
 

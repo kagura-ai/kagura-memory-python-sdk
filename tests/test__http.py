@@ -12,7 +12,12 @@ from unittest.mock import MagicMock
 import httpx
 import pytest
 
-from kagura_memory._http import extract_detail, normalize_uuid, validate_https_url
+from kagura_memory._http import (
+    extract_detail,
+    normalize_uuid,
+    validate_https_url,
+    validate_lat_lon,
+)
 
 
 def _response_with_json(payload: object) -> MagicMock:
@@ -314,3 +319,38 @@ def test_detail_takes_precedence_over_message():
 def test_non_string_message_returns_empty():
     resp = _response_with_json({"error": "X", "message": 42, "details": {}})
     assert extract_detail(resp) == ""
+
+
+# ---------------------------------------------------------------------------
+# validate_lat_lon — one coordinate rule shared by recall_nearby + CLI --location
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("lat", "lon"),
+    [
+        (0.0, 0.0),
+        (35.68, 139.76),
+        (90.0, 180.0),  # poles / antimeridian are valid points, not errors
+        (-90.0, -180.0),
+        (0, 0),  # ints are numbers too
+    ],
+)
+def test_validate_lat_lon_accepts_valid_points(lat: float, lon: float):
+    """In-range coordinates, including the boundaries, must not raise."""
+    validate_lat_lon(lat, lon)
+
+
+@pytest.mark.parametrize(
+    ("lat", "lon", "expected"),
+    [
+        (91.0, 0.0, "lat"),
+        (-91.0, 0.0, "lat"),
+        (0.0, 181.0, "lon"),
+        (0.0, -181.0, "lon"),
+    ],
+)
+def test_validate_lat_lon_rejects_out_of_range(lat: float, lon: float, expected: str):
+    """Out-of-range coordinates raise, naming the offending axis."""
+    with pytest.raises(ValueError, match=expected):
+        validate_lat_lon(lat, lon)
