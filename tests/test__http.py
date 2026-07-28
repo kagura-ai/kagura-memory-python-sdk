@@ -354,3 +354,24 @@ def test_validate_lat_lon_rejects_out_of_range(lat: float, lon: float, expected:
     """Out-of-range coordinates raise, naming the offending axis."""
     with pytest.raises(ValueError, match=expected):
         validate_lat_lon(lat, lon)
+
+
+@pytest.mark.parametrize(
+    ("lat", "lon"),
+    [
+        (float("nan"), 0.0),
+        (0.0, float("nan")),
+        (float("inf"), 0.0),
+        (0.0, float("-inf")),
+    ],
+)
+def test_validate_lat_lon_rejects_nan_and_inf(lat: float, lon: float):
+    """NaN/inf must not reach the server as a coordinate.
+
+    This depends on the ``not -90 <= lat <= 90`` form: every comparison against
+    NaN is False, so the chain is False and ``not`` makes it raise. The
+    equivalent-looking ``lat < -90 or lat > 90`` would let NaN through — do not
+    "simplify" the guard into that shape.
+    """
+    with pytest.raises(ValueError, match="lat|lon"):
+        validate_lat_lon(lat, lon)

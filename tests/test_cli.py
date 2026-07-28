@@ -575,6 +575,18 @@ def test_remember_location_shorthand_with_label(mock_client_cls, mock_config):
 
 @patch("kagura_memory.cli.load_config")
 @patch("kagura_memory.cli.KaguraClient")
+def test_remember_location_trailing_comma_omits_label(mock_client_cls, mock_config):
+    """'lat,lon,' is the 2-field form with a stray comma — no empty label key."""
+    result, mock_client = _remember_cli(mock_client_cls, mock_config, "--location", "35.68,139.76,")
+    assert result.exit_code == 0
+    assert mock_client.remember.call_args[1]["details"]["location"] == {
+        "lat": 35.68,
+        "lon": 139.76,
+    }
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
 def test_remember_location_merges_into_details(mock_client_cls, mock_config):
     """--location and --details compose: other details keys are preserved."""
     result, mock_client = _remember_cli(
