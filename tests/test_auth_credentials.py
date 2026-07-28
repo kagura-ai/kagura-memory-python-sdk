@@ -31,6 +31,7 @@ from kagura_memory.auth.credentials import (
     update_profile,
 )
 from kagura_memory.auth.device_flow import TokenResponse
+from kagura_memory.exceptions import KaguraAuthExpiredError
 
 # Gate POSIX-specific behaviour to non-Windows (CI runs Linux):
 #   - the cross-process refresh-dedup tests rely on fcntl serializing two
@@ -460,6 +461,109 @@ async def test_oauth_refreshes_when_within_skew(tmp_path: Path):
     # Persisted to disk too.
     on_disk = load_credentials_file(path).get_profile()
     assert on_disk.access_token == "new-token"
+
+
+@pytest.mark.asyncio
+async def test_oauth_refuses_refresh_without_a_stored_refresh_token(tmp_path: Path):
+    """A profile with no refresh token must fail before any network call.
+
+    Posting ``refresh_token=""`` can only ever earn an ``invalid_grant``,
+    whose message ("refresh token is no longer valid") describes a token
+    that never existed. See typescript-sdk#14.
+    """
+    reset_state_cache()
+    path = tmp_path / "creds.json"
+    creds = _sample_creds(
+        refresh_token="",
+        expires_at=datetime.now(UTC) - timedelta(seconds=1),
+    )
+    cf = CredentialsFile()
+    cf.set_profile("default", creds)
+    save_credentials_file(cf, path)
+
+    auth = KaguraOAuth(get_shared_state(path))
+
+    refresh_mock = AsyncMock()
+    with (
+        patch("kagura_memory.auth.device_flow.refresh_access_token", new=refresh_mock),
+        patch(
+            "kagura_memory.auth.device_flow.make_oauth_client",
+            return_value=_AsyncContextStub(),
+        ),
+        pytest.raises(KaguraAuthExpiredError, match="without a refresh token"),
+    ):
+        request = httpx.Request("GET", "https://test/x")
+        flow = auth.async_auth_flow(request)
+        await flow.__anext__()
+
+    refresh_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_oauth_force_refresh_refuses_without_a_stored_refresh_token(tmp_path: Path):
+    reset_state_cache()
+    path = tmp_path / "creds.json"
+    cf = CredentialsFile()
+    cf.set_profile("default", _sample_creds(refresh_token=""))
+    save_credentials_file(cf, path)
+
+    auth = KaguraOAuth(get_shared_state(path))
+
+    refresh_mock = AsyncMock()
+    with (
+        patch("kagura_memory.auth.device_flow.refresh_access_token", new=refresh_mock),
+        patch(
+            "kagura_memory.auth.device_flow.make_oauth_client",
+            return_value=_AsyncContextStub(),
+        ),
+        pytest.raises(KaguraAuthExpiredError),
+    ):
+        await auth.force_refresh()
+
+    refresh_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_oauth_refresh_keeps_stored_scope_when_server_omits_it(tmp_path: Path):
+    """``TokenResponse.scope`` defaults to "" — that must not blank the grant.
+
+    ``with_refreshed`` falls back only on ``None``, so passing the empty
+    string through overwrote a perfectly good stored scope.
+    """
+    reset_state_cache()
+    path = tmp_path / "creds.json"
+    near_expiry = datetime.now(UTC) + timedelta(seconds=60)
+    cf = CredentialsFile()
+    cf.set_profile(
+        "default",
+        _sample_creds(expires_at=near_expiry, scope="memory:read memory:write"),
+    )
+    save_credentials_file(cf, path)
+
+    auth = KaguraOAuth(get_shared_state(path))
+    refreshed = TokenResponse(
+        access_token="new-token",
+        refresh_token="new-rtok",
+        token_type="Bearer",
+        expires_at=datetime.now(UTC) + timedelta(hours=1),
+        scope="",
+    )
+
+    with (
+        patch(
+            "kagura_memory.auth.device_flow.refresh_access_token",
+            new=AsyncMock(return_value=refreshed),
+        ),
+        patch(
+            "kagura_memory.auth.device_flow.make_oauth_client",
+            return_value=_AsyncContextStub(),
+        ),
+    ):
+        request = httpx.Request("GET", "https://test/x")
+        flow = auth.async_auth_flow(request)
+        await flow.__anext__()
+
+    assert load_credentials_file(path).get_profile().scope == "memory:read memory:write"
 
 
 @pytest.mark.asyncio
