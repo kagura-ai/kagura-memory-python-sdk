@@ -362,8 +362,8 @@ class KaguraClient:
             supersedes: UUID of a memory this one replaces. The old memory is
                 **shadowed, not deleted**: it drops out of default
                 :meth:`recall` but stays reachable via
-                ``recall(filters=...)`` with ``include_superseded`` and via
-                :meth:`explore`, and deleting the edge restores it. Prefer this
+                ``recall(include_superseded=True)`` and :meth:`explore`, and
+                deleting the edge restores it. Prefer this
                 over :meth:`forget` + :meth:`remember` when storing a newer
                 version of a fact — that pair destroys the history the
                 supersede edge exists to preserve. Requires memory-cloud
@@ -414,6 +414,7 @@ class KaguraClient:
         search_mode: str | None = None,
         context_ids: list[str] | None = None,
         include_explore_hints: bool = False,
+        include_superseded: bool = False,
     ) -> dict[str, Any]:
         """
         Call recall MCP tool.
@@ -444,6 +445,13 @@ class KaguraClient:
                 graph discovery hints in the response under the
                 ``explore_hints`` key — useful as seeds for a follow-up
                 :meth:`explore` call.
+            include_superseded: When True, also return memories shadowed by a
+                ``supersedes`` edge, annotated with ``superseded_by``. Default
+                recall demotes them, so this is how you read the history that
+                :meth:`remember` (``supersedes=...``) deliberately preserves —
+                without it, superseding would be a one-way door. Note this is a
+                top-level argument, **not** a ``filters`` key. Requires
+                memory-cloud server v0.45.0+ (#1208).
 
         Returns:
             API response with results list
@@ -479,6 +487,8 @@ class KaguraClient:
             arguments["search_mode"] = search_mode
         if include_explore_hints:
             arguments["include_explore_hints"] = True
+        if include_superseded:
+            arguments["include_superseded"] = True
         return await self._call_tool_checked("recall", arguments)
 
     async def recall_upcoming(

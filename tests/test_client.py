@@ -351,6 +351,39 @@ async def test_remember_with_supersedes():
 
 
 @pytest.mark.asyncio
+async def test_recall_include_superseded():
+    """Issue #243: superseded memories must be retrievable, or supersedes is a one-way door.
+
+    ``include_superseded`` is a top-level tool argument, not a ``filters`` key.
+    """
+    client = _make_initialized_client()
+
+    try:
+        with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+            mock.return_value = {"results": []}
+            await client.recall(context_id="ctx", query="q", include_superseded=True)
+            args = mock.call_args[0][1]
+            assert args["include_superseded"] is True
+            assert "include_superseded" not in args.get("filters", {})
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_recall_omits_include_superseded_by_default():
+    """The default is the server's default — omit rather than send false."""
+    client = _make_initialized_client()
+
+    try:
+        with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+            mock.return_value = {"results": []}
+            await client.recall(context_id="ctx", query="q")
+            assert "include_superseded" not in mock.call_args[0][1]
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
 async def test_remember_with_details():
     """remember() should pass details JSON dict through to MCP arguments."""
     client = _make_initialized_client()
