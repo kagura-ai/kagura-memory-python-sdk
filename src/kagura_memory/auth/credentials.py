@@ -37,6 +37,8 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
+from ..exceptions import KaguraAuthExpiredError
+
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
 
@@ -641,6 +643,19 @@ class KaguraOAuth(httpx.Auth):
         # so resolve only at refresh time to avoid a cycle at import time.
         from .device_flow import make_oauth_client, refresh_access_token
 
+        # A profile stored without a refresh token cannot be refreshed.
+        # Going to the network only earns an ``invalid_grant``, whose
+        # message ("refresh token is no longer valid") describes a token
+        # that never existed — the grant never carried offline access.
+        # Fail here instead, naming that. Mirrors typescript-sdk#14.
+        if not base.refresh_token:
+            raise KaguraAuthExpiredError(
+                "This profile was stored without a refresh token, so it "
+                "cannot be refreshed — log in again to get one.\n"
+                "  Run: kagura auth login",
+                base.expires_at,
+            )
+
         async with make_oauth_client() as client:
             token = await refresh_access_token(
                 client,
@@ -657,7 +672,10 @@ class KaguraOAuth(httpx.Auth):
             access_token=token.access_token,
             refresh_token=token.refresh_token or None,
             expires_at=token.expires_at,
-            scope=token.scope,
+            # ``or None`` not the bare value: TokenResponse.scope defaults
+            # to "" when the server omits it, and with_refreshed falls back
+            # only on None — so an omitted scope blanked the stored grant.
+            scope=token.scope or None,
         )
         # We already hold the cross-process lock; write directly rather than via
         # update_profile (which would re-acquire the same lock on a second fd
