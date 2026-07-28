@@ -1147,11 +1147,11 @@ class KaguraClient:
         filters. This is the primary mitigation for tag drift (e.g. ``"auth"``
         vs ``"authentication"`` silently degrading recall precision).
 
-        Requires memory-cloud server v0.15.4+ — older servers expose
-        ``list_contexts`` and ``recall`` but not ``list_tags``, and will
-        return an MCP "tool not found" error. ``MIN_SERVER_VERSION`` (0.17.1)
-        is deliberately not bumped past that: only this method needs 0.15.4+,
-        and its ``with_tags`` drill-down needs 0.17.2+.
+        Server floors: this tool exists from memory-cloud v0.15.4+ (older
+        servers expose ``list_contexts`` and ``recall`` but not ``list_tags``,
+        and raise an MCP "tool not found"), and the ``with_tags`` drill-down
+        needs v0.17.2+. As elsewhere in this client, ``MIN_SERVER_VERSION`` is
+        not bumped to match — floors are tracked per surface.
 
         Args:
             context_id: Context ID to list tags from.

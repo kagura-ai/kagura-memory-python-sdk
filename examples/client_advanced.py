@@ -9,7 +9,8 @@ WHERE axis (``recall_nearby``), and supersede/history.
 Server floors: ``list_tags()`` needs memory-cloud v0.15.4+, its
 ``with_tags`` drill-down v0.17.2+, ``supersedes`` / ``include_superseded``
 v0.45.0+, and ``recall_nearby`` / ``details.location`` v0.53.0+. Against an
-older server those specific calls return an MCP "tool not found".
+older server those calls raise ``KaguraError`` ("tool not found"); this script
+does not catch them, so it stops at the first one the server lacks.
 
 Usage:
     export KAGURA_API_KEY="kagura_..."

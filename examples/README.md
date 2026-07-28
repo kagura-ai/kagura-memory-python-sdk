@@ -31,8 +31,10 @@ extra (or `[ingest-all]`); plain text / Markdown need only the base
 memory-cloud v0.15.4+, its `with_tags` drill-down v0.17.2+, supersede
 (`supersedes` / `include_superseded`) v0.45.0+, and `recall_nearby` /
 `details.location` v0.53.0+. Against an older server those specific calls
-return an MCP "tool not found"; the rest of the script still runs. Its
-WHERE-axis block writes two demo memories and forgets them in a `finally`.
+raise `KaguraError` ("tool not found") — the script does not catch them, so it
+stops at the first unsupported call. Run it against a current server, or drop
+the blocks your server predates. The WHERE-axis block writes two demo memories
+and forgets them in a `finally`, so an early failure there still leaves no residue.
 
 `SecretClient` (zero-knowledge secrets) has no standalone script — it is
 CLI-first, since real use needs OS-keychain key custody and the put/get/grant

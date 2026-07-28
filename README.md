@@ -399,7 +399,7 @@ The same client also provisions **member API keys** (memory-cloud [#1165](https:
 | 0.14.x | 0.15.1 | `FilesClient` + R2 checksum binding (`x-amz-checksum-sha256` on PUT) |
 | 0.13.x | 0.13.0 | Pre-`FilesClient` |
 
-`MIN_SERVER_VERSION` in `src/kagura_memory/client.py` is the SDK's tested floor, and it is **advisory**: `check_server_version()` logs a warning and `kagura doctor` fails against a too-old server, but tool calls never raise on a version mismatch. A newer-than-floor MCP tool called against an older server comes back as an MCP "tool not found" error, and a newer *parameter* on an existing tool may simply be ignored — which is why the per-surface floors above matter. When pointing the SDK at a backend with `R2_CHECKSUM_BINDING_ENABLED=true`, the SDK must be v0.14.0+; older versions don't send the signed checksum header and uploads fail with `HTTP 403 SignatureDoesNotMatch`.
+`MIN_SERVER_VERSION` in `src/kagura_memory/client.py` is the SDK's tested floor, and it is **advisory**: the SDK does not pre-check the server version and block a call. `check_server_version()` only logs a warning, and `kagura doctor` is the one place a too-old server fails outright. Version mismatches therefore surface **at call time**, in two different ways: a tool the server doesn't have raises `KaguraError` ("tool not found"), while a newer *parameter* on a tool it does have is typically ignored server-side — silently. That silent case is why the per-surface floors above matter. When pointing the SDK at a backend with `R2_CHECKSUM_BINDING_ENABLED=true`, the SDK must be v0.14.0+; older versions don't send the signed checksum header and uploads fail with `HTTP 403 SignatureDoesNotMatch`.
 
 ## CLI
 
