@@ -326,8 +326,61 @@ async def test_remember_pass_through_keys_absent_when_none():
         assert "context" not in args
         assert "linked_memory_ids" not in args
         assert "linked_source_uris" not in args
+        assert "supersedes" not in args
 
     await client.close()
+
+
+@pytest.mark.asyncio
+async def test_remember_with_supersedes():
+    """Issue #243: remember() forwards supersedes so the old memory is shadowed, not deleted."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {"memory_id": "new-mem"}
+        await client.remember(
+            context_id="ctx",
+            summary="s",
+            content="c",
+            supersedes="11111111-2222-3333-4444-555555555555",
+        )
+        args = mock.call_args[0][1]
+        assert args["supersedes"] == "11111111-2222-3333-4444-555555555555"
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_recall_include_superseded():
+    """Issue #243: superseded memories must be retrievable, or supersedes is a one-way door.
+
+    ``include_superseded`` is a top-level tool argument, not a ``filters`` key.
+    """
+    client = _make_initialized_client()
+
+    try:
+        with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+            mock.return_value = {"results": []}
+            await client.recall(context_id="ctx", query="q", include_superseded=True)
+            args = mock.call_args[0][1]
+            assert args["include_superseded"] is True
+            assert "include_superseded" not in args.get("filters", {})
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_recall_omits_include_superseded_by_default():
+    """The default is the server's default — omit rather than send false."""
+    client = _make_initialized_client()
+
+    try:
+        with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+            mock.return_value = {"results": []}
+            await client.recall(context_id="ctx", query="q")
+            assert "include_superseded" not in mock.call_args[0][1]
+    finally:
+        await client.close()
 
 
 @pytest.mark.asyncio
@@ -1263,6 +1316,50 @@ async def test_update_memory_requires_one_id():
     await client.close()
 
 
+@pytest.mark.parametrize(
+    "id_kwargs",
+    [{"memory_id": "mem-1"}, {"external_id": "ext-key"}],
+    ids=["in-place", "upsert"],
+)
+@pytest.mark.asyncio
+async def test_update_memory_passes_details(id_kwargs):
+    """Issue #242: details is forwarded on both the in-place and upsert paths.
+
+    The upsert path matters on its own: before this, ``update_memory(external_id=...)``
+    could only produce a memory with no details at all, which made it useless as a
+    de-duplication safety net.
+    """
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {"status": "success", "memory_id": "mem-1"}
+        await client.update_memory(
+            context_id="ctx",
+            summary="s",
+            content="c",
+            type="note",
+            details={"location": {"lat": 35.68, "lon": 139.76}},
+            **id_kwargs,
+        )
+        args = mock.call_args[0][1]
+        assert args["details"] == {"location": {"lat": 35.68, "lon": 139.76}}
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_update_memory_omits_details_when_none():
+    """Issue #242: details is omitted when not provided, so existing callers are unaffected."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {"status": "success", "memory_id": "mem-1"}
+        await client.update_memory(context_id="ctx", memory_id="mem-1", summary="s")
+        assert "details" not in mock.call_args[0][1]
+
+    await client.close()
+
+
 @pytest.mark.asyncio
 async def test_delete_context():
     """delete_context() should call tool with context_id."""
@@ -2076,6 +2173,84 @@ async def test_recall_upcoming_omits_bounds_when_none():
 
 
 # ============================================================================
+# recall_nearby (WHERE axis, MCP) — Issue #241
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_recall_nearby_minimal():
+    """recall_nearby() sends the point plus the documented radius/k defaults."""
+    client = _make_initialized_client()
+
+    try:
+        with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+            mock.return_value = {"results": []}
+            await client.recall_nearby(context_id="ctx", lat=35.68, lon=139.76)
+            name, args = mock.call_args.args[0], mock.call_args.args[1]
+            assert name == "recall_nearby"
+            assert args == {
+                "context_id": "ctx",
+                "lat": 35.68,
+                "lon": 139.76,
+                "radius_m": 1000,
+                "k": 20,
+            }
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_recall_nearby_passes_all_params():
+    """recall_nearby() forwards an explicit radius and k."""
+    client = _make_initialized_client()
+
+    try:
+        with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+            mock.return_value = {"results": []}
+            await client.recall_nearby(
+                context_id="ctx", lat=-33.87, lon=151.21, radius_m=5000, k=50
+            )
+            args = mock.call_args.args[1]
+            assert args["lat"] == -33.87
+            assert args["lon"] == 151.21
+            assert args["radius_m"] == 5000
+            assert args["k"] == 50
+    finally:
+        await client.close()
+
+
+@pytest.mark.parametrize(
+    ("lat", "lon"),
+    [(91.0, 0.0), (-91.0, 0.0), (0.0, 181.0), (0.0, -181.0)],
+)
+@pytest.mark.asyncio
+async def test_recall_nearby_rejects_out_of_range_coordinates(lat, lon):
+    """recall_nearby() rejects impossible coordinates locally instead of round-tripping a 422."""
+    client = _make_initialized_client()
+
+    try:
+        with pytest.raises(ValueError, match="lat|lon"):
+            await client.recall_nearby(context_id="ctx", lat=lat, lon=lon)
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_recall_nearby_accepts_boundary_coordinates():
+    """The poles and the antimeridian are valid points, not errors."""
+    client = _make_initialized_client()
+
+    try:
+        with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+            mock.return_value = {"results": []}
+            await client.recall_nearby(context_id="ctx", lat=90.0, lon=180.0)
+            await client.recall_nearby(context_id="ctx", lat=-90.0, lon=-180.0)
+            assert mock.await_count == 2
+    finally:
+        await client.close()
+
+
+# ============================================================================
 # recall trust_tier filter (provenance, #173)
 # ============================================================================
 
@@ -2310,6 +2485,7 @@ _ERROR_TRANSLATING_METHODS = [
     ("remember", lambda c: c.remember(context_id="c", summary="s", content="x")),
     ("recall", lambda c: c.recall(context_id="c", query="q")),
     ("recall_upcoming", lambda c: c.recall_upcoming(context_id="c")),
+    ("recall_nearby", lambda c: c.recall_nearby(context_id="c", lat=0.0, lon=0.0)),
     ("load_pinned", lambda c: c.load_pinned(context_id="c")),
     ("list_contexts", lambda c: c.list_contexts()),
     ("explore", lambda c: c.explore(context_id="c", memory_id="m")),
@@ -3202,6 +3378,51 @@ async def test_list_tags_passes_all_params():
         assert args["min_count"] == 5
         assert args["sort"] == "recent"
         assert args["prefix"] == "auth"
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_list_tags_passes_with_tags():
+    """Issue #244: with_tags reaches the server so faceted drill-down is possible."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = _list_tags_envelope()
+        await client.list_tags(
+            context_id="ctx-1",
+            prefix="when:",
+            with_tags=["client:acme.co.jp", "kind:invoice"],
+        )
+        args = mock.call_args[0][1]
+        assert args["with_tags"] == ["client:acme.co.jp", "kind:invoice"]
+        assert args["prefix"] == "when:"
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_list_tags_omits_with_tags_when_none():
+    """Issue #244: with_tags is omitted when unset, leaving existing calls byte-identical."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = _list_tags_envelope()
+        await client.list_tags(context_id="ctx-1")
+        assert "with_tags" not in mock.call_args[0][1]
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_list_tags_omits_empty_with_tags():
+    """Issue #244: an empty with_tags list is not a drill-down — omit rather than send []."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = _list_tags_envelope()
+        await client.list_tags(context_id="ctx-1", with_tags=[])
+        assert "with_tags" not in mock.call_args[0][1]
 
     await client.close()
 

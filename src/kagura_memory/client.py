@@ -9,7 +9,13 @@ import httpx
 from pydantic import BaseModel as _BaseModel
 
 from ._auth import _resolve_auth, _StaticAuth
-from ._http import SDK_VERSION, base_url_from_mcp, raise_for_kagura_status, validate_https_url
+from ._http import (
+    SDK_VERSION,
+    base_url_from_mcp,
+    raise_for_kagura_status,
+    validate_https_url,
+    validate_lat_lon,
+)
 from .exceptions import (
     KaguraConnectionError,
     KaguraError,
@@ -314,6 +320,7 @@ class KaguraClient:
         details: dict[str, Any] | None = None,
         context: dict[str, Any] | None = None,
         delivery_mode: Literal["always", "on_recall", "on_trigger"] = "on_recall",
+        supersedes: str | None = None,
     ) -> dict[str, Any]:
         """Call remember MCP tool.
 
@@ -352,6 +359,15 @@ class KaguraClient:
                 an unset value stays forward-compatible. Keyword-only in
                 practice — keep passing it by name. (Appended at the end of the
                 signature so existing positional callers are unaffected.)
+            supersedes: UUID of a memory this one replaces. The old memory is
+                **shadowed, not deleted**: it drops out of default
+                :meth:`recall` but stays reachable via
+                ``recall(include_superseded=True)`` and :meth:`explore`, and
+                deleting the edge restores it. Prefer this
+                over :meth:`forget` + :meth:`remember` when storing a newer
+                version of a fact — that pair destroys the history the
+                supersede edge exists to preserve. Requires memory-cloud
+                server v0.45.0+ (#1208).
 
         Returns:
             API response with ``memory_id``.
@@ -383,6 +399,8 @@ class KaguraClient:
             arguments["linked_memory_ids"] = linked_memory_ids
         if linked_source_uris is not None:
             arguments["linked_source_uris"] = linked_source_uris
+        if supersedes is not None:
+            arguments["supersedes"] = supersedes
 
         return await self._call_tool_checked("remember", arguments)
 
@@ -396,6 +414,7 @@ class KaguraClient:
         search_mode: str | None = None,
         context_ids: list[str] | None = None,
         include_explore_hints: bool = False,
+        include_superseded: bool = False,
     ) -> dict[str, Any]:
         """
         Call recall MCP tool.
@@ -426,6 +445,13 @@ class KaguraClient:
                 graph discovery hints in the response under the
                 ``explore_hints`` key — useful as seeds for a follow-up
                 :meth:`explore` call.
+            include_superseded: When True, also return memories shadowed by a
+                ``supersedes`` edge, annotated with ``superseded_by``. Default
+                recall demotes them, so this is how you read the history that
+                :meth:`remember` (``supersedes=...``) deliberately preserves —
+                without it, superseding would be a one-way door. Note this is a
+                top-level argument, **not** a ``filters`` key. Requires
+                memory-cloud server v0.45.0+ (#1208).
 
         Returns:
             API response with results list
@@ -461,6 +487,8 @@ class KaguraClient:
             arguments["search_mode"] = search_mode
         if include_explore_hints:
             arguments["include_explore_hints"] = True
+        if include_superseded:
+            arguments["include_superseded"] = True
         return await self._call_tool_checked("recall", arguments)
 
     async def recall_upcoming(
@@ -499,6 +527,55 @@ class KaguraClient:
         if until is not None:
             arguments["until"] = until
         return await self._call_tool_checked("recall_upcoming", arguments)
+
+    async def recall_nearby(
+        self,
+        context_id: str,
+        lat: float,
+        lon: float,
+        *,
+        radius_m: float = 1000,
+        k: int = 20,
+    ) -> dict[str, Any]:
+        """List memories near a geographic point, nearest first with ``distance_m``.
+
+        Calls the ``recall_nearby`` MCP tool. This is the WHERE-axis mirror of
+        :meth:`recall_upcoming`: a **deterministic spatial query** over stored
+        coordinates — not semantic search and with no Hebbian side-effects — so
+        it is distinct from :meth:`recall`. Attach a location with
+        ``remember(details={"location": {"lat": ..., "lon": ..., "label": ...}})``;
+        any memory type can carry one.
+
+        Requires memory-cloud server v0.53.0+ (#1331); older servers return an
+        MCP "tool not found". See :meth:`update_memory` for the caveat about
+        revising a memory that carries a location.
+
+        Args:
+            context_id: Target context UUID.
+            lat: Query latitude, -90 to 90. Must be a JSON number — the server
+                rejects string-typed numerics with a 422 by design.
+            lon: Query longitude, -180 to 180. Same numeric requirement.
+            radius_m: Search radius in meters (default 1000). The server clamps
+                this to [1, 1000000] rather than rejecting out-of-range values.
+            k: Maximum results (default 20, server max 100).
+
+        Returns:
+            API response with ``results`` — memories whose stored location falls
+            within the radius, nearest first, each carrying ``distance_m``.
+
+        Raises:
+            ValueError: If ``lat`` or ``lon`` is outside its valid range.
+        """
+        validate_lat_lon(lat, lon)
+
+        arguments: dict[str, Any] = {
+            "context_id": context_id,
+            "lat": lat,
+            "lon": lon,
+            "radius_m": radius_m,
+            "k": k,
+        }
+        return await self._call_tool_checked("recall_nearby", arguments)
 
     async def load_pinned(
         self,
@@ -1060,6 +1137,7 @@ class KaguraClient:
         min_count: int = 1,
         sort: Literal["count", "recent", "alpha"] = "count",
         prefix: str = "",
+        with_tags: list[str] | None = None,
     ) -> ListTagsResponse:
         """List the tag vocabulary in a context with usage counts and recency.
 
@@ -1081,6 +1159,22 @@ class KaguraClient:
             sort: Sort order — ``"count"`` (default), ``"recent"``, or ``"alpha"``.
             prefix: Case-insensitive prefix filter for autocomplete-style lookup.
                 ``%`` and ``_`` are treated as literals server-side. Max 200 chars.
+            with_tags: Multi-tag AND drill-down. Restricts the count to memories
+                whose tags contain **all** of these values, and excludes the
+                ``with_tags`` values themselves from the returned vocabulary.
+                This is the primitive for faceted browsing — each level is one
+                server-side aggregation, with no local index::
+
+                    await client.list_tags(ctx, prefix="client:")
+                    await client.list_tags(
+                        ctx, prefix="when:", with_tags=["client:acme.co.jp"]
+                    )
+                    await client.recall(
+                        ctx, query=..., filters={"tags": [...], "tags_match": "all"}
+                    )
+
+                Requires memory-cloud server v0.17.2+ (#830). Omitted when
+                empty or unset.
 
         Returns:
             :class:`ListTagsResponse` with ``context_id``, ``context_name``,
@@ -1106,6 +1200,10 @@ class KaguraClient:
         }
         if prefix:
             arguments["prefix"] = prefix
+        # An empty list is not a drill-down; omit rather than send [] so the
+        # server keeps its unfiltered behaviour.
+        if with_tags:
+            arguments["with_tags"] = with_tags
         result = await self._call_tool_checked("list_tags", arguments)
         return ListTagsResponse.model_validate(result)
 
@@ -1190,6 +1288,7 @@ class KaguraClient:
         tags: list[str] | None = None,
         context_summary: str | None = None,
         delivery_mode: Literal["always", "on_recall", "on_trigger"] | None = None,
+        details: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Update an existing memory in-place or upsert by external ID.
 
@@ -1216,6 +1315,11 @@ class KaguraClient:
                 promoted to ``scope="persistent"``); ``"on_recall"`` unpins it
                 (back to probabilistic :meth:`recall`; the memory stays
                 persistent). Omit to leave the current delivery mode unchanged.
+            details: Updated structured details JSON. **Replaces ``details``
+                wholesale** — the server does not deep-merge, so read the
+                current value with :meth:`reference` and re-send every key you
+                want to keep (notably ``location``, which otherwise drops off
+                :meth:`recall_nearby`). Omit to leave details unchanged.
 
         Returns:
             API response with updated memory info.
@@ -1244,6 +1348,8 @@ class KaguraClient:
             arguments["context_summary"] = context_summary
         if delivery_mode is not None:
             arguments["delivery_mode"] = delivery_mode
+        if details is not None:
+            arguments["details"] = details
         return await self._call_tool_checked("update_memory", arguments)
 
     async def forget(

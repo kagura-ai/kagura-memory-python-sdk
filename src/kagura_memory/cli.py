@@ -16,6 +16,7 @@ from ._auth import (
     _resolve_auth,
     _StaticAuth,
 )
+from ._http import validate_lat_lon
 from .auth.cli import auth as _auth_group
 from .client import KaguraClient
 from .config import load_config
@@ -73,6 +74,81 @@ def _parse_tags(tags: str | None) -> list[str] | None:
         return None
     parsed = [t.strip() for t in tags.split(",") if t.strip()]
     return parsed or None
+
+
+def _parse_details(details: str | None) -> dict[str, Any] | None:
+    """Parse a --details JSON object string into a dict, or None if empty.
+
+    Blank (or whitespace-only) means unset, matching :func:`_parse_tags` — a
+    shell expansion of an empty variable should not be a usage error.
+
+    Raises:
+        click.UsageError: If the string is not valid JSON, or is valid JSON but
+            not an object (the MCP tool's ``details`` is typed ``object``).
+    """
+    if details is None or not details.strip():
+        return None
+    try:
+        parsed = json.loads(details)
+    except json.JSONDecodeError as e:
+        raise click.UsageError(f"Invalid JSON for --details: {_exc_message(e)}") from e
+    if not isinstance(parsed, dict):
+        raise click.UsageError(
+            f"--details must be a JSON object, got {type(parsed).__name__}. "
+            'Example: --details \'{"location": {"lat": 35.68, "lon": 139.76}}\''
+        )
+    return parsed
+
+
+def _parse_location(location: str | None) -> dict[str, Any] | None:
+    """Parse ``lat,lon[,label]`` into a ``details.location`` payload, or None.
+
+    Blank (or whitespace-only) means unset, matching :func:`_parse_tags` and
+    :func:`_parse_details`, rather than failing with a confusing arity error.
+
+    Raises:
+        click.UsageError: On wrong arity, non-numeric coordinates, or
+            coordinates outside their valid range.
+    """
+    if location is None or not location.strip():
+        return None
+    parts = [p.strip() for p in location.split(",")]
+    if len(parts) not in (2, 3):
+        raise click.UsageError(f"--location must be 'lat,lon' or 'lat,lon,label', got {location!r}")
+    try:
+        lat, lon = float(parts[0]), float(parts[1])
+    except ValueError as e:
+        raise click.UsageError(
+            f"--location lat/lon must be numbers, got {parts[0]!r},{parts[1]!r}"
+        ) from e
+    # Same range rule as KaguraClient.recall_nearby — one definition, two surfaces.
+    try:
+        validate_lat_lon(lat, lon)
+    except ValueError as e:
+        raise click.UsageError(f"--location {_exc_message(e)}") from e
+
+    payload: dict[str, Any] = {"lat": lat, "lon": lon}
+    if len(parts) == 3 and parts[2]:
+        payload["label"] = parts[2]
+    return payload
+
+
+def _build_details(details: str | None, location: str | None) -> dict[str, Any] | None:
+    """Combine --details and --location into a single details payload.
+
+    ``--location`` is a shorthand that writes ``details.location``. Supplying
+    both a ``location`` key in --details and --location is rejected rather than
+    silently resolved, so neither value is quietly dropped.
+    """
+    parsed = _parse_details(details)
+    loc = _parse_location(location)
+    if loc is None:
+        return parsed
+    if parsed and "location" in parsed:
+        raise click.UsageError(
+            "--location conflicts with the 'location' key in --details. Use one or the other."
+        )
+    return {**(parsed or {}), "location": loc}
 
 
 def _run_client_command(
@@ -260,6 +336,16 @@ def doctor(profile, json_output):
     "--linked-source-uris",
     help="Comma-separated source URIs to resolve to memories and link",
 )
+@click.option(
+    "--details",
+    help="Structured details as an inline JSON object. Coordinates live under "
+    "the 'location' key and must be JSON numbers, not strings: "
+    '\'{"location": {"lat": 35.68, "lon": 139.76}}\'',
+)
+@click.option(
+    "--location",
+    help="Shorthand for details.location: 'lat,lon' or 'lat,lon,label'",
+)
 def remember(
     context_id,
     summary,
@@ -271,16 +357,25 @@ def remember(
     source_type,
     linked_memory_ids,
     linked_source_uris,
+    details,
+    location,
 ):
     """
     Store a memory directly (without AI analysis).
+
+    Coordinates in --details must be JSON numbers, not strings: the server
+    rejects string-typed lat/lon with a 422 by design. Note that updating a
+    memory replaces details wholesale, so re-send location when you revise it.
 
     Examples:
       kagura remember -s "FastAPI DI pattern" --content "Use Depends()..."
       kagura remember -c dev -s "OAuth2 setup" --content "..." --tags "auth,oauth"
       kagura remember -s "Spec" --content "$(cat spec.md)" \\
         --source-uri file:///spec.md --source-type file
+      kagura remember -s "Coffee with Sato" --content "..." \\
+        --location "35.68,139.76,Tokyo HQ"
     """
+    details_payload = _build_details(details, location)
 
     async def op(client: KaguraClient, ctx: str) -> dict[str, Any]:
         return await client.remember(
@@ -294,6 +389,7 @@ def remember(
             source_type=source_type,
             linked_memory_ids=_parse_tags(linked_memory_ids),
             linked_source_uris=_parse_tags(linked_source_uris),
+            details=details_payload,
         )
 
     _run_client_command(op, context_id)

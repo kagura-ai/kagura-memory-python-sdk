@@ -12,7 +12,12 @@ from unittest.mock import MagicMock
 import httpx
 import pytest
 
-from kagura_memory._http import extract_detail, normalize_uuid, validate_https_url
+from kagura_memory._http import (
+    extract_detail,
+    normalize_uuid,
+    validate_https_url,
+    validate_lat_lon,
+)
 
 
 def _response_with_json(payload: object) -> MagicMock:
@@ -314,3 +319,80 @@ def test_detail_takes_precedence_over_message():
 def test_non_string_message_returns_empty():
     resp = _response_with_json({"error": "X", "message": 42, "details": {}})
     assert extract_detail(resp) == ""
+
+
+# ---------------------------------------------------------------------------
+# validate_lat_lon — one coordinate rule shared by recall_nearby + CLI --location
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("lat", "lon"),
+    [
+        (0.0, 0.0),
+        (35.68, 139.76),
+        (90.0, 180.0),  # poles / antimeridian are valid points, not errors
+        (-90.0, -180.0),
+        (0, 0),  # ints are numbers too
+    ],
+)
+def test_validate_lat_lon_accepts_valid_points(lat: float, lon: float):
+    """In-range coordinates, including the boundaries, must not raise."""
+    validate_lat_lon(lat, lon)
+
+
+@pytest.mark.parametrize(
+    ("lat", "lon", "expected"),
+    [
+        (91.0, 0.0, "lat"),
+        (-91.0, 0.0, "lat"),
+        (0.0, 181.0, "lon"),
+        (0.0, -181.0, "lon"),
+    ],
+)
+def test_validate_lat_lon_rejects_out_of_range(lat: float, lon: float, expected: str):
+    """Out-of-range coordinates raise, naming the offending axis."""
+    with pytest.raises(ValueError, match=expected):
+        validate_lat_lon(lat, lon)
+
+
+@pytest.mark.parametrize(
+    ("lat", "lon"),
+    [
+        (float("nan"), 0.0),
+        (0.0, float("nan")),
+        (float("inf"), 0.0),
+        (0.0, float("-inf")),
+    ],
+)
+def test_validate_lat_lon_rejects_nan_and_inf(lat: float, lon: float):
+    """NaN/inf must not reach the server as a coordinate.
+
+    This depends on the ``not -90 <= lat <= 90`` form: every comparison against
+    NaN is False, so the chain is False and ``not`` makes it raise. The
+    equivalent-looking ``lat < -90 or lat > 90`` would let NaN through — do not
+    "simplify" the guard into that shape.
+    """
+    with pytest.raises(ValueError, match="lat|lon"):
+        validate_lat_lon(lat, lon)
+
+
+@pytest.mark.parametrize(
+    ("lat", "lon"),
+    [
+        ("35.68", 139.76),  # the exact footgun the server 422s on
+        (35.68, "139.76"),
+        (None, 0.0),
+        (0.0, None),
+        ([35.68], 0.0),
+        (True, 0.0),  # bool is an int subclass, but never a coordinate
+    ],
+)
+def test_validate_lat_lon_rejects_non_numeric(lat: object, lon: object):
+    """Non-numeric coordinates raise ValueError, not an opaque TypeError.
+
+    A stringified coordinate must fail here rather than on the wire: coercing
+    ``"35.68"`` would only move the server's 422 somewhere less debuggable.
+    """
+    with pytest.raises(ValueError, match="must be a number"):
+        validate_lat_lon(lat, lon)
