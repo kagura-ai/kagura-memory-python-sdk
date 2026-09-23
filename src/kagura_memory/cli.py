@@ -177,14 +177,15 @@ def _require_context_id(context_id: str | None, config: dict[str, Any]) -> str:
     return ctx_id
 
 
-def _cli_error_message(e: BaseException) -> str:
+def _cli_error_message(e: BaseException, message: str | None = None) -> str:
     """The ``Error:`` text for a failed command — the message plus gate details (#256).
 
     A quota refusal adds when it resets, and a quota or feature gate the
     plan that lifts it (``display (key)`` when the server sent both), so the
-    operator does not have to dig them out of the prose.
+    operator does not have to dig them out of the prose. ``message``
+    replaces the first line when a command words the failure itself.
     """
-    lines = [_exc_message(e)]
+    lines = [_exc_message(e) if message is None else message]
     if isinstance(e, KaguraQuotaError) and e.resets_at is not None:
         lines.append(f"  Resets at: {e.resets_at.isoformat()}")
     if isinstance(e, (KaguraQuotaError, KaguraFeatureNotAvailableError)):
@@ -1484,7 +1485,7 @@ def guardrails_digest(context_id, target, out_path, profile, tools):
     except click.ClickException:
         raise
     except Exception as e:
-        raise click.ClickException(_exc_message(e)) from e
+        raise click.ClickException(_cli_error_message(e)) from e
     click.echo(
         json.dumps(
             {
@@ -2460,9 +2461,12 @@ def files_upload(
             # The upload already succeeded — surface the file_id so the user
             # knows the file_object exists and does not re-upload a duplicate.
             raise click.ClickException(
-                f"File uploaded (file_id={file_obj.id}), but creating the linked "
-                f"memory failed: {_exc_message(e)}. The file_object is stored; "
-                f"retry the memory write separately or reference it by file_id."
+                _cli_error_message(
+                    e,
+                    f"File uploaded (file_id={file_obj.id}), but creating the linked "
+                    f"memory failed: {_exc_message(e)}. The file_object is stored; "
+                    f"retry the memory write separately or reference it by file_id.",
+                )
             ) from e
         return json.dumps(
             {"file": file_obj.model_dump(mode="json"), "memory": memory},

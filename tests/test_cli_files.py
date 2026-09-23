@@ -308,6 +308,45 @@ def test_files_upload_remember_failure_still_reports_file_id(
     assert SAMPLE_FILE_ID in result.output
 
 
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+@patch("kagura_memory.cli.FilesClient")
+def test_files_upload_remember_quota_failure_shows_the_gate_lines(
+    mock_files_cls, mock_kagura_cls, mock_config, tmp_path
+):
+    """#256: the linked-memory wrapper keeps the reset time and required plan."""
+    from datetime import UTC, datetime
+
+    from kagura_memory.exceptions import KaguraQuotaError
+
+    mock_config.return_value = {
+        "api_key": "key",
+        "mcp_url": "https://test.com/mcp",
+        "context_id": SAMPLE_CTX_ID,
+    }
+    mock_files = _mock_files_client("upload", _file_object())
+    _wire_files_client_mock(mock_files_cls, mock_files)
+    mock_kagura = _mock_kagura_client(mock_kagura_cls)
+    mock_kagura.remember.side_effect = KaguraQuotaError(
+        "remember failed (quota_exceeded): Daily memory limit reached.",
+        quota_type="memories_per_day",
+        resets_at=datetime(2099, 1, 2, tzinfo=UTC),
+        required_plan="pro",
+        required_plan_display="L",
+    )
+
+    p = tmp_path / "hello.txt"
+    p.write_text("hi")
+
+    result = CliRunner().invoke(main, ["files", "upload", str(p), "--remember"])
+
+    assert result.exit_code != 0
+    assert f"File uploaded (file_id={SAMPLE_FILE_ID})" in result.output
+    assert "Daily memory limit reached" in result.output
+    assert "Resets at: 2099-01-02T00:00:00+00:00" in result.output
+    assert "Required plan: L (pro)" in result.output
+
+
 @pytest.mark.parametrize(
     "bad_result",
     [

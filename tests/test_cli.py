@@ -1418,7 +1418,7 @@ def test_sleep_history_drift_is_a_clean_error_naming_the_operation(monkeypatch):
 _ROLLBACK_SUMMARY = {
     "edges_deleted": 3,
     "merges_reversed": 1,
-    "merges_unreversible": 2,
+    "merges_unreversible": 0,
     "importance_restored": 4,
     "promotions_reversed": 1,
     "importance_kept": 1,
@@ -1450,7 +1450,7 @@ def test_sleep_rollback_shows_the_unreversible_and_kept_counters(rollback_mcp):
     }
     result = CliRunner().invoke(main, ["sleep", "rollback", "ctx-1", "rid-9", "-y"])
     assert result.exit_code == 0, result.output
-    assert '"merges_unreversible": 2' in result.output
+    assert '"merges_unreversible": 0' in result.output
     assert '"importance_kept": 1' in result.output
     assert '"promotions_kept": 5' in result.output
 
@@ -1462,15 +1462,36 @@ def test_sleep_rollback_partial_prints_what_was_reversed(rollback_mcp):
         "error": "partial_rollback",
         "message": "Rollback completed with 1 error(s).",
         "report_id": "rid-9",
-        "rollback_summary": {**_ROLLBACK_SUMMARY, "errors": ["Action 42 (merge): db error"]},
+        "rollback_summary": {
+            **_ROLLBACK_SUMMARY,
+            "merges_unreversible": 1,
+            "errors": ["shadow merge m-1 → m-2 not reversed"],
+        },
     }
     result = CliRunner().invoke(main, ["sleep", "rollback", "ctx-1", "rid-9", "-y"])
     assert result.exit_code != 0
     assert '"error": "partial_rollback"' in result.output
     assert '"merges_reversed": 1' in result.output
-    assert '"merges_unreversible": 2' in result.output
-    assert "Action 42 (merge): db error" in result.output
+    assert '"merges_unreversible": 1' in result.output
+    assert "shadow merge m-1 → m-2 not reversed" in result.output
     assert "Error: rollback_sleep_run failed (partial_rollback)" in result.output
+
+
+def test_sleep_rollback_partial_with_an_unreadable_summary(rollback_mcp):
+    """Summary drift still reports the partial rollback, with a null summary."""
+    rollback_mcp.return_value = {
+        "status": "error",
+        "error": "partial_rollback",
+        "message": "Rollback completed with 1 error(s).",
+        "report_id": "rid-9",
+        "rollback_summary": {"edges_deleted": "three"},
+    }
+    result = CliRunner().invoke(main, ["sleep", "rollback", "ctx-1", "rid-9", "-y"])
+    assert result.exit_code != 0
+    assert '"rollback_summary": null' in result.output
+    assert "(partial_rollback)" in result.output
+    assert "rollback_summary could not be read" in result.output
+    assert "Traceback" not in result.output
 
 
 @patch("kagura_memory.cli.load_config")
@@ -1520,6 +1541,28 @@ def test_feature_error_shows_required_plan(monkeypatch):
     assert "Feature 'resources' not available on M plan." in result.output
     assert "Required plan: promax" in result.output
     assert "Resets at" not in result.output
+
+
+def test_guardrails_digest_quota_error_shows_the_gate_lines():
+    """The REST guardrails digest renders the gate lines like the shared runners."""
+    from kagura_memory.exceptions import KaguraQuotaError
+
+    config = {"api_key": "key", "mcp_url": "https://test.com/mcp", "context_id": "ctx-1"}
+    client = AsyncMock()
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=None)
+    client.get_guardrail_digest.side_effect = KaguraQuotaError(
+        "Daily MCP quota exceeded.", 86400, quota_type="api_mcp_daily", required_plan="pro"
+    )
+    with (
+        patch("kagura_memory.cli.load_config", return_value=config),
+        patch("kagura_memory.cli.MemoryClient") as mock_cls,
+    ):
+        mock_cls._from_resolved_auth.return_value = client
+        result = CliRunner().invoke(main, ["guardrails", "digest", "ctx-1"])
+    assert result.exit_code == 1
+    assert "Error: Daily MCP quota exceeded." in result.output
+    assert "Required plan: pro" in result.output
 
 
 @patch("kagura_memory.cli.load_config")
