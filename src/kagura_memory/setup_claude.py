@@ -14,7 +14,7 @@ from urllib.parse import parse_qsl, urlsplit, urlunsplit
 import click
 
 from . import claude_code
-from ._http import mcp_url_has_tools_allowlist, mcp_url_with_query
+from ._http import mcp_url_guardrails_off, mcp_url_has_tools_allowlist, mcp_url_with_query
 from .auth.credentials import CredentialsFile, OAuthCredentials
 from .claude_code import (
     MCP_API_KEY_ENV,
@@ -743,8 +743,7 @@ def _resolve_extras(
 def _plugin_server_url(upstream_url: str) -> str:
     """The plugin's ``server_url``: the MCP URL with only ``guardrails=off`` kept in its query."""
     parts = urlsplit(upstream_url)
-    values = [v for k, v in parse_qsl(parts.query, keep_blank_values=True) if k == "guardrails"]
-    query = "guardrails=off" if values and values[0].strip().lower() == "off" else ""
+    query = "guardrails=off" if mcp_url_guardrails_off(upstream_url) else ""
     return urlunsplit(parts._replace(query=query, fragment=""))
 
 

@@ -18,6 +18,7 @@ from kagura_memory._http import (
     jsonrpc_error_body,
     mcp_session_expired,
     mcp_session_header,
+    mcp_url_guardrails_off,
     mcp_url_has_tools_allowlist,
     mcp_url_with_query,
     normalize_guardrails,
@@ -529,6 +530,22 @@ def test_base_url_from_mcp_drops_query_and_fragment(mcp_url: str, expected: str)
 )
 def test_mcp_url_has_tools_allowlist(url: str, expected: bool):
     assert mcp_url_has_tools_allowlist(url) is expected
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("https://h/mcp?guardrails=off", True),
+        ("https://h/mcp?profile=core&guardrails=%20OFF", True),
+        ("https://h/mcp?guardrails=off&guardrails=x", True),
+        ("https://h/mcp?guardrails=x&guardrails=off", False),  # the server reads the first
+        ("https://h/mcp?guardrails=offline", False),
+        ("https://h/mcp?x=off", False),
+        ("https://h/mcp", False),
+    ],
+)
+def test_mcp_url_guardrails_off(url: str, expected: bool):
+    assert mcp_url_guardrails_off(url) is expected
 
 
 def test_mcp_url_with_query_sets_both_keys_in_order():
