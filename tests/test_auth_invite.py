@@ -44,6 +44,9 @@ API = "https://api.example.com"
 DEVICE_URI = f"{WEB}/device"
 DEVICE_URI_COMPLETE = f"{WEB}/device?user_code=ABCD-1234"
 HAND_OFF_VERSION = (0, 76, 0)
+# make_oauth_client's default. Not httpx's own 5 s default, which would hide
+# a /system/info probe that forgot its short timeout.
+_OAUTH_TIMEOUT = 30.0
 
 
 @pytest.fixture
@@ -132,7 +135,9 @@ class _Server:
         return httpx.Response(200, json=self.info)
 
     def client_factory(self) -> Callable[..., httpx.AsyncClient]:
-        return lambda *_a, **_k: httpx.AsyncClient(transport=httpx.MockTransport(self))
+        return lambda *_a, **_k: httpx.AsyncClient(
+            transport=httpx.MockTransport(self), timeout=_OAUTH_TIMEOUT
+        )
 
 
 def _invoke(
@@ -409,7 +414,8 @@ def test_invite_support_without_a_features_object_is_unknown(hand_off_released):
 
 
 async def _fetch(handler: Callable[[httpx.Request], httpx.Response]) -> dict | None:
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport, timeout=_OAUTH_TIMEOUT) as client:
         return await fetch_system_info(client, f"{API}/")
 
 
@@ -422,6 +428,9 @@ async def test_fetch_system_info_returns_raw_json():
     assert str(request.url) == f"{API}/api/v1/system/info"
     assert request.method == "GET"
     assert "authorization" not in request.headers
+    # The device code is already ticking: the probe overrides the client's 30 s.
+    assert device_flow._SYSTEM_INFO_TIMEOUT_SEC == 5.0
+    assert request.extensions["timeout"] == dict.fromkeys(("connect", "read", "write", "pool"), 5.0)
 
 
 @pytest.mark.asyncio
@@ -528,6 +537,7 @@ def test_login_invite_link_host_comes_from_verification_uri_not_server(
     assert authorize.call_args.args[1] == API
     [probe] = server.requests
     assert str(probe.url) == f"{API}/api/v1/system/info"
+    assert probe.extensions["timeout"]["read"] == 5.0
     [opened] = browser.call_args.args
     assert opened.startswith(f"{WEB}/join/{SENTINEL}?return_to=")
     assert API not in opened
