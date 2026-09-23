@@ -755,8 +755,23 @@ def reference(context_id, memory_id):
 @click.option("--type", "-t", "memory_type", help="Updated memory type")
 @click.option("--importance", "-i", type=float, help="Updated importance 0.0-1.0")
 @click.option("--tags", help="Comma-separated tags")
+@click.option(
+    "--dismiss-supersede-candidate",
+    is_flag=True,
+    default=False,
+    help="Reject this memory's supersede_candidate suggestion (needs --memory-id; "
+    "server v0.65.0+, older servers drop it silently)",
+)
 def update_memory(
-    context_id, memory_id, external_id, summary, content, memory_type, importance, tags
+    context_id,
+    memory_id,
+    external_id,
+    summary,
+    content,
+    memory_type,
+    importance,
+    tags,
+    dismiss_supersede_candidate,
 ):
     """
     Update an existing memory or upsert by external ID.
@@ -766,11 +781,16 @@ def update_memory(
     Examples:
       kagura update-memory -m MEM_UUID -s "updated summary"
       kagura update-memory --external-id ext-key -s "summary" --content "..." -t note
+      kagura update-memory -m MEM_UUID --dismiss-supersede-candidate
     """
     if not memory_id and not external_id:
         raise click.ClickException("Either --memory-id or --external-id is required")
     if memory_id and external_id:
         raise click.ClickException("Provide only one of --memory-id or --external-id")
+    if dismiss_supersede_candidate and external_id:
+        raise click.ClickException(
+            "--dismiss-supersede-candidate requires --memory-id (not --external-id)"
+        )
 
     tag_list = _parse_tags(tags)
 
@@ -784,6 +804,7 @@ def update_memory(
             type=memory_type,
             importance=importance,
             tags=tag_list,
+            dismiss_supersede_candidate=dismiss_supersede_candidate,
         ),
         context_id,
     )
@@ -821,15 +842,35 @@ def context():
 
 
 @context.command(name="list")
-def context_list():
+@click.option(
+    "--name-contains",
+    help="Only contexts whose name or display name contains this text "
+    "(case-insensitive, max 100 chars)",
+)
+@click.option("--summary", is_flag=True, default=False, help="Add summaries (300-char preview)")
+@click.option(
+    "--details", is_flag=True, default=False, help="Add full summaries and embedding_model"
+)
+@click.option("--stats", is_flag=True, default=False, help="Add memory_count per context")
+def context_list(name_contains, summary, details, stats):
     """
     List available contexts.
 
+    Rows are slim by default (id, name, is_private, is_locked, last_used_at);
+    memory-cloud v0.73.0+ is needed for --name-contains/--summary/--details.
+
     Examples:
       kagura context list
+      kagura context list --name-contains auth --summary
+      kagura context list --stats
     """
     _run_client_command(
-        lambda client, _: client.list_contexts(),
+        lambda client, _: client.list_contexts(
+            name_contains=name_contains,
+            include_summary=summary,
+            include_details=details,
+            include_stats=stats,
+        ),
         context_id=None,
         needs_context=False,
     )
@@ -969,7 +1010,10 @@ def context_search_config(
 # Keep backward compat: kagura contexts → kagura context list
 @main.command()
 def contexts():
-    """List available contexts (alias for 'context list')."""
+    """List available contexts (short form of 'context list', without its options).
+
+    For --name-contains/--summary/--details/--stats use 'kagura context list'.
+    """
     _run_client_command(
         lambda client, _: client.list_contexts(),
         context_id=None,

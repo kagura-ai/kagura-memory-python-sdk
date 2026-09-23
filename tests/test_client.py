@@ -1424,6 +1424,168 @@ async def test_create_context_quota_exceeded_missing_count_limit(quota_response)
     await client.close()
 
 
+# Issue #255: the memory-cloud v0.73.0 slim list_contexts envelope (#1600).
+# Items carry only id/name/is_private/is_locked/last_used_at; ``count`` is quota
+# usage and ``total`` is the number of rows returned.
+def _slim_list_contexts_envelope(*, count: int, limit: int, can_create: bool) -> dict:
+    return {
+        "status": "success",
+        "contexts": [
+            {
+                "id": "ctx-1",
+                "name": "dev",
+                "is_private": True,
+                "is_locked": False,
+                "last_used_at": "2026-09-01T00:00:00Z",
+            }
+        ],
+        "count": count,
+        "total": 1,
+        "limit": limit,
+        "can_create": can_create,
+    }
+
+
+@pytest.mark.asyncio
+async def test_list_contexts_default_sends_no_arguments():
+    """Issue #255: a bare list_contexts() sends no options, so the server keeps its
+    slim default shape."""
+    client = _make_initialized_client()
+
+    try:
+        with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+            mock.return_value = _slim_list_contexts_envelope(count=1, limit=20, can_create=True)
+            await client.list_contexts()
+            assert mock.call_args.args == ("list_contexts", {})
+    finally:
+        await client.close()
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "expected"),
+    [
+        ({"name_contains": "auth"}, {"name_contains": "auth"}),
+        ({"include_summary": True}, {"include_summary": True}),
+        ({"include_details": True}, {"include_details": True}),
+        ({"include_stats": True}, {"include_stats": True}),
+        (
+            {
+                "name_contains": "auth",
+                "include_summary": True,
+                "include_details": True,
+                "include_stats": True,
+            },
+            {
+                "name_contains": "auth",
+                "include_summary": True,
+                "include_details": True,
+                "include_stats": True,
+            },
+        ),
+    ],
+    ids=["name_contains", "include_summary", "include_details", "include_stats", "all"],
+)
+@pytest.mark.asyncio
+async def test_list_contexts_sends_only_the_options_set(kwargs, expected):
+    """Issue #255: each list_contexts option is sent only when the caller sets it."""
+    client = _make_initialized_client()
+
+    try:
+        with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+            mock.return_value = _slim_list_contexts_envelope(count=1, limit=20, can_create=True)
+            await client.list_contexts(**kwargs)
+            assert mock.call_args.args == ("list_contexts", expected)
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_list_contexts_omits_empty_name_contains():
+    """Issue #255: an empty name_contains is not a filter, so it is not sent."""
+    client = _make_initialized_client()
+
+    try:
+        with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+            mock.return_value = _slim_list_contexts_envelope(count=1, limit=20, can_create=True)
+            await client.list_contexts(name_contains="")
+            assert mock.call_args.args == ("list_contexts", {})
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_list_contexts_options_are_keyword_only():
+    """Issue #255: the flags are keyword-only, so a positional bool cannot misroute."""
+    client = _make_initialized_client()
+
+    try:
+        with pytest.raises(TypeError):
+            await client.list_contexts("auth")
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_list_contexts_passes_through_empty_account_hint():
+    """Issue #255: the optional v0.75.0 ``hint`` (#1658) reaches the caller untouched."""
+    client = _make_initialized_client()
+    envelope = {
+        "status": "success",
+        "contexts": [],
+        "count": 0,
+        "total": 0,
+        "limit": 3,
+        "can_create": True,
+        "hint": "No contexts are visible to you yet.",
+    }
+
+    try:
+        with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+            mock.return_value = envelope
+            result = await client.list_contexts()
+            assert result["hint"] == "No contexts are visible to you yet."
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_create_context_precheck_accepts_slim_list_contexts_response():
+    """Issue #255: create_context's quota pre-check works on the v0.73.0 slim envelope.
+
+    The pre-check only reads can_create/count/limit, and calls list_contexts with
+    no options so it asks for the cheapest shape.
+    """
+    client = _make_initialized_client()
+
+    try:
+        with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+            mock.side_effect = [
+                _slim_list_contexts_envelope(count=1, limit=20, can_create=True),
+                {"id": "uuid-1", "name": "new-ctx"},
+            ]
+            result = await client.create_context(name="new-ctx")
+            assert result["name"] == "new-ctx"
+            assert mock.call_args_list[0].args == ("list_contexts", {})
+            assert mock.call_args_list[1].args[0] == "create_context"
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_create_context_precheck_raises_quota_error_on_slim_response():
+    """Issue #255: a slim envelope at its limit still raises KaguraQuotaError with count/limit."""
+    client = _make_initialized_client()
+
+    try:
+        with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+            mock.return_value = _slim_list_contexts_envelope(count=3, limit=3, can_create=False)
+            with pytest.raises(KaguraQuotaError, match=r"Context limit reached \(3/3\)"):
+                await client.create_context(name="over-limit")
+            mock.assert_awaited_once()
+    finally:
+        await client.close()
+
+
 @pytest.mark.asyncio
 async def test_update_context_with_resource_id_and_is_public():
     """update_context() should pass resource_id and is_public."""
@@ -1617,6 +1779,71 @@ async def test_update_memory_omits_details_when_none():
         assert "details" not in mock.call_args[0][1]
 
     await client.close()
+
+
+@pytest.mark.asyncio
+async def test_update_memory_sends_dismiss_supersede_candidate():
+    """Issue #255: a dismissal-only call sends the flag with memory_id and nothing else."""
+    client = _make_initialized_client()
+
+    try:
+        with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+            mock.return_value = {
+                "status": "success",
+                "memory_id": "mem-1",
+                "supersede_candidate_dismissed": "mem-old",
+            }
+            result = await client.update_memory(
+                context_id="ctx", memory_id="mem-1", dismiss_supersede_candidate=True
+            )
+            assert mock.call_args.args == (
+                "update_memory",
+                {"context_id": "ctx", "memory_id": "mem-1", "dismiss_supersede_candidate": True},
+            )
+            assert result["supersede_candidate_dismissed"] == "mem-old"
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_update_memory_omits_dismiss_supersede_candidate_by_default():
+    """Issue #255: the dismiss flag is not sent unless the caller sets it."""
+    client = _make_initialized_client()
+
+    try:
+        with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+            mock.return_value = {"status": "success", "memory_id": "mem-1"}
+            await client.update_memory(
+                context_id="ctx",
+                memory_id="mem-1",
+                summary="s",
+                dismiss_supersede_candidate=False,
+            )
+            assert "dismiss_supersede_candidate" not in mock.call_args.args[1]
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_update_memory_rejects_dismiss_with_external_id_before_network():
+    """Issue #255: the server rejects the dismiss flag on an external_id upsert, so the
+    SDK raises the same ValueError before any network call."""
+    client = _make_initialized_client()
+
+    try:
+        with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+            with pytest.raises(ValueError, match="dismiss_supersede_candidate requires memory_id"):
+                await client.update_memory(
+                    context_id="ctx",
+                    external_id="ext-key",
+                    summary="upserted summary",
+                    content="c",
+                    type="note",
+                    dismiss_supersede_candidate=True,
+                )
+            mock.assert_not_awaited()
+    finally:
+        await client.close()
 
 
 @pytest.mark.asyncio
@@ -2427,6 +2654,38 @@ async def test_recall_upcoming_omits_bounds_when_none():
             assert "from" not in args
             assert "until" not in args
             assert args["k"] == 20
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_recall_upcoming_omits_include_details_by_default():
+    """Issue #255: include_details is not sent unless set, so items keep the lean
+    v0.73.0 ``trigger`` shape (#1599)."""
+    client = _make_initialized_client()
+
+    try:
+        with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+            mock.return_value = {"status": "success", "results": []}
+            await client.recall_upcoming(context_id="ctx", include_details=False)
+            assert "include_details" not in mock.call_args.args[1]
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_recall_upcoming_sends_include_details_when_set():
+    """Issue #255: include_details=True opts back into the full ``details`` per item."""
+    client = _make_initialized_client()
+
+    try:
+        with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+            mock.return_value = {"status": "success", "results": []}
+            await client.recall_upcoming(context_id="ctx", include_details=True)
+            assert mock.call_args.args == (
+                "recall_upcoming",
+                {"context_id": "ctx", "k": 20, "include_details": True},
+            )
     finally:
         await client.close()
 
