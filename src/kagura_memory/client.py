@@ -22,6 +22,7 @@ from ._http import (
     parse_response,
     parse_response_list,
     raise_for_kagura_status,
+    validate_coordinate,
     validate_https_url,
     validate_lat_lon,
 )
@@ -2654,11 +2655,13 @@ class KaguraClient:
             ``has_more``.
 
         Raises:
+            ValueError: If a bbox bound is non-numeric or out of range — checked
+                locally, as :meth:`recall_nearby` checks its point, since the
+                server would only 422 it.
             KaguraAuthError: Authentication failed.
             KaguraConnectionError: Network failure or non-2xx response — e.g. a
                 ``context_id`` that does not exist or is not accessible
-                surfaces as ``HTTP 404``, and an out-of-range bbox bound as
-                ``HTTP 422``.
+                surfaces as ``HTTP 404``.
         """
         params: dict[str, Any] = {"limit": limit, "offset": offset}
         if context_id is not None:
@@ -2679,8 +2682,17 @@ class KaguraClient:
         if order_by is not None:
             params["order_by"] = order_by
         # `is not None`, not truthiness: 0.0 (equator / prime meridian) is a bound.
-        bbox = {"lat_min": lat_min, "lat_max": lat_max, "lon_min": lon_min, "lon_max": lon_max}
-        params.update({key: bound for key, bound in bbox.items() if bound is not None})
+        # Each bound is range-checked on its own; the pair ordering is not, since
+        # lon_min > lon_max is the valid antimeridian box.
+        for key, bound, max_abs in (
+            ("lat_min", lat_min, 90),
+            ("lat_max", lat_max, 90),
+            ("lon_min", lon_min, 180),
+            ("lon_max", lon_max, 180),
+        ):
+            if bound is not None:
+                validate_coordinate(key, bound, max_abs)
+                params[key] = bound
         return await self._rest_get("/api/v1/memory/list", MemoryListResponse, params=params)
 
     @staticmethod

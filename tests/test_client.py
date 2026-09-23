@@ -2779,6 +2779,52 @@ async def test_list_memories_bbox_antimeridian_box_passes_through():
 
 
 @pytest.mark.asyncio
+async def test_list_memories_bbox_range_edges_are_forwarded():
+    """±90 / ±180 are inside the range — the whole globe is a valid box."""
+    client = _make_initialized_client()
+
+    try:
+        with patch.object(client._client, "get", new_callable=AsyncMock) as mock_get:
+            mock_get.return_value = _memory_list_response_mock()
+            await client.list_memories(lat_min=-90, lat_max=90, lon_min=-180, lon_max=180.0)
+            params = mock_get.call_args.kwargs["params"]
+            assert {k: params[k] for k in _BBOX_KEYS} == {
+                "lat_min": -90,
+                "lat_max": 90,
+                "lon_min": -180,
+                "lon_max": 180.0,
+            }
+    finally:
+        await client.close()
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"lat_min": -90.5}, "lat_min must be between -90 and 90"),
+        ({"lat_max": 91}, "lat_max must be between -90 and 90"),
+        ({"lon_min": -181.0}, "lon_min must be between -180 and 180"),
+        ({"lon_max": 180.1}, "lon_max must be between -180 and 180"),
+        ({"lat_min": float("nan")}, "lat_min must be between"),
+        ({"lon_max": "140"}, "lon_max must be a number"),
+        ({"lat_max": True}, "lat_max must be a number"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_list_memories_bbox_bad_bound_rejected_locally(kwargs, match):
+    """A bound the server would 422 raises ValueError before any request, like recall_nearby."""
+    client = _make_initialized_client()
+
+    try:
+        with patch.object(client._client, "get", new_callable=AsyncMock) as mock_get:
+            with pytest.raises(ValueError, match=match):
+                await client.list_memories(**kwargs)
+            mock_get.assert_not_awaited()
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
 async def test_list_memories_bbox_omitted_when_none():
     """No bbox bound is sent when none is set (existing calls are unchanged)."""
     client = _make_initialized_client()
