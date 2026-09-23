@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 import uuid
 from collections.abc import Mapping
-from datetime import datetime
+from datetime import UTC, datetime, time, timedelta
 from importlib.metadata import version as _pkg_version
 from typing import Any, NoReturn, TypeVar
 
@@ -205,8 +205,14 @@ def _retry_after_seconds(response: httpx.Response) -> int | None:
 _FEATURE_GATES = frozenset({"plan", "allowlist", "deployment"})
 _FEATURE_CODES = frozenset({"plan_required", "feature_not_available", "FEAT-001"})
 _QUOTA_CODES = frozenset({"quota_exceeded", "QUOTA-001"})
+# The daily MCP call cap every non-read-only tool checks in-band. It carries
+# no ``gate`` and names its counts ``used_today`` / ``daily_limit``; the cap
+# counts calls per UTC day.
+_MCP_DAILY_CAP_CODE = "rate_limit_exceeded"
 # Each names exactly one cap, so the code alone makes it a quota refusal.
-_SINGLE_CAP_QUOTA_CODES = frozenset({"QUOTA-002", "CONNECTOR-001"})
+_SINGLE_CAP_QUOTA_CODES = frozenset({"QUOTA-002", "CONNECTOR-001", _MCP_DAILY_CAP_CODE})
+# Envelope keys that frame an MCP refusal rather than describe it.
+_ENVELOPE_KEYS = frozenset({"status", "error", "message"})
 # memory-cloud's frozen ``quota_type`` vocabulary (``QUOTA_TYPES``). A quota
 # refusal naming one is a tier quota even from a server without ``gate``.
 _TIER_QUOTA_TYPES = frozenset(
@@ -268,7 +274,9 @@ def gate_error(
     ``feature_not_available`` and ``FEAT-001`` are feature gates;
     ``quota_exceeded`` and ``QUOTA-001`` are quotas only when they name a
     known ``quota_type`` or a retry window, because the same code also
-    covers limits no plan lifts, such as the 1 MB memory-size guard.
+    covers limits no plan lifts, such as the 1 MB memory-size guard. MCP
+    ``rate_limit_exceeded`` (the daily MCP call cap) is the
+    ``api_mcp_daily`` quota, resetting at the next UTC midnight.
 
     Malformed detail fields are dropped rather than raised, so drift never
     hides the refusal itself.
@@ -283,29 +291,45 @@ def gate_error(
             (the resource events-per-hour ceiling) is read from ``fields``.
 
     Returns:
-        :class:`KaguraQuotaError` or :class:`KaguraFeatureNotAvailableError`;
-        a plain :class:`KaguraError` for a quota code that is neither a tier
-        quota nor a retry window; ``None`` when ``code`` is not a plan or
-        quota refusal.
+        :class:`KaguraQuotaError` or :class:`KaguraFeatureNotAvailableError`,
+        each carrying every descriptor field as ``details``; a plain
+        :class:`KaguraError` for a quota code that is neither a tier quota
+        nor a retry window; ``None`` when ``code`` is not a plan or quota
+        refusal.
     """
+    details = {k: v for k, v in fields.items() if k not in _ENVELOPE_KEYS}
+    if code == _MCP_DAILY_CAP_CODE:
+        # Fill in the canonical names the envelope leaves implicit; whatever
+        # the server does send wins.
+        midnight = datetime.combine(datetime.now(UTC).date() + timedelta(days=1), time(), UTC)
+        fields = {
+            "quota_type": "api_mcp_daily",
+            "current": fields.get("used_today"),
+            "limit": fields.get("daily_limit"),
+            "resets_at": midnight.isoformat(),
+            **fields,
+        }
     if retry_after is None:
         retry_after = _opt_int(fields.get("retry_after_seconds"))
     gate = _opt_str(fields.get("gate"))
     if gate == "quota":
-        return _quota_error(message, fields, retry_after)
+        return _quota_error(message, fields, retry_after, details)
     if gate in _FEATURE_GATES or code in _FEATURE_CODES:
-        return _feature_error(message, fields)
+        return KaguraFeatureNotAvailableError(message, **_plan_fields(fields), details=details)
     if code in _SINGLE_CAP_QUOTA_CODES:
-        return _quota_error(message, fields, retry_after)
+        return _quota_error(message, fields, retry_after, details)
     if code in _QUOTA_CODES:
         if _opt_str(fields.get("quota_type")) in _TIER_QUOTA_TYPES or retry_after is not None:
-            return _quota_error(message, fields, retry_after)
+            return _quota_error(message, fields, retry_after, details)
         return KaguraError(message)
     return None
 
 
 def _quota_error(
-    message: str, fields: Mapping[str, Any], retry_after: int | None
+    message: str,
+    fields: Mapping[str, Any],
+    retry_after: int | None,
+    details: dict[str, Any],
 ) -> KaguraQuotaError:
     return KaguraQuotaError(
         message,
@@ -316,11 +340,8 @@ def _quota_error(
         used_today=_opt_int(fields.get("used_today")),
         resets_at=_opt_datetime(fields.get("resets_at")),
         **_plan_fields(fields),
+        details=details,
     )
-
-
-def _feature_error(message: str, fields: Mapping[str, Any]) -> KaguraFeatureNotAvailableError:
-    return KaguraFeatureNotAvailableError(message, **_plan_fields(fields))
 
 
 def _plan_fields(fields: Mapping[str, Any]) -> dict[str, str | None]:

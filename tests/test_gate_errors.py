@@ -17,6 +17,8 @@ The wire shapes below follow memory-cloud's error contract
 
 from __future__ import annotations
 
+import copy
+import pickle
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock, patch
@@ -30,12 +32,14 @@ from kagura_memory import (
     RollbackResult,
     RollbackSummary,
 )
+from kagura_memory._http import raise_for_kagura_status
 from kagura_memory.client import KaguraClient
 from kagura_memory.exceptions import (
     KaguraConnectionError,
     KaguraError,
     KaguraNotFoundError,
     KaguraQuotaError,
+    KaguraRateLimitError,
     KaguraResponseError,
 )
 from kagura_memory.files_client import FilesClient
@@ -102,6 +106,51 @@ def test_feature_error_attributes_default_to_none():
     err = KaguraFeatureNotAvailableError("nope")
     assert (err.feature, err.required_plan, err.required_plan_display) == (None, None, None)
     assert (err.current_plan, err.gate) == (None, None)
+    assert err.details == {}
+
+
+def _round_trips(err: KaguraError) -> list[KaguraError]:
+    # Unpickles only bytes this test just produced from its own object.
+    return [pickle.loads(pickle.dumps(err)), copy.copy(err)]
+
+
+def test_quota_error_pickles_with_its_attributes():
+    """Exceptions cross process boundaries (multiprocessing, task queues)."""
+    resets_at = datetime(2099, 1, 2, tzinfo=UTC)
+    err = KaguraQuotaError(
+        "over",
+        quota_type="memories_per_day",
+        limit=5,
+        current=5,
+        resets_at=resets_at,
+        required_plan="pro",
+        details={"requested": 1},
+    )
+    for clone in _round_trips(err):
+        assert isinstance(clone, KaguraQuotaError)
+        assert str(clone) == "over"
+        assert (clone.quota_type, clone.limit, clone.current) == ("memories_per_day", 5, 5)
+        assert clone.resets_at == resets_at
+        assert clone.retry_after == err.retry_after
+        assert clone.required_plan == "pro"
+        assert clone.details == {"requested": 1}
+
+
+def test_feature_error_pickles_with_its_attributes():
+    err = KaguraFeatureNotAvailableError("nope", feature="resources", gate="plan")
+    for clone in _round_trips(err):
+        assert isinstance(clone, KaguraFeatureNotAvailableError)
+        assert (clone.feature, clone.gate) == ("resources", "plan")
+
+
+def test_partial_rollback_error_pickles_with_its_summary():
+    summary = RollbackSummary(edges_deleted=2, errors=["Action 1 (merge): db error"])
+    err = KaguraPartialRollbackError("partial", report_id="rid-1", summary=summary)
+    for clone in _round_trips(err):
+        assert isinstance(clone, KaguraPartialRollbackError)
+        assert str(clone) == "partial"
+        assert clone.report_id == "rid-1"
+        assert clone.summary == summary
 
 
 # ---------------------------------------------------------------------------
@@ -158,6 +207,55 @@ async def test_mcp_quota_exceeded_with_gate_descriptor():
     assert err.required_plan == "pro"
     assert err.required_plan_display == "L"
     assert err.current_plan == "basic"
+    # Fields without an attribute stay reachable; the envelope framing does not.
+    assert err.details["requested"] == 1
+    assert err.details["quota_type"] == "memories_per_day"
+    assert not {"status", "error", "message"} & err.details.keys()
+
+
+@pytest.mark.asyncio
+async def test_mcp_daily_call_cap_is_a_quota_error():
+    """The in-band daily MCP call cap: ``rate_limit_exceeded`` with ``used_today`` /
+    ``daily_limit`` and no ``gate``, resetting at midnight UTC."""
+    with pytest.raises(KaguraQuotaError, match=r"remember failed \(rate_limit_exceeded\)") as exc:
+        await _remember_with(
+            {
+                "status": "error",
+                "error": "rate_limit_exceeded",
+                "message": "Daily MCP call limit reached (100/100). Resets at midnight UTC.",
+                "used_today": 100,
+                "daily_limit": 100,
+                "help": "Use get_usage() to check your current quota.",
+            }
+        )
+    err = exc.value
+    assert err.quota_type == "api_mcp_daily"
+    assert (err.current, err.used_today, err.limit) == (100, 100, 100)
+    tomorrow = datetime.now(UTC).date() + timedelta(days=1)
+    assert err.resets_at == datetime(tomorrow.year, tomorrow.month, tomorrow.day, tzinfo=UTC)
+    assert err.retry_after is not None and 0 < err.retry_after <= 86400
+    # ``details`` is what the server sent, not the names the SDK filled in.
+    assert err.details == {
+        "used_today": 100,
+        "daily_limit": 100,
+        "help": "Use get_usage() to check your current quota.",
+    }
+
+
+def test_mcp_transport_daily_quota_429_stays_a_rate_limit_error():
+    """Deliberately unchanged: the middleware's HTTP 429 on ``/mcp`` keeps raising
+    KaguraRateLimitError, so existing ``except KaguraRateLimitError`` handlers hold."""
+    request = httpx.Request("POST", "https://test.com/mcp")
+    body = {
+        "error": "QUOTA-001",
+        "message": "Daily MCP quota exceeded: 101/100. Resets at midnight UTC.",
+        "details": {"gate": "quota", "quota_type": "api_mcp_daily", "retry_after": 86400},
+    }
+    response = httpx.Response(429, json=body, headers={"Retry-After": "86400"}, request=request)
+    with pytest.raises(KaguraRateLimitError) as exc:
+        raise_for_kagura_status(httpx.HTTPStatusError("429", request=request, response=response))
+    assert exc.value.retry_after == 86400
+    assert not isinstance(exc.value, KaguraQuotaError)
 
 
 @pytest.mark.asyncio
@@ -214,7 +312,8 @@ def test_mcp_quota_exceeded_with_a_retry_window_is_a_quota_error():
 
 
 def test_mcp_count_cap_carries_no_retry_after():
-    """``create_context`` at the context cap: a count cap, not a time window."""
+    """The server's context-cap envelope (``create_context`` past the SDK's
+    pre-check, ``setup_resource``): a count cap, not a time window."""
     with pytest.raises(KaguraQuotaError) as exc:
         KaguraClient._raise_for_mcp_error(
             {
@@ -300,6 +399,87 @@ async def test_mcp_plan_required_with_gate_descriptor():
     assert err.required_plan == "promax"
     assert err.required_plan_display == "XL"
     assert err.current_plan == "pro"
+    assert err.details["feature"] == "resources"
+
+
+def _contexts_at(*, count: Any, limit: Any) -> dict[str, Any]:
+    return {
+        "status": "success",
+        "contexts": [],
+        "count": count,
+        "limit": limit,
+        "can_create": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_create_context_precheck_carries_the_quota_fields():
+    """The pre-check refuses before the server does, so it fills the fields itself."""
+    client = _client()
+    try:
+        with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+            mock.return_value = _contexts_at(count=3, limit=3)
+            with pytest.raises(KaguraQuotaError, match=r"Context limit reached \(3/3\)") as exc:
+                await client.create_context(name="over-limit")
+            mock.assert_awaited_once()
+    finally:
+        await client.close()
+    err = exc.value
+    assert (err.quota_type, err.current, err.limit) == ("contexts", 3, 3)
+    assert err.retry_after is None
+
+
+@pytest.mark.asyncio
+async def test_create_context_precheck_drops_non_integer_counts():
+    client = _client()
+    try:
+        with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+            mock.return_value = _contexts_at(count=True, limit="3")
+            with pytest.raises(KaguraQuotaError) as exc:
+                await client.create_context(name="over-limit")
+    finally:
+        await client.close()
+    assert exc.value.quota_type == "contexts"
+    assert (exc.value.current, exc.value.limit) == (None, None)
+
+
+@pytest.mark.asyncio
+async def test_create_context_precheck_defers_a_failed_quota_lookup_to_the_server():
+    """``limit: 0`` + ``can_create: false`` is list_contexts' lookup-failure signal,
+    not a cap: the server's own check decides, and its typed refusal comes through."""
+    client = _client()
+    cap = {
+        "status": "error",
+        "error": "quota_exceeded",
+        "message": "Context limit reached.",
+        "gate": "quota",
+        "quota_type": "contexts",
+        "current": 1,
+        "limit": 1,
+        "required_plan": "basic",
+        "required_plan_display": "M",
+    }
+    try:
+        with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+            mock.side_effect = [_contexts_at(count=1, limit=0), cap]
+            with pytest.raises(KaguraQuotaError, match=r"create_context failed") as exc:
+                await client.create_context(name="new-ctx")
+            assert mock.call_args_list[1].args[0] == "create_context"
+    finally:
+        await client.close()
+    assert exc.value.required_plan_display == "M"
+
+
+@pytest.mark.asyncio
+async def test_create_context_precheck_lookup_failure_lets_the_create_through():
+    client = _client()
+    try:
+        with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+            mock.side_effect = [_contexts_at(count=1, limit=0), {"id": "uuid-1", "name": "c"}]
+            result = await client.create_context(name="c")
+    finally:
+        await client.close()
+    assert result["id"] == "uuid-1"
 
 
 def test_mcp_plan_required_legacy_server():
@@ -418,22 +598,25 @@ def test_mcp_not_found_mapping_is_unchanged():
 # rollback_sleep_run
 # ---------------------------------------------------------------------------
 
+_UNREVERSIBLE = "shadow merge m-1 → m-2 not reversed — the edge was changed by a later writer"
+
+# A partial rollback: each unreversible merge is also an ``errors`` entry.
 _FULL_SUMMARY = {
     "edges_deleted": 3,
     "merges_reversed": 1,
-    "merges_unreversible": 2,
+    "merges_unreversible": 1,
     "importance_restored": 4,
     "promotions_reversed": 1,
     "importance_kept": 1,
     "promotions_kept": 5,
     "archives_restored": 2,
-    "errors": ["Action 42 (merge): db error"],
+    "errors": [_UNREVERSIBLE, "Action 42 (merge): db error"],
 }
 
 
 def test_rollback_summary_round_trips_the_new_counters():
     summary = RollbackSummary.model_validate(_FULL_SUMMARY)
-    assert summary.merges_unreversible == 2
+    assert summary.merges_unreversible == 1
     assert summary.importance_kept == 1
     assert summary.promotions_kept == 5
     assert summary.model_dump() == _FULL_SUMMARY
@@ -453,16 +636,18 @@ async def test_rollback_success_carries_the_new_counters():
     client = _client()
     try:
         with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+            # A success never carries an unreversible merge (that is an error).
             mock.return_value = {
                 "status": "success",
                 "report_id": "rid-9",
-                "rollback_summary": {**_FULL_SUMMARY, "errors": []},
+                "rollback_summary": {**_FULL_SUMMARY, "merges_unreversible": 0, "errors": []},
             }
             result = await client.rollback_sleep_run(context_id=CTX, report_id="rid-9")
     finally:
         await client.close()
     assert isinstance(result, RollbackResult)
-    assert result.rollback_summary.merges_unreversible == 2
+    assert result.rollback_summary.merges_unreversible == 0
+    assert result.rollback_summary.importance_kept == 1
     assert result.rollback_summary.promotions_kept == 5
 
 
@@ -488,21 +673,35 @@ async def test_partial_rollback_raises_with_the_summary():
     assert err.report_id == "rid-9"
     assert isinstance(err.summary, RollbackSummary)
     assert err.summary.model_dump() == _FULL_SUMMARY
-    assert err.summary.errors == ["Action 42 (merge): db error"]
+    assert err.summary.merges_unreversible == 1
+    assert err.summary.errors == [_UNREVERSIBLE, "Action 42 (merge): db error"]
 
 
-def test_partial_rollback_with_a_drifted_summary_is_a_response_error():
-    with pytest.raises(KaguraResponseError, match="rollback_sleep_run"):
+@pytest.mark.parametrize(
+    "extra",
+    [{"rollback_summary": {"edges_deleted": "three"}}, {}],
+    ids=["drifted-summary", "missing-summary"],
+)
+def test_partial_rollback_with_an_unreadable_summary_is_still_a_partial_rollback(extra):
+    """The partial reversal is committed either way — drift must not hide it."""
+    with pytest.raises(
+        KaguraPartialRollbackError,
+        match=r"failed \(partial_rollback\): Rollback completed.*could not be read",
+    ) as exc:
         KaguraClient._raise_for_mcp_error(
             {
                 "status": "error",
                 "error": "partial_rollback",
                 "message": "Rollback completed with 1 error(s).",
                 "report_id": "rid-9",
-                "rollback_summary": {"edges_deleted": "three"},
+                **extra,
             },
             "rollback_sleep_run",
         )
+    err = exc.value
+    assert err.report_id == "rid-9"
+    assert err.summary is None
+    assert isinstance(err.__cause__, KaguraResponseError)
 
 
 # ---------------------------------------------------------------------------
@@ -554,6 +753,30 @@ async def test_rest_token_cap_is_a_quota_error_not_a_connection_error():
     assert err.feature == "resources"
     assert err.required_plan_display == "XL"
     assert err.retry_after is None
+    assert err.details == _TOKEN_CAP_DETAILS
+
+
+@pytest.mark.asyncio
+async def test_rest_embedding_spend_cap_keeps_its_usd_fields_in_details():
+    """``QUOTA-002`` has no count pair: its numbers live only in ``details``."""
+    details = {
+        "gate": "quota",
+        "quota_type": "embedding_spend_daily",
+        "period": "daily",
+        "cap_usd": 1.0,
+        "current_usd": 1.2,
+    }
+    handler = _respond(429, "QUOTA-002", "Daily embedding spend cap reached.", details)
+    async with _rest(ResourceClient, handler) as c:
+        with pytest.raises(KaguraQuotaError) as exc:
+            await c.list_tokens()
+    err = exc.value
+    assert (err.limit, err.current) == (None, None)
+    assert (err.details["period"], err.details["cap_usd"], err.details["current_usd"]) == (
+        "daily",
+        1.0,
+        1.2,
+    )
 
 
 @pytest.mark.asyncio

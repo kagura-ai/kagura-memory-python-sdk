@@ -12,6 +12,7 @@ from pydantic import BaseModel as _BaseModel
 from ._auth import _resolve_auth, _StaticAuth
 from ._http import (
     SDK_VERSION,
+    _opt_int,
     base_url_from_mcp,
     gate_error,
     mcp_session_expired,
@@ -27,6 +28,7 @@ from .exceptions import (
     KaguraError,
     KaguraNotFoundError,
     KaguraPartialRollbackError,
+    KaguraResponseError,
     _exc_message,
 )
 from .models import (
@@ -80,12 +82,15 @@ class KaguraClient:
     All methods may raise:
         KaguraAuthError: Authentication failed
         KaguraConnectionError: Connection to server failed
-        KaguraRateLimitError: Rate limit exceeded
+        KaguraRateLimitError: Rate limit exceeded — any HTTP 429, including
+            the daily MCP quota when the server's rate-limit middleware
+            refuses the request before the tool runs
 
     MCP tool methods additionally translate the server's structured domain
     errors (``{"status": "error", ...}``) into exceptions rather than
     returning them as data (issue #180): a missing context/memory/report
-    raises :class:`KaguraNotFoundError`, a quota refusal
+    raises :class:`KaguraNotFoundError`, a quota refusal (including the
+    in-band daily MCP call cap, ``rate_limit_exceeded``)
     :class:`KaguraQuotaError` and a plan/feature gate
     :class:`KaguraFeatureNotAvailableError`, each carrying the server's
     detail fields (#256), and any other domain error raises
@@ -1027,8 +1032,10 @@ class KaguraClient:
             The created :class:`Agent`.
 
         Raises:
-            KaguraError: Name conflict, quota exceeded, insufficient role,
-                or other server-side error.
+            KaguraQuotaError: The workspace's agent cap is reached
+                (``quota_type="agents"``).
+            KaguraError: Name conflict, insufficient role, or other
+                server-side error.
         """
         arguments: dict[str, Any] = {"name": name}
         if description is not None:
@@ -1690,25 +1697,34 @@ class KaguraClient:
             Created context dict with id, name, and metadata.
 
         Raises:
-            KaguraQuotaError: Context limit reached for this workspace.
+            KaguraQuotaError: Context limit reached for this workspace
+                (``quota_type="contexts"``). The SDK checks ``list_contexts``
+                first, so this usually carries ``current`` / ``limit`` but
+                no ``required_plan``.
             KaguraFeatureNotAvailableError: The plan does not allow a
                 shared context (``is_private=False``; server v0.75.0+).
         """
         # Pre-check quota
         contexts = await self.list_contexts()
-        if not contexts.get("can_create", True):
+        count = contexts.get("count")
+        limit = contexts.get("limit")
+        # ``limit: 0`` with ``can_create: false`` is how list_contexts reports
+        # a failed quota lookup (every plan allows at least one context), so
+        # the server's own check decides then (#256).
+        if not contexts.get("can_create", True) and limit != 0:
             from .exceptions import KaguraQuotaError
 
             # Use ``.get`` then coerce None → "?" so a quota response that is
             # missing count/limit OR carries them as null (both forms of server
             # schema drift) still yields a clean message, never KeyError or a
             # literal "None" (issue #183). A real 0 is preserved as "0".
-            count = contexts.get("count")
-            limit = contexts.get("limit")
             raise KaguraQuotaError(
                 f"Context limit reached ({'?' if count is None else count}/"
                 f"{'?' if limit is None else limit}). "
-                "Delete unused contexts or upgrade your plan."
+                "Delete unused contexts or upgrade your plan.",
+                quota_type="contexts",
+                current=_opt_int(count),
+                limit=_opt_int(limit),
             )
 
         arguments: dict[str, Any] = {"name": name, "is_private": is_private}
@@ -1762,6 +1778,10 @@ class KaguraClient:
 
         Returns:
             Updated context dict.
+
+        Raises:
+            KaguraFeatureNotAvailableError: ``is_public=True`` on a plan
+                without the ``public_contexts`` feature.
         """
         arguments: dict[str, Any] = {"context_id": context_id}
         if display_name is not None:
@@ -1806,6 +1826,13 @@ class KaguraClient:
             ``resource_id``, ``token`` (plaintext, shown once), ``token_id``,
             ``warning``. Server may include additional fields (e.g. ``status``,
             ``message``) which callers can ignore.
+
+        Raises:
+            KaguraFeatureNotAvailableError: The plan lacks the ``resources``
+                feature.
+            KaguraQuotaError: The workspace's context cap or active-token
+                cap is reached (``quota_type`` ``"contexts"`` /
+                ``"resource_tokens"``).
 
         Note:
             Idempotency for repeated calls with the same ``resource_id`` is
@@ -2371,13 +2398,18 @@ class KaguraClient:
         text = f"{operation} failed ({code}): {message}"
         if code == "partial_rollback":
             report_id = result.get("report_id")
-            raise KaguraPartialRollbackError(
-                text,
-                report_id=report_id if isinstance(report_id, str) else None,
-                summary=parse_response(
+            report_id = report_id if isinstance(report_id, str) else None
+            try:
+                summary = parse_response(
                     RollbackSummary, result.get("rollback_summary"), operation=operation
-                ),
-            )
+                )
+            except KaguraResponseError as drift:
+                # The partial reversal is already committed; a summary the
+                # SDK cannot read must not hide that (#256).
+                raise KaguraPartialRollbackError(
+                    f"{text} (rollback_summary could not be read)", report_id=report_id
+                ) from drift
+            raise KaguraPartialRollbackError(text, report_id=report_id, summary=summary)
         raise gate_error(str(code), text, result) or KaguraError(text)
 
     async def get_sleep_history(

@@ -1270,7 +1270,7 @@ def sleep_rollback(context_id, report_id, yes):
         partial = {
             "report_id": e.report_id,
             "error": "partial_rollback",
-            "rollback_summary": e.summary.model_dump(mode="json"),
+            "rollback_summary": e.summary.model_dump(mode="json") if e.summary else None,
         }
         click.echo(json.dumps(partial, indent=2, ensure_ascii=False))
         raise click.ClickException(_exc_message(e)) from e

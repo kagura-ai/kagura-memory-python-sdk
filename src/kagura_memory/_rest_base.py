@@ -63,11 +63,14 @@ class KaguraRestClient:
 
     - a plan or quota refusal, at any status →
       :class:`KaguraFeatureNotAvailableError` / :class:`KaguraQuotaError`
-      (see :meth:`_gate_error`; runs before the status hooks)
+      (see :meth:`_gate_error`; runs before the status hooks, so it
+      applies to every subclass); a ``QUOTA-001`` with no gate, no known
+      ``quota_type`` and no ``Retry-After`` (e.g. the 1 MB memory-size
+      guard) → a plain :class:`KaguraError`
     - 401 → :class:`KaguraAuthError` with an OAuth-aware recovery hint
     - 403 → the generic ``HTTP 403: <detail>`` mapping
     - 404 → :class:`KaguraNotFoundError` (server detail or "Not found")
-    - 429 → :class:`KaguraQuotaError` with a tolerant ``Retry-After``
+    - any other 429 → :class:`KaguraQuotaError` with a tolerant ``Retry-After``
     - other statuses → :class:`KaguraConnectionError`
     - transport errors → :class:`KaguraConnectionError`
     - a 2xx JSON body its model or envelope rejects →
