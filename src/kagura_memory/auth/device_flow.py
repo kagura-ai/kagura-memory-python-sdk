@@ -3,7 +3,9 @@
 Pure-function API: every entry point takes an :class:`httpx.AsyncClient`
 (use :func:`make_oauth_client` to construct one) plus the relevant
 parameters, and returns a dataclass. No CLI, no terminal IO, no global
-state — that lives in :mod:`auth.cli` and :mod:`auth.credentials`.
+state — that lives in :mod:`auth.cli` and :mod:`auth.credentials`. The
+``kagura auth login --invite`` helpers live here too: pure functions over
+strings, plus one best-effort ``/system/info`` probe.
 
 The transport client is intentionally separate from
 :class:`KaguraClient`'s own ``httpx.AsyncClient`` so the SDK's
@@ -62,11 +64,15 @@ _DEFAULT_PORTS = {"http": 80, "https": 443}
 JOIN_RETURN_TO_MIN_SERVER_VERSION: tuple[int, int, int] | None = None
 """First memory-cloud release whose ``/join/<token>`` honours ``return_to``.
 
-memory-cloud#1655 (the ``/join`` → ``/device`` hand-off) is not in any
-release yet, so this is ``None`` and :func:`invite_support` never answers
-``"hand_off"``: every server gets the two-step fallback. Set it to that
-release's version once #1655 ships, or swap the check for the server's
-capability flag if it grows one.
+memory-cloud#1655 (the ``/join`` → ``/device`` hand-off) is merged on
+memory-cloud main (#1666) but not in any release yet, so this is ``None``
+and :func:`invite_support` never answers ``"hand_off"``: every server gets
+the two-step fallback. #1666 shipped with no capability flag, so the
+version is the switch: set it to the first release that tags #1666. That
+is a release after 0.75.0, never ``(0, 75, 0)``, because memory-cloud main
+still reports 0.75.0 with #1666 on it. The link shape
+:func:`build_invite_link` builds is the one memory-cloud documents in
+``docs/deployment.md`` ("Invites and device or MCP sign-in").
 """
 
 # The /system/info probe runs while the device code is already ticking, so a
@@ -133,7 +139,7 @@ class InviteRef:
 
 
 def make_oauth_client(timeout: float = 30.0) -> httpx.AsyncClient:
-    """Construct an unauthenticated ``httpx.AsyncClient`` for ``/oauth/*``.
+    """Construct an unauthenticated ``httpx.AsyncClient`` for ``/oauth/*`` and ``/system/info``.
 
     No ``Authorization`` header is set — device-flow uses ``client_id``
     in the form body for client authentication, not a bearer token.
@@ -443,8 +449,9 @@ def build_invite_link(
     ``{base}/join/{token}?return_to=<path and query of verification_uri_complete>``,
     with ``base`` from :func:`invite_base_url`. ``return_to`` is a
     same-origin relative path (e.g. ``/device?user_code=ABCD-1234``), the
-    form ``/join`` accepts once memory-cloud#1655 ships. The TypeScript CLI
-    mirrors this as ``buildInviteLink``.
+    form ``/join`` accepts once memory-cloud#1655 ships. Named so the
+    TypeScript CLI can mirror it as ``buildInviteLink``
+    (kagura-memory-typescript-sdk#44).
 
     Returns:
         The link, or ``None`` when ``/join`` cannot be placed: no ``base``,
@@ -494,8 +501,9 @@ async def fetch_system_info(
 
     Sent without credentials (there are none yet during login). The raw body
     is returned rather than :class:`~kagura_memory.models.ServerInfo`
-    because ``ServerFeatures`` does not model ``beta_invites`` yet.
-    Best-effort: any HTTP error, timeout or non-object body yields ``None``.
+    because ``ServerFeatures`` does not model ``beta_invites`` yet (swap to
+    ``ServerInfo`` once #257 adds it). Best-effort: any HTTP error, timeout
+    or non-object body yields ``None``.
     """
     try:
         response = await client.get(f"{server.rstrip('/')}{_PATH_SYSTEM_INFO}", timeout=timeout)

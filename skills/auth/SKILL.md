@@ -31,8 +31,10 @@ kagura auth logout                 # revoke + delete a profile
 - On "not authenticated", run `kagura auth login`.
 - **Invite-only sign-up:** if the user has an invite link (`https://<host>/join/<token>`)
   and no account yet, run `kagura auth login --invite <link>`. The CLI prints the steps
-  in order (accept the invite, then approve the code); relay them as printed. The token
-  is a one-time secret: do not echo it back, save it or put it anywhere except that flag.
+  in order (accept the invite, then approve the code); relay them as printed. The printed
+  `/join` link carries the token and is the one exception: show it only to the user who
+  gave you the invite. Otherwise the token is a one-time secret: never save it (memory,
+  files, notes), log it, or send it anywhere except that flag.
   "Different server" means the link belongs to another deployment: re-run with
   `--server <that server's API URL>`.
 - **Multi-profile safety:** if several profiles exist, surface which profile and
