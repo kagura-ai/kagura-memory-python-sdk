@@ -172,6 +172,10 @@ async with KaguraClient(api_key="kagura_...", mcp_url="https://...") as client:
     # Servers before v0.69.0 rerank only on True.
     fast = await client.recall(context_id="dev", query="OAuth2", use_rerank=False)
 
+    # Find a context by name. On memory-cloud v0.73.0+ rows are slim
+    # (id/name/is_private/is_locked/last_used_at); summaries are opt-in.
+    found = await client.list_contexts(name_contains="auth", include_summary=True)
+
     # Trust-tier filter (provenance) — exclude untrusted / connector-ingested
     # memories from behaviour-influencing reads (OWASP LLM01/LLM03)
     safe = await client.recall(context_id="dev", query="policy",
@@ -191,7 +195,8 @@ async with KaguraClient(api_key="kagura_...", mcp_url="https://...") as client:
                           content="...", delivery_mode="always")
     pinned = await client.load_pinned(context_id="dev")
 
-    # Time Memories — deterministic "what's upcoming" query (no semantic search)
+    # Time Memories — deterministic "what's upcoming" query (no semantic search).
+    # Items carry `trigger` on server v0.73.0+; include_details=True returns `details`.
     upcoming = await client.recall_upcoming(context_id="dev", from_="now")
 
     # WHERE axis — deterministic "what's near here" query, nearest first
@@ -212,6 +217,10 @@ async with KaguraClient(api_key="kagura_...", mcp_url="https://...") as client:
     # Read the history back. NOTE: a top-level argument, NOT a filters key.
     history = await client.recall(context_id="dev", query="deploy target",
                                   include_superseded=True)  # results carry superseded_by
+    # Reject a wrong supersede_candidate suggestion (server v0.65.0+; memory_id only).
+    res = await client.update_memory(context_id="dev", memory_id="uuid",
+                                     dismiss_supersede_candidate=True)
+    # Only res.get("supersede_candidate_dismissed") confirms it: older servers drop the flag.
 
     # Retrieval feedback — teach the substrate which recall results were useful
     await client.feedback(context_id="dev", memory_id="uuid", helpful=True, query="OAuth2")
@@ -403,6 +412,7 @@ The same client also provisions **member API keys** (memory-cloud [#1165](https:
 
 | SDK | Min memory-cloud | Notes |
 |---|---|---|
+| 0.39.0+ | 0.17.1 (per-surface: see notes) | **`list_contexts` / `recall_upcoming` options and supersede dismissal.** `update_memory(dismiss_supersede_candidate=True)` / `kagura update-memory --dismiss-supersede-candidate` needs memory-cloud **0.65.0+** ([#1504](https://github.com/kagura-ai/memory-cloud/issues/1504)). It rejects the memory's `supersede_candidate` suggestion and needs `memory_id`: combined with `external_id` it raises `ValueError` before any network call. Before 0.65.0 the server silently drops the flag, so a dismissal-only call succeeds as an empty update that dismisses nothing and refreshes `updated_at`; `supersede_candidate_dismissed` in the response is the only confirmation that a dismissal happened. `list_contexts(name_contains=…, include_summary=…, include_details=…)` / `kagura context list --name-contains/--summary/--details` and `recall_upcoming(include_details=True)` need **0.73.0+** ([#1600](https://github.com/kagura-ai/memory-cloud/issues/1600), [#1599](https://github.com/kagura-ai/memory-cloud/issues/1599)); `include_stats` / `--stats` works on any server. From memory-cloud 0.73.0, `list_contexts` rows are slim by default (`id`/`name`/`is_private`/`is_locked`/`last_used_at`; `summary` and `embedding_model` are opt-in), and the envelope adds `total` (rows returned) beside `count` (quota usage, unaffected by `name_contains`). 0.75.0 adds an optional `hint` when the caller can see no context ([#1658](https://github.com/kagura-ai/memory-cloud/issues/1658)). `recall_upcoming` items carry `trigger` in place of `details` unless `include_details=True`. Every new argument is omitted from the wire when unset, and older servers ignore it (before 0.73.0 there is also no `total`: use `len(result["contexts"])`). `MIN_SERVER_VERSION` stays **0.17.1**. |
 | 0.38.1+ | 0.17.1 (the fix matters against 0.43.0+ for Sleep, 0.68.0+ for the indexer) | **Forward-tolerant Sleep and indexer responses.** memory-cloud **0.43.0+** grades a Sleep run `degraded` when some judge-LLM calls fail ([#1183](https://github.com/kagura-ai/memory-cloud/issues/1183)) — and since **0.46.0** also when a phase fails ([#1229](https://github.com/kagura-ai/memory-cloud/issues/1229)) — and **0.68.0+** records `skipped_reason="memories_per_day_exceeded"` when the resource indexer defers a batch to the daily quota reset ([#1549](https://github.com/kagura-ai/memory-cloud/issues/1549)). SDKs up to 0.38.0 rejected both values: one degraded run broke `get_sleep_history` and `kagura sleep history|report|rollback`, and one deferred run broke `get_indexer_status` and `kagura resource indexer-status`. `SleepReport.status`, `RollbackResult.status`, `IndexerState.job_status` and `IndexerStateMetrics.skipped_reason` are now `str`, so values a newer server adds pass through (the `SleepRunStatus` / `IndexerJobStatus` / `IndexerSkippedReason` Literals list the known values). `SleepReport` gains `llm_call_failures` and `SleepReportDetail` gains `merge_retention_result`. A response the `KaguraClient` MCP tool methods or the REST clients still cannot parse (a model mismatch or a missing/`null` list or object in the envelope) raises `KaguraResponseError` naming the operation, not a raw pydantic `ValidationError`, `KeyError` or `TypeError`; the REST clients' envelope-shape errors move from `KaguraConnectionError` to it too. `KaguraClient`'s REST-backed methods (`get_server_info`, `get_memory_stats`, `list_memories`, …) still raise `KaguraConnectionError` — catch `KaguraError` for both. `MIN_SERVER_VERSION` stays **0.17.1**. |
 | 0.38.0+ | 0.17.1 (per-surface: see notes) | **Client-surface parity — four server capabilities the SDK could not reach.** `recall_nearby()` + `details.location` (the WHERE axis) need memory-cloud **0.53.0+** ([#1331](https://github.com/kagura-ai/memory-cloud/issues/1331)); `remember(supersedes=…)` and its read-back counterpart `recall(include_superseded=True)` need **0.45.0+** ([#1208](https://github.com/kagura-ai/memory-cloud/issues/1208)); `list_tags(with_tags=…)` faceted drill-down needs **0.17.2+** ([#830](https://github.com/kagura-ai/memory-cloud/issues/830)); `update_memory(details=…)` works on any server that already accepted `details` on the MCP tool, and **replaces `details` wholesale** — the server does not deep-merge, so re-send `location` when revising or the memory drops off `recall_nearby`. CLI gains `kagura remember --details/--location`. All four are additive and omitted from the wire when unset, so existing calls are unchanged. `MIN_SERVER_VERSION` stays **0.17.1**. |
 | 0.37.0+ | 0.17.1 (0.49.0 for the agent control plane) | **Agent control plane (RFC-0002 P0-1/2/3).** `KaguraClient.get_agent_bootstrap()` (MCP) and `AgentsClient.bootstrap()` (REST, `POST /api/v1/agents/{agent_id}/bootstrap`) need memory-cloud **0.49.0+** ([#1276](https://github.com/kagura-ai/memory-cloud/issues/1276)); the same release covers the **registry + binding wrappers** (`register_agent`/`get_agent`/`list_agents`/`update_agent`/`delete_agent` on both surfaces; bindings as `bind_agent_context`/`list_agent_bindings`/`update_agent_binding`/`unbind_agent_context` on `KaguraClient`, mirrored as `bind_context`/`list_bindings`/`update_binding`/`unbind_context` on `AgentsClient` — owner/admin-gated server-side, [#1274](https://github.com/kagura-ai/memory-cloud/issues/1274)/[#1275](https://github.com/kagura-ai/memory-cloud/issues/1275)), so an SDK-only consumer can provision the agent + binding that bootstrap requires. Against an older server the MCP tools return "tool not found" and the REST routes 404. `MIN_SERVER_VERSION` stays **0.17.1**. |
@@ -498,7 +508,9 @@ kagura recall "dependency injection" -k 10
 kagura recall "dependency injection" --no-rerank   # skip reranking; no flag follows the context config (v0.69.0+)
 kagura explore -m "memory-uuid" --depth 3
 kagura forget -m "memory-uuid"
+kagura update-memory -m "memory-uuid" --dismiss-supersede-candidate   # server v0.65.0+
 kagura contexts
+kagura context list --name-contains auth --summary   # server v0.73.0+; --details, --stats
 
 # Resource tokens
 kagura resource tokens create -r products -d "Product sync"
@@ -641,7 +653,7 @@ follow-up.
 | Time Memory (recall_upcoming) | `KaguraClient` | MCP | API Key |
 | WHERE axis (recall_nearby + `details.location`) | `KaguraClient` | MCP | API Key |
 | Tag vocabulary + faceted drill-down (list_tags, `with_tags`) | `KaguraClient` | MCP | API Key |
-| Supersede / memory history (remember `supersedes=`, recall `include_superseded=`) | `KaguraClient` | MCP | API Key |
+| Supersede / memory history (remember `supersedes=`, recall `include_superseded=`, update_memory `dismiss_supersede_candidate=`) | `KaguraClient` | MCP | API Key |
 | Retrieval feedback (feedback) | `KaguraClient` | MCP | API Key |
 | Agent session-state lane (set_state/get_state, TTL) | `KaguraClient` | MCP | API Key |
 | Agent bootstrap (get_agent_bootstrap — one-call session-start rehydration) | `KaguraClient` / `AgentsClient` | MCP + REST | API Key |
