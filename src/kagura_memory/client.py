@@ -1737,7 +1737,8 @@ class KaguraClient:
         Raises:
             ValueError: If ``limit``, ``min_count``, ``prefix`` or
                 ``with_tags`` are out of range, before any request.
-            TypeError: If ``with_tags`` is a ``str`` rather than a list.
+            TypeError: If ``with_tags`` is a ``str`` rather than a list, or
+                holds an item that is not a ``str``.
             KaguraNotFoundError: Context not found or caller lacks access.
             KaguraError: Other server-side error.
             KaguraResponseError: A response that does not match
@@ -1753,10 +1754,14 @@ class KaguraClient:
         # the server would happily run.
         if isinstance(with_tags, str):
             raise TypeError("with_tags must be a list of tags, not a str")
+        tags = list(with_tags or ())
+        for tag in tags:
+            if not isinstance(tag, str):
+                raise TypeError(f"with_tags items must be str, got {type(tag).__name__}")
         # Normalized as the server normalizes it, so the caps below judge the
         # list the server would. An empty drill-down matches everything
         # (``tags @> '{}'``), so it is the same as none.
-        drill_down = [s for t in with_tags or () if (s := t.strip())]
+        drill_down = [s for t in tags if (s := t.strip())]
         if len(drill_down) > 50:
             raise ValueError(f"with_tags accepts at most 50 tags, got {len(drill_down)}")
         longest = max(map(len, drill_down), default=0)

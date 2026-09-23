@@ -5123,6 +5123,35 @@ async def test_list_tags_rejects_a_bare_string_with_tags():
     assert server.requests == []
 
 
+@pytest.mark.parametrize(
+    ("with_tags", "type_name"),
+    [([1], "int"), (["ok", None], "NoneType"), (("ok", b"raw"), "bytes")],
+)
+@pytest.mark.asyncio
+async def test_list_tags_rejects_a_non_str_with_tags_item(with_tags, type_name):
+    """A TypeError naming the item's type, not an AttributeError from .strip()."""
+    server = _TagsServer()
+    client = _tags_client(server)
+    try:
+        with pytest.raises(TypeError, match=f"with_tags items must be str, got {type_name}$"):
+            await client.list_tags(context_id=_TAGS_CTX, with_tags=with_tags)
+    finally:
+        await client.close()
+    assert server.requests == []
+
+
+@pytest.mark.asyncio
+async def test_list_tags_accepts_any_iterable_of_str_with_tags():
+    """A tuple or a one-shot generator is read once, then normalized like a list."""
+    server = _TagsServer()
+    client = _tags_client(server)
+    try:
+        await client.list_tags(context_id=_TAGS_CTX, with_tags=(t for t in [" a ", "b"]))  # type: ignore[arg-type]
+    finally:
+        await client.close()
+    assert server.gets()[0].url.params.get_list("with_tags") == ["a", "b"]
+
+
 @pytest.mark.asyncio
 async def test_list_tags_drops_blank_values_before_the_50_tag_cap():
     server = _TagsServer()
