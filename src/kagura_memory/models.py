@@ -34,19 +34,51 @@ class EmbeddingModelsResponse(BaseModel):
 
 
 class ServerFeatures(BaseModel):
-    """Feature flags reported by the server."""
+    """Deployment feature flags from the ``features`` block of ``/api/v1/system/info``.
+
+    The flags describe what the deployment offers, not what the caller's plan
+    allows. Every flag defaults to ``False``, which also stands for "not
+    reported": a server older than a flag omits it. Flags newer than this SDK
+    are kept, not dropped — read them from ``model_extra``. The typed flags are
+    the ones memory-cloud v0.76.0 sends.
+    """
+
+    model_config = ConfigDict(extra="allow")
 
     neural_memory: bool = False
     research_tools: bool = False
+    # The web UI shows the Plan page (memory-cloud #1145; off by default for OSS).
+    plan_page: bool = False
+    # Workspace BYOK keys and the cost dashboard are available (#1167; on by default).
+    byok: bool = False
+    # The web UI shows money: cost page, analysis cost (#1571; on by default).
+    cost_display: bool = False
+    # Connectors run on the managed worker, no per-connector LLM needed (#1426).
+    managed_connectors: bool = False
+    # Memory Analysis can run without a workspace OpenAI key (#1569).
+    managed_llm: bool = False
+    # The referral program is available (#1470).
+    referrals: bool = False
+    # Closed-beta invite links are available (#1581); ``/beta-invites`` 404s when off.
+    beta_invites: bool = False
+    # Reranking is enabled and its default provider can run (#1572, v0.69.0+).
+    reranking: bool = False
 
 
 class ServerInfo(BaseModel):
-    """Server information from /api/v1/system/info."""
+    """Server information from /api/v1/system/info.
+
+    ``search_defaults`` (memory-cloud v0.69.0+, #1572) holds the reranker
+    settings a new context starts with — ``use_rerank``,
+    ``reranker_provider`` and ``reranker_model`` (names only, never URLs or
+    keys). It is ``None`` on older servers.
+    """
 
     name: str
     version: str
     description: str | None = None
     environment: str | None = None
+    search_defaults: dict[str, Any] | None = None
     features: ServerFeatures = Field(default_factory=ServerFeatures)
 
 
@@ -756,10 +788,11 @@ class TagInfo(BaseModel):
 
     Mirrors the wire shape of the server's ``RelatedTagItem`` as emitted by
     the ``list_tags`` MCP tool. ``sample_summary`` from the server-side
-    pydantic model is intentionally omitted because ``list_tags`` does not
-    populate it (only ``recall.related_tags`` does). The schema is otherwise
-    aligned so callers can unify their tag-info type between the two
-    surfaces.
+    pydantic model is intentionally omitted because no MCP tool sends it:
+    ``list_tags`` never populated it, and ``recall``'s ``related_tags``
+    carries only ``{tag, count}`` since memory-cloud v0.73.0 (#1599). The
+    schema is otherwise aligned so callers can unify their tag-info type
+    between the two surfaces.
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -1133,7 +1166,9 @@ class AgentBootstrapResponse(BaseModel):
     recall without a ``query``, with a ``reason``), or ``"error"`` (that
     component failed; the rest still return and the top-level ``degraded``
     flag is set). Component payloads stay dicts because their shapes belong
-    to the standalone tools and evolve with them.
+    to the standalone tools and evolve with them: ``pinned`` lists its rows
+    under ``memories``, and since memory-cloud v0.73.0 ``upcoming`` rows
+    carry ``trigger`` in place of ``details``, with no opt-out.
 
     ``context`` reuses :class:`ContextDetail` — the server emits the block
     byte-compatible with ``get_context_info`` (``search_config`` is not

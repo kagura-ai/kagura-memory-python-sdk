@@ -1,7 +1,9 @@
 """Tests for KaguraClient."""
 
 import asyncio
+import inspect
 import json
+import textwrap
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -25,6 +27,7 @@ from kagura_memory import (
     MemoryListResponse,
     MemoryStatsResponse,
     RollbackResult,
+    ServerFeatures,
     ServerInfo,
     SleepAction,
     SleepReport,
@@ -742,17 +745,63 @@ async def test_update_memory_delivery_mode_not_sent_when_none():
 
 
 @pytest.mark.asyncio
+async def test_update_memory_sends_empty_values_that_clear_fields():
+    """``""`` / ``{}`` / ``[]`` reach the wire: the server treats them as "clear".
+
+    Only ``None`` means "leave unchanged", so a falsy-value shortcut in the
+    argument builder would silently turn a clear into a no-op.
+    """
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {"status": "success", "memory_id": "mid"}
+        await client.update_memory(
+            context_id="ctx", memory_id="mid", context_summary="", details={}, tags=[]
+        )
+        args = mock.call_args[0][1]
+        assert args["context_summary"] == ""
+        assert args["details"] == {}
+        assert args["tags"] == []
+
+    await client.close()
+
+
+def _load_pinned_response(*memory_ids: str, truncated: bool = False) -> dict:
+    """The server's load_pinned envelope: the pinned set is under ``memories``."""
+    return {
+        "status": "success",
+        "memories": [
+            {
+                "memory_id": mid,
+                "summary": f"Guardrail {mid}",
+                "context_summary": None,
+                "type": "decision",
+                "importance": 0.9,
+                "delivery_mode": "always",
+            }
+            for mid in memory_ids
+        ],
+        "total_available": len(memory_ids),
+        "truncated": truncated,
+        "cap": 50,
+        "context_id": "ctx",
+        "context_name": "dev",
+    }
+
+
+@pytest.mark.asyncio
 async def test_load_pinned_minimal():
     """load_pinned() should call the load_pinned MCP tool with context_id only."""
     client = _make_initialized_client()
 
     with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
-        mock.return_value = {"results": [], "truncated": False, "total_available": 0}
+        mock.return_value = _load_pinned_response()
         result = await client.load_pinned(context_id="ctx")
         name, args = mock.call_args[0][0], mock.call_args[0][1]
         assert name == "load_pinned"
         assert args == {"context_id": "ctx"}
         assert result["truncated"] is False
+        assert result["memories"] == []
 
     await client.close()
 
@@ -763,7 +812,7 @@ async def test_load_pinned_with_cap():
     client = _make_initialized_client()
 
     with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
-        mock.return_value = {"results": [], "truncated": True, "total_available": 50}
+        mock.return_value = _load_pinned_response("m1", truncated=True)
         await client.load_pinned(context_id="ctx", cap=10)
         args = mock.call_args[0][1]
         assert args["cap"] == 10
@@ -777,11 +826,58 @@ async def test_load_pinned_cap_not_sent_when_none():
     client = _make_initialized_client()
 
     with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
-        mock.return_value = {"results": []}
+        mock.return_value = _load_pinned_response()
         await client.load_pinned(context_id="ctx")
         args = mock.call_args[0][1]
         assert "cap" not in args
 
+    await client.close()
+
+
+def _docstring_example(method) -> str:
+    """Return the ``>>>`` / ``...`` lines of a method's docstring as source."""
+    lines = []
+    for raw in inspect.getdoc(method).splitlines():
+        line = raw.strip()
+        if line.startswith((">>> ", "... ")):
+            lines.append(line[4:])
+    return "\n".join(lines)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("truncated", [False, True])
+async def test_load_pinned_docstring_example_runs_against_server_shape(truncated):
+    """The documented example must run against the real ``memories`` key (#257).
+
+    It used to read ``pinned["results"]`` and raised ``KeyError`` against every
+    server. When the first call is truncated the example re-calls with a larger
+    cap, so both branches are exercised.
+    """
+    client = _make_initialized_client()
+    source = _docstring_example(KaguraClient.load_pinned)
+    assert source, "load_pinned docstring lost its example"
+    namespace: dict = {}
+    exec("async def _example(client, ctx):\n" + textwrap.indent(source, "    "), namespace)
+
+    responses = {
+        "load_pinned": [
+            _load_pinned_response("m1", "m2", truncated=truncated),
+            _load_pinned_response("m1", "m2", "m3"),
+        ],
+    }
+
+    async def fake_call_tool(name, arguments):
+        if name == "reference":
+            return {"status": "success", "memory": {"memory_id": arguments["memory_id"]}}
+        return responses[name].pop(0)
+
+    with patch.object(
+        client, "_call_tool", new_callable=AsyncMock, side_effect=fake_call_tool
+    ) as mock:
+        await namespace["_example"](client, "ctx")
+
+    referenced = [c.args[1]["memory_id"] for c in mock.call_args_list if c.args[0] == "reference"]
+    assert referenced == (["m1", "m2", "m3"] if truncated else ["m1", "m2"])
     await client.close()
 
 
@@ -3073,6 +3169,85 @@ async def test_get_server_info():
         assert result.features.neural_memory is True
 
     await client.close()
+
+
+# The ``features`` block memory-cloud v0.76.0 sends (backend/src/api/routes/system.py).
+# ``extra="allow"`` keeps an untyped flag in ``model_extra`` and ``model_dump()``,
+# so the tests below also assert ``model_extra`` / ``model_fields`` to prove each
+# flag is a typed field.
+_V076_FEATURES = {
+    "neural_memory": True,
+    "research_tools": False,
+    "plan_page": True,
+    "byok": True,
+    "cost_display": False,
+    "managed_connectors": True,
+    "managed_llm": True,
+    "referrals": False,
+    "beta_invites": True,
+    "reranking": True,
+}
+_V076_SEARCH_DEFAULTS = {
+    "use_rerank": True,
+    "reranker_provider": "self_hosted",
+    "reranker_model": "bge-reranker-v2-m3",
+}
+
+
+def _server_info_response(payload: dict) -> MagicMock:
+    response = MagicMock()
+    response.json.return_value = payload
+    response.raise_for_status = MagicMock()
+    return response
+
+
+@pytest.mark.asyncio
+async def test_get_server_info_exposes_v076_features_and_search_defaults():
+    """Every v0.76.0 flag and ``search_defaults`` survive parsing (#257)."""
+    client = _make_initialized_client()
+    payload = {
+        "name": "Kagura Memory Cloud",
+        "version": "0.76.0",
+        "description": "Remote MCP Server + Web Management",
+        "environment": "production",
+        "search_defaults": _V076_SEARCH_DEFAULTS,
+        "features": _V076_FEATURES,
+    }
+
+    with patch.object(client._client, "get", new_callable=AsyncMock) as mock_get:
+        mock_get.return_value = _server_info_response(payload)
+        result = await client.get_server_info()
+
+    assert set(ServerFeatures.model_fields) == set(_V076_FEATURES)
+    assert result.features.model_extra == {}
+    assert result.features.model_dump() == _V076_FEATURES
+    assert result.search_defaults == _V076_SEARCH_DEFAULTS
+    await client.close()
+
+
+def test_server_features_keeps_unknown_future_flags():
+    """A flag newer than the SDK is kept in ``model_extra``, not dropped."""
+    info = ServerInfo.model_validate(
+        {
+            "name": "Kagura Memory Cloud",
+            "version": "9.0.0",
+            "features": {**_V076_FEATURES, "brand_new_flag": True},
+        }
+    )
+    assert info.features.model_extra == {"brand_new_flag": True}
+    assert info.features.beta_invites is True
+
+
+def test_server_info_from_an_older_server_defaults_missing_fields():
+    """Flags a server does not send read as ``False``; ``search_defaults`` as ``None``."""
+    info = ServerInfo.model_validate(
+        {"name": "Kagura Memory Cloud", "version": "0.53.0", "features": {"neural_memory": True}}
+    )
+    assert info.features.neural_memory is True
+    assert info.features.reranking is False
+    assert info.features.beta_invites is False
+    assert info.search_defaults is None
+    assert info.features.model_extra == {}
 
 
 @pytest.mark.asyncio

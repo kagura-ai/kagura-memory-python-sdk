@@ -854,9 +854,13 @@ def update_memory(
 @click.option("-k", type=int, default=10, help="Max memories to delete in query mode")
 def forget(context_id, memory_id, query, k):
     """
-    Delete memories (soft delete, recoverable for 30 days).
+    Delete memories (soft delete).
+
+    Deleted memories stay recoverable until the deployment's cleanup window
+    passes (CLEANUP_DELETED_MEMORIES_RETENTION_DAYS, 30 days by default).
 
     Use --memory-id for specific deletion or --query for bulk deletion.
+    The server refuses --query while recall is degraded (keyword-only).
 
     Examples:
       kagura forget -m "abc-123-def"

@@ -128,7 +128,13 @@ class KaguraClient:
                 resolution chain above runs.
             mcp_url: Explicit MCP URL. When omitted, derived from the
                 resolved credential source (OAuth profile, env, or
-                ``.kagura.json``).
+                ``.kagura.json``). It may carry memory-cloud's endpoint
+                query, which every MCP request sends: ``?profile=<name>`` /
+                ``?tools=a,b`` (v0.73.0+) only narrow what ``tools/list``
+                returns — ``tools/call`` never reads them, so every method
+                here keeps working — and ``?guardrails=off`` (v0.74.0+)
+                drops the ``guardrails`` block from :meth:`get_context_info`.
+                REST calls derive their base URL without the query (#258).
             timeout: Request timeout in seconds.
             profile: Named OAuth profile to load (overrides
                 ``KAGURA_PROFILE`` and the credentials file's
@@ -456,7 +462,17 @@ class KaguraClient:
                 Keyword-only.
 
         Returns:
-            API response with ``memory_id``.
+            API response with ``memory_id``, ``scope`` and the context fields.
+            Since memory-cloud v0.65.0 two optional keys may follow, each
+            absent (never ``null``) when it does not apply:
+            ``persistence`` — ``{scope, committed, promotes_via,
+            consolidation_archive_min_age_days, detail}``, how the scope the
+            memory landed in is consolidated — and ``lint`` —
+            ``[{code, hint, subject?}]``, advisory hints about a write that
+            will recall poorly (``summary_short``, ``summary_long``,
+            ``summary_narrative``, ``no_tags``, ``tag_near_duplicate``). The
+            memory is stored either way; act on a hint with
+            :meth:`update_memory`.
 
         Raises:
             ValueError: ``tool_trigger`` is given and ``details`` already has
@@ -531,6 +547,11 @@ class KaguraClient:
                 - ``type``: memory type (e.g., ``"code"``)
                 - ``tags``: list of tag strings (e.g., ``["python"]``)
                 - ``tags_match``: ``"any"`` (default) or ``"all"`` for AND logic
+                - ``tags_normalize``: ``True`` also matches tag spellings that
+                  differ only by case, hyphen/underscore/space or a simple
+                  plural (``"dev-environment"`` = ``"Dev_Environment"``;
+                  memory-cloud v0.65.0+). Abbreviations never match — they
+                  come back as ``tag_suggestions`` instead.
                 - ``created_after`` / ``created_before``: ISO 8601 datetime
                 - ``updated_after`` / ``updated_before``: ISO 8601 datetime
                 - ``trust_tier``: ``"trusted"`` EXCLUDES external/connector-ingested
@@ -557,7 +578,24 @@ class KaguraClient:
                 memory-cloud server v0.45.0+ (#1208).
 
         Returns:
-            API response with results list
+            API response with ``results`` (ranked summaries), ``count``,
+            ``related_tags`` (``[{tag, count}]``), ``confidence`` and the
+            context fields. The optional keys below are absent when they do
+            not apply, so read them with ``.get()``:
+
+            - ``degraded`` / ``degraded_reason`` (v0.66.0+): the semantic half
+              of hybrid search was unavailable, so the results are
+              keyword-only. An empty or weak result then means "search
+              impaired", not "nothing stored" — retry later.
+            - ``tag_suggestions`` (v0.65.0+): ``{requested_tag: ["stored-tag
+              (count)", ...]}`` when a tag filter matched nothing and similar
+              stored tags exist. Advisory — the filter was not widened.
+            - ``explore_hints``: present whenever ``include_explore_hints``
+              is set, possibly as an empty list.
+            - Per result, ``context_summary``, ``superseded_by``,
+              ``contradicts`` and ``supersede_candidate``: absent when empty
+              since memory-cloud v0.73.0; older servers send ``null`` /
+              ``[]``, so test them for truthiness.
 
         Raises:
             ValueError: If ``query`` is empty/whitespace; if neither
@@ -727,14 +765,16 @@ class KaguraClient:
                 Omit to use the server default.
 
         Returns:
-            API response with ``results`` (the pinned set), ``truncated``
-            (bool), and ``total_available`` (int).
+            API response with ``memories`` (the pinned set — each item
+            ``{memory_id, summary, context_summary, type, importance,
+            delivery_mode}``), ``truncated`` (bool), ``total_available``
+            (int), ``cap`` (the cap applied) and the context fields.
 
         Example:
             >>> pinned = await client.load_pinned(context_id=ctx)
             >>> if pinned["truncated"]:
             ...     pinned = await client.load_pinned(context_id=ctx, cap=1000)
-            >>> for m in pinned["results"]:
+            >>> for m in pinned["memories"]:
             ...     full = await client.reference(
             ...         context_id=ctx, memory_id=m["memory_id"]
             ...     )
@@ -978,7 +1018,12 @@ class KaguraClient:
             :class:`AgentBootstrapResponse` — the composed envelope with
             ``agent`` (identity + resolved binding), ``context``,
             ``instructions``, per-component payloads in ``components``,
-            the ``correlation`` block, and the ``degraded`` flag.
+            the ``correlation`` block, and the ``degraded`` flag. Since
+            memory-cloud v0.73.0 the ``upcoming`` component's rows carry
+            ``trigger`` in place of ``details``, as :meth:`recall_upcoming`
+            does by default; bootstrap has no ``include_details`` opt-out, so
+            fetch ``details`` with :meth:`reference` or
+            ``recall_upcoming(include_details=True)``.
 
         Raises:
             KaguraNotFoundError: Agent or context not found (uniform 404 —
@@ -1536,8 +1581,9 @@ class KaguraClient:
             content: Updated content.
             type: Updated memory type.
             importance: Updated importance (0.0-1.0).
-            tags: Updated tags.
+            tags: Updated tags (replaces the list; ``[]`` clears it).
             context_summary: Updated context summary (max 2000 chars).
+                ``""`` clears it; ``None`` leaves it unchanged.
             delivery_mode: Pin or unpin the memory. ``"always"`` pins it
                 (deterministically loaded every turn via :meth:`load_pinned`,
                 promoted to ``scope="persistent"``); ``"on_recall"`` unpins it
@@ -1548,7 +1594,8 @@ class KaguraClient:
                 current value with :meth:`reference` and re-send every key you
                 want to keep (notably ``location``, which otherwise drops off
                 :meth:`recall_nearby`, and ``tool_trigger``, which otherwise
-                unmarks a guardrail). Omit to leave details unchanged.
+                unmarks a guardrail). ``{}`` clears it; omit to leave details
+                unchanged.
             dismiss_supersede_candidate: Reject this memory's current
                 ``supersede_candidate`` (the older near-duplicate that
                 :meth:`recall` / :meth:`reference` suggest it replaces), for two
@@ -1571,7 +1618,11 @@ class KaguraClient:
                 carries a trigger needs context editor or above. Keyword-only.
 
         Returns:
-            API response with updated memory info. When a dismissal applied,
+            API response with updated memory info (``memory_id``,
+            ``operation``, ``re_embedded``, ``scope``). Since memory-cloud
+            v0.65.0 it may also carry ``persistence`` and ``lint`` as in
+            :meth:`remember` — ``lint`` describes the memory after the update.
+            When a dismissal applied,
             ``supersede_candidate_dismissed`` holds the rejected candidate's
             memory_id. It is the only confirmation that a dismissal happened:
             the key is absent both when there was no live suggestion and when
@@ -1633,8 +1684,19 @@ class KaguraClient:
         """
         Call forget MCP tool (soft delete memories).
 
-        Delete by specific memory_id or by search query.
-        Soft delete with 30-day retention.
+        Delete by specific memory_id or by search query. This is a soft
+        delete: a deleted memory stays recoverable until the deployment's
+        cleanup sweep purges it. The window is set per deployment
+        (``CLEANUP_DELETED_MEMORIES_RETENTION_DAYS``, default 30 days, ``0``
+        disables the sweep; memory-cloud v0.66.0+), and Sleep retention
+        settings can purge sooner, so do not rely on a fixed recovery period.
+
+        ``query`` mode is refused while recall is degraded (memory-cloud
+        v0.66.0+): with the semantic half of hybrid search unavailable, the
+        candidates would be a keyword-only set rather than the memories the
+        query normally matches, so the server raises an error instead of
+        deleting them. Retry once search is healthy, or delete by
+        ``memory_id``.
 
         A target the caller may not delete is **silently skipped**, not an
         error. Since memory-cloud v0.74.0 that includes every tool guardrail
@@ -1658,6 +1720,8 @@ class KaguraClient:
             ValueError: If neither ``memory_id`` nor ``query`` is provided —
                 ``forget`` always targets a specific memory or a search; an
                 unqualified call would be an ambiguous no-op.
+            KaguraError: Server-side rejection, e.g. a ``query`` delete while
+                recall is degraded.
         """
         if not memory_id and not query:
             raise ValueError("Provide either memory_id or query")
@@ -1690,8 +1754,14 @@ class KaguraClient:
             usage_guide: LLM-oriented memory usage guidelines.
             resource_id: Resource identifier for external data ingestion.
             is_private: Privacy flag (default: True).
-            embedding_model: Embedding model for this context (immutable after creation).
-                Use ``list_embedding_models()`` to discover available options.
+            embedding_model: Embedding model for this context. It is fixed at
+                creation — no SDK call changes it — but since memory-cloud
+                v0.66.0 an operator can migrate a context to another model,
+                so read the current one from
+                ``get_context_info().context.embedding_model`` rather than
+                caching it. :meth:`list_embedding_models` lists the models the
+                deployment offers; any other is refused with
+                ``invalid_embedding_model``.
 
         Returns:
             Created context dict with id, name, and metadata.
@@ -1774,6 +1844,13 @@ class KaguraClient:
             usage_guide: Updated LLM-oriented usage guidelines (max 2000 chars).
             resource_id: Updated resource identifier for external data ingestion.
             is_public: Updated public visibility (required for resource tokens).
+                Making a context public is plan-gated (``plan_required``).
+                Since memory-cloud v0.68.0 (#1551) the gate is the plan's
+                ``public_contexts`` feature (XL only by default); earlier
+                servers gated it on plans with shared contexts. A context
+                that is already public keeps serving. Making one private is
+                refused with ``cannot_make_private`` while it has a
+                ``resource_id``.
             is_locked: Lock/unlock context. Locked contexts cannot be deleted.
 
         Returns:
@@ -1837,6 +1914,12 @@ class KaguraClient:
         Note:
             Idempotency for repeated calls with the same ``resource_id`` is
             not guaranteed by this SDK; server-side behavior may evolve.
+
+            Creating a resource — and with it a public context and a token —
+            is plan-gated (``plan_required``). Since memory-cloud v0.68.0
+            (#1551) the gate is the plan's ``resources`` feature (XL only by
+            default); earlier servers gated it on plans with shared contexts
+            and resource tokens. Existing resources keep serving.
         """
         arguments: dict[str, Any] = {
             "resource_id": resource_id,
@@ -1859,20 +1942,35 @@ class KaguraClient:
         """
         Merge memories from one context into another.
 
-        Copies all memories from the source context to the target context.
-        Both contexts must use the same embedding model and belong to the
-        same workspace.
+        Copies every live memory from the source context into the target —
+        copied, not moved: the source keeps its memories unless
+        ``delete_source`` is set. Both contexts must use the same embedding
+        model and belong to the same workspace, and the caller needs owner
+        access to both.
 
         Args:
             source_id: Context ID to copy memories from.
             target_id: Context ID to copy memories into.
             delete_source: If True, soft-delete the source context after merge.
+                Refused for the workspace's default context and for a locked
+                context. Since memory-cloud v0.65.0 the server checks the
+                default context before copying anything, and fails the merge
+                (keeping the source) if not every live memory reached the
+                target.
 
         Returns:
-            API response with merge results (e.g., merged count).
+            API response with ``merged``, ``pending_embedding``,
+            ``source_id`` / ``target_id`` (context UUIDs) and
+            ``delete_source``. Since memory-cloud v0.65.0 ``merged`` counts
+            memory **rows** copied, including rows not embedded yet;
+            ``pending_embedding`` says how many of them are not searchable
+            until the server embeds them in the target. Older servers counted
+            only embedded memories and send no ``pending_embedding``.
 
         Raises:
             ValueError: If source_id and target_id are the same.
+            KaguraError: Server-side rejection, e.g. ``delete_source`` on the
+                default context.
         """
         if source_id == target_id:
             raise ValueError("source_id and target_id must be different")
@@ -2154,6 +2252,9 @@ class KaguraClient:
         """Update hybrid search configuration for a context.
 
         Weights must sum to 1.0 (±0.01). Requires owner or editor permission.
+        New contexts start from the deployment's defaults, which
+        :meth:`get_server_info` reports as ``search_defaults`` (memory-cloud
+        v0.69.0+).
 
         Args:
             context_id: Context UUID.
@@ -2162,10 +2263,13 @@ class KaguraClient:
             fetch_factor: Candidate fetch multiplier (1-10, server default 3).
             use_rerank: Enable AI reranking. Since server v0.69.0 this is also
                 what a :meth:`recall` that omits ``use_rerank`` follows.
-            reranker_provider: Reranker provider ("voyage", "cohere", or
-                "self_hosted" for the deployment's keyless local reranker;
-                server v0.42.0+ renamed it from "ollama").
-            reranker_model: Reranker model name.
+            reranker_provider: Reranker provider: ``"voyage"`` or
+                ``"cohere"`` (each needs its provider's API key), or
+                ``"self_hosted"`` (memory-cloud v0.42.0+) — the deployment's
+                keyless local reranker, an OpenAI-compatible backend such as
+                Ollama or vLLM.
+            reranker_model: Reranker model name. May be omitted for
+                ``"self_hosted"`` (memory-cloud v0.69.0+).
 
         Returns:
             Current search config after update.
@@ -2191,7 +2295,11 @@ class KaguraClient:
         Calls ``GET /api/v1/system/info``.
 
         Returns:
-            ServerInfo with version string and feature flags.
+            ServerInfo with the version string, the deployment's feature
+            flags (:class:`~kagura_memory.models.ServerFeatures` — flags newer
+            than this SDK land in ``features.model_extra``) and, on
+            memory-cloud v0.69.0+, ``search_defaults`` — the reranker
+            settings new contexts start with.
         """
         return await self._rest_get("/api/v1/system/info", ServerInfo)
 
@@ -2224,7 +2332,10 @@ class KaguraClient:
     async def get_embedding_status(self) -> EmbeddingStatus:
         """Get embedding queue status for the workspace.
 
-        Calls ``GET /api/v1/workspace/embedding-status``.
+        Calls ``GET /api/v1/workspace/embedding-status``. Since memory-cloud
+        v0.65.0 the counts and ``failed_memories`` cover only the contexts
+        the caller can see: the workspace owner sees every context, other
+        members see shared contexts and the private ones they created.
 
         Returns:
             EmbeddingStatus with total, by_status breakdown, and failed memories.
@@ -2530,6 +2641,9 @@ class KaguraClient:
 
         Calls ``GET /api/v1/system/embedding/models`` to retrieve
         server-supported embedding models with provider info and availability.
+        Since memory-cloud v0.66.0 the list holds only the models the
+        deployment's allowlist offers — the ones :meth:`create_context`
+        accepts.
 
         Returns:
             EmbeddingModelsResponse with models list and default_model.

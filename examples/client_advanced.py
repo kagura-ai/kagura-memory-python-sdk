@@ -142,10 +142,14 @@ async def main():
                     await client.forget(context_id=ctx, memory_id=mid)
 
         # Merge contexts (opt-in, destructive — copies memories source -> target).
+        # Since server v0.65.0 `merged` counts memory rows, including rows not
+        # embedded yet; `pending_embedding` of them are not searchable until the
+        # server embeds them in the target (older servers do not send it).
         src, dst = os.getenv("KAGURA_MERGE_SOURCE"), os.getenv("KAGURA_MERGE_TARGET")
         if src and dst:
             result = await client.merge_contexts(source_id=src, target_id=dst)
-            print(f"Merged {result['merged']} memories into {dst}")
+            pending = result.get("pending_embedding", 0)
+            print(f"Merged {result['merged']} memories into {dst} ({pending} still embedding)")
 
 
 if __name__ == "__main__":

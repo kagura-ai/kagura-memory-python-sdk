@@ -30,3 +30,13 @@ kagura resource tokens list|create|update|revoke
 - Relay the CLI output. **Resource tokens are secrets:** when one is created it
   is shown once and not stored — surface it to the user and remind them to save
   it now. Prefer `revoke` over leaving stale tokens active.
+- **Creation is plan-gated**: `setup` and `tokens create` need the workspace
+  plan's `resources` feature, and making a context public needs
+  `public_contexts` (memory-cloud v0.68.0+, XL only by default; earlier servers
+  gated them on the plan's shared contexts and token cap). Without it the
+  server refuses (`plan_required` / `FEAT-001`): tell the user the plan does
+  not allow it instead of retrying, and suggest an upgrade only when the
+  refusal names a `required_plan`. A `tokens create` refused at the
+  active-token cap ("Token limit reached"; `QUOTA-001` with
+  `quota_type: resource_tokens` on v0.75.0+) means revoking unused tokens
+  first. Existing resources, tokens and public contexts keep working.

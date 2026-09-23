@@ -92,7 +92,10 @@ class AgentsClient(KaguraRestClient):
                 Omit for all components.
 
         Returns:
-            :class:`AgentBootstrapResponse` — the composed envelope.
+            :class:`AgentBootstrapResponse` — the composed envelope. Since
+            memory-cloud v0.73.0 the ``upcoming`` component's rows carry
+            ``trigger`` in place of ``details``, with no ``include_details``
+            opt-out on this path.
         """
         body = _bootstrap_payload(
             context_id=context_id,

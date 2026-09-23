@@ -183,6 +183,16 @@ def test_forget_requires_memory_id_or_query():
     assert "Either --memory-id or --query" in result.output
 
 
+def test_forget_help_describes_deployment_retention():
+    """Retention is set per deployment (server v0.66.0+), not a fixed 30 days (#257)."""
+    result = CliRunner().invoke(main, ["forget", "--help"])
+    assert result.exit_code == 0
+    text = " ".join(result.output.split())
+    assert "recoverable for 30 days" not in text
+    assert "CLEANUP_DELETED_MEMORIES_RETENTION_DAYS" in text
+    assert "degraded" in text
+
+
 @patch("kagura_memory.cli.load_config")
 @patch("kagura_memory.cli.KaguraClient")
 def test_context_list(mock_client_cls, mock_config):
