@@ -698,7 +698,7 @@ class TestHermesBlock:
         [
             ("model: gpt\nmcp_servers:\n  other:\n    command: foo\n", "  "),
             ("mcp_servers:\n    other:\n        url: https://x\n", "    "),
-            ("﻿mcp_servers:\n  other:\n    command: foo\n", "  "),
+            ("\ufeffmcp_servers:\n  other:\n    command: foo\n", "  "),
             ('"mcp_servers":\n  other:\n    command: foo\n', "  "),
             ("'mcp_servers' :\n  other:\n    command: foo\n", "  "),
             ("mcp_servers:  # mine\n# note\n\n   other:\n     command: foo\n", "   "),
