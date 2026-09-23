@@ -422,8 +422,8 @@ def remember(
     "--trusted-only",
     is_flag=True,
     help=(
-        "Exclude external / connector-ingested memories (filters.trust_tier=trusted). "
-        "Use it for reads fed back to an agent, like the SessionStart hook."
+        "Exclude external / connector-ingested memories (filters.trust_tier=trusted; "
+        "server v0.24.0+). Use it for reads fed back to an agent, like the SessionStart hook."
     ),
 )
 def recall(query, context_id, k, rerank, trusted_only):
@@ -1537,8 +1537,9 @@ def _tool_profile_option(ctx, param, value: str | None) -> str | None:
     metavar="off|CONTEXT_ID",
     callback=_guardrails_option,
     help=(
-        "Add ?guardrails= to the upstream MCP URL (kagura-mcp --guardrails, or the "
-        "url's query for an API key). 'off' stops the server's guardrail digest AND "
+        "Add ?guardrails= to the upstream MCP URL (server v0.74.0+; kagura-mcp "
+        "--guardrails, or the url's query for an API key). A re-run without it drops an "
+        "earlier value. 'off' stops the server's guardrail digest AND "
         "removes the guardrails block from get_context_info: use it only when hooks, "
         "such as the kagura-memory plugin's, deliver guardrails. A context UUID picks "
         "that context's digest."
@@ -1550,8 +1551,10 @@ def _tool_profile_option(ctx, param, value: str | None) -> str | None:
     metavar="NAME",
     callback=_tool_profile_option,
     help=(
-        "Add ?profile=NAME to the upstream MCP URL to limit tools/list (e.g. core); "
-        "the server rejects an unknown name."
+        "Add ?profile=NAME to the upstream MCP URL to limit tools/list (server "
+        "v0.73.0+). The server knows 'full' and 'core' (case-sensitive) and fails "
+        "tools/list for any other name, which leaves Claude Code with no Kagura tools. "
+        "A ?tools= allowlist already on the URL wins over it."
     ),
 )
 @click.option(
@@ -1605,8 +1608,9 @@ def setup_claude(
       - --profile NAME (OAuth): refresh-aware `kagura-mcp` stdio proxy, no silent 401s
 
     When the memory-cloud kagura-memory Claude Code plugin is installed, an
-    interactive run offers to skip the SessionStart hook and the commands it
-    duplicates, and prints the plugin's server_url / context_id settings.
+    interactive run offers to skip /kagura-recall and /kagura-remember, which
+    duplicate its commands, asks whether to keep the SessionStart recall hook
+    (the plugin has no automatic recall), and prints the plugin's settings.
 
     \b
     Examples:
@@ -1616,7 +1620,7 @@ def setup_claude(
       kagura setup claude --profile default --guardrails off --tool-profile core
       kagura setup claude --api-key kagura_xxx --mcp-url http://localhost:8080/mcp/w/{workspace_id}
       kagura setup claude -y --api-key kagura_xxx --context-id my-project
-      kagura setup claude --no-session-hook --no-commands  # plugin users
+      kagura setup claude --no-commands      # plugin users: its /kagura-memory:* instead
       kagura setup claude --no-auto-context  # always show full context list
     """
     try:

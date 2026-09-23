@@ -32,18 +32,19 @@ Options (all optional; the defaults write the same files as before):
   setup prints that command and stops). Claude Code uses the entry from the
   strongest scope (local > project > user), so setup warns when a stronger one
   would hide the new entry, and with `-y` exits 1 without writing.
-- `--guardrails off|<context-uuid>` and `--tool-profile <name>` — put
-  `?guardrails=` / `?profile=` on the upstream MCP URL (as `kagura-mcp` args for
-  `--profile`). `off` also removes the `guardrails` block from
-  `get_context_info`: use it only once hooks (such as the memory-cloud
-  `kagura-memory` plugin's) deliver guardrails. Changing either never forces a
-  re-login.
+- `--guardrails off|<context-uuid>` (server v0.74.0+) and `--tool-profile <name>`
+  (server v0.73.0+: `full` or `core`) — put `?guardrails=` / `?profile=` on the
+  upstream MCP URL (as `kagura-mcp` args for `--profile`). `off` also removes the
+  `guardrails` block from `get_context_info`: use it only once hooks (such as the
+  memory-cloud `kagura-memory` plugin's) deliver guardrails. Changing either never
+  forces a re-login; a re-run without them drops them, so pass them again.
 - `--no-session-hook`, `--no-sync-hook`, `--no-commands` — skip the SessionStart
   recall hook (trusted memories only), the `.claude/memory` sync hook, or
   `/kagura-recall` · `/kagura-remember`. Re-running with one removes only what
   setup itself wrote. With the `kagura-memory` plugin installed, an interactive
-  run offers to skip the session hook and the commands it duplicates, and prints
-  the plugin's `server_url` / `context_id` settings.
+  run offers to skip the commands it duplicates, asks separately about the
+  session hook (default keep: the plugin has no automatic recall), and prints the
+  plugin's `server_url` / `context_id` settings.
 
 ## Consume the result
 
