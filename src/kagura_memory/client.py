@@ -43,6 +43,7 @@ from .models import (
     AgentBootstrapComponentName,
     AgentBootstrapResponse,
     ContextInfo,
+    ContextTagsResponse,
     DuplicatesResponse,
     Edge,
     EmbeddingModelsResponse,
@@ -65,7 +66,6 @@ from .models import (
     _agent_update_payload,
     _binding_scope_payload,
     _bootstrap_payload,
-    _ContextTagsBody,
     _details_with_tool_trigger,
 )
 
@@ -1794,7 +1794,7 @@ class KaguraClient:
         # Quoted, so a caller's id cannot add segments to the request path.
         path = f"/api/v1/contexts/{quote(context_id, safe='')}/tags"
         data = await self._rest_get_json(path, params, operation="list_tags")
-        body = parse_response(_ContextTagsBody, data, operation="list_tags")
+        body = parse_response(ContextTagsResponse, data, operation="list_tags")
         # Only after the REST call, so its error is the one a caller sees.
         context_name = body.context_name or await self._context_name_for(body.context_id)
         return self._remember_context_name(

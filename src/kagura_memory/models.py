@@ -903,9 +903,11 @@ class ListTagsResponse(BaseModel):
     total: int
 
 
-class _ContextTagsBody(BaseModel):
-    """``GET /api/v1/contexts/{id}/tags``, which ``list_tags`` reshapes (#273).
+class ContextTagsResponse(BaseModel):
+    """Internal response from ``GET /api/v1/contexts/{id}/tags`` (#273).
 
+    ``list_tags`` reshapes it into :class:`ListTagsResponse`. Not exported;
+    it carries the server model's name, which a drift error reports.
     Unlike the MCP tool, the route sends no ``context_name`` (through
     memory-cloud v0.76.0; memory-cloud#1669 proposes adding it) and adds a
     ``sample_summary`` per tag, which :class:`TagInfo` drops.

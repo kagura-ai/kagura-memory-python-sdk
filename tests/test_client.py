@@ -5143,6 +5143,10 @@ async def test_list_tags_with_tags_raises_response_error_on_a_malformed_rest_bod
         await client.close()
 
     assert exc.value.operation == "list_tags"
+    # Names the (unexported) model after the server's, never a private name.
+    assert str(exc.value).startswith(
+        "list_tags: unexpected server response for ContextTagsResponse ("
+    )
     assert server.tool_calls() == []
 
 
