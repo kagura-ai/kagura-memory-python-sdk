@@ -409,7 +409,7 @@ class KaguraClient:
         context_id: str | None = None,
         query: str = "",
         k: int = 5,
-        use_rerank: bool = False,
+        use_rerank: bool | None = None,
         filters: dict[str, Any] | None = None,
         search_mode: str | None = None,
         context_ids: list[str] | None = None,
@@ -423,7 +423,17 @@ class KaguraClient:
             context_id: Context ID for single-context search.
             query: Search query
             k: Number of results
-            use_rerank: Enable AI reranking for higher quality results
+            use_rerank: Cross-encoder reranking, tri-state since memory-cloud
+                v0.69.0 (#1572). ``None`` (the default) omits the argument, so
+                the server follows the context's search config
+                (``search_config.use_rerank``, set via
+                :meth:`update_search_config`). ``True`` requests reranking,
+                which applies only when the context enables it (and the
+                workspace plan and deployment allow it). ``False`` disables
+                reranking for this call. With ``context_ids``, only the first
+                listed context's config governs both ``None`` and ``True``.
+                Servers before v0.69.0 treat an omitted value as ``False``, so
+                ``None`` never reranks there.
             filters: Optional filters. Supported keys:
                 - ``type``: memory type (e.g., ``"code"``)
                 - ``tags``: list of tag strings (e.g., ``["python"]``)
@@ -477,8 +487,10 @@ class KaguraClient:
             arguments["context_ids"] = context_ids
         else:
             arguments["context_id"] = context_id
-        if use_rerank:
-            arguments["use_rerank"] = True
+        # Send an explicit False: since server v0.69.0 an omitted use_rerank
+        # follows the context config, so dropping False would still rerank.
+        if use_rerank is not None:
+            arguments["use_rerank"] = use_rerank
         if filters:
             arguments["filters"] = filters
         if search_mode:
@@ -1856,8 +1868,11 @@ class KaguraClient:
             semantic_weight: Semantic search weight (0.0-1.0, server default 0.6).
             bm25_weight: BM25 keyword search weight (0.0-1.0, server default 0.4).
             fetch_factor: Candidate fetch multiplier (1-10, server default 3).
-            use_rerank: Enable AI reranking.
-            reranker_provider: Reranker provider ("voyage", "cohere", or "ollama").
+            use_rerank: Enable AI reranking. Since server v0.69.0 this is also
+                what a :meth:`recall` that omits ``use_rerank`` follows.
+            reranker_provider: Reranker provider ("voyage", "cohere", or
+                "self_hosted" for the deployment's keyless local reranker;
+                server v0.42.0+ renamed it from "ollama").
             reranker_model: Reranker model name.
 
         Returns:

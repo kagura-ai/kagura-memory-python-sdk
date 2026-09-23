@@ -114,26 +114,47 @@ def test_contexts_command(mock_client_cls, mock_config):
     assert "c1" in result.output
 
 
-@patch("kagura_memory.cli.load_config")
-@patch("kagura_memory.cli.KaguraClient")
-def test_recall_command(mock_client_cls, mock_config):
-    """recall command should search and output results."""
+def _recall_cli(mock_client_cls, mock_config, *args):
+    """Invoke `kagura recall` with a wired mock client and return (result, client)."""
     mock_config.return_value = {
         "api_key": "key",
         "mcp_url": "https://test.com/mcp",
         "context_id": "ctx",
     }
-
     mock_client = AsyncMock()
     mock_client.recall.return_value = {"results": [{"summary": "found"}]}
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=None)
     mock_client_cls.return_value = mock_client
+    result = CliRunner().invoke(main, ["recall", "test query", *args])
+    return result, mock_client
 
-    runner = CliRunner()
-    result = runner.invoke(main, ["recall", "test query"])
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_recall_command(mock_client_cls, mock_config):
+    """recall command should search and output results."""
+    result, _ = _recall_cli(mock_client_cls, mock_config)
     assert result.exit_code == 0
     assert "found" in result.output
+
+
+@pytest.mark.parametrize(
+    ("flags", "expected"),
+    [((), None), (("--rerank",), True), (("--no-rerank",), False)],
+    ids=["omitted", "rerank", "no-rerank"],
+)
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_recall_rerank_flag(mock_client_cls, mock_config, flags, expected):
+    """Issue #251: --rerank/--no-rerank forward True/False; no flag forwards None.
+
+    None leaves ``use_rerank`` off the wire, so the server follows the
+    context's search config (memory-cloud v0.69.0+).
+    """
+    result, mock_client = _recall_cli(mock_client_cls, mock_config, *flags)
+    assert result.exit_code == 0, result.output
+    assert mock_client.recall.call_args.kwargs.get("use_rerank") is expected
 
 
 def test_forget_requires_memory_id_or_query():
@@ -332,6 +353,37 @@ def test_context_search_config(mock_client_cls, mock_config):
     )
     assert result.exit_code == 0
     assert "success" in result.output
+
+
+@pytest.mark.parametrize("provider", ["voyage", "cohere", "self_hosted"])
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_context_search_config_reranker_choices(mock_client_cls, mock_config, provider):
+    """--reranker accepts the server's provider enum, incl. keyless self_hosted (v0.42.0+)."""
+    mock_config.return_value = {"api_key": "key", "mcp_url": "https://test.com/mcp"}
+
+    mock_client = AsyncMock()
+    mock_client.update_search_config.return_value = {"status": "success"}
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    mock_client_cls.return_value = mock_client
+
+    result = CliRunner().invoke(
+        main, ["context", "search-config", "uuid-1", "--rerank", "--reranker", provider]
+    )
+    assert result.exit_code == 0, result.output
+    kwargs = mock_client.update_search_config.call_args.kwargs
+    assert kwargs["reranker_provider"] == provider
+    assert kwargs["use_rerank"] is True
+
+
+def test_context_search_config_rejects_legacy_ollama_reranker():
+    """The server renamed ollama → self_hosted (v0.42.0) and rejects the old key."""
+    result = CliRunner().invoke(
+        main, ["context", "search-config", "uuid-1", "--reranker", "ollama"]
+    )
+    assert result.exit_code != 0
+    assert "Invalid value for '--reranker'" in result.output
 
 
 def test_context_search_config_requires_option():
