@@ -3075,6 +3075,82 @@ async def test_get_server_info():
     await client.close()
 
 
+# The ``features`` block memory-cloud v0.76.0 sends (backend/src/api/routes/system.py).
+# Values deliberately mix True/False so a flag that is dropped (and so falls
+# back to the ``False`` default) cannot pass by accident.
+_V076_FEATURES = {
+    "neural_memory": True,
+    "research_tools": False,
+    "plan_page": True,
+    "byok": True,
+    "cost_display": False,
+    "managed_connectors": True,
+    "managed_llm": True,
+    "referrals": False,
+    "beta_invites": True,
+    "reranking": True,
+}
+_V076_SEARCH_DEFAULTS = {
+    "use_rerank": True,
+    "reranker_provider": "self_hosted",
+    "reranker_model": "bge-reranker-v2-m3",
+}
+
+
+def _server_info_response(payload: dict) -> MagicMock:
+    response = MagicMock()
+    response.json.return_value = payload
+    response.raise_for_status = MagicMock()
+    return response
+
+
+@pytest.mark.asyncio
+async def test_get_server_info_exposes_v076_features_and_search_defaults():
+    """Every v0.76.0 flag and ``search_defaults`` survive parsing (#257)."""
+    client = _make_initialized_client()
+    payload = {
+        "name": "Kagura Memory Cloud",
+        "version": "0.76.0",
+        "description": "Remote MCP Server + Web Management",
+        "environment": "production",
+        "search_defaults": _V076_SEARCH_DEFAULTS,
+        "features": _V076_FEATURES,
+    }
+
+    with patch.object(client._client, "get", new_callable=AsyncMock) as mock_get:
+        mock_get.return_value = _server_info_response(payload)
+        result = await client.get_server_info()
+
+    assert result.features.model_dump() == _V076_FEATURES
+    assert result.search_defaults == _V076_SEARCH_DEFAULTS
+    await client.close()
+
+
+def test_server_features_keeps_unknown_future_flags():
+    """A flag newer than the SDK is kept in ``model_extra``, not dropped."""
+    info = ServerInfo.model_validate(
+        {
+            "name": "Kagura Memory Cloud",
+            "version": "9.0.0",
+            "features": {**_V076_FEATURES, "brand_new_flag": True},
+        }
+    )
+    assert info.features.model_extra == {"brand_new_flag": True}
+    assert info.features.beta_invites is True
+
+
+def test_server_info_from_an_older_server_defaults_missing_fields():
+    """Flags a server does not send read as ``False``; ``search_defaults`` as ``None``."""
+    info = ServerInfo.model_validate(
+        {"name": "Kagura Memory Cloud", "version": "0.53.0", "features": {"neural_memory": True}}
+    )
+    assert info.features.neural_memory is True
+    assert info.features.reranking is False
+    assert info.features.beta_invites is False
+    assert info.search_defaults is None
+    assert info.features.model_extra == {}
+
+
 @pytest.mark.asyncio
 async def test_check_server_version_ok(caplog):
     """check_server_version() should not warn when version meets minimum."""

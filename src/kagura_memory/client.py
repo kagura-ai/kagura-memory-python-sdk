@@ -2191,7 +2191,11 @@ class KaguraClient:
         Calls ``GET /api/v1/system/info``.
 
         Returns:
-            ServerInfo with version string and feature flags.
+            ServerInfo with the version string, the deployment's feature
+            flags (:class:`~kagura_memory.models.ServerFeatures` — flags newer
+            than this SDK land in ``features.model_extra``) and, on
+            memory-cloud v0.69.0+, ``search_defaults`` — the reranker
+            settings new contexts start with.
         """
         return await self._rest_get("/api/v1/system/info", ServerInfo)
 
