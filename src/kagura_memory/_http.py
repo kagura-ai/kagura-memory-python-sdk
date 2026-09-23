@@ -92,7 +92,7 @@ def _query_without(query: str, keys: Collection[str]) -> list[str]:
     ]
 
 
-def mcp_url_without_query(mcp_url: str, key: str) -> str:
+def mcp_url_without_query_param(mcp_url: str, key: str) -> str:
     """Return ``mcp_url`` with every ``key`` parameter dropped from its query.
 
     Names are compared decoded, as the server reads them (``guard%72ails`` is
@@ -103,11 +103,13 @@ def mcp_url_without_query(mcp_url: str, key: str) -> str:
         key: The query parameter to drop, e.g. ``guardrails``.
 
     Returns:
-        ``mcp_url`` itself when it has no ``key`` parameter.
+        The URL without any ``key`` segment and without a bare ``?`` when
+        nothing else is left; ``mcp_url`` itself, as written, when it has no
+        ``key`` parameter.
     """
     parts = urlsplit(mcp_url)
     kept = _query_without(parts.query, (key,))
-    if kept == _query_without(parts.query, ()):
+    if len(kept) == sum(1 for segment in parts.query.split("&") if segment):
         return mcp_url
     return urlunsplit(parts._replace(query="&".join(kept)))
 

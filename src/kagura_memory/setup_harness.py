@@ -68,7 +68,7 @@ from ._http import (
     base_url_from_mcp,
     mcp_url_guardrails_off,
     mcp_url_with_query,
-    mcp_url_without_query,
+    mcp_url_without_query_param,
     normalize_uuid,
     validate_https_url,
 )
@@ -983,7 +983,7 @@ def _url_for_no_instructions(h: _Harness, url: str) -> str:
             f"  from get_context_info: {h.title} then gets no guardrails from Kagura."
         )
         return mcp_url_with_query(url, guardrails="off")
-    kept = mcp_url_without_query(url, "guardrails")
+    kept = mcp_url_without_query_param(url, "guardrails")
     if kept != url:
         click.echo(
             f"\n  Warning: {h.title} does not read MCP instructions, so the ?guardrails= value in\n"

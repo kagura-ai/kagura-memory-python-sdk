@@ -21,7 +21,7 @@ from kagura_memory._http import (
     mcp_url_guardrails_off,
     mcp_url_has_tools_allowlist,
     mcp_url_with_query,
-    mcp_url_without_query,
+    mcp_url_without_query_param,
     normalize_guardrails,
     normalize_uuid,
     validate_https_url,
@@ -646,15 +646,15 @@ def test_mcp_url_with_query_none_is_a_no_op():
         ("https://h.example/mcp?guardrails", "https://h.example/mcp"),
     ],
 )
-def test_mcp_url_without_query_drops_every_value(url, expected):
-    assert mcp_url_without_query(url, "guardrails") == expected
+def test_mcp_url_without_query_param_drops_every_value(url, expected):
+    assert mcp_url_without_query_param(url, "guardrails") == expected
 
 
 @pytest.mark.parametrize(
     "url", ["https://h.example/mcp", "https://h.example/mcp?", "https://h.example/mcp?&tools=a,b&"]
 )
-def test_mcp_url_without_query_leaves_a_url_without_the_key_as_it_is(url):
-    assert mcp_url_without_query(url, "guardrails") == url
+def test_mcp_url_without_query_param_leaves_a_url_without_the_key_as_it_is(url):
+    assert mcp_url_without_query_param(url, "guardrails") == url
 
 
 @pytest.mark.parametrize(
