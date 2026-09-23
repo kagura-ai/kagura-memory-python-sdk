@@ -17,13 +17,15 @@ a dedicated client" idiom.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Literal
+from urllib.parse import quote, urlsplit
 
 import httpx
 
-from .._http import SDK_VERSION, extract_detail
+from .._http import SDK_VERSION, extract_detail, validate_https_url
 from ..exceptions import (
     KaguraAuthDeniedError,
     KaguraAuthError,
@@ -38,6 +40,7 @@ from ..exceptions import (
 _PATH_DEVICE_AUTHORIZE = "/api/v1/oauth/device/authorize"
 _PATH_TOKEN = "/api/v1/oauth/token/"
 _PATH_REVOKE = "/api/v1/oauth/revoke"
+_PATH_SYSTEM_INFO = "/api/v1/system/info"
 
 # RFC 8628 §3.5 — "slow_down" requires the client to add 5 seconds.
 _SLOW_DOWN_INCREMENT_SEC = 5
@@ -47,6 +50,29 @@ DEFAULT_CLIENT_ID = "kagura-cli"
 
 DEVICE_FLOW_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code"
 REFRESH_TOKEN_GRANT_TYPE = "refresh_token"
+
+# memory-cloud's own invite-token shape (``BETA_INVITE_TOKEN_PATTERN`` in
+# backend/src/services/beta_invite_service.py), minus the anchors: matched
+# with ``fullmatch`` so a trailing newline cannot sneak past ``$``.
+_INVITE_TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{20,128}")
+_INVITE_TOKEN_RULE = "20-128 characters from A-Z, a-z, 0-9, '_' and '-'"
+_SEMVER_PREFIX_RE = re.compile(r"v?(\d+)\.(\d+)\.(\d+)")
+
+JOIN_RETURN_TO_MIN_SERVER_VERSION: tuple[int, int, int] | None = None
+"""First memory-cloud release whose ``/join/<token>`` honours ``return_to``.
+
+memory-cloud#1655 (the ``/join`` → ``/device`` hand-off) is not in any
+release yet, so this is ``None`` and :func:`invite_support` never answers
+``"hand_off"``: every server gets the two-step fallback. Set it to that
+release's version once #1655 ships, or swap the check for the server's
+capability flag if it grows one.
+"""
+
+# The /system/info probe runs while the device code is already ticking, so a
+# hung server must not eat into the user's approval window.
+_SYSTEM_INFO_TIMEOUT_SEC = 5.0
+
+InviteSupport = Literal["disabled", "hand_off", "two_step"]
 
 
 # ---------------------------------------------------------------------------
@@ -83,6 +109,21 @@ class TokenResponse:
     user_email: str = ""
     workspace_id: str = ""
     workspace_name: str = ""
+
+
+@dataclass(frozen=True)
+class InviteRef:
+    """A parsed ``kagura auth login --invite`` value.
+
+    The token is a bearer secret for one sign-up, so it and the link that
+    carries it are kept out of ``repr`` (and therefore out of tracebacks).
+    """
+
+    token: str = field(repr=False)
+    origin: str | None = None
+    """``scheme://host[:port]`` of a full invite link; ``None`` for a bare token."""
+    link: str | None = field(default=None, repr=False)
+    """The invite link as given, minus query and fragment; ``None`` for a bare token."""
 
 
 # ---------------------------------------------------------------------------
@@ -336,8 +377,184 @@ async def revoke_token(
 
 
 # ---------------------------------------------------------------------------
+# Invite sign-up (``kagura auth login --invite``)
+# ---------------------------------------------------------------------------
+
+
+def parse_invite(value: str) -> InviteRef:
+    """Parse an invite link or a bare invite token, without any network call.
+
+    A link is ``https://<host>[/<base path>]/join/<token>``: its query and
+    fragment are ignored, and only the last two path segments must be
+    ``join/<token>`` so a frontend served under a base path still parses.
+    A bare token must match memory-cloud's pattern (20-128 of
+    ``[A-Za-z0-9_-]``). Surrounding whitespace is ignored.
+
+    Raises:
+        ValueError: ``value`` is neither. The message never echoes the
+            input, which may hold a (mistyped) token.
+    """
+    value = value.strip()
+    if "://" not in value:
+        if "/" in value:
+            raise ValueError("an invite link must be a full https://<host>/join/<token> URL")
+        _check_invite_token(value)
+        return InviteRef(token=value)
+
+    origin = _url_origin(value)
+    if origin is None:
+        raise ValueError("an invite link must be an https://<host>/join/<token> URL")
+    validate_https_url(origin, label="An invite link")
+    path = urlsplit(value).path.rstrip("/")
+    segments = path.split("/")
+    if len(segments) < 3 or segments[-2] != "join":
+        raise ValueError("an invite link must end in /join/<token>")
+    _check_invite_token(segments[-1])
+    return InviteRef(token=segments[-1], origin=origin, link=f"{origin}{path}")
+
+
+def invite_base_url(verification_uri: str) -> str | None:
+    """Return the web app's base URL: ``verification_uri`` minus its ``/device``.
+
+    memory-cloud builds ``verification_uri`` as ``{frontend_url}/device``, and
+    it is the only web-app location the CLI learns — ``--server`` is the API
+    origin, which can differ. ``None`` when the URI does not end in a
+    ``/device`` segment or fails the same HTTPS check as ``--server``: the
+    CLI then cannot place ``/join`` safely.
+    """
+    origin = _url_origin(verification_uri)
+    path = urlsplit(verification_uri).path.rstrip("/")
+    if origin is None or not path.endswith("/device"):
+        return None
+    base = f"{origin}{path.removesuffix('/device')}"
+    try:
+        validate_https_url(base)
+    except ValueError:
+        return None
+    return base
+
+
+def build_invite_link(
+    verification_uri: str, verification_uri_complete: str, token: str
+) -> str | None:
+    """Build the single link that accepts an invite and lands on ``/device``.
+
+    ``{base}/join/{token}?return_to=<path and query of verification_uri_complete>``,
+    with ``base`` from :func:`invite_base_url`. ``return_to`` is a
+    same-origin relative path (e.g. ``/device?user_code=ABCD-1234``), the
+    form ``/join`` accepts once memory-cloud#1655 ships. The TypeScript CLI
+    mirrors this as ``buildInviteLink``.
+
+    Returns:
+        The link, or ``None`` when ``/join`` cannot be placed: no ``base``,
+        or ``verification_uri_complete`` on a different origin.
+
+    Raises:
+        ValueError: ``token`` does not match the invite-token pattern.
+    """
+    _check_invite_token(token)
+    base = invite_base_url(verification_uri)
+    if base is None or _url_origin(verification_uri_complete) != _url_origin(verification_uri):
+        return None
+    parts = urlsplit(verification_uri_complete)
+    return_to = f"{parts.path}?{parts.query}" if parts.query else parts.path
+    return f"{base}/join/{token}?return_to={quote(return_to, safe='')}"
+
+
+def check_invite_origin(invite: InviteRef, verification_uri: str) -> None:
+    """Refuse a full invite link whose origin is not the web app's.
+
+    The web app's origin is ``verification_uri``'s — ``--server`` is the API
+    origin, which can differ. The CLI never rewrites a link onto another
+    host, so a mismatch means the user is logging in to the wrong server.
+    A bare token carries no origin and always passes.
+
+    Raises:
+        ValueError: the origins differ. The message names both origins,
+            never the token.
+    """
+    if invite.origin is None:
+        return
+    web_origin = _url_origin(verification_uri)
+    if invite.origin != web_origin:
+        raise ValueError(
+            f"This invite is for a different server ({invite.origin}) than the one "
+            f"you are logging in to ({web_origin or verification_uri})."
+        )
+
+
+async def fetch_system_info(
+    client: httpx.AsyncClient,
+    server: str,
+    *,
+    timeout: float = _SYSTEM_INFO_TIMEOUT_SEC,
+) -> dict[str, Any] | None:
+    """GET the public ``/api/v1/system/info`` and return the raw JSON object.
+
+    Sent without credentials (there are none yet during login). The raw body
+    is returned rather than :class:`~kagura_memory.models.ServerInfo`
+    because ``ServerFeatures`` does not model ``beta_invites`` yet.
+    Best-effort: any HTTP error, timeout or non-object body yields ``None``.
+    """
+    try:
+        response = await client.get(f"{server.rstrip('/')}{_PATH_SYSTEM_INFO}", timeout=timeout)
+    except httpx.RequestError:
+        return None
+    if response.status_code != 200:
+        return None
+    return _safe_json(response) or None
+
+
+def invite_support(system_info: dict[str, Any] | None) -> InviteSupport:
+    """Decide how ``--invite`` is presented, from a raw ``/system/info`` body.
+
+    Returns:
+        ``"disabled"`` when ``features.beta_invites`` is ``false`` (invites
+        have no effect on this server); ``"hand_off"`` when the server
+        version is at least :data:`JOIN_RETURN_TO_MIN_SERVER_VERSION`, so one
+        ``/join`` link carries the user on to ``/device``; otherwise
+        ``"two_step"`` (no info, an older or unparseable version, or the
+        hand-off not released yet).
+    """
+    if system_info is None:
+        return "two_step"
+    features = system_info.get("features")
+    if isinstance(features, dict) and features.get("beta_invites") is False:
+        return "disabled"
+    minimum = JOIN_RETURN_TO_MIN_SERVER_VERSION
+    version = system_info.get("version")
+    if minimum is None or not isinstance(version, str):
+        return "two_step"
+    match = _SEMVER_PREFIX_RE.match(version)
+    if match is None:
+        return "two_step"
+    parsed = (int(match[1]), int(match[2]), int(match[3]))
+    return "hand_off" if parsed >= minimum else "two_step"
+
+
+# ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+
+def _check_invite_token(token: str) -> None:
+    """Raise ``ValueError`` (without echoing ``token``) unless it is well-formed."""
+    if not _INVITE_TOKEN_RE.fullmatch(token):
+        raise ValueError(f"an invite token must be {_INVITE_TOKEN_RULE}")
+
+
+def _url_origin(url: str) -> str | None:
+    """``scheme://host[:port]`` of an http(s) URL, lower-cased; ``None`` otherwise."""
+    parts = urlsplit(url)
+    try:
+        host, port = parts.hostname, parts.port
+    except ValueError:  # a non-numeric or out-of-range port
+        return None
+    if parts.scheme not in ("http", "https") or not host:
+        return None
+    if ":" in host:  # IPv6 literal — hostname drops the brackets
+        host = f"[{host}]"
+    return f"{parts.scheme}://{host}" + (f":{port}" if port is not None else "")
 
 
 def _safe_json_object(response: httpx.Response, endpoint: str) -> dict[str, Any]:
