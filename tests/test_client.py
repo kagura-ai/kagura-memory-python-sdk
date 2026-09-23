@@ -56,10 +56,13 @@ from tests.conftest import (
 # ============================================================================
 
 
-def test_rejects_http_url():
-    """HTTP URLs (non-localhost) should raise ValueError."""
+@pytest.mark.parametrize(
+    "mcp_url", ["http://evil.com/mcp", "HTTP://evil.com/mcp", " http://evil.com/mcp"]
+)
+def test_rejects_http_url(mcp_url):
+    """HTTP URLs (non-localhost) should raise ValueError, in any case or padding (#274)."""
     with pytest.raises(ValueError, match="must use HTTPS"):
-        KaguraClient(api_key="test", mcp_url="http://evil.com/mcp")
+        KaguraClient(api_key="test", mcp_url=mcp_url)
 
 
 def test_allows_https_url():

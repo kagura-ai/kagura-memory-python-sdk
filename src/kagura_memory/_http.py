@@ -579,9 +579,20 @@ def _format_validation_errors(errors: list[Any]) -> str:
 # followed by a boundary — a port (``:\d+``), a path/query/fragment delimiter, or
 # end-of-string — so a prefix-match attack like ``http://localhost.evil.com`` or a
 # userinfo trick like ``http://localhost@evil.com`` cannot smuggle an external host
-# past the check (#189). Scheme matching stays case-sensitive to preserve prior
-# behavior; the trigger below is the lowercase ``http://`` literal.
-_LOCALHOST_HTTP_RE = re.compile(r"^http://(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?(?:[/?#]|$)")
+# past the check (#189). Every URL parser reads the scheme and host without regard
+# to case, so ``HTTP://evil.com`` is fetched over plain HTTP exactly like
+# ``http://evil.com`` (#274); the match is ASCII-only, so no Unicode case fold
+# (``ſ`` → ``s``) can spell ``localhost``. Any ``http:`` scheme counts, slashes or
+# not: WHATWG parsers read ``http:/evil.com`` and ``http:evil.com`` as
+# ``http://evil.com``, and a loopback URL written that way is refused.
+_PLAIN_HTTP_RE = re.compile(r"^http:", re.IGNORECASE | re.ASCII)
+_LOCALHOST_HTTP_RE = re.compile(
+    r"^http://(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?(?:[/?#]|$)", re.IGNORECASE | re.ASCII
+)
+# What URL parsers drop before they read a scheme: whitespace and C0 controls
+# around the URL, and (WHATWG: Node, browsers, Rust's ``url`` crate, which the
+# harnesses ``kagura setup`` writes for use) a tab or newline anywhere in it.
+_URL_IGNORED_RE = re.compile(r"^[\x00-\x20\s]+|[\x00-\x20\s]+$|[\t\n\r]")
 
 
 def normalize_uuid(value: object, *, label: str) -> str:
@@ -665,6 +676,12 @@ def validate_lat_lon(lat: object, lon: object) -> None:
 def validate_https_url(url: str, *, label: str = "URL") -> None:
     """Enforce HTTPS except for localhost development.
 
+    The URL is checked as a parser reads it: surrounding whitespace and
+    control characters and any tab or newline dropped, the scheme and host in
+    any case. ``" HTTP://evil.com"`` is plain HTTP to ``evil.com`` for httpx
+    once a caller strips it, and for every harness that reads the URL from its
+    config (#274).
+
     Args:
         url: URL to validate.
         label: Human-readable label for error messages.
@@ -672,8 +689,9 @@ def validate_https_url(url: str, *, label: str = "URL") -> None:
     Raises:
         ValueError: If URL uses HTTP and is not a loopback host.
     """
-    if url.startswith("http://") and not _LOCALHOST_HTTP_RE.match(url):
+    candidate = _URL_IGNORED_RE.sub("", url)
+    if _PLAIN_HTTP_RE.match(candidate) and not _LOCALHOST_HTTP_RE.match(candidate):
         raise ValueError(
-            f"{label} must use HTTPS for security (got: {url}). "
+            f"{label} must use HTTPS for security (got: {candidate}). "
             "HTTP is only allowed for localhost development."
         )

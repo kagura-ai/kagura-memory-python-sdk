@@ -1038,11 +1038,14 @@ def test_resolve_server_default(monkeypatch):
     assert _resolve_server(None) == DEFAULT_SERVER
 
 
-def test_resolve_server_rejects_http():
+@pytest.mark.parametrize(
+    "server", ["http://evil.example.com", "HTTP://evil.example.com", " http://evil.example.com"]
+)
+def test_resolve_server_rejects_http(server):
     from kagura_memory.auth.cli import _resolve_server
 
     with pytest.raises(ValueError, match="HTTPS"):
-        _resolve_server("http://evil.example.com")
+        _resolve_server(server)
 
 
 # ---------------------------------------------------------------------------
