@@ -33,6 +33,9 @@ from .conftest import make_oauth_creds
 
 # Captured before the autouse fixtures replace them.
 REAL_PROXY_PATH = setup_harness._proxy_path
+REAL_HARNESS_EXECUTABLE = setup_harness._harness_executable
+REAL_STDIN_IS_TTY = setup_harness._stdin_is_tty
+REAL_FETCH_DIGEST = setup_harness._fetch_digest
 REAL_RUN = subprocess.run
 
 PROXY = "/opt/kagura/bin/kagura-mcp"
@@ -1011,3 +1014,212 @@ def test_custom_name_flows_into_every_form(on_path, recorder):
     assert "  kagura_work:" in result.output
     assert "${MCP_KAGURA_WORK_API_KEY}" in result.output
     assert "hermes mcp test kagura_work" in result.output
+
+
+def test_dry_run_with_an_existing_entry_labels_the_force_commands(on_path, recorder):
+    on_path("openclaw")
+    recorder.detect_out["openclaw"] = json.dumps({"command": "kagura-mcp"})
+    result = run("openclaw", "--profile", "default", "--dry-run")
+    assert result.exit_code == 0, result.output
+    assert "With --force, would run: openclaw mcp set kagura-memory" in result.output
+    assert recorder.mutating() == []
+
+
+@pytest.mark.parametrize(
+    ("content", "action"),
+    [(None, "create"), ("# Mine\n", "append the block to"), (EXPORT_BLOCK, "replace the block in")],
+)
+def test_dry_run_names_the_export_action(tmp_path, content, action):
+    path = tmp_path / "AGENTS.md"
+    if content is not None:
+        path.write_text(content, encoding="utf-8")
+    args = ("--context-id", CTX, "--agents-md", str(path), "--dry-run")
+    result = run("codex", "--profile", "default", *args)
+    assert result.exit_code == 0, result.output
+    assert f"AGENTS.md: would {action} {path}" in result.output
+    assert (path.read_text(encoding="utf-8") if content is not None else None) == content
+
+
+def test_export_action_for_each_file_state(tmp_path):
+    path = tmp_path / "AGENTS.md"
+    assert setup_harness._export_action(path) == "create"
+    path.write_text("# Mine\n", encoding="utf-8")
+    assert setup_harness._export_action(path) == "append the block to"
+    path.write_text(EXPORT_BLOCK, encoding="utf-8")
+    assert setup_harness._export_action(path) == "replace the block in"
+    path.write_bytes(b"\xff\xfe not utf-8")
+    assert setup_harness._export_action(path) == "update"
+
+
+@pytest.mark.parametrize(
+    ("flags", "expected"),
+    [([], "offered when setup runs"), (["-y"], "not offered with -y")],
+)
+def test_dry_run_mentions_the_export_offer(flags, expected):
+    result = run("openclaw", "--profile", "default", "--dry-run", *flags)
+    assert result.exit_code == 0, result.output
+    assert "~/.openclaw/workspace/AGENTS.md" in result.output
+    assert expected in result.output
+
+
+def test_digest_failure_other_than_404_is_reported_after_the_entry(digest, tmp_path):
+    from kagura_memory.exceptions import KaguraConnectionError
+
+    digest.error = KaguraConnectionError("HTTP 503: down")
+    path = tmp_path / "AGENTS.md"
+    result = run("codex", "--profile", "default", "--context-id", CTX, "--agents-md", str(path))
+    assert result.exit_code == 1
+    assert "The MCP entry is set up, but the AGENTS.md export failed: HTTP 503" in result.output
+    assert not path.exists()
+
+
+def test_broken_target_file_is_left_unchanged(tmp_path):
+    path = tmp_path / "AGENTS.md"
+    broken = "# P\n\n" + EXPORT_BLOCK + "\n" + EXPORT_BLOCK
+    path.write_text(broken, encoding="utf-8")
+    result = run("codex", "--profile", "default", "--context-id", CTX, "--agents-md", str(path))
+    assert result.exit_code == 1
+    assert "fix it by hand; left unchanged" in result.output
+    assert path.read_text(encoding="utf-8") == broken
+
+
+def test_codex_agents_md_size_warning_counts_bytes(env, digest):
+    path = env / ".codex" / "AGENTS.md"
+    path.parent.mkdir(parents=True)
+    path.write_text("あ" * 11_000 + "\n", encoding="utf-8")  # 33,000 bytes, 11,001 chars
+    result = run("codex", "--profile", "default", "--context-id", CTX, "--agents-md", "-y")
+    assert result.exit_code == 0, result.output
+    assert "bytes; Codex reads only the first 32768" in result.output
+
+
+def test_detection_command_that_cannot_run_counts_as_no_entry(on_path, monkeypatch):
+    on_path("hermes")
+    calls = []
+
+    def broken(argv, **kwargs):
+        calls.append(argv)
+        raise OSError("exec format error")
+
+    monkeypatch.setattr(setup_harness.subprocess, "run", broken)
+    result = run("hermes", "--profile", "default", "-y")
+    assert result.exit_code == 0, result.output
+    assert "No kagura-memory entry yet." in result.output
+    assert calls == [["/usr/bin/hermes", "mcp", "list"]]
+
+
+@pytest.mark.parametrize("stdout", ["not json", "warning: x\n{}", "[1, 2]"])
+def test_openclaw_show_output_without_an_entry(on_path, recorder, stdout):
+    on_path("openclaw")
+    recorder.detect_out["openclaw"] = stdout
+    result = run("openclaw", "--profile", "default", "-y")
+    assert result.exit_code == 0, result.output
+    assert "No kagura-memory entry yet." in result.output
+
+
+def test_harness_command_that_cannot_start_is_reported(on_path, monkeypatch):
+    on_path("openclaw")
+
+    def run_(argv, **kwargs):
+        if argv[1:3] == ["mcp", "show"]:
+            return subprocess.CompletedProcess(argv, 1, "", "")
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(setup_harness.subprocess, "run", run_)
+    result = run("openclaw", "--profile", "default", "-y")
+    assert result.exit_code == 1
+    assert "`openclaw mcp add` failed: " in result.output
+    assert "Permission denied" in result.output
+
+
+def test_interactive_export_without_profile_or_context_is_a_usage_error(digest):
+    result = run("openclaw", "--url-form", "--mcp-url", MCP_URL, "--agents-md", input="\n")
+    assert result.exit_code == 2
+    assert "The AGENTS.md export needs --context-id" in result.output
+    assert digest.calls == []
+
+
+def test_url_form_without_profile_exports_with_the_default_credential(on_path, digest, tmp_path):
+    on_path("codex")
+    path = tmp_path / "AGENTS.md"
+    args = ("--url-form", "--mcp-url", MCP_URL, "--context-id", CTX, "--agents-md", str(path))
+    result = run("codex", *args, "-y")
+    assert result.exit_code == 0, result.output
+    assert digest.calls == [(None, CTX)]
+    assert f"kagura guardrails digest {CTX} --out" in result.output
+
+
+def test_unexpected_error_becomes_setup_failed(monkeypatch):
+    def boom(*args, **kwargs):
+        raise RuntimeError("kaboom")
+
+    monkeypatch.setattr("kagura_memory.cli.run_setup_harness", boom)
+    result = run("codex", "--profile", "default", "-y")
+    assert result.exit_code == 1
+    assert "Setup failed: kaboom" in result.output
+
+
+def test_codex_hooks_message_names_codex_home(tmp_path, monkeypatch, on_path):
+    codex_home = tmp_path / "ch"
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    data = codex_home / "plugins" / "data" / "kagura-memory-x"
+    data.mkdir(parents=True)
+    (data / "config.json").write_text("{}", encoding="utf-8")
+    result = run("codex", "--profile", "default", "-y")
+    assert result.exit_code == 0, result.output
+    assert f"a config.json under {codex_home / 'plugins' / 'data'}/kagura-memory-*/" in (
+        result.output
+    )
+
+
+def test_codex_url_form_block_without_codex():
+    result = run("codex", "--url-form", "--mcp-url", MCP_URL, "-y")
+    assert result.exit_code == 0, result.output
+    assert f'url = "{MCP_URL}"' in result.output
+    assert 'bearer_token_env_var = "KAGURA_API_KEY"' in result.output
+
+
+def test_hermes_list_without_our_name_is_no_entry(on_path, recorder):
+    on_path("hermes")
+    recorder.detect_out["hermes"] = "  Name  Transport\n  github   npx @mcp/github   all\n"
+    result = run("hermes", "--profile", "default", "-y")
+    assert result.exit_code == 0, result.output
+    assert "No kagura-memory entry yet." in result.output
+
+
+def test_openclaw_show_with_broken_json_is_no_entry(on_path, recorder):
+    on_path("openclaw")
+    recorder.detect_out["openclaw"] = '{"command": '
+    result = run("openclaw", "--profile", "default", "-y")
+    assert result.exit_code == 0, result.output
+    assert "No kagura-memory entry yet." in result.output
+
+
+def test_lookups_use_path_and_stdin(monkeypatch):
+    monkeypatch.setattr(setup_harness.shutil, "which", lambda cmd: f"/bin/{cmd}")
+    assert REAL_HARNESS_EXECUTABLE("hermes") == "/bin/hermes"
+    monkeypatch.setattr(setup_harness.sys.stdin, "isatty", lambda: False)
+    assert REAL_STDIN_IS_TTY() is False
+
+
+@pytest.mark.asyncio
+async def test_fetch_digest_uses_the_profile(monkeypatch):
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def get_guardrail_digest(self, context_id):
+            return GuardrailDigest(context_id=context_id, target="export", text=EXPORT_BLOCK)
+
+    seen = []
+
+    def from_mcp_url(**kwargs):
+        seen.append(kwargs)
+        return Client()
+
+    monkeypatch.setattr(setup_harness.MemoryClient, "from_mcp_url", from_mcp_url)
+    digest = await REAL_FETCH_DIGEST("work", CTX)
+    assert digest.text == EXPORT_BLOCK
+    assert seen == [{"profile": "work"}]

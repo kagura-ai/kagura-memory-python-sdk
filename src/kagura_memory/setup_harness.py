@@ -45,6 +45,7 @@ import shutil
 import subprocess
 import sys
 import tomllib
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, ClassVar, Literal
@@ -194,7 +195,7 @@ def _capture(exe: str, args: list[str]) -> subprocess.CompletedProcess[str] | No
 # =============================================================================
 
 
-class _Harness:
+class _Harness(ABC):
     """One harness: where its config lives, and how to detect, write and print an entry."""
 
     key: ClassVar[HarnessName]
@@ -207,37 +208,44 @@ class _Harness:
     #: How much of a context file the harness loads, and in which unit.
     agents_md_cap: ClassVar[tuple[int, str] | None] = None
 
+    @abstractmethod
     def config_path(self) -> Path:
-        raise NotImplementedError
+        """The file the harness keeps its MCP servers in."""
 
+    @abstractmethod
     def detect(self, name: str, exe: str | None) -> _Existing | None:
         """The entry ``name`` has now, from its config or a read-only command."""
-        raise NotImplementedError
 
+    @abstractmethod
     def add_args(self, name: str, entry: _Entry) -> list[str]:
-        raise NotImplementedError
+        """The harness command (after its name) that adds ``entry`` as ``name``."""
 
     def replace_args(self, name: str, entry: _Entry) -> list[list[str]]:
         """The commands that replace an existing ``name`` (``--force``)."""
         return [self.add_args(name, entry)]
 
+    @abstractmethod
     def block(self, name: str, entry: _Entry) -> str:
-        raise NotImplementedError
+        """``entry`` in the config file's own syntax, to print."""
 
     def key_env(self, name: str, requested: str | None) -> str:
+        """The variable the URL form reads the API key from."""
         return requested or DEFAULT_KEY_ENV
 
+    @abstractmethod
     def key_note(self, entry: _Entry, *, ran: bool) -> str:
         """Where the URL form's key goes; never asks for it."""
-        raise NotImplementedError
 
+    @abstractmethod
     def verify_args(self, name: str) -> list[str]:
-        raise NotImplementedError
+        """The harness command that checks the entry."""
 
+    @abstractmethod
     def agents_md_path(self) -> Path:
-        raise NotImplementedError
+        """The always-loaded file the export goes into by default."""
 
     def notes(self) -> list[str]:
+        """Harness-specific lines for the end of the run."""
         return []
 
 
@@ -681,8 +689,9 @@ def _codex_hook_warning(existing: _Existing | None, hooks_on: bool, *, ask: bool
     )
     if not hooks_on:
         return
+    data = _path_label(codex_home() / "plugins" / "data")
     click.echo(
-        "  They are turned on here (a config.json under ~/.codex/plugins/data/kagura-memory-*/):\n"
+        f"  They are turned on here (a config.json under {data}/kagura-memory-*/):\n"
         "  to keep them, re-run with --url-form."
     )
     if ask and not click.confirm("Write the stdio entry anyway?", default=False):
@@ -911,6 +920,8 @@ def run_setup_harness(
     click.echo("")
     if reason is None:
         verb = "Would run" if dry_run else "Running"
+        if dry_run and existing is not None and not force:
+            verb = "With --force, would run"
         for args in commands:
             click.echo(f"  {verb}: {shlex.join([h.cli, *args])}")
     else:
