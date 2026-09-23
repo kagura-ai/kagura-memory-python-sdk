@@ -58,4 +58,7 @@ With the hooks active, the plugin recommends `?guardrails=off` on the MCP URL so
 server does not also send a guardrail digest. The `kagura-mcp` entry cannot carry that
 query through the profile; `/kagura-memory:setup` explains the `--server` override, and
 re-running `kagura setup claude --profile <name>` rewrites the entry, so re-apply it
-afterwards. To check what the hooks will load, run `kagura guardrails load`.
+afterwards. `kagura guardrails load <the plugin's context_id>` shows that context's set
+as the CLI's own credential sees it (the bare command uses `.kagura.json`'s context,
+which may be a different one). The hooks use their own API key, and an agent binding
+filters the set per credential, so what they load can differ from that output.
