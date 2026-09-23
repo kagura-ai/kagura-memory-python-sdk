@@ -40,46 +40,19 @@ from kagura_memory import (
 )
 from kagura_memory._http import parse_response
 from kagura_memory.secrets.client import SecretClient
-from tests.conftest import sleep_report_summary_dict
+from tests.conftest import (
+    indexer_status_dict,
+    sleep_report_detail_dict,
+    sleep_report_summary_dict,
+)
 
 AGENT = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 WS = "11111111-2222-3333-4444-555555555555"
 
 
-def _indexer_payload(**metrics: Any) -> dict[str, Any]:
-    """Server-shaped ``indexer-status`` body (memory-cloud resource_indexer.py)."""
-    return {
-        "resource_id": "products",
-        "state": {
-            "job_status": "idle",
-            "last_run_at": "2026-09-20T00:00:00Z",
-            "next_run_at": None,
-            "active_version": 1,
-            "last_offset": 42,
-            "lag_seconds": 3.0,
-            "metrics": {"applied_upserts": 0, "applied_deletes": 0, "errors": 0, **metrics},
-        },
-        "recent_events": [],
-    }
-
-
 def _detail_payload(**overrides: Any) -> dict[str, Any]:
     """Flattened ``get_sleep_report`` shape (``_report_to_detail`` + actions)."""
-    return {
-        **sleep_report_summary_dict("rid-d"),
-        "memories_flagged": 0,
-        "embedding_calls_made": 0,
-        "error_message": None,
-        "edge_discovery_result": None,
-        "dedup_result": None,
-        "merge_retention_result": None,
-        "importance_result": None,
-        "consolidation_result": None,
-        "reindex_result": None,
-        "actions": [],
-        "action_count": 0,
-        **overrides,
-    }
+    return {**sleep_report_detail_dict("rid-d", **overrides), "actions": [], "action_count": 0}
 
 
 # ---------------------------------------------------------------------------
@@ -173,7 +146,7 @@ def test_unseen_sleep_status_does_not_raise(model, payload):
 
 def test_indexer_status_parses_memories_per_day_exceeded():
     status = IndexerStatusResponse.model_validate(
-        _indexer_payload(skipped_reason="memories_per_day_exceeded")
+        indexer_status_dict(skipped_reason="memories_per_day_exceeded")
     )
     assert status.state is not None
     assert status.state.metrics.skipped_reason == "memories_per_day_exceeded"
@@ -182,7 +155,7 @@ def test_indexer_status_parses_memories_per_day_exceeded():
 def test_indexer_status_unseen_values_pass_through():
     # A newer server's reason must not raise — and must not degrade to None
     # either: None means "the last run was NOT skipped" on this wire.
-    payload = _indexer_payload(skipped_reason="some_future_reason")
+    payload = indexer_status_dict(skipped_reason="some_future_reason")
     payload["state"]["job_status"] = "paused"
     status = IndexerStatusResponse.model_validate(payload)
     assert status.state is not None
@@ -344,7 +317,7 @@ _REST_DRIFT_CASES: list[tuple[str, type, Callable[[Any], Awaitable[Any]], Any]] 
         "ResourceClient.get_indexer_status",
         ResourceClient,
         lambda c: c.get_indexer_status("products"),
-        {**_indexer_payload(), "state": {"job_status": "idle"}},
+        {**indexer_status_dict(), "state": {"job_status": "idle"}},
     ),
     ("ResourceClient.list_tokens", ResourceClient, lambda c: c.list_tokens(), {"tokens": []}),
     ("ResourceClient.list_resources", ResourceClient, lambda c: c.list_resources(), {}),

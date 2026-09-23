@@ -33,6 +33,7 @@ from tests.conftest import (
     agent_binding_dict,
     agent_dict,
     bootstrap_envelope_dict,
+    sleep_report_detail_dict,
     sleep_report_summary_dict,
 )
 
@@ -2731,20 +2732,9 @@ async def test_get_sleep_report_degraded_run():
     """get_sleep_report() parses a degraded run, incl. ``merge_retention_result``."""
     client = _make_initialized_client()
 
-    report = {
-        **sleep_report_summary_dict("rid-9"),
-        "status": "degraded",
-        "llm_call_failures": 1,
-        "memories_flagged": 0,
-        "embedding_calls_made": 0,
-        "error_message": None,
-        "edge_discovery_result": None,
-        "dedup_result": None,
-        "merge_retention_result": {"purged": 2},
-        "importance_result": None,
-        "consolidation_result": None,
-        "reindex_result": None,
-    }
+    report = sleep_report_detail_dict(
+        "rid-9", status="degraded", llm_call_failures=1, merge_retention_result={"purged": 2}
+    )
     with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
         mock.return_value = {
             "status": "success",

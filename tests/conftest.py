@@ -64,6 +64,51 @@ def sleep_report_summary_dict(report_id: str = "rid-1") -> dict:
     }
 
 
+def sleep_report_detail_dict(report_id: str = "rid-1", **overrides) -> dict:
+    """Build a server-shaped Sleep report detail dict for tests.
+
+    Mirrors ``_report_to_detail`` in
+    ``memory-cloud/backend/src/mcp_server/tools/sleep.py`` — the object the
+    ``get_sleep_report`` tool returns under its ``report`` key. Per-case
+    variants pass only the fields they assert, e.g. ``status="degraded"``.
+    """
+    return {
+        **sleep_report_summary_dict(report_id),
+        "memories_flagged": 0,
+        "embedding_calls_made": 0,
+        "error_message": None,
+        "edge_discovery_result": None,
+        "dedup_result": None,
+        "importance_result": None,
+        "consolidation_result": None,
+        "reindex_result": None,
+        "merge_retention_result": None,
+        **overrides,
+    }
+
+
+def indexer_status_dict(**metrics) -> dict:
+    """Build a server-shaped ``GET /api/v1/resources/{id}/indexer-status`` body.
+
+    Mirrors ``IndexerStatusResponse`` in
+    ``memory-cloud/backend/src/api/routes/resource_indexer.py``; ``metrics``
+    overrides the per-run counters, e.g. ``skipped_reason=...``.
+    """
+    return {
+        "resource_id": "products",
+        "state": {
+            "job_status": "idle",
+            "last_run_at": "2026-09-20T00:00:00Z",
+            "next_run_at": None,
+            "active_version": 1,
+            "last_offset": 42,
+            "lag_seconds": 3.0,
+            "metrics": {"applied_upserts": 0, "applied_deletes": 0, "errors": 0, **metrics},
+        },
+        "recent_events": [],
+    }
+
+
 def bootstrap_envelope_dict(
     agent_id: str = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
     context_id: str = "11111111-2222-3333-4444-555555555555",

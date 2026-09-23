@@ -7,7 +7,11 @@ from click.testing import CliRunner
 
 from kagura_memory.auth.credentials import reset_state_cache
 from kagura_memory.cli import _parse_tags, main
-from tests.conftest import sleep_report_summary_dict
+from tests.conftest import (
+    indexer_status_dict,
+    sleep_report_detail_dict,
+    sleep_report_summary_dict,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -1178,18 +1182,9 @@ def _degraded_tool_result(tool_name: str, _arguments: dict) -> dict:
     if tool_name == "get_sleep_history":
         return {"status": "success", "reports": [sleep_report_summary_dict("rid-c"), summary]}
     if tool_name == "get_sleep_report":
-        report = {
-            **summary,
-            "memories_flagged": 0,
-            "embedding_calls_made": 0,
-            "error_message": None,
-            "edge_discovery_result": None,
-            "dedup_result": None,
-            "merge_retention_result": {"purged": 1},
-            "importance_result": None,
-            "consolidation_result": None,
-            "reindex_result": None,
-        }
+        report = sleep_report_detail_dict(
+            "rid-d", status="degraded", llm_call_failures=2, merge_retention_result={"purged": 1}
+        )
         return {"status": "success", "report": report, "actions": [], "action_count": 4}
     if tool_name == "rollback_sleep_run":
         return {
@@ -1266,19 +1261,7 @@ def test_resource_indexer_status_shows_quota_deferred_run(monkeypatch):
 
     from kagura_memory import ResourceClient
 
-    body = {
-        "resource_id": "products",
-        "state": {
-            "job_status": "idle",
-            "last_run_at": "2026-09-20T00:00:00Z",
-            "next_run_at": None,
-            "active_version": 1,
-            "last_offset": 7,
-            "lag_seconds": 1.0,
-            "metrics": {"skipped_reason": "memories_per_day_exceeded"},
-        },
-        "recent_events": [],
-    }
+    body = indexer_status_dict(skipped_reason="memories_per_day_exceeded")
     client = ResourceClient(api_key="key", base_url="https://test.com")
     client._client = httpx.AsyncClient(
         transport=httpx.MockTransport(lambda _request: httpx.Response(200, json=body))
