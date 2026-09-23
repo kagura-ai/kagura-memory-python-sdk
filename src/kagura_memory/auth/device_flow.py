@@ -531,11 +531,8 @@ def invite_support(system_info: dict[str, Any] | None) -> InviteSupport:
     version = system_info.get("version")
     if minimum is None or not isinstance(version, str):
         return "two_step"
-    match = _SEMVER_PREFIX_RE.match(version)
-    if match is None:
-        return "two_step"
-    parsed = (int(match[1]), int(match[2]), int(match[3]))
-    return "hand_off" if parsed >= minimum else "two_step"
+    parsed = _parse_version_prefix(version)
+    return "hand_off" if parsed is not None and parsed >= minimum else "two_step"
 
 
 # ---------------------------------------------------------------------------
@@ -547,6 +544,17 @@ def _check_invite_token(token: str) -> None:
     """Raise ``ValueError`` (without echoing ``token``) unless it is well-formed."""
     if not _INVITE_TOKEN_RE.fullmatch(token):
         raise ValueError(f"an invite token must be {_INVITE_TOKEN_RULE}")
+
+
+def _parse_version_prefix(version: str) -> tuple[int, int, int] | None:
+    """``(major, minor, patch)`` from a ``v?MAJOR.MINOR.PATCH`` prefix; ``None`` otherwise.
+
+    Same shape as ``doctor._parse_version_prefix`` so the two can merge.
+    """
+    match = _SEMVER_PREFIX_RE.match(version)
+    if match is None:
+        return None
+    return (int(match[1]), int(match[2]), int(match[3]))
 
 
 def _url_origin(url: str) -> str | None:
