@@ -5,6 +5,7 @@ import itertools
 import json
 import logging
 import math
+import warnings
 from datetime import datetime
 from typing import Any, Literal, Self, TypeVar
 from urllib.parse import quote
@@ -90,6 +91,13 @@ _MIN_SERVER_VERSION_TUPLE = tuple(int(x) for x in MIN_SERVER_VERSION.split(".")[
 # authority on every other rule (e.g. the 365-day series window).
 _METRIC_MAX_LEN = 64
 _UNIT_MAX_LEN = 32
+
+# Shared by KaguraClient.setup_resource and ResourceClient.setup_resource (#273).
+_SETUP_SUMMARY_DEPRECATED = (
+    "setup_resource(summary=...) is deprecated and ignored: the server's setup_resource "
+    "has no summary, so it is not sent. Set it afterwards with "
+    "update_context(context_id, summary=...) on the returned context_id."
+)
 
 
 def _validate_metric(metric: object) -> None:
@@ -2083,7 +2091,12 @@ class KaguraClient:
             description: Context description.
             summary: LLM-oriented summary (200-500 chars).
             usage_guide: LLM-oriented memory usage guidelines.
-            resource_id: Resource identifier for external data ingestion.
+            resource_id: Deprecated and not sent (#273): the server's
+                ``create_context`` does not read it (memory-cloud through
+                v0.76.0), so it was always dropped. Passing it emits a
+                :class:`DeprecationWarning`. Set it afterwards with
+                :meth:`update_context` (owner only), or create a resource
+                context with :meth:`setup_resource`.
             is_private: Privacy flag (default: True).
             embedding_model: Embedding model for this context. It is fixed at
                 creation — no SDK call changes it — but since memory-cloud
@@ -2105,6 +2118,15 @@ class KaguraClient:
             KaguraFeatureNotAvailableError: The plan does not allow a
                 shared context (``is_private=False``; server v0.75.0+).
         """
+        if resource_id is not None:
+            warnings.warn(
+                "create_context(resource_id=...) is deprecated and ignored: the server's "
+                "create_context does not read resource_id, so it is not sent. Set it "
+                "afterwards with update_context(context_id, resource_id=...), or use "
+                "setup_resource().",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         # Pre-check quota
         contexts = await self.list_contexts()
         count = contexts.get("count")
@@ -2137,8 +2159,6 @@ class KaguraClient:
             arguments["summary"] = summary
         if usage_guide is not None:
             arguments["usage_guide"] = usage_guide
-        if resource_id is not None:
-            arguments["resource_id"] = resource_id
         if embedding_model is not None:
             arguments["embedding_model"] = embedding_model
         return await self._call_tool_checked("create_context", arguments)
@@ -2224,8 +2244,16 @@ class KaguraClient:
 
         Args:
             resource_id: Resource identifier for data ingestion.
-            name: Context name (defaults to ``resource_id`` server-side).
-            summary: Context summary.
+            name: Context name, which the server requires. Defaults to
+                ``resource_id``, which always matches the server's
+                context-name pattern; only one longer than the 100-character
+                name limit needs a ``name`` of its own.
+            summary: Deprecated and not sent (#273): the server's
+                ``setup_resource`` has no summary (memory-cloud through
+                v0.76.0), so it was always dropped. Passing it emits a
+                :class:`DeprecationWarning`. Set it afterwards with
+                :meth:`update_context` on the returned ``context_id`` (owner
+                only).
             description: Token description.
             quota_events_per_hour: Token quota (1-10000).
 
@@ -2252,14 +2280,15 @@ class KaguraClient:
             default); earlier servers gated it on plans with shared contexts
             and resource tokens. Existing resources keep serving.
         """
+        if summary is not None:
+            warnings.warn(_SETUP_SUMMARY_DEPRECATED, DeprecationWarning, stacklevel=2)
         arguments: dict[str, Any] = {
             "resource_id": resource_id,
+            # Required by the server: without it every call was refused with
+            # missing_fields (#273).
+            "name": resource_id if name is None else name,
             "quota_events_per_hour": quota_events_per_hour,
         }
-        if name is not None:
-            arguments["name"] = name
-        if summary is not None:
-            arguments["summary"] = summary
         if description is not None:
             arguments["description"] = description
         return await self._call_tool_checked("setup_resource", arguments)

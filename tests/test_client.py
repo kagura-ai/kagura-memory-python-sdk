@@ -4,6 +4,7 @@ import asyncio
 import inspect
 import json
 import textwrap
+import warnings
 from datetime import UTC, datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -1447,8 +1448,8 @@ async def test_create_context():
 
 
 @pytest.mark.asyncio
-async def test_create_context_with_resource_id():
-    """create_context() should pass resource_id when provided."""
+async def test_create_context_resource_id_is_deprecated_and_not_sent():
+    """#273: the server's create_context never read resource_id, so it is not sent."""
     client = _make_initialized_client()
 
     with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
@@ -1456,10 +1457,31 @@ async def test_create_context_with_resource_id():
             {"status": "success", "contexts": [], "count": 0, "limit": 20, "can_create": True},
             {"id": "uuid-1", "name": "res-ctx"},
         ]
-        await client.create_context(name="res-ctx", resource_id="my-resource")
+        with pytest.warns(DeprecationWarning, match=r"resource_id.*update_context") as record:
+            await client.create_context(name="res-ctx", resource_id="my-resource")
         # Second call is create_context tool
-        args = mock.call_args_list[1][0][1]
-        assert args["resource_id"] == "my-resource"
+        assert mock.call_args_list[1][0] == (
+            "create_context",
+            {"name": "res-ctx", "is_private": True},
+        )
+    # Attributed to the caller's line, not the SDK's.
+    assert record[0].filename == __file__
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_create_context_without_resource_id_does_not_warn():
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.side_effect = [
+            {"status": "success", "contexts": [], "count": 0, "limit": 20, "can_create": True},
+            {"id": "uuid-1", "name": "ctx"},
+        ]
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            await client.create_context(name="ctx")
 
     await client.close()
 
@@ -1706,7 +1728,7 @@ async def test_update_context_with_resource_id_and_is_public():
 
 @pytest.mark.asyncio
 async def test_setup_resource_basic():
-    """Optional fields must be omitted when None so the server applies its own defaults."""
+    """#273: the server requires name, so it defaults to resource_id; description is omitted."""
     client = _make_initialized_client()
 
     with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
@@ -1717,15 +1739,13 @@ async def test_setup_resource_basic():
             "token": "kagura_resource_xyz",
             "token_id": 1,
         }
-        result = await client.setup_resource(resource_id="products")
-        tool_name = mock.call_args[0][0]
-        args = mock.call_args[0][1]
-        assert tool_name == "setup_resource"
-        assert args["resource_id"] == "products"
-        assert args["quota_events_per_hour"] == 1000
-        assert "name" not in args
-        assert "summary" not in args
-        assert "description" not in args
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            result = await client.setup_resource(resource_id="products")
+        assert mock.call_args[0] == (
+            "setup_resource",
+            {"resource_id": "products", "name": "products", "quota_events_per_hour": 1000},
+        )
         assert result["token"] == "kagura_resource_xyz"
 
     await client.close()
@@ -1733,24 +1753,38 @@ async def test_setup_resource_basic():
 
 @pytest.mark.asyncio
 async def test_setup_resource_with_all_args():
-    """setup_resource() should forward all optional args when provided."""
+    """setup_resource() forwards an explicit name, description and quota."""
     client = _make_initialized_client()
 
     with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
         mock.return_value = {}
         await client.setup_resource(
             resource_id="products",
-            name="Product Catalog",
-            summary="All product data",
+            name="product-catalog",
             description="Catalog ingestion token",
             quota_events_per_hour=5000,
         )
-        args = mock.call_args[0][1]
-        assert args["resource_id"] == "products"
-        assert args["name"] == "Product Catalog"
-        assert args["summary"] == "All product data"
-        assert args["description"] == "Catalog ingestion token"
-        assert args["quota_events_per_hour"] == 5000
+        assert mock.call_args[0][1] == {
+            "resource_id": "products",
+            "name": "product-catalog",
+            "description": "Catalog ingestion token",
+            "quota_events_per_hour": 5000,
+        }
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_setup_resource_summary_is_deprecated_and_not_sent():
+    """#273: the server's setup_resource has no summary, so it is not sent."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {}
+        with pytest.warns(DeprecationWarning, match=r"summary.*update_context") as record:
+            await client.setup_resource(resource_id="products", summary="All product data")
+        assert "summary" not in mock.call_args[0][1]
+    assert record[0].filename == __file__
 
     await client.close()
 

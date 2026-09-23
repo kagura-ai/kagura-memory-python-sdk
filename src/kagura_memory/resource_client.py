@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import warnings
 from datetime import UTC, datetime
 from typing import Any, Literal
 
 from ._auth import _AuthSource, _OAuthAuth, _StaticAuth
 from ._rest_base import KaguraRestClient
 from .auth.credentials import KaguraOAuth
-from .client import KaguraClient
+from .client import _SETUP_SUMMARY_DEPRECATED, KaguraClient
 from .exceptions import (
     KaguraAuthError,
     KaguraNotFoundError,
@@ -222,8 +223,13 @@ class ResourceClient(KaguraRestClient):
 
         Args:
             resource_id: Resource identifier for data ingestion.
-            context_name: Context name (defaults to resource_id).
-            summary: Context summary.
+            context_name: Context name, which the server requires. Defaults
+                to ``resource_id`` (see :meth:`KaguraClient.setup_resource`).
+            summary: Deprecated and not sent (#273): the server's
+                ``setup_resource`` has no summary, so it was always dropped.
+                Passing it emits a :class:`DeprecationWarning`. Set it
+                afterwards with :meth:`KaguraClient.update_context` on the
+                returned ``context_id`` (owner only).
             description: Token description.
             quota_events_per_hour: Token quota (1-10000).
 
@@ -245,6 +251,9 @@ class ResourceClient(KaguraRestClient):
             not guaranteed; server-side behavior may evolve. Avoid retrying
             setup for an existing ``resource_id`` without first verifying state.
         """
+        if summary is not None:
+            # Warned here, at the caller's line, and not forwarded.
+            warnings.warn(_SETUP_SUMMARY_DEPRECATED, DeprecationWarning, stacklevel=2)
         if not self._mcp_url:
             raise RuntimeError(
                 "setup_resource() requires MCP URL. "
@@ -268,7 +277,6 @@ class ResourceClient(KaguraRestClient):
             response = await mcp.setup_resource(
                 resource_id=resource_id,
                 name=context_name,
-                summary=summary,
                 description=description,
                 quota_events_per_hour=quota_events_per_hour,
             )

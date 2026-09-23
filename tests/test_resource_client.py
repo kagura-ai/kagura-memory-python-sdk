@@ -1,5 +1,6 @@
 """Tests for ResourceClient."""
 
+import warnings
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -9,6 +10,7 @@ import pytest
 
 from kagura_memory import (
     KaguraAuthError,
+    KaguraClient,
     KaguraConnectionError,
     KaguraNotFoundError,
     KaguraQuotaError,
@@ -910,7 +912,6 @@ async def test_setup_resource():
         result = await client.setup_resource(
             resource_id="my-res",
             context_name="my-res",
-            summary="Test setup",
             description="Setup test token",
             quota_events_per_hour=2000,
         )
@@ -924,7 +925,6 @@ async def test_setup_resource():
     mock_mcp.setup_resource.assert_called_once_with(
         resource_id="my-res",
         name="my-res",
-        summary="Test setup",
         description="Setup test token",
         quota_events_per_hour=2000,
     )
@@ -934,7 +934,7 @@ async def test_setup_resource():
 
 @pytest.mark.asyncio
 async def test_setup_resource_passes_none_context_name():
-    """Omitting context_name must surface as name=None so the server applies its own default."""
+    """Omitting context_name passes name=None; KaguraClient.setup_resource defaults it."""
     client = ResourceClient.from_mcp_url(api_key="test", mcp_url="http://localhost:8080/mcp")
 
     server_response = {
@@ -953,11 +953,66 @@ async def test_setup_resource_passes_none_context_name():
     mock_mcp.setup_resource.assert_called_once_with(
         resource_id="auto-named",
         name=None,
-        summary=None,
         description=None,
         quota_events_per_hour=1000,
     )
 
+    await client.close()
+
+
+_SETUP_OK = {
+    "status": "success",
+    "context_id": "ctx-uuid",
+    "context_name": "crm",
+    "resource_id": "crm",
+    "token": "kagura_resource_xyz",
+    "token_id": 3,
+}
+
+
+@pytest.mark.asyncio
+async def test_setup_resource_names_the_context_after_the_resource_on_the_wire():
+    """#273: the server requires name; without the default every call got missing_fields."""
+    client = ResourceClient.from_mcp_url(api_key="test", mcp_url="http://localhost:8080/mcp")
+
+    with patch.object(KaguraClient, "_call_tool", new_callable=AsyncMock) as mock_call:
+        mock_call.return_value = _SETUP_OK
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            result = await client.setup_resource(resource_id="crm")
+
+    assert mock_call.call_args[0] == (
+        "setup_resource",
+        {"resource_id": "crm", "name": "crm", "quota_events_per_hour": 1000},
+    )
+    assert result.token == "kagura_resource_xyz"
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_setup_resource_summary_is_deprecated_and_not_sent():
+    """#273: the server's setup_resource has no summary; it is no longer forwarded."""
+    client = ResourceClient.from_mcp_url(api_key="test", mcp_url="http://localhost:8080/mcp")
+
+    with patch.object(KaguraClient, "_call_tool", new_callable=AsyncMock) as mock_call:
+        mock_call.return_value = _SETUP_OK
+        with pytest.warns(DeprecationWarning, match=r"summary.*update_context") as record:
+            await client.setup_resource(
+                resource_id="crm",
+                context_name="crm-context",
+                summary="ignored",
+                description="d",
+                quota_events_per_hour=50,
+            )
+
+    assert len(record) == 1  # warned once, by ResourceClient, not again by KaguraClient
+    assert record[0].filename == __file__
+    assert mock_call.call_args[0][1] == {
+        "resource_id": "crm",
+        "name": "crm-context",
+        "description": "d",
+        "quota_events_per_hour": 50,
+    }
     await client.close()
 
 
