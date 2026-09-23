@@ -25,15 +25,19 @@ Design (see issue #101, gate1 review):
 - **mcp_url comes from the profile** (or ``--server``) explicitly — never via
   ``KaguraClient`` env resolution, which ignores ``KAGURA_MCP_URL`` and would
   silently fall back to the hardcoded cloud URL.
-- **The proxy owns the upstream session** (issue #252). memory-cloud drops an
-  MCP session after an idle hour and on every restart, and Claude Code, which
-  only talks stdio to us, can neither see that nor re-initialize. On the
-  ``404`` we replay the downstream's own cached ``initialize`` and retry the
-  message once, mirroring the one-shot ``401`` refresh.
+- **The proxy owns the upstream session** (issue #252). When an upstream
+  drops the MCP session it answers the next request with ``404`` (MCP
+  Streamable HTTP), and Claude Code, which only talks stdio to us, can neither
+  see that nor re-initialize. On that ``404`` we replay the downstream's own
+  cached ``initialize`` and retry the message once, mirroring the one-shot
+  ``401`` refresh. (memory-cloud v0.75.0 as deployed re-adopts an unknown
+  session id instead of 404ing; see ``mcp_session_expired``.)
 - **Upstream JSON-RPC errors pass through.** A non-2xx whose body is a
   JSON-RPC ``error`` (``-32600``, ``-32022`` …) is forwarded with its own
-  code/message/data rather than flattened into ``-32000``; only the ``401``
-  keeps the proxy's re-login message.
+  code/message/data rather than flattened into ``-32000``. Only the ``401``
+  (the proxy's re-login message) and a failed ``initialize`` replay (the
+  proxy's own ``-32000``, since the error is not about the message being
+  answered) are reported by the proxy itself.
 """
 
 from __future__ import annotations
@@ -49,6 +53,7 @@ import httpx
 
 from ._http import (
     SDK_VERSION,
+    extract_detail,
     jsonrpc_error_body,
     mcp_session_expired,
     mcp_session_header,
@@ -92,7 +97,8 @@ class _Upstream:
 
         Raises:
             httpx.HTTPStatusError: A ``401`` that survived the forced refresh,
-                or a non-2xx without a JSON-RPC error body to forward.
+                a non-2xx without a JSON-RPC error body to forward, or a
+                replayed ``initialize`` that failed (see :meth:`_reopen_session`).
         """
         is_initialize = message.get("method") == "initialize"
         # ``initialize`` opens a new session; sending the old id with it would
@@ -178,17 +184,23 @@ def _error_response(message: dict[str, Any], exc: Exception) -> dict[str, Any] |
 
     A notification (no ``id``) gets no response even on failure — replying
     would violate JSON-RPC. The error text is made actionable for the common
-    refresh-failure case so Claude Code surfaces the re-login hint to the user.
+    refresh-failure case so Claude Code surfaces the re-login hint to the user;
+    any other HTTP error carries the server's own explanation when it sent one
+    (e.g. the OAuth-style ``error_description`` of a workspace-URL ``403``).
     """
     msg_id = message.get("id")
     if msg_id is None:
         return None
     detail = str(exc)
-    if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 401:
-        detail = (
-            "Kagura authentication failed and the token could not be refreshed. "
-            "Run `kagura auth login` to re-authenticate."
-        )
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code
+        if status == 401:
+            detail = (
+                "Kagura authentication failed and the token could not be refreshed. "
+                "Run `kagura auth login` to re-authenticate."
+            )
+        elif server_detail := extract_detail(exc.response):
+            detail = f"HTTP {status}: {server_detail}"
     return {
         "jsonrpc": "2.0",
         "id": msg_id,
