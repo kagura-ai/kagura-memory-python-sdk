@@ -399,17 +399,27 @@ def remember(
 @click.argument("query")
 @click.option("--context-id", "-c", help="Context ID (or set in .kagura.json)")
 @click.option("-k", type=int, default=5, help="Number of results (default: 5)")
-def recall(query, context_id, k):
+@click.option(
+    "--rerank/--no-rerank",
+    default=None,
+    help="Request/skip reranking for this call (default: follow the context's search config)",
+)
+def recall(query, context_id, k, rerank):
     """
     Search memories directly (without AI analysis).
+
+    Without --rerank/--no-rerank the server follows the context's search
+    config (memory-cloud v0.69.0+). --rerank applies only when the context
+    enables reranking; --no-rerank always skips it.
 
     Examples:
       kagura recall "FastAPI dependency injection"
       kagura recall "OAuth2 implementation" -k 10
       kagura recall -c dev "error handling pattern"
+      kagura recall "latency-sensitive lookup" --no-rerank
     """
     _run_client_command(
-        lambda client, ctx: client.recall(context_id=ctx, query=query, k=k),
+        lambda client, ctx: client.recall(context_id=ctx, query=query, k=k, use_rerank=rerank),
         context_id,
     )
 

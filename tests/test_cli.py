@@ -114,26 +114,47 @@ def test_contexts_command(mock_client_cls, mock_config):
     assert "c1" in result.output
 
 
-@patch("kagura_memory.cli.load_config")
-@patch("kagura_memory.cli.KaguraClient")
-def test_recall_command(mock_client_cls, mock_config):
-    """recall command should search and output results."""
+def _recall_cli(mock_client_cls, mock_config, *args):
+    """Invoke `kagura recall` with a wired mock client and return (result, client)."""
     mock_config.return_value = {
         "api_key": "key",
         "mcp_url": "https://test.com/mcp",
         "context_id": "ctx",
     }
-
     mock_client = AsyncMock()
     mock_client.recall.return_value = {"results": [{"summary": "found"}]}
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=None)
     mock_client_cls.return_value = mock_client
+    result = CliRunner().invoke(main, ["recall", "test query", *args])
+    return result, mock_client
 
-    runner = CliRunner()
-    result = runner.invoke(main, ["recall", "test query"])
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_recall_command(mock_client_cls, mock_config):
+    """recall command should search and output results."""
+    result, _ = _recall_cli(mock_client_cls, mock_config)
     assert result.exit_code == 0
     assert "found" in result.output
+
+
+@pytest.mark.parametrize(
+    ("flags", "expected"),
+    [((), None), (("--rerank",), True), (("--no-rerank",), False)],
+    ids=["omitted", "rerank", "no-rerank"],
+)
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_recall_rerank_flag(mock_client_cls, mock_config, flags, expected):
+    """Issue #251: --rerank/--no-rerank forward True/False; no flag forwards None.
+
+    None leaves ``use_rerank`` off the wire, so the server follows the
+    context's search config (memory-cloud v0.69.0+).
+    """
+    result, mock_client = _recall_cli(mock_client_cls, mock_config, *flags)
+    assert result.exit_code == 0, result.output
+    assert mock_client.recall.call_args.kwargs.get("use_rerank") is expected
 
 
 def test_forget_requires_memory_id_or_query():
