@@ -229,7 +229,7 @@ class TestWriteMcpJson:
         path = _write_mcp_json(project_dir, "kagura_key", "http://localhost:8080/mcp")
         data = json.loads(path.read_text())
         server = data["mcpServers"]["kagura-memory"]
-        assert server["type"] == "url"
+        assert server["type"] == "http"  # #258: Claude Code does not accept "url"
         assert server["url"] == "http://localhost:8080/mcp"
         assert server["headers"]["Authorization"] == "Bearer kagura_key"
 

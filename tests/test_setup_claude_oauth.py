@@ -67,6 +67,20 @@ class TestWriteMcpJsonStdio:
         # No secret is written in the stdio form.
         assert "headers" not in server
 
+    def test_guardrails_and_tool_profile_in_args(self, project_dir: Path) -> None:
+        """#258: the proxy builds the query at run time; the entry copies no URL."""
+        path = _write_mcp_json_stdio(project_dir, "default", guardrails="off", tool_profile="core")
+        server = json.loads(path.read_text())["mcpServers"][MCP_SERVER_NAME]
+        assert server["args"] == [
+            "--profile",
+            "default",
+            "--guardrails",
+            "off",
+            "--tool-profile",
+            "core",
+        ]
+        assert "--server" not in server["args"]
+
     def test_named_profile_in_args(self, project_dir: Path) -> None:
         path = _write_mcp_json_stdio(project_dir, "work")
         server = json.loads(path.read_text())["mcpServers"][MCP_SERVER_NAME]
@@ -116,6 +130,21 @@ class TestDetectMcpJsonMode:
             "mcpServers": {
                 MCP_SERVER_NAME: {
                     "type": "url",
+                    "url": "https://x/mcp",
+                    "headers": {"Authorization": "Bearer kagura_x"},
+                }
+            }
+        }
+        (project_dir / ".mcp.json").write_text(json.dumps(existing))
+        assert detect_mcp_json_mode(project_dir) == "static-token"
+
+    @pytest.mark.parametrize("entry_type", ["http", "url"])
+    def test_static_token_for_http_and_legacy_url(self, project_dir: Path, entry_type: str) -> None:
+        """#258: Claude Code's ``http`` type and the SDK's legacy ``url`` read the same."""
+        existing = {
+            "mcpServers": {
+                MCP_SERVER_NAME: {
+                    "type": entry_type,
                     "url": "https://x/mcp",
                     "headers": {"Authorization": "Bearer kagura_x"},
                 }
