@@ -30,8 +30,10 @@ kagura auth logout                 # revoke + delete a profile
 - Relay the CLI output verbatim where it matters (status table, login URL/code).
 - On "not authenticated", run `kagura auth login`.
 - **Invite-only sign-up:** if the user has an invite link (`https://<host>/join/<token>`)
-  and no account yet, run `kagura auth login --invite <link>`. The CLI prints the steps
-  in order (accept the invite, then approve the code); relay them as printed. The printed
+  and no account yet, run `kagura auth login --invite <link>`. On memory-cloud v0.76.0+
+  the CLI prints one `/join` link that signs up and lands on the approval page with the
+  code filled in; on older servers it prints two steps in order (accept the invite, then
+  approve the code). Relay the output as printed. The printed
   `/join` link carries the token and is the one exception: show it only to the user who
   gave you the invite. Otherwise the token is a one-time secret: never save it (memory,
   files, notes), log it, or send it anywhere except that flag.

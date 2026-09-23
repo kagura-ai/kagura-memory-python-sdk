@@ -592,12 +592,18 @@ builds the `/join` link on the web app's host (taken from the device flow's
 origin) and refuses a full link for a different server. It then reads the
 public `/api/v1/system/info`: when `features.beta_invites` is not `true`
 (invites turned off, or a server older than v0.70.0) it says invites have no
-effect and shows the normal prompt. Otherwise it prints two steps in order —
-open the invite link and sign up, then open the approval URL — and opens
-only the first in the browser (`--no-browser` just prints both). A
-single link that signs you up and lands on the approval page with the code
-filled in is built in but switched off until memory-cloud ships the `/join`
-`return_to` hand-off (memory-cloud#1655).
+effect and shows the normal prompt. On memory-cloud v0.76.0 and later it
+prints one link, `/join/<token>?return_to=…`, that signs you up and lands on
+the approval page with the code filled in, followed by the plain approval URL
+in case you end up on the dashboard. On an older server, or when that probe
+fails, it prints two steps in order — open the invite link and sign up, then
+open the approval URL. Either way the browser opens only the invite link
+(`--no-browser` just prints).
+
+**Sign-in rate limit.** memory-cloud v0.76.0 and later limit device sign-in
+requests per client address. When the server refuses one with HTTP 429,
+`kagura auth login` says so and how many seconds to wait (from the
+`Retry-After` header, 60 when it is missing).
 
 Two integration paths:
 
