@@ -179,6 +179,11 @@ def run(*args: str, input: str | None = None):
     return CliRunner().invoke(main, ["setup", *args], input=input)
 
 
+def flat(output: str) -> str:
+    """``output`` on one line, for a message wrapped to fit the terminal."""
+    return " ".join(output.split())
+
+
 def printed_json(output: str) -> Any:
     """The JSON block setup printed (the first ``{`` onwards)."""
     return json.JSONDecoder().raw_decode(output[output.index("{") :])[0]
@@ -940,10 +945,21 @@ class TestNoInstructionsUrl:
         result = run(harness, "--url-form", "--mcp-url", f"{MCP_URL}?{query}", "-y")
         assert result.exit_code == 0, result.output
         assert printed_url(harness, result.output) == f"{MCP_URL}?profile=core"
-        assert "?guardrails= value in\n  --mcp-url has no effect there and is not written" in (
-            result.output
+        assert "so the ?guardrails= value in --mcp-url has no effect there and is not written" in (
+            flat(result.output)
         )
         assert CTX not in result.output
+
+    def test_one_warning_when_guardrails_is_given_both_ways(self, harness, recorder):
+        url = f"{MCP_URL}?guardrails={CTX}"
+        result = run(harness, "--url-form", "--mcp-url", url, "--guardrails", CTX, "-y")
+        assert result.exit_code == 0, result.output
+        assert printed_url(harness, result.output) == MCP_URL
+        assert result.output.count("does not read MCP instructions") == 1
+        assert (
+            "so --guardrails and the ?guardrails= value in --mcp-url have no effect there "
+            "and are not written"
+        ) in flat(result.output)
 
     def test_url_without_other_parameters_loses_its_query(self, harness, recorder):
         result = run(harness, "--url-form", "--mcp-url", f"{MCP_URL}?guardrails={CTX}", "-y")
