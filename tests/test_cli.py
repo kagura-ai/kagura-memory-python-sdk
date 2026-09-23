@@ -1716,14 +1716,29 @@ def test_measure_record_accepts_negative_value(mock_client_cls, mock_config, raw
     assert mock_client.record_measurement.await_args.kwargs["unit"] == "USD"
 
 
+@pytest.mark.parametrize(
+    ("args", "token"),
+    [
+        # Trailing: lands as an extra positional, which click itself refuses.
+        (["ctx-1", "m", "1", "--unti", "kg"], None),
+        # METRIC slot: would otherwise append a junk "--weight" series for good.
+        (["ctx-1", "--weight", "71.5"], "--weight"),
+        (["ctx-1", "--metric=weight_kg", "71.5"], "--metric=weight_kg"),
+        (["ctx-1", "-x", "5"], "-x"),
+        # CONTEXT_ID slot.
+        (["-c", "dev", "71.5"], "-c"),
+    ],
+)
 @patch("kagura_memory.cli.load_config")
 @patch("kagura_memory.cli.KaguraClient")
-def test_measure_record_rejects_unknown_option(mock_client_cls, mock_config):
-    """Tolerating negative numbers must not swallow a mistyped option."""
+def test_measure_record_rejects_unknown_option(mock_client_cls, mock_config, args, token):
+    """Tolerating negative numbers must not swallow a mistyped option in any slot."""
     mock_client = _measure_mock_client(mock_client_cls, mock_config)
 
-    result = CliRunner().invoke(main, ["measure", "record", "ctx-1", "m", "1", "--unti", "kg"])
-    assert result.exit_code != 0
+    result = CliRunner().invoke(main, ["measure", "record", *args])
+    assert result.exit_code == 2, result.output
+    if token is not None:
+        assert f"No such option: {token}" in result.output
     mock_client.record_measurement.assert_not_awaited()
 
 

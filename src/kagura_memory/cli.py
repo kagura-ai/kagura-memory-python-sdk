@@ -1532,8 +1532,11 @@ def measure():
 
 
 # ignore_unknown_options lets a negative VALUE such as -3.5 parse as the
-# positional instead of failing with "No such option: -3". A genuinely unknown
-# option is still rejected: it lands as an extra positional, which click refuses.
+# positional instead of failing with "No such option: -3". The catch: click then
+# passes EVERY unknown '-' token through as a positional. After the three
+# positionals it is an extra argument, which click refuses, and in the VALUE
+# slot the float type refuses anything but a number — but in the CONTEXT_ID or
+# METRIC slot it would be accepted, so measure_record refuses those itself.
 @measure.command(name="record", context_settings={"ignore_unknown_options": True})
 @click.argument("context_id")
 @click.argument("metric")
@@ -1557,6 +1560,14 @@ def measure_record(context_id, metric, value, unit, measured_at):
       kagura measure record <context-id> weight_kg 71.5 --unit kg
       kagura measure record <context-id> pnl_usd -120 --at 2026-09-01T00:00:00Z
     """
+    # A mistyped option (`ctx --weight 71.5`, `-c dev 71.5`) reaches here as a
+    # positional (see ignore_unknown_options above). Sending it would append a
+    # junk series the append-only lane cannot delete, so refuse it as the option
+    # it almost certainly is. No context id starts with '-', and the Python API
+    # still accepts such a metric name for the rare caller who means one.
+    for token in (context_id, metric):
+        if token.startswith("-"):
+            raise click.NoSuchOption(token, ctx=click.get_current_context())
 
     async def _op(client: KaguraClient, _ctx: str) -> dict[str, Any]:
         result = await client.record_measurement(
