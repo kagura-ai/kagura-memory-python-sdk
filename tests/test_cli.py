@@ -1241,6 +1241,25 @@ def test_sleep_rollback_prefetches_degraded_run_for_confirm(degraded_mcp):
     ]
 
 
+def test_sleep_history_drift_is_a_clean_error_naming_the_operation(monkeypatch):
+    """A payload the SDK cannot parse is an ``Error:`` line, not a pydantic traceback."""
+    from kagura_memory.client import KaguraClient
+
+    monkeypatch.setattr(
+        "kagura_memory.cli.load_config",
+        lambda: {"api_key": "key", "mcp_url": "https://test.com/mcp"},
+    )
+    monkeypatch.setattr(
+        KaguraClient,
+        "_call_tool",
+        AsyncMock(return_value={"status": "success", "reports": [{"report_id": "x"}]}),
+    )
+    result = CliRunner().invoke(main, ["sleep", "history", "ctx-1"])
+    assert result.exit_code != 0
+    assert "Error: get_sleep_history: " in result.output
+    assert "Traceback" not in result.output
+
+
 def test_resource_indexer_status_shows_quota_deferred_run(monkeypatch):
     """`memories_per_day_exceeded` (server v0.68.0+, #1549) renders instead of erroring."""
     import httpx

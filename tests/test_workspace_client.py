@@ -591,15 +591,16 @@ async def test_destructive_ids_require_strict_int():
 
 @pytest.mark.asyncio
 async def test_mint_salvages_plaintext_on_shape_mismatch():
-    from kagura_memory.exceptions import KaguraError
+    from kagura_memory.exceptions import KaguraResponseError
 
     def handler(request: httpx.Request) -> httpx.Response:
         # Server drift: required fields renamed, but the one-time secret is there
         return httpx.Response(201, json={"plaintext_key": "kagura_salvaged_secret"})
 
     async with make_client(handler) as c:
-        with pytest.raises(KaguraError, match="kagura_salvaged_secret"):
+        with pytest.raises(KaguraResponseError, match="kagura_salvaged_secret") as exc_info:
             await c.mint_member_key(WS, "u2", "ci-bot", 30)
+    assert exc_info.value.operation == "WorkspaceClient.mint_member_key"
 
 
 @pytest.mark.asyncio
@@ -689,11 +690,12 @@ def test_from_resolved_auth_oauth_branch():
 
 @pytest.mark.asyncio
 async def test_mint_shape_mismatch_without_plaintext_points_at_recovery():
-    from kagura_memory.exceptions import KaguraError
+    from kagura_memory.exceptions import KaguraResponseError
 
     async with make_client(lambda r: httpx.Response(201, json={"unexpected": True})) as c:
-        with pytest.raises(KaguraError, match="list-keys"):
+        with pytest.raises(KaguraResponseError, match="list-keys") as exc_info:
             await c.mint_member_key(WS, "u2", "ci-bot", 30)
+    assert exc_info.value.operation == "WorkspaceClient.mint_member_key"
 
 
 @pytest.mark.asyncio

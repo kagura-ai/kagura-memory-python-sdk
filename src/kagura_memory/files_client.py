@@ -41,6 +41,7 @@ from ._http import (
     base_url_from_mcp,
     extract_detail,
     normalize_uuid,
+    parse_response,
     sanitize_server_detail,
 )
 from ._rest_base import KaguraRestClient
@@ -409,7 +410,7 @@ class FilesClient(KaguraRestClient):
                     return existing
                 raise
 
-            reserve = FileReserveResponse.model_validate(reserve_resp.json())
+            reserve = self._parse(FileReserveResponse, self._json(reserve_resp), "upload")
             reserved_file_id = reserve.file_id
             log.action("Uploading to object store", stage="upload")
             await self._put_to_object_store(
@@ -431,7 +432,7 @@ class FilesClient(KaguraRestClient):
                 params={"workspace_id": context_id},
                 json={"sha256": sha256_hex},
             )
-            result = FileObject.model_validate(confirm_resp.json())
+            result = self._parse(FileObject, self._json(confirm_resp), "upload")
             confirmed = True
             log.success(
                 "Upload complete",
@@ -477,7 +478,9 @@ class FilesClient(KaguraRestClient):
             f"/api/v1/files/{file_id}/download-url",
             params={"workspace_id": context_id},
         )
-        return FileDownloadUrlResponse.model_validate(response.json()).download_url
+        return self._parse(
+            FileDownloadUrlResponse, self._json(response), "download_url"
+        ).download_url
 
     async def delete(self, file_id: str, *, context_id: str) -> None:
         """Soft-delete a file by id (server hard-deletes after retention).
@@ -524,15 +527,15 @@ class FilesClient(KaguraRestClient):
         if cursor is not None:
             params["cursor"] = cursor
         response = await self._request("GET", "/api/v1/files", params=params)
-        raw = response.json()
+        raw = self._json(response)
         # Current server returns a bare ``list[FileObjectOut]``;
         # future server versions may return ``{files, next_cursor}``.
         if isinstance(raw, list):
             return FileListResponse(
-                files=[FileObject.model_validate(item) for item in raw],
+                files=[self._parse(FileObject, item, "list") for item in raw],
                 next_cursor=None,
             )
-        return FileListResponse.model_validate(raw)
+        return self._parse(FileListResponse, raw, "list")
 
     # -------------------------------------------------------------------
     # Lifecycle
@@ -672,7 +675,7 @@ def _extract_existing_file(error: KaguraConnectionError) -> FileObject | None:
     existing = body.get("existing_file")
     if not isinstance(existing, dict):
         return None
-    return FileObject.model_validate(existing)
+    return parse_response(FileObject, existing, operation="FilesClient.upload")
 
 
 def _normalize_context_id(context_id: str) -> str:

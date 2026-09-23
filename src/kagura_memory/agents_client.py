@@ -108,7 +108,7 @@ class AgentsClient(KaguraRestClient):
             f"/api/v1/agents/{normalize_uuid(agent_id, label='agent_id')}/bootstrap",
             json=body,
         )
-        return AgentBootstrapResponse.model_validate(self._json(resp))
+        return self._parse(AgentBootstrapResponse, self._json(resp), "bootstrap")
 
     # -------------------------------------------------------------------
     # Agent registry (#235, RFC-0002 P0-1 — owner/admin only)
@@ -139,19 +139,22 @@ class AgentsClient(KaguraRestClient):
         if version is not None:
             body["version"] = version
         resp = await self._request("POST", "/api/v1/agents", json=body)
-        return Agent.model_validate(self._json(resp))
+        return self._parse(Agent, self._json(resp), "register_agent")
 
     async def list_agents(self) -> list[Agent]:
         """List the workspace's agents, newest first (owner/admin only)."""
         resp = await self._request("GET", "/api/v1/agents")
-        return [Agent.model_validate(row) for row in self._expect_wrapped_list(resp, "agents")]
+        return [
+            self._parse(Agent, row, "list_agents")
+            for row in self._expect_wrapped_list(resp, "agents")
+        ]
 
     async def get_agent(self, agent_id: str) -> Agent:
         """Fetch one agent by id (owner/admin only; uniform 404)."""
         resp = await self._request(
             "GET", f"/api/v1/agents/{normalize_uuid(agent_id, label='agent_id')}"
         )
-        return Agent.model_validate(self._json(resp))
+        return self._parse(Agent, self._json(resp), "get_agent")
 
     async def update_agent(
         self,
@@ -191,7 +194,7 @@ class AgentsClient(KaguraRestClient):
             f"/api/v1/agents/{normalize_uuid(agent_id, label='agent_id')}",
             json=body,
         )
-        return Agent.model_validate(self._json(resp))
+        return self._parse(Agent, self._json(resp), "update_agent")
 
     async def delete_agent(self, agent_id: str) -> None:
         """Hard-delete an agent (``DELETE``, 204; owner/admin only).
@@ -237,7 +240,7 @@ class AgentsClient(KaguraRestClient):
             f"/api/v1/agents/{normalize_uuid(agent_id, label='agent_id')}/bindings",
             json=body,
         )
-        return AgentBinding.model_validate(self._json(resp))
+        return self._parse(AgentBinding, self._json(resp), "bind_context")
 
     async def list_bindings(self, agent_id: str) -> list[AgentBinding]:
         """List an agent's context bindings (owner/admin only)."""
@@ -246,7 +249,8 @@ class AgentsClient(KaguraRestClient):
             f"/api/v1/agents/{normalize_uuid(agent_id, label='agent_id')}/bindings",
         )
         return [
-            AgentBinding.model_validate(row) for row in self._expect_wrapped_list(resp, "bindings")
+            self._parse(AgentBinding, row, "list_bindings")
+            for row in self._expect_wrapped_list(resp, "bindings")
         ]
 
     async def update_binding(
@@ -278,7 +282,7 @@ class AgentsClient(KaguraRestClient):
             f"/bindings/{normalize_uuid(binding_id, label='binding_id')}",
             json=body,
         )
-        return AgentBinding.model_validate(self._json(resp))
+        return self._parse(AgentBinding, self._json(resp), "update_binding")
 
     async def unbind_context(self, agent_id: str, binding_id: str) -> None:
         """Delete a binding (``DELETE``, 204; owner/admin only).

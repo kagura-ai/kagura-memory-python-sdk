@@ -50,6 +50,23 @@ class KaguraNotFoundError(KaguraError):
     """Requested resource not found (HTTP 404)."""
 
 
+class KaguraResponseError(KaguraError):
+    """A successful server response did not match the SDK's model of it (#250).
+
+    Usually the server is newer than this SDK and returns a value or a
+    shape the SDK does not know yet; upgrading ``kagura-memory`` is the
+    likely fix. ``operation`` names the call whose response failed to
+    parse — the MCP tool name, or ``<Client>.<method>`` on the REST
+    clients. The underlying ``pydantic.ValidationError`` is chained as
+    ``__cause__``; the message names the failing fields but never echoes
+    payload values.
+    """
+
+    def __init__(self, message: str, operation: str | None = None):
+        super().__init__(message)
+        self.operation = operation
+
+
 class KaguraRateLimitError(KaguraError):
     """Rate limit exceeded."""
 

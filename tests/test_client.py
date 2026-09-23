@@ -1832,12 +1832,12 @@ async def test_get_context_info_cached_degrades_on_failure():
 
 @pytest.mark.asyncio
 async def test_get_context_info_cached_degrades_on_malformed_payload():
-    """A malformed server payload (pydantic ValidationError) degrades to None."""
+    """A malformed server payload (KaguraResponseError, #250) degrades to None."""
     client = _make_initialized_client()
 
     with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
-        # Missing the required `context` field → ContextInfo.model_validate raises
-        # a pydantic ValidationError, which is NOT a KaguraError.
+        # Missing the required `context` field → get_context_info raises
+        # KaguraResponseError (wrapping the pydantic ValidationError).
         mock.return_value = {"status": "success"}
         result = await client._get_context_info_cached("uuid-1")
 

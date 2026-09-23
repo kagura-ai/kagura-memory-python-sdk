@@ -21,9 +21,10 @@ Invariants the base enforces for every client:
 
 from __future__ import annotations
 
-from typing import Any, Literal, Self
+from typing import Any, Literal, Self, TypeVar
 
 import httpx
+from pydantic import BaseModel
 
 from ._auth import _AuthSource, _OAuthAuth, _resolve_auth, _StaticAuth
 from ._http import (
@@ -31,6 +32,7 @@ from ._http import (
     _retry_after_seconds,
     base_url_from_mcp,
     extract_detail,
+    parse_response,
     validate_https_url,
 )
 from .auth.credentials import KaguraOAuth
@@ -44,6 +46,8 @@ from .exceptions import (
 )
 
 HttpMethod = Literal["GET", "POST", "PUT", "PATCH", "DELETE"]
+
+_M = TypeVar("_M", bound=BaseModel)
 
 
 class KaguraRestClient:
@@ -59,6 +63,8 @@ class KaguraRestClient:
     - 429 → :class:`KaguraQuotaError` with a tolerant ``Retry-After``
     - other statuses → :class:`KaguraConnectionError`
     - transport errors → :class:`KaguraConnectionError`
+    - a 2xx body its model rejects → :class:`KaguraResponseError`
+      (via :meth:`_parse`)
     """
 
     def __init__(
@@ -323,6 +329,15 @@ class KaguraRestClient:
                 f"Server returned a non-JSON body (HTTP {resp.status_code}) for "
                 f"{resp.request.method} {resp.request.url.path}."
             ) from exc
+
+    def _parse(self, model: type[_M], data: Any, operation: str) -> _M:
+        """Validate a decoded 2xx payload into ``model``.
+
+        Drift raises :class:`KaguraResponseError` labelled
+        ``<Client>.<operation>`` (e.g. ``ResourceClient.get_indexer_status``)
+        rather than a raw pydantic ``ValidationError`` (#250).
+        """
+        return parse_response(model, data, operation=f"{type(self).__name__}.{operation}")
 
     def _expect_list(self, resp: httpx.Response) -> list[Any]:
         """Parse a 2xx body that the contract says is a JSON array."""

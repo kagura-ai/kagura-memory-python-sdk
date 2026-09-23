@@ -12,6 +12,7 @@ from kagura_memory import (
     KaguraConnectionError,
     KaguraNotFoundError,
     KaguraQuotaError,
+    KaguraResponseError,
     ResourceClient,
     ResourceEventRecord,
     ResourceEventRequest,
@@ -736,6 +737,20 @@ async def test_get_indexer_status_tolerates_newer_skipped_reasons(reason):
 
     assert result.state is not None
     assert result.state.metrics.skipped_reason == reason
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_get_indexer_status_drift_raises_kagura_response_error():
+    """A payload that still fails validation surfaces as a KaguraError subclass."""
+    client = ResourceClient(api_key="test", base_url="https://test.com")
+
+    response_data = {"resource_id": "products", "state": {"job_status": "idle"}}
+    with patch.object(client._client, "request", new_callable=AsyncMock) as mock_req:
+        mock_req.return_value = _mock_response(200, response_data)
+        with pytest.raises(KaguraResponseError, match="ResourceClient.get_indexer_status"):
+            await client.get_indexer_status("products")
 
     await client.close()
 

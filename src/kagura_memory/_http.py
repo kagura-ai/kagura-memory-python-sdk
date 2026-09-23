@@ -5,19 +5,25 @@ from __future__ import annotations
 import re
 import uuid
 from importlib.metadata import version as _pkg_version
-from typing import Any, NoReturn
+from typing import Any, NoReturn, TypeVar
 
 import httpx
+from pydantic import BaseModel, ValidationError
 
 from .exceptions import (
     KaguraAuthError,
     KaguraConnectionError,
     KaguraRateLimitError,
+    KaguraResponseError,
     _exc_message,
 )
 
 SDK_VERSION: str = _pkg_version("kagura-memory")
 """Package version string, shared across client modules."""
+
+_M = TypeVar("_M", bound=BaseModel)
+
+_MAX_LISTED_RESPONSE_ERRORS = 3
 
 
 def base_url_from_mcp(mcp_url: str) -> str:
@@ -139,8 +145,46 @@ def raise_for_kagura_status(e: httpx.HTTPStatusError) -> NoReturn:
     raise KaguraConnectionError(f"HTTP {status}: {detail}") from e
 
 
+def parse_response(model: type[_M], data: Any, *, operation: str) -> _M:
+    """Validate a server response payload into ``model`` (#250).
+
+    Drift — a payload the model rejects, usually because the server is
+    newer than the SDK — raises :class:`KaguraResponseError` naming
+    ``operation`` and the failing fields instead of letting a raw
+    ``pydantic.ValidationError`` escape the client. The message leaves
+    payload values out (they can be secret ciphertext or key plaintext);
+    the full error stays on ``__cause__``.
+
+    Response side only: request models built from caller arguments must
+    keep raising ``ValidationError``, which reports a caller mistake.
+
+    Args:
+        model: Pydantic model the payload should match.
+        data: Decoded JSON payload.
+        operation: Call being parsed, used as the message prefix and the
+            exception's ``operation`` attribute.
+
+    Raises:
+        KaguraResponseError: If ``data`` does not validate against ``model``.
+    """
+    try:
+        return model.model_validate(data)
+    except ValidationError as exc:
+        errors = exc.errors(include_url=False, include_context=False, include_input=False)
+        listed = _format_validation_errors(errors[:_MAX_LISTED_RESPONSE_ERRORS])
+        if len(errors) > _MAX_LISTED_RESPONSE_ERRORS:
+            listed += f" (+{len(errors) - _MAX_LISTED_RESPONSE_ERRORS} more)"
+        raise KaguraResponseError(
+            f"{operation}: unexpected server response for {model.__name__} ({listed}). "
+            "The server may be newer than this SDK; upgrading kagura-memory may help.",
+            operation=operation,
+        ) from exc
+
+
 def _format_validation_errors(errors: list[Any]) -> str:
     # Silent-skip malformed entries so a single bad entry doesn't blank the line.
+    # ``loc`` is a list on the wire (FastAPI) and a tuple from pydantic's own
+    # ``ValidationError.errors()`` (parse_response).
     parts: list[str] = []
     for entry in errors:
         if not isinstance(entry, dict):
@@ -149,7 +193,7 @@ def _format_validation_errors(errors: list[Any]) -> str:
         if not isinstance(msg, str) or not msg:
             continue
         loc = entry.get("loc")
-        if isinstance(loc, list) and loc:
+        if isinstance(loc, (list, tuple)) and loc:
             loc_path = ".".join(str(part) for part in loc)
             parts.append(f"{loc_path}: {msg}")
         else:

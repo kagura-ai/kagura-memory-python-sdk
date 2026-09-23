@@ -79,27 +79,29 @@ class SecretClient(KaguraRestClient):
         if label is not None:
             body["label"] = label
         response = await self._request("POST", f"{_BASE}/pubkeys", json=body)
-        return PubkeyResponse.model_validate(response.json())
+        return self._parse(PubkeyResponse, self._json(response), "register_pubkey")
 
     async def list_pubkeys(self) -> list[PubkeyResponse]:
         """List all pubkeys in the workspace (owner/admin view)."""
         response = await self._request("GET", f"{_BASE}/pubkeys")
-        return [PubkeyResponse.model_validate(p) for p in response.json()]
+        return [self._parse(PubkeyResponse, p, "list_pubkeys") for p in self._expect_list(response)]
 
     async def list_my_pubkeys(self) -> list[PubkeyResponse]:
         """List the caller's own pubkeys."""
         response = await self._request("GET", f"{_BASE}/pubkeys/me")
-        return [PubkeyResponse.model_validate(p) for p in response.json()]
+        return [
+            self._parse(PubkeyResponse, p, "list_my_pubkeys") for p in self._expect_list(response)
+        ]
 
     async def approve_pubkey(self, pubkey_id: str) -> PubkeyResponse:
         """Approve a pending pubkey (owner only; TOFU attestation)."""
         response = await self._request("POST", f"{_BASE}/pubkeys/{pubkey_id}/approve")
-        return PubkeyResponse.model_validate(response.json())
+        return self._parse(PubkeyResponse, self._json(response), "approve_pubkey")
 
     async def revoke_pubkey(self, pubkey_id: str) -> PubkeyResponse:
         """Revoke a pubkey (owner only)."""
         response = await self._request("POST", f"{_BASE}/pubkeys/{pubkey_id}/revoke")
-        return PubkeyResponse.model_validate(response.json())
+        return self._parse(PubkeyResponse, self._json(response), "revoke_pubkey")
 
     # -- secrets -------------------------------------------------------------
 
@@ -124,12 +126,14 @@ class SecretClient(KaguraRestClient):
             "grant_pubkey_ids": grant_pubkey_ids,
         }
         response = await self._request("POST", _BASE, json=body)
-        return SecretPutResponse.model_validate(response.json())
+        return self._parse(SecretPutResponse, self._json(response), "put_secret")
 
     async def list_secrets(self) -> list[SecretMetaResponse]:
         """List secret metadata (never includes values)."""
         response = await self._request("GET", _BASE)
-        return [SecretMetaResponse.model_validate(s) for s in response.json()]
+        return [
+            self._parse(SecretMetaResponse, s, "list_secrets") for s in self._expect_list(response)
+        ]
 
     async def fetch_secret(
         self, name: str, version_number: int | None = None
@@ -139,7 +143,7 @@ class SecretClient(KaguraRestClient):
         if version_number is not None:
             body["version_number"] = version_number
         response = await self._request("POST", f"{_BASE}/fetch", json=body)
-        return SecretValueResponse.model_validate(response.json())
+        return self._parse(SecretValueResponse, self._json(response), "fetch_secret")
 
     async def revoke_grant(self, name: str, recipient_pubkey_id: str) -> SecretMetaResponse:
         """Revoke one recipient's grant on a secret (flags ``rotation_needed``).
@@ -150,7 +154,7 @@ class SecretClient(KaguraRestClient):
         """
         body = {"name": name, "recipient_pubkey_id": recipient_pubkey_id}
         response = await self._request("POST", f"{_BASE}/revoke-grant", json=body)
-        return SecretMetaResponse.model_validate(response.json())
+        return self._parse(SecretMetaResponse, self._json(response), "revoke_grant")
 
     async def delete_secret(self, name: str) -> None:
         """Hard-delete a secret and all its versions + grants (owner only).
@@ -184,7 +188,7 @@ class SecretClient(KaguraRestClient):
     async def verify_audit(self) -> AuditVerifyResponse:
         """Verify the tamper-evident audit chain (owner/admin)."""
         response = await self._request("GET", f"{_BASE}/audit/verify")
-        return AuditVerifyResponse.model_validate(response.json())
+        return self._parse(AuditVerifyResponse, self._json(response), "verify_audit")
 
     # -- high-level orchestration -------------------------------------------
 
