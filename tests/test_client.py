@@ -27,6 +27,7 @@ from kagura_memory import (
     MemoryListResponse,
     MemoryStatsResponse,
     RollbackResult,
+    ServerFeatures,
     ServerInfo,
     SleepAction,
     SleepReport,
@@ -3171,8 +3172,9 @@ async def test_get_server_info():
 
 
 # The ``features`` block memory-cloud v0.76.0 sends (backend/src/api/routes/system.py).
-# Values deliberately mix True/False so a flag that is dropped (and so falls
-# back to the ``False`` default) cannot pass by accident.
+# ``extra="allow"`` keeps an untyped flag in ``model_extra`` and ``model_dump()``,
+# so the tests below also assert ``model_extra`` / ``model_fields`` to prove each
+# flag is a typed field.
 _V076_FEATURES = {
     "neural_memory": True,
     "research_tools": False,
@@ -3216,6 +3218,8 @@ async def test_get_server_info_exposes_v076_features_and_search_defaults():
         mock_get.return_value = _server_info_response(payload)
         result = await client.get_server_info()
 
+    assert set(ServerFeatures.model_fields) == set(_V076_FEATURES)
+    assert result.features.model_extra == {}
     assert result.features.model_dump() == _V076_FEATURES
     assert result.search_defaults == _V076_SEARCH_DEFAULTS
     await client.close()
