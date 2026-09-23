@@ -22,6 +22,7 @@ from kagura_memory.auth.device_flow import (
     DeviceAuthorizationResponse,
     TokenResponse,
 )
+from kagura_memory.claude_code import claude_json_label
 from kagura_memory.cli import main
 
 
@@ -620,7 +621,8 @@ def test_status_reports_user_scope_stdio_entry(patched_default_path: Path):
     with runner.isolated_filesystem():
         result = runner.invoke(main, ["auth", "status"])
     assert result.exit_code == 0, result.output
-    assert "Claude Code (~/.claude.json, user scope): refresh-aware" in result.output
+    label = claude_json_label()
+    assert f"Claude Code ({label}, user scope): refresh-aware" in result.output
 
 
 def test_status_silent_for_an_unrecognised_entry(patched_default_path: Path):
@@ -644,7 +646,7 @@ def test_status_names_the_scope_a_project_entry_hides(patched_default_path: Path
         result = runner.invoke(main, ["auth", "status"])
     assert result.exit_code == 0, result.output
     assert "Claude Code (.mcp.json, project scope): legacy static API-key token" in result.output
-    assert "hides the user-scope entry in ~/.claude.json" in result.output
+    assert f"hides the user-scope entry in {claude_json_label()}" in result.output
 
 
 # ---------------------------------------------------------------------------

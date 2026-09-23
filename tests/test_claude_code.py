@@ -21,6 +21,7 @@ from kagura_memory.claude_code import (
     MCP_SERVER_NAME,
     McpEntry,
     classify_mcp_entry,
+    claude_json_label,
     claude_json_path,
     detect_kagura_plugin,
     detect_mcp_json_mode,
@@ -73,6 +74,11 @@ def test_claude_json_path_defaults_to_home(monkeypatch, tmp_path: Path) -> None:
     [
         (_STDIO, "stdio"),
         ({"command": "kagura-mcp", "args": []}, "stdio"),  # Claude Code's default type
+        ({**_STDIO, "command": "/home/u/.venv/bin/kagura-mcp"}, "stdio"),  # absolute path
+        ({**_STDIO, "command": "C:\\venv\\Scripts\\kagura-mcp.exe"}, "stdio"),
+        ({"command": "uvx", "args": ["--from", "kagura-memory", "kagura-mcp"]}, "stdio"),
+        ({"type": "stdio", "command": "kagura-mcp-other"}, "absent"),
+        ({"type": "stdio", "command": "uvx", "args": "kagura-mcp"}, "absent"),  # args not a list
         (_BEARER, "static-token"),
         ({**_BEARER, "type": "url"}, "static-token"),  # legacy SDK form
         ({**_BEARER, "type": "streamable-http"}, "static-token"),
@@ -119,11 +125,73 @@ def test_finds_every_scope_strongest_first(tmp_path: Path) -> None:
     entries = find_kagura_mcp_entries(project)
 
     assert [(e.scope, e.source) for e in entries] == [
-        ("local", "~/.claude.json"),
+        ("local", claude_json_label()),
         ("project", ".mcp.json"),
-        ("user", "~/.claude.json"),
+        ("user", claude_json_label()),
     ]
     assert detect_mcp_json_mode(project) == "stdio"  # the local entry wins
+    assert detect_mcp_json_mode(project, entries[1:]) == "static-token"  # entries reused
+
+
+def _local_block(entry: dict[str, Any]) -> dict[str, Any]:
+    return {"mcpServers": {MCP_SERVER_NAME: entry}}
+
+
+def test_local_scope_is_keyed_by_the_git_root(tmp_path: Path) -> None:
+    """Claude Code keys local scope by the repository root, not the subdirectory it runs in."""
+    repo = tmp_path / "repo"
+    sub = repo / "pkg" / "sub"
+    sub.mkdir(parents=True)
+    (repo / ".git").mkdir()
+    stale = {**_STDIO, "args": ["--profile", "stale"]}
+    write_claude_json(
+        {
+            "projects": {
+                str(repo.resolve()): _local_block(_STDIO),
+                str(sub.resolve()): _local_block(stale),
+            }
+        }
+    )
+
+    [entry] = find_kagura_mcp_entries(sub)
+
+    assert entry.scope == "local"
+    assert entry.config == _STDIO  # the root's block, not the ignored subdirectory one
+
+
+def test_local_scope_of_a_linked_worktree_is_keyed_by_the_main_worktree(tmp_path: Path) -> None:
+    main_tree = tmp_path / "main"
+    git_dir = main_tree / ".git" / "worktrees" / "wt"
+    git_dir.mkdir(parents=True)
+    (git_dir / "commondir").write_text("../..\n")
+    worktree = tmp_path / "wt"
+    (worktree / "deep").mkdir(parents=True)
+    (worktree / ".git").write_text(f"gitdir: {git_dir}\n")
+    write_claude_json({"projects": {str(main_tree.resolve()): _local_block(_STDIO)}})
+
+    assert [e.scope for e in find_kagura_mcp_entries(worktree / "deep")] == ["local"]
+
+
+def test_local_scope_of_a_submodule_is_keyed_by_the_submodule(tmp_path: Path) -> None:
+    """A ``.git`` file without ``commondir`` (a submodule) keys by its own directory."""
+    module = tmp_path / "super" / "mod"
+    module.mkdir(parents=True)
+    (module / ".git").write_text("gitdir: ../.git/modules/mod\n")
+    write_claude_json({"projects": {str(module.resolve()): _local_block(_STDIO)}})
+
+    assert [e.scope for e in find_kagura_mcp_entries(module)] == ["local"]
+
+
+def test_claude_json_label(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    assert claude_json_label() == "~/.claude.json"
+
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "cfg"))
+    assert claude_json_label() == "~/cfg/.claude.json"
+
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/etc/claude")
+    assert claude_json_label() == str(Path("/etc/claude") / ".claude.json")
 
 
 def test_local_scope_of_another_project_is_ignored(tmp_path: Path) -> None:
