@@ -23,6 +23,7 @@ from .claude_code import (
     _read_json_safe,
     classify_mcp_entry,
     claude_json_label,
+    claude_json_path,
     find_kagura_mcp_entries,
     same_mcp_entry,
 )
@@ -370,7 +371,8 @@ class _McpPlan:
 
     scope: McpScope
     entry: dict[str, Any]
-    #: Weaker-scope entries the new one hides in this project.
+    #: Entries the new one hides in this project: weaker scopes' and a parent
+    #: directory's ``.mcp.json``.
     hidden: list[McpEntry] = field(default_factory=list)
     #: A different user-scope entry to replace. ``claude mcp add-json``
     #: refuses to overwrite one, so it is removed first (and restored if the
@@ -467,12 +469,12 @@ def _plan_mcp_entry(
             f"  so in this project a {scope}-scope entry would be hidden by:"
         )
         for e in stronger:
-            # Local and project scope resolve from the directory claude runs in.
+            # `claude mcp remove` finds a local entry from anywhere in the project,
+            # a project one only in the directory whose .mcp.json holds it.
+            cwd = {"local": project, "project": e.path.parent, "user": None}[e.scope]
             remove = claude_code.mcp_remove_args(e.scope)
             click.echo(f"    {e.scope} scope ({e.source}) — remove it with:")
-            click.echo(
-                f"      {_claude_command(remove, cwd=None if e.scope == 'user' else project)}"
-            )
+            click.echo(f"      {_claude_command(remove, cwd=cwd)}")
         if non_interactive:
             raise click.ClickException(
                 f"Nothing was written: the {stronger[0].scope}-scope {MCP_SERVER_NAME} entry "
@@ -481,8 +483,12 @@ def _plan_mcp_entry(
         if not click.confirm(f"Write the {scope}-scope entry anyway?", default=False):
             raise click.ClickException("Setup cancelled; nothing was written.")
 
-    plan = _McpPlan(scope, entry, hidden=[e for e in entries if rank(e.scope) > rank(scope)])
-    current = next((e for e in entries if e.scope == scope), None)
+    # The entry this write replaces. A project-scope one in a parent directory's
+    # .mcp.json stays where it is: the new, closer file hides it.
+    target = project / ".mcp.json" if scope == "project" else claude_json_path()
+    current = next((e for e in entries if e.scope == scope and e.path == target), None)
+    hidden = [e for e in entries if rank(e.scope) >= rank(scope) and e is not current]
+    plan = _McpPlan(scope, entry, hidden=hidden)
     if current is not None:
         plan.dropped = _dropped_query_flags(current.config, entry)
     if scope != "user":

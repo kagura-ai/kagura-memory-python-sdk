@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shlex
 from dataclasses import dataclass, field
 from datetime import UTC
 from importlib import metadata as importlib_metadata
@@ -535,13 +536,18 @@ def _check_mcp(project_dir: Path) -> list[DoctorCheck]:
         )
 
     if entries and entries[0].legacy_type:
+        fix = _LEGACY_TYPE_FIX[entries[0].scope]
+        mcp_json_dir = entries[0].path.parent
+        if entries[0].scope == "project" and mcp_json_dir != project_dir.resolve():
+            # A parent directory's .mcp.json: a re-run here would write a closer file.
+            fix = f"re-run `kagura setup claude --project-dir {shlex.quote(str(mcp_json_dir))}`"
         checks.append(
             DoctorCheck(
                 section="mcp",
                 status="warn",
                 message=(
                     'The kagura-memory entry has type "url", which Claude Code does not '
-                    f'accept; {_LEGACY_TYPE_FIX[entries[0].scope]} to write it as "http"'
+                    f'accept; {fix} to write it as "http"'
                 ),
                 details=details,
             )

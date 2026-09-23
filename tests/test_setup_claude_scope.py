@@ -456,6 +456,51 @@ def test_local_entry_at_the_git_root_is_found_from_a_subdirectory(
     assert not (sub / ".mcp.json").exists()
 
 
+def test_parent_mcp_json_entry_is_found_from_a_subdirectory(
+    connection, fake_claude, tmp_path: Path
+) -> None:
+    """Claude Code takes the closest ``.mcp.json`` up the tree; a user entry would be hidden.
+
+    ``claude mcp remove --scope project`` only edits the ``.mcp.json`` of the
+    directory it runs in, so the printed command goes there.
+    """
+    repo = tmp_path / "my repo"
+    (repo / ".git").mkdir(parents=True)
+    sub = repo / "pkg"
+    sub.mkdir()
+    mcp_json = write_project_entry(repo, STDIO_DEFAULT)
+    before = mcp_json.read_bytes()
+
+    result = run_setup(sub, "--scope", "user")
+
+    assert result.exit_code == 1
+    assert f"project scope ({mcp_json.resolve()})" in result.output
+    remove = "claude mcp remove --scope project kagura-memory"
+    assert f"cd '{repo.resolve()}' && {remove}" in result.output
+    assert fake_claude.mcp_calls() == []
+    assert mcp_json.read_bytes() == before
+
+
+def test_project_write_below_a_parent_entry_notes_the_hidden_entry(
+    connection, tmp_path: Path
+) -> None:
+    """The new, closer ``.mcp.json`` hides the parent's entry rather than replacing it."""
+    sub = tmp_path / "pkg"
+    sub.mkdir()
+    parent = {**STDIO_DEFAULT, "args": ["--profile", "default", "--guardrails", "off"]}
+    mcp_json = write_project_entry(tmp_path, parent)
+    before = mcp_json.read_bytes()
+
+    result = run_setup(sub)
+
+    assert result.exit_code == 0, result.output
+    assert mcp_entry(sub) == STDIO_DEFAULT
+    assert mcp_json.read_bytes() == before
+    hidden = f"hides the kagura-memory entry in project scope ({mcp_json.resolve()})"
+    assert hidden in result.output
+    assert "left out" not in result.output  # nothing of the parent's entry was replaced
+
+
 @pytest.mark.parametrize(("answer", "code"), [("\n", 1), ("y\n", 0)], ids=["default-no", "yes"])
 def test_shadowed_write_asks_interactively(
     connection, fake_claude, tmp_path: Path, answer: str, code: int

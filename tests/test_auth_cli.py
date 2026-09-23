@@ -581,6 +581,25 @@ def test_status_reports_legacy_static_token_mode(patched_default_path: Path):
     assert "kagura setup claude --profile" in result.output
 
 
+def test_status_reports_a_parent_mcp_json_from_a_subdirectory(
+    patched_default_path: Path, tmp_path: Path, monkeypatch
+):
+    """Claude Code takes the closest ``.mcp.json`` up the tree, so status does too."""
+    _seed_credentials(patched_default_path.parent.parent, _make_creds())
+    monkeypatch.setattr(Path, "home", lambda: tmp_path.resolve())
+    (tmp_path / "proj" / "sub").mkdir(parents=True)
+    monkeypatch.chdir(tmp_path / "proj")
+    _write_cwd_mcp_json(
+        {"type": "stdio", "command": "kagura-mcp", "args": ["--profile", "default"]}
+    )
+    monkeypatch.chdir("sub")
+
+    result = CliRunner().invoke(main, ["auth", "status"])
+
+    assert result.exit_code == 0, result.output
+    assert "Claude Code (~/proj/.mcp.json, project scope): refresh-aware" in result.output
+
+
 def test_status_silent_when_no_mcp_json(patched_default_path: Path):
     """status says nothing about Claude Code when there is no .mcp.json in cwd."""
     _seed_credentials(patched_default_path.parent.parent, _make_creds())

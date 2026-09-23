@@ -35,6 +35,7 @@ from kagura_memory.claude_code import claude_executable as real_claude_executabl
 
 _STDIO = {"type": "stdio", "command": "kagura-mcp", "args": ["--profile", "default"]}
 _BEARER = {"type": "http", "url": "https://h/mcp", "headers": {"Authorization": "Bearer k"}}
+_MCP_JSON = Path("proj") / ".mcp.json"
 
 
 def write_claude_json(data: dict[str, Any]) -> Path:
@@ -102,8 +103,8 @@ def test_same_mcp_entry_ignores_empty_values() -> None:
 
 
 def test_legacy_type_flags_only_url() -> None:
-    assert McpEntry("project", ".mcp.json", {**_BEARER, "type": "url"}).legacy_type
-    assert not McpEntry("project", ".mcp.json", _BEARER).legacy_type
+    assert McpEntry("project", ".mcp.json", {**_BEARER, "type": "url"}, _MCP_JSON).legacy_type
+    assert not McpEntry("project", ".mcp.json", _BEARER, _MCP_JSON).legacy_type
 
 
 # =============================================================================
@@ -124,13 +125,46 @@ def test_finds_every_scope_strongest_first(tmp_path: Path) -> None:
 
     entries = find_kagura_mcp_entries(project)
 
-    assert [(e.scope, e.source) for e in entries] == [
-        ("local", claude_json_label()),
-        ("project", ".mcp.json"),
-        ("user", claude_json_label()),
+    assert [(e.scope, e.source, e.path) for e in entries] == [
+        ("local", claude_json_label(), claude_json_path()),
+        ("project", ".mcp.json", project.resolve() / ".mcp.json"),
+        ("user", claude_json_label(), claude_json_path()),
     ]
     assert detect_mcp_json_mode(project) == "stdio"  # the local entry wins
     assert detect_mcp_json_mode(project, entries[1:]) == "static-token"  # entries reused
+
+
+def test_project_scope_comes_from_a_parent_directorys_mcp_json(monkeypatch, tmp_path: Path) -> None:
+    """Claude Code reads ``.mcp.json`` up the tree, past the repository root."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path.resolve())
+    repo = tmp_path / "outer" / "repo"
+    sub = repo / "pkg" / "sub"
+    sub.mkdir(parents=True)
+    (repo / ".git").mkdir()
+    write_mcp_json(tmp_path / "outer", _BEARER)
+    write_claude_json({"mcpServers": {MCP_SERVER_NAME: _STDIO}})
+
+    entries = find_kagura_mcp_entries(sub)
+
+    assert [(e.scope, e.source, e.path) for e in entries] == [
+        ("project", "~/outer/.mcp.json", (tmp_path / "outer" / ".mcp.json").resolve()),
+        ("user", claude_json_label(), claude_json_path()),
+    ]
+    assert detect_mcp_json_mode(sub) == "static-token"  # not the user entry
+
+
+def test_the_closest_mcp_json_defining_the_server_wins(tmp_path: Path) -> None:
+    """A nearer file wins; one without ``kagura-memory`` does not stop the walk."""
+    near = {**_STDIO, "args": ["--profile", "near"]}
+    write_mcp_json(tmp_path, _STDIO)
+    (tmp_path / "a" / "b").mkdir(parents=True)
+    write_mcp_json(tmp_path / "a", near)
+    (tmp_path / "a" / "b" / ".mcp.json").write_text(json.dumps({"mcpServers": {"github": {}}}))
+
+    [entry] = find_kagura_mcp_entries(tmp_path / "a" / "b")
+
+    assert entry.config == near
+    assert entry.path == (tmp_path / "a" / ".mcp.json").resolve()
 
 
 def _local_block(entry: dict[str, Any]) -> dict[str, Any]:

@@ -6,7 +6,9 @@ the whole entry from the winning scope with no merging:
 * ``local``   — ``~/.claude.json`` → ``projects["<project key>"].mcpServers``, keyed
   by the git repository root (a linked worktree's main working tree) or, outside
   a repository, by the directory itself
-* ``project`` — ``<project>/.mcp.json`` → ``mcpServers``
+* ``project`` — ``.mcp.json`` → ``mcpServers``, from the closest file that
+  defines the server: Claude Code reads one in every directory from the one it
+  runs in up to the filesystem root (past the repository root too)
 * ``user``    — ``~/.claude.json`` → ``mcpServers``
 
 (then plugin-provided servers). An entry in a stronger scope therefore
@@ -84,6 +86,14 @@ def claude_json_path() -> Path:
     return Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home()) / ".claude.json"
 
 
+def _path_label(path: Path) -> str:
+    """``path`` for messages, with the home directory written ``~``."""
+    try:
+        return f"~/{path.relative_to(Path.home()).as_posix()}"
+    except (ValueError, RuntimeError):
+        return str(path)
+
+
 def claude_json_label() -> str:
     """:func:`claude_json_path` for messages, with the home directory written ``~``.
 
@@ -91,11 +101,7 @@ def claude_json_label() -> str:
         ``~/.claude.json`` by default; the full path when ``$CLAUDE_CONFIG_DIR``
         points outside the home directory.
     """
-    path = claude_json_path()
-    try:
-        return f"~/{path.relative_to(Path.home()).as_posix()}"
-    except (ValueError, RuntimeError):
-        return str(path)
+    return _path_label(claude_json_path())
 
 
 def _runs_proxy(entry: dict[str, Any]) -> bool:
@@ -146,9 +152,12 @@ class McpEntry:
     """One ``kagura-memory`` definition Claude Code sees for a project."""
 
     scope: McpScope
-    #: Where it lives, for messages: ``.mcp.json`` or :func:`claude_json_label`.
+    #: Where it lives, for messages: :func:`claude_json_label`, ``.mcp.json`` for
+    #: the project's own file, or a parent directory's ``.mcp.json`` path.
     source: str
     config: dict[str, Any]
+    #: The file it lives in: :func:`claude_json_path` or a ``.mcp.json``.
+    path: Path
 
     @property
     def mode(self) -> McpMode:
@@ -207,6 +216,22 @@ def _local_servers(claude_json: dict[str, Any], project: Path) -> object:
     return None
 
 
+def _closest_mcp_json(project: Path) -> tuple[Path, object]:
+    """The ``.mcp.json`` Claude Code takes ``kagura-memory`` from, and its ``mcpServers``.
+
+    Claude Code reads every ``.mcp.json`` from the directory it runs in up to
+    the filesystem root, and for each server name the closest file wins
+    (checked against Claude Code 2.1.280). ``<project>/.mcp.json`` when none
+    defines ``kagura-memory``.
+    """
+    for directory in (project, *project.parents):
+        path = directory / ".mcp.json"
+        servers = _read_json_safe(path).get("mcpServers")
+        if isinstance(servers, dict) and isinstance(servers.get(MCP_SERVER_NAME), dict):
+            return path, servers
+    return project / ".mcp.json", None
+
+
 def same_mcp_entry(a: dict[str, Any], b: dict[str, Any]) -> bool:
     """True when two entries configure the same server.
 
@@ -230,7 +255,9 @@ def same_mcp_entry(a: dict[str, Any], b: dict[str, Any]) -> bool:
 def find_kagura_mcp_entries(project_dir: Path) -> list[McpEntry]:
     """Every scope that defines ``kagura-memory`` for ``project_dir``, strongest first.
 
-    Reads ``~/.claude.json`` and ``<project>/.mcp.json`` only.
+    Reads ``~/.claude.json`` and the ``.mcp.json`` of ``project_dir`` and of
+    each parent directory only. Project scope is the closest of those files
+    that defines one; a farther one is hidden by it and not listed.
 
     Args:
         project_dir: The project Claude Code runs in.
@@ -240,18 +267,21 @@ def find_kagura_mcp_entries(project_dir: Path) -> list[McpEntry]:
         are shadowed by it; empty when no scope defines one.
     """
     project = project_dir.resolve()
-    claude_json = _read_json_safe(claude_json_path())
+    claude_path = claude_json_path()
+    claude_json = _read_json_safe(claude_path)
     label = claude_json_label()
-    candidates: list[tuple[McpScope, str, object]] = [
-        ("local", label, _local_servers(claude_json, project)),
-        ("project", ".mcp.json", _read_json_safe(project / ".mcp.json").get("mcpServers")),
-        ("user", label, claude_json.get("mcpServers")),
+    mcp_json, project_servers = _closest_mcp_json(project)
+    mcp_json_label = ".mcp.json" if mcp_json.parent == project else _path_label(mcp_json)
+    candidates: list[tuple[McpScope, str, Path, object]] = [
+        ("local", label, claude_path, _local_servers(claude_json, project)),
+        ("project", mcp_json_label, mcp_json, project_servers),
+        ("user", label, claude_path, claude_json.get("mcpServers")),
     ]
     entries: list[McpEntry] = []
-    for scope, source, servers in candidates:
+    for scope, source, path, servers in candidates:
         entry = servers.get(MCP_SERVER_NAME) if isinstance(servers, dict) else None
         if isinstance(entry, dict):
-            entries.append(McpEntry(scope, source, entry))
+            entries.append(McpEntry(scope, source, entry, path))
     return entries
 
 

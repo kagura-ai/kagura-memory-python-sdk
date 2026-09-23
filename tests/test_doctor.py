@@ -45,7 +45,7 @@ def _patch_mcp_entry(monkeypatch, entry: dict) -> None:
     """Make ``entry`` the project-scope kagura-memory entry doctor finds."""
     monkeypatch.setattr(
         "kagura_memory.doctor.find_kagura_mcp_entries",
-        lambda _: [McpEntry("project", ".mcp.json", entry)],
+        lambda project: [McpEntry("project", ".mcp.json", entry, project.resolve() / ".mcp.json")],
     )
 
 
@@ -615,6 +615,38 @@ def test_doctor_warns_about_a_shadowed_entry(tmp_path):
     assert len(shadow) == 1
     assert shadow[0].status == "warn"
     assert "project-scope entry" in shadow[0].message
+
+
+def test_doctor_reports_a_parent_mcp_json_entry_from_a_subdirectory(monkeypatch, tmp_path):
+    """Claude Code takes the closest ``.mcp.json`` up the tree; it hides the user entry."""
+    from kagura_memory.doctor import _check_mcp
+
+    monkeypatch.setattr("kagura_memory.doctor._kagura_mcp_on_path", lambda: True)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path.resolve())
+    (tmp_path / "repo" / ".git").mkdir(parents=True)
+    sub = tmp_path / "repo" / "sub"
+    sub.mkdir()
+    _write_project_entry(tmp_path / "repo", _STDIO_ENTRY)
+    _write_claude_json({"mcpServers": {"kagura-memory": _BEARER_ENTRY}})
+
+    checks = _check_mcp(sub)
+
+    assert checks[0].status == "pass"
+    assert checks[0].message == "MCP Mode: stdio (project scope, ~/repo/.mcp.json)"
+    assert any("also defined in user scope" in c.message for c in checks)
+
+
+def test_doctor_legacy_hint_in_a_parent_mcp_json_names_its_directory(tmp_path):
+    """A plain re-run in the subdirectory would write a closer file, not fix this one."""
+    from kagura_memory.doctor import _check_mcp
+
+    repo = tmp_path / "my repo"
+    (repo / "sub").mkdir(parents=True)
+    _write_project_entry(repo, {**_BEARER_ENTRY, "type": "url"})
+
+    [hint] = [c.message for c in _check_mcp(repo / "sub") if 'type "url"' in c.message]
+
+    assert f"re-run `kagura setup claude --project-dir '{repo.resolve()}'`" in hint
 
 
 def test_doctor_names_the_scope_of_an_unusable_entry(tmp_path):

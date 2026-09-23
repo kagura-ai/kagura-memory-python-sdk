@@ -706,7 +706,8 @@ replaced: an interactive run asks first, `-y` replaces it (and says so). Each ru
 still writes the project's `.kagura.json` and hooks. Claude Code uses the
 `kagura-memory` entry from the strongest scope — local > project > user — and
 ignores the rest (local scope belongs to the git repository root, whichever
-subdirectory you start in), so setup checks every scope first: it warns (and
+subdirectory you start in; project scope is the closest `.mcp.json` defining it,
+in that directory or any parent), so setup checks every scope first: it warns (and
 with `-y` exits 1 without writing) when a stronger entry would hide the new one,
 and notes any weaker entry the new one hides. `kagura doctor` reports the same.
 
