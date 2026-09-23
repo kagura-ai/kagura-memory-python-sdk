@@ -84,13 +84,17 @@ class SecretClient(KaguraRestClient):
     async def list_pubkeys(self) -> list[PubkeyResponse]:
         """List all pubkeys in the workspace (owner/admin view)."""
         response = await self._request("GET", f"{_BASE}/pubkeys")
-        return [self._parse(PubkeyResponse, p, "list_pubkeys") for p in self._expect_list(response)]
+        return [
+            self._parse(PubkeyResponse, p, "list_pubkeys")
+            for p in self._expect_list(response, "list_pubkeys")
+        ]
 
     async def list_my_pubkeys(self) -> list[PubkeyResponse]:
         """List the caller's own pubkeys."""
         response = await self._request("GET", f"{_BASE}/pubkeys/me")
         return [
-            self._parse(PubkeyResponse, p, "list_my_pubkeys") for p in self._expect_list(response)
+            self._parse(PubkeyResponse, p, "list_my_pubkeys")
+            for p in self._expect_list(response, "list_my_pubkeys")
         ]
 
     async def approve_pubkey(self, pubkey_id: str) -> PubkeyResponse:
@@ -132,7 +136,8 @@ class SecretClient(KaguraRestClient):
         """List secret metadata (never includes values)."""
         response = await self._request("GET", _BASE)
         return [
-            self._parse(SecretMetaResponse, s, "list_secrets") for s in self._expect_list(response)
+            self._parse(SecretMetaResponse, s, "list_secrets")
+            for s in self._expect_list(response, "list_secrets")
         ]
 
     async def fetch_secret(

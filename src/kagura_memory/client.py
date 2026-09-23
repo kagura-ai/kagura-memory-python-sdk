@@ -13,6 +13,7 @@ from ._http import (
     SDK_VERSION,
     base_url_from_mcp,
     parse_response,
+    parse_response_list,
     raise_for_kagura_status,
     validate_https_url,
     validate_lat_lon,
@@ -887,7 +888,7 @@ class KaguraClient:
         if version is not None:
             arguments["version"] = version
         result = await self._call_tool_checked("register_agent", arguments)
-        return parse_response(Agent, result["agent"], operation="register_agent")
+        return parse_response(Agent, result.get("agent"), operation="register_agent")
 
     async def get_agent(self, agent_id: str) -> Agent:
         """Fetch one registered agent by id (owner/admin only).
@@ -903,7 +904,7 @@ class KaguraClient:
             KaguraNotFoundError: Agent not found (uniform 404).
         """
         result = await self._call_tool_checked("get_agent", {"agent_id": agent_id})
-        return parse_response(Agent, result["agent"], operation="get_agent")
+        return parse_response(Agent, result.get("agent"), operation="get_agent")
 
     async def list_agents(self) -> list[Agent]:
         """List the workspace's registered agents, newest first (owner/admin only).
@@ -912,7 +913,7 @@ class KaguraClient:
             List of :class:`Agent` rows in the active workspace.
         """
         result = await self._call_tool_checked("list_agents", {})
-        return [parse_response(Agent, a, operation="list_agents") for a in result.get("agents", [])]
+        return parse_response_list(Agent, result.get("agents", []), operation="list_agents")
 
     async def update_agent(
         self,
@@ -972,7 +973,7 @@ class KaguraClient:
         if not changes:
             raise ValueError("update_agent requires at least one field to update")
         result = await self._call_tool_checked("update_agent", {"agent_id": agent_id, **changes})
-        return parse_response(Agent, result["agent"], operation="update_agent")
+        return parse_response(Agent, result.get("agent"), operation="update_agent")
 
     async def delete_agent(self, agent_id: str) -> bool:
         """Hard-delete an Agent Registry row (owner/admin only).
@@ -1041,7 +1042,7 @@ class KaguraClient:
             ),
         }
         result = await self._call_tool_checked("bind_agent_context", arguments)
-        return parse_response(AgentBinding, result["binding"], operation="bind_agent_context")
+        return parse_response(AgentBinding, result.get("binding"), operation="bind_agent_context")
 
     async def list_agent_bindings(self, agent_id: str) -> list[AgentBinding]:
         """List an agent's context bindings (owner/admin only).
@@ -1056,10 +1057,9 @@ class KaguraClient:
             KaguraNotFoundError: Agent not found.
         """
         result = await self._call_tool_checked("list_agent_bindings", {"agent_id": agent_id})
-        return [
-            parse_response(AgentBinding, b, operation="list_agent_bindings")
-            for b in result.get("bindings", [])
-        ]
+        return parse_response_list(
+            AgentBinding, result.get("bindings", []), operation="list_agent_bindings"
+        )
 
     async def update_agent_binding(
         self,
@@ -1104,7 +1104,7 @@ class KaguraClient:
             "update_agent_binding",
             {"agent_id": agent_id, "binding_id": binding_id, **changes},
         )
-        return parse_response(AgentBinding, result["binding"], operation="update_agent_binding")
+        return parse_response(AgentBinding, result.get("binding"), operation="update_agent_binding")
 
     async def unbind_agent_context(self, agent_id: str, binding_id: str) -> bool:
         """Delete a binding — the agent loses that context (owner/admin only).
@@ -1628,7 +1628,7 @@ class KaguraClient:
         if limit is not None:
             arguments["limit"] = limit
         result = await self._call_tool_checked("list_edges", arguments)
-        return [parse_response(Edge, e, operation="list_edges") for e in result.get("edges", [])]
+        return parse_response_list(Edge, result.get("edges", []), operation="list_edges")
 
     async def create_edge(
         self,
@@ -2124,9 +2124,9 @@ class KaguraClient:
             "get_sleep_history",
             {"context_id": context_id, "limit": limit},
         )
-        return [
-            parse_response(SleepReport, r, operation="get_sleep_history") for r in result["reports"]
-        ]
+        return parse_response_list(
+            SleepReport, result.get("reports"), operation="get_sleep_history"
+        )
 
     async def get_sleep_report(
         self,
@@ -2155,16 +2155,15 @@ class KaguraClient:
         # The MCP tool wraps the report fields under a "report" key;
         # flatten so SleepReportDetail (a SleepReport subclass) validates
         # naturally without forcing callers through an extra ``.report.``
-        # accessor.
-        return parse_response(
-            SleepReportDetail,
-            {
-                **result["report"],
-                "actions": result["actions"],
-                "action_count": result["action_count"],
-            },
-            operation="get_sleep_report",
-        )
+        # accessor. A missing or non-object "report" is passed through
+        # unflattened so it fails validation like any other drift.
+        report = result.get("report")
+        if isinstance(report, dict):
+            report = {
+                **report,
+                **{key: result[key] for key in ("actions", "action_count") if key in result},
+            }
+        return parse_response(SleepReportDetail, report, operation="get_sleep_report")
 
     async def rollback_sleep_run(
         self,

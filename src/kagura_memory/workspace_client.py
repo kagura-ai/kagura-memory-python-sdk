@@ -97,7 +97,8 @@ class WorkspaceClient(KaguraRestClient):
         workspace_id = _normalize_workspace_id(workspace_id)
         resp = await self._request("GET", f"/api/v1/workspaces/{workspace_id}/members")
         return [
-            self._parse(WorkspaceMember, row, "list_members") for row in self._expect_list(resp)
+            self._parse(WorkspaceMember, row, "list_members")
+            for row in self._expect_list(resp, "list_members")
         ]
 
     async def add_member(
@@ -202,7 +203,7 @@ class WorkspaceClient(KaguraRestClient):
         )
         return [
             self._parse(WorkspaceInvitation, row, "list_invitations")
-            for row in self._expect_list(resp)
+            for row in self._expect_list(resp, "list_invitations")
         ]
 
     async def revoke_invitation(self, workspace_id: str, invitation_id: int) -> None:
@@ -247,18 +248,19 @@ class WorkspaceClient(KaguraRestClient):
         except ValidationError as exc:
             # The key already exists server-side and is force-hidden — a shape
             # mismatch must not swallow the ONE chance to see the plaintext,
-            # so this path writes its own message instead of using _parse.
-            operation = f"{type(self).__name__}.mint_member_key"
+            # so this path writes its own message instead of using _parse (the
+            # one KaguraResponseError whose message carries a payload value).
+            operation = self._operation("mint_member_key")
             plaintext = payload.get("plaintext_key") if isinstance(payload, dict) else None
             if isinstance(plaintext, str) and plaintext:
                 raise KaguraResponseError(
-                    "Server returned an unexpected mint response shape, but the "
-                    f"key WAS created. Save the plaintext now: {plaintext}",
+                    f"{operation}: server returned an unexpected mint response shape, "
+                    f"but the key WAS created. Save the plaintext now: {plaintext}",
                     operation=operation,
                 ) from exc
             raise KaguraResponseError(
-                "Server returned an unexpected mint response shape; the key may "
-                "have been created without displaying its plaintext — check "
+                f"{operation}: server returned an unexpected mint response shape; "
+                "the key may have been created without displaying its plaintext — check "
                 "`kagura auth list-keys` and revoke/re-mint if present.",
                 operation=operation,
             ) from exc
@@ -277,7 +279,7 @@ class WorkspaceClient(KaguraRestClient):
         )
         return [
             self._parse(MemberAPIKey, row, "list_member_keys")
-            for row in self._expect_wrapped_list(resp, "api_keys")
+            for row in self._expect_wrapped_list(resp, "api_keys", "list_member_keys")
         ]
 
     async def revoke_member_key(self, workspace_id: str, user_id: str, key_id: int) -> None:

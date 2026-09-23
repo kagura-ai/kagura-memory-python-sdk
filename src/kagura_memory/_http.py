@@ -25,6 +25,8 @@ _M = TypeVar("_M", bound=BaseModel)
 
 _MAX_LISTED_RESPONSE_ERRORS = 3
 
+_UPGRADE_HINT = "The server may be newer than this SDK; upgrading kagura-memory may help."
+
 
 def base_url_from_mcp(mcp_url: str) -> str:
     """Derive REST API base URL from an MCP URL.
@@ -153,14 +155,16 @@ def parse_response(model: type[_M], data: Any, *, operation: str) -> _M:
     ``operation`` and the failing fields instead of letting a raw
     ``pydantic.ValidationError`` escape the client. The message leaves
     payload values out (they can be secret ciphertext or key plaintext);
-    the full error stays on ``__cause__``.
+    the full error stays on ``__cause__``, whose own text does include
+    them.
 
     Response side only: request models built from caller arguments must
     keep raising ``ValidationError``, which reports a caller mistake.
 
     Args:
         model: Pydantic model the payload should match.
-        data: Decoded JSON payload.
+        data: Decoded JSON payload. Pass a missing or ``null`` envelope
+            key through as ``None`` so it fails here too.
         operation: Call being parsed, used as the message prefix and the
             exception's ``operation`` attribute.
 
@@ -174,11 +178,38 @@ def parse_response(model: type[_M], data: Any, *, operation: str) -> _M:
         listed = _format_validation_errors(errors[:_MAX_LISTED_RESPONSE_ERRORS])
         if len(errors) > _MAX_LISTED_RESPONSE_ERRORS:
             listed += f" (+{len(errors) - _MAX_LISTED_RESPONSE_ERRORS} more)"
+        problem = f"for {model.__name__} ({listed})"
         raise KaguraResponseError(
-            f"{operation}: unexpected server response for {model.__name__} ({listed}). "
-            "The server may be newer than this SDK; upgrading kagura-memory may help.",
+            f"{operation}: unexpected server response {problem}. {_UPGRADE_HINT}",
             operation=operation,
         ) from exc
+
+
+def parse_response_list(model: type[_M], data: Any, *, operation: str) -> list[_M]:
+    """Validate a JSON array of ``model`` rows, each as :func:`parse_response` does.
+
+    ``data`` that is not a list — its envelope key was missing, ``null`` or
+    another type — raises :class:`KaguraResponseError` instead of a
+    ``TypeError`` on iteration.
+    """
+    if not isinstance(data, list):
+        raise response_shape_error(
+            operation, f"expected a list of {model.__name__}, got {type(data).__name__}"
+        )
+    return [parse_response(model, row, operation=operation) for row in data]
+
+
+def response_shape_error(operation: str, problem: str) -> KaguraResponseError:
+    """Build the :class:`KaguraResponseError` for a mis-shaped 2xx envelope.
+
+    For drift caught before any model sees it (a list field that is not a
+    list), so nothing is chained. ``problem`` describes the shape only,
+    never payload values.
+    """
+    return KaguraResponseError(
+        f"{operation}: unexpected server response ({problem}). {_UPGRADE_HINT}",
+        operation=operation,
+    )
 
 
 def _format_validation_errors(errors: list[Any]) -> str:

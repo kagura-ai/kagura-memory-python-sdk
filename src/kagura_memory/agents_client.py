@@ -146,7 +146,7 @@ class AgentsClient(KaguraRestClient):
         resp = await self._request("GET", "/api/v1/agents")
         return [
             self._parse(Agent, row, "list_agents")
-            for row in self._expect_wrapped_list(resp, "agents")
+            for row in self._expect_wrapped_list(resp, "agents", "list_agents")
         ]
 
     async def get_agent(self, agent_id: str) -> Agent:
@@ -250,7 +250,7 @@ class AgentsClient(KaguraRestClient):
         )
         return [
             self._parse(AgentBinding, row, "list_bindings")
-            for row in self._expect_wrapped_list(resp, "bindings")
+            for row in self._expect_wrapped_list(resp, "bindings", "list_bindings")
         ]
 
     async def update_binding(

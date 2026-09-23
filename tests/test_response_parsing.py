@@ -7,9 +7,11 @@ Two contracts, pinned on every client surface:
    response models, so a value added by a newer server parses instead of
    failing the whole call. The ``Literal`` aliases stay as the documented
    known-value sets and must track memory-cloud (v0.75.0 here).
-2. **Drift wrapping.** A 2xx payload that still fails validation raises
-   :class:`KaguraResponseError` (a ``KaguraError``) naming the operation,
-   never a raw ``pydantic.ValidationError``.
+2. **Drift wrapping.** A 2xx payload that still fails validation — its
+   model, or the envelope around it (a missing/``null`` key, a list that is
+   not a list) — raises :class:`KaguraResponseError` (a ``KaguraError``)
+   naming the operation, never a raw ``pydantic.ValidationError``,
+   ``KeyError`` or ``TypeError``.
 """
 
 from __future__ import annotations
@@ -38,7 +40,7 @@ from kagura_memory import (
     SleepRunStatus,
     WorkspaceClient,
 )
-from kagura_memory._http import parse_response
+from kagura_memory._http import parse_response, parse_response_list
 from kagura_memory.secrets.client import SecretClient
 from tests.conftest import (
     indexer_status_dict,
@@ -215,6 +217,34 @@ def test_parse_response_non_mapping_payload():
         parse_response(SleepReport, None, operation="op")
 
 
+def test_parse_response_list_validates_every_row():
+    rows = parse_response_list(
+        SleepReport,
+        [sleep_report_summary_dict("a"), sleep_report_summary_dict("b")],
+        operation="op",
+    )
+    assert [r.report_id for r in rows] == ["a", "b"]
+
+
+@pytest.mark.parametrize("data", [None, {}, "reports"], ids=["null", "object", "string"])
+def test_parse_response_list_rejects_a_non_list(data):
+    # A missing (None via .get), null or mistyped envelope field must not
+    # TypeError on iteration — or iterate a dict's keys / a string's chars.
+    with pytest.raises(KaguraResponseError) as exc_info:
+        parse_response_list(SleepReport, data, operation="get_sleep_history")
+    err = exc_info.value
+    assert err.operation == "get_sleep_history"
+    assert str(err).startswith("get_sleep_history: ")
+    assert "expected a list of SleepReport" in str(err)
+    assert err.__cause__ is None
+
+
+def test_parse_response_list_wraps_row_drift():
+    with pytest.raises(KaguraResponseError) as exc_info:
+        parse_response_list(SleepReport, [{"report_id": "x"}], operation="op")
+    assert isinstance(exc_info.value.__cause__, ValidationError)
+
+
 # ---------------------------------------------------------------------------
 # MCP surface: every KaguraClient model path wraps drift
 # ---------------------------------------------------------------------------
@@ -298,6 +328,76 @@ async def test_mcp_model_paths_wrap_drift(tool, call, payload):
         await client.close()
 
 
+# A success envelope missing its payload key, or carrying ``null`` / the wrong
+# type there, used to escape as KeyError / TypeError.
+_MCP_ENVELOPE_DRIFT_CASES: list[
+    tuple[str, str, Callable[[KaguraClient], Awaitable[Any]], dict[str, Any]]
+] = [
+    ("get_sleep_history", "missing", lambda c: c.get_sleep_history(context_id="ctx-1"), {}),
+    (
+        "get_sleep_history",
+        "null",
+        lambda c: c.get_sleep_history(context_id="ctx-1"),
+        {"reports": None},
+    ),
+    (
+        "get_sleep_report",
+        "null",
+        lambda c: c.get_sleep_report(context_id="ctx-1", report_id="rid-1"),
+        {"report": None, "actions": [], "action_count": 0},
+    ),
+    (
+        "get_sleep_report",
+        "missing-action-count",
+        lambda c: c.get_sleep_report(context_id="ctx-1", report_id="rid-1"),
+        {"report": sleep_report_detail_dict(), "actions": []},
+    ),
+    ("register_agent", "null", lambda c: c.register_agent("a"), {"agent": None}),
+    ("get_agent", "missing", lambda c: c.get_agent(AGENT), {}),
+    ("update_agent", "missing", lambda c: c.update_agent(AGENT, name="b"), {}),
+    ("list_agents", "null", lambda c: c.list_agents(), {"agents": None}),
+    ("bind_agent_context", "missing", lambda c: c.bind_agent_context(AGENT, WS), {}),
+    ("list_agent_bindings", "null", lambda c: c.list_agent_bindings(AGENT), {"bindings": None}),
+    (
+        "update_agent_binding",
+        "null",
+        lambda c: c.update_agent_binding(AGENT, "b", can_read=False),
+        {"binding": None},
+    ),
+    (
+        "list_edges",
+        "object",
+        lambda c: c.list_edges(context_id="ctx-1", memory_id="m"),
+        {"edges": {}},
+    ),
+    (
+        "create_edge",
+        "null",
+        lambda c: c.create_edge(context_id="ctx-1", source_id="a", target_id="b"),
+        {"edge": None},
+    ),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "tool, _shape, call, payload",
+    _MCP_ENVELOPE_DRIFT_CASES,
+    ids=[f"{case[0]}-{case[1]}" for case in _MCP_ENVELOPE_DRIFT_CASES],
+)
+async def test_mcp_envelope_drift_raises_response_error(tool, _shape, call, payload):
+    client = KaguraClient(api_key="test", mcp_url="https://test.com/mcp")
+    try:
+        with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+            mock.return_value = {"status": "success", **payload}
+            with pytest.raises(KaguraResponseError) as exc_info:
+                await call(client)
+        assert exc_info.value.operation == tool
+        assert str(exc_info.value).startswith(f"{tool}: ")
+    finally:
+        await client.close()
+
+
 # ---------------------------------------------------------------------------
 # REST surface: every KaguraRestClient subclass wraps drift
 # ---------------------------------------------------------------------------
@@ -363,6 +463,23 @@ _REST_DRIFT_CASES: list[tuple[str, type, Callable[[Any], Awaitable[Any]], Any]] 
     ("AgentsClient.bootstrap", AgentsClient, lambda c: c.bootstrap(AGENT), {}),
     ("SecretClient.list_pubkeys", SecretClient, lambda c: c.list_pubkeys(), [{"id": "p"}]),
     ("SecretClient.verify_audit", SecretClient, lambda c: c.verify_audit(), {}),
+    # Envelope shape: a list endpoint answering with the wrong JSON type.
+    ("WorkspaceClient.list_members", WorkspaceClient, lambda c: c.list_members(WS), {}),
+    (
+        "WorkspaceClient.list_member_keys",
+        WorkspaceClient,
+        lambda c: c.list_member_keys(WS, "u2"),
+        {"api_keys": None},
+    ),
+    ("AgentsClient.list_agents", AgentsClient, lambda c: c.list_agents(), {"agents": None}),
+    (
+        "AgentsClient.list_bindings",
+        AgentsClient,
+        lambda c: c.list_bindings(AGENT),
+        {"bindings": {}},
+    ),
+    ("SecretClient.list_secrets", SecretClient, lambda c: c.list_secrets(), {"secrets": []}),
+    ("SecretClient.list_my_pubkeys", SecretClient, lambda c: c.list_my_pubkeys(), "pubkeys"),
 ]
 
 

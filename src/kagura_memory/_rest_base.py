@@ -33,6 +33,7 @@ from ._http import (
     base_url_from_mcp,
     extract_detail,
     parse_response,
+    response_shape_error,
     validate_https_url,
 )
 from .auth.credentials import KaguraOAuth
@@ -63,8 +64,8 @@ class KaguraRestClient:
     - 429 → :class:`KaguraQuotaError` with a tolerant ``Retry-After``
     - other statuses → :class:`KaguraConnectionError`
     - transport errors → :class:`KaguraConnectionError`
-    - a 2xx body its model rejects → :class:`KaguraResponseError`
-      (via :meth:`_parse`)
+    - a 2xx JSON body its model or envelope rejects →
+      :class:`KaguraResponseError` (via :meth:`_parse` / :meth:`_expect_list`)
     """
 
     def __init__(
@@ -330,6 +331,10 @@ class KaguraRestClient:
                 f"{resp.request.method} {resp.request.url.path}."
             ) from exc
 
+    def _operation(self, method_name: str) -> str:
+        """``<Client>.<method>`` label carried by :class:`KaguraResponseError`."""
+        return f"{type(self).__name__}.{method_name}"
+
     def _parse(self, model: type[_M], data: Any, operation: str) -> _M:
         """Validate a decoded 2xx payload into ``model``.
 
@@ -337,34 +342,38 @@ class KaguraRestClient:
         ``<Client>.<operation>`` (e.g. ``ResourceClient.get_indexer_status``)
         rather than a raw pydantic ``ValidationError`` (#250).
         """
-        return parse_response(model, data, operation=f"{type(self).__name__}.{operation}")
+        return parse_response(model, data, operation=self._operation(operation))
 
-    def _expect_list(self, resp: httpx.Response) -> list[Any]:
-        """Parse a 2xx body that the contract says is a JSON array."""
+    def _expect_list(self, resp: httpx.Response, operation: str) -> list[Any]:
+        """Parse a 2xx body that the contract says is a JSON array.
+
+        Any other JSON raises :class:`KaguraResponseError` labelled like
+        :meth:`_parse` (#250).
+        """
         payload = self._json(resp)
         if not isinstance(payload, list):
-            raise KaguraConnectionError(
-                f"Unexpected response shape for {resp.request.method} "
-                f"{resp.request.url.path}: expected a JSON array, got "
-                f"{type(payload).__name__}."
+            raise response_shape_error(
+                self._operation(operation),
+                f"{resp.request.method} {resp.request.url.path}: expected a JSON array, "
+                f"got {type(payload).__name__}",
             )
         return payload
 
-    def _expect_wrapped_list(self, resp: httpx.Response, key: str) -> list[Any]:
+    def _expect_wrapped_list(self, resp: httpx.Response, key: str, operation: str) -> list[Any]:
         """Parse a 2xx body that wraps a JSON array under ``key``.
 
         Guards the FIELD, not just the envelope: ``key: null`` would
         TypeError on iteration and ``key: {}`` would feed dict keys into
         ``model_validate`` (Copilot review, PR #228 — the rationale used
         to live only in WorkspaceClient's copy; hoisted at the third
-        call site).
+        call site). Either raises :class:`KaguraResponseError` (#250).
         """
         payload = self._json(resp)
         rows = payload.get(key) if isinstance(payload, dict) else None
         if not isinstance(rows, list):
-            raise KaguraConnectionError(
-                f"Unexpected response shape for {resp.request.method} "
-                f"{resp.request.url.path}: expected an object carrying "
-                f"a '{key}' array."
+            raise response_shape_error(
+                self._operation(operation),
+                f"{resp.request.method} {resp.request.url.path}: expected an object "
+                f"carrying a '{key}' array",
             )
         return rows
