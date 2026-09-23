@@ -1886,9 +1886,10 @@ def setup_hermes(**params):
     asks which tools to enable, and asks before replacing an entry. With
     -y, without a terminal or without hermes on PATH, setup prints the
     mcp_servers block and the config.yaml to add it to ($HERMES_HOME, or
-    the active Hermes profile's) and changes nothing. The entry runs the
-    refresh-aware kagura-mcp proxy, by absolute path, on your
-    `kagura auth login` profile.
+    the active Hermes profile's) and changes nothing; when that file
+    already has an mcp_servers key, only the entry to put under it. The
+    entry runs the refresh-aware kagura-mcp proxy, by absolute path, on
+    your `kagura auth login` profile.
 
     Hermes does not read MCP instructions: guardrails reach it through
     get_context_info (on by default) and, if you choose, an AGENTS.md

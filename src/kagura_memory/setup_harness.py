@@ -55,6 +55,7 @@ import sys
 import tomllib
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from functools import cached_property
 from pathlib import Path
 from typing import Any, ClassVar, Literal
 from urllib.parse import quote_plus, urlsplit, urlunsplit
@@ -254,6 +255,14 @@ class _Harness(ABC):
     def block(self, name: str, entry: _Entry) -> str:
         """``entry`` in the config file's own syntax, to print."""
 
+    def block_target(self) -> str:
+        """Where in the config file the printed block goes."""
+        return "it"
+
+    def block_notes(self, name: str) -> list[str]:
+        """Lines to print with the block, on how it fits the file as it is."""
+        return []
+
     def key_env(self, name: str, requested: str | None) -> str:
         """The variable the URL form reads the API key from."""
         return requested or DEFAULT_KEY_ENV
@@ -405,6 +414,50 @@ class _Codex(_Harness):
         _codex_hook_warning(name, existing, hooks_on, ask=ask)
 
 
+# The top-level `mcp_servers:` key of a config.yaml, and what follows its colon.
+# A BOM before it and a quoted key are valid YAML too: missing either would print
+# a second top-level key.
+_YAML_SERVERS_KEY_RE = re.compile(r"""^\ufeff?(["']?)mcp_servers\1[ \t]*:(.*)$""")
+# Blank and comment lines neither open nor close a block.
+_YAML_SKIP_RE = re.compile(r"^\s*(?:#|$)")
+_YAML_INDENT_RE = re.compile(r"^([ \t]+)\S")
+
+
+@dataclass(frozen=True)
+class _YamlServers:
+    """The top-level ``mcp_servers:`` key a Hermes ``config.yaml`` already has."""
+
+    #: The indent of the entries under it (two spaces when it has none yet).
+    indent: str
+    #: Its value is written inline (flow style, or a scalar such as ``null``).
+    inline: bool
+
+
+def _yaml_servers(text: str) -> _YamlServers | None:
+    """Find a top-level ``mcp_servers:`` key in ``config.yaml`` text, without parsing YAML.
+
+    YAML keeps the last of two equal keys, so a second top-level
+    ``mcp_servers:`` pasted in would drop every server under the first,
+    without an error.
+
+    Args:
+        text: The file's text.
+
+    Returns:
+        The key's entry indent and form, or None when the file has no such key.
+    """
+    lines = re.split(r"\r?\n", text)
+    for i, line in enumerate(lines):
+        key = _YAML_SERVERS_KEY_RE.match(line)
+        if key is None:
+            continue
+        inline = not _YAML_SKIP_RE.match(key.group(2))
+        after = next((x for x in lines[i + 1 :] if not _YAML_SKIP_RE.match(x)), "")
+        indent = _YAML_INDENT_RE.match(after)
+        return _YamlServers(indent.group(1) if indent else "  ", inline)
+    return None
+
+
 def hermes_home() -> Path:
     """Where Hermes keeps ``config.yaml`` and ``.env`` for the active Hermes profile.
 
@@ -486,19 +539,59 @@ class _Hermes(_Harness):
         assert entry.url is not None
         return ["mcp", "add", name, "--url", entry.url, "--auth", "header"]
 
+    @cached_property
+    def _servers_key(self) -> tuple[_YamlServers | None, str | None]:
+        """config.yaml's top-level ``mcp_servers:`` key, and why the file could not be read."""
+        try:
+            text = self.config_path().read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return None, None
+        except (OSError, ValueError) as e:
+            return None, _exc_message(e)
+        return _yaml_servers(text), None
+
     def block(self, name: str, entry: _Entry) -> str:
         q = json.dumps  # a JSON string is a YAML double-quoted scalar
-        lines = ["mcp_servers:", f"  {name}:"]
+        lines = [f"{name}:"]
         if entry.command is not None:
             args = ", ".join(q(a) for a in entry.args)
-            lines += [f"    command: {q(entry.command)}", f"    args: [{args}]"]
+            lines += [f"  command: {q(entry.command)}", f"  args: [{args}]"]
         else:
             lines += [
-                f"    url: {q(entry.url)}",
-                "    headers:",
-                f"      Authorization: {q(entry.auth_header())}",
+                f"  url: {q(entry.url)}",
+                "  headers:",
+                f"    Authorization: {q(entry.auth_header())}",
             ]
-        return "\n".join(lines)
+        servers, _ = self._servers_key
+        if servers is None:
+            return "\n".join(["mcp_servers:", *(f"  {line}" for line in lines)])
+        # The entry alone, to go under the key the file has.
+        return "\n".join(f"{servers.indent}{line}" for line in lines)
+
+    def block_target(self) -> str:
+        servers, _ = self._servers_key
+        return "it" if servers is None else "its mcp_servers: mapping"
+
+    def block_notes(self, name: str) -> list[str]:
+        servers, unread = self._servers_key
+        where = _path_label(self.config_path())
+        if unread is not None:
+            return [
+                f"Setup could not read {where} ({unread}): if it already has a\n"
+                f"  top-level mcp_servers: key, put only the {name} entry under it."
+            ]
+        if servers is None:
+            return []
+        notes = [
+            f"{where} already has a top-level mcp_servers: key, so only the\n"
+            "  entry is printed: a second one would replace the first and every server under it."
+        ]
+        if servers.inline:
+            notes.append(
+                "Its mcp_servers value is written inline (flow style or null): rewrite it\n"
+                f"  as a block mapping, one server per indented key, before adding {name}."
+            )
+        return notes
 
     def key_env(self, name: str, requested: str | None) -> str:
         return hermes_key_env(name)
@@ -1160,6 +1253,10 @@ def run_setup_harness(
     reason = _print_reason(h, exe, non_interactive, interactive)
 
     click.echo("")
+    show_block = dry_run or reason is not None
+    if show_block:
+        for note in h.block_notes(name):
+            click.echo(f"  {note}")
     if reason is None:
         verb = "Would run" if dry_run else "Running"
         if dry_run and existing is not None and not force:
@@ -1169,9 +1266,9 @@ def run_setup_harness(
         replace = " in place of the existing one" if existing is not None else ""
         click.echo(
             f"  Setup does not edit {where} itself ({reason}).\n"
-            f"  Add this {name} entry to it{replace}:"
+            f"  Add this {name} entry to {h.block_target()}{replace}:"
         )
-    if dry_run or reason is not None:
+    if show_block:
         click.echo("")
         _echo_block(h.block(name, entry))
     if dry_run:

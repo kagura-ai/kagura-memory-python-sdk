@@ -647,6 +647,117 @@ class TestHermesPaths:
         assert hermes_key_env("my_srv") == "MCP_MY_SRV_API_KEY"
 
 
+class TestHermesBlock:
+    """The printed block when config.yaml already has a top-level ``mcp_servers:`` (#274).
+
+    A second top-level key would replace the first (YAML keeps the last), and
+    every server under it with it, so only the entry is printed.
+    """
+
+    STDIO_ENTRY = [
+        "kagura-memory:",
+        f'  command: "{PROXY}"',
+        '  args: ["--profile", "default"]',
+    ]
+
+    @staticmethod
+    def config(home: Path) -> Path:
+        path = home / ".hermes" / "config.yaml"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path
+
+    @staticmethod
+    def printed(lines: list[str], indent: str) -> str:
+        """``lines`` as setup prints them: its 4-space margin, then ``indent``."""
+        return "".join(f"\n    {indent}{line}" for line in lines) + "\n"
+
+    @pytest.mark.parametrize(
+        ("text", "indent"),
+        [
+            ("model: gpt\nmcp_servers:\n  other:\n    command: foo\n", "  "),
+            ("mcp_servers:\n    other:\n        url: https://x\n", "    "),
+            ("﻿mcp_servers:\n  other:\n    command: foo\n", "  "),
+            ('"mcp_servers":\n  other:\n    command: foo\n', "  "),
+            ("'mcp_servers' :\n  other:\n    command: foo\n", "  "),
+            ("mcp_servers:  # mine\n# note\n\n   other:\n     command: foo\n", "   "),
+            ("mcp_servers:\r\n  other:\r\n    command: foo\r\n", "  "),
+            ("mcp_servers:\nmodel: gpt\n", "  "),  # a key with no entries yet
+            ("model: gpt\nmcp_servers:", "  "),  # the last line
+        ],
+        ids=[
+            "after-other-keys",
+            "4-space",
+            "bom",
+            "double-quoted",
+            "single-quoted",
+            "comments",
+            "crlf",
+            "empty",
+            "last-line",
+        ],
+    )
+    def test_existing_key_gets_the_entry_alone(self, env, recorder, text, indent):
+        self.config(env).write_text(text, encoding="utf-8")
+        result = run("hermes", "--profile", "default", "-y")
+        assert result.exit_code == 0, result.output
+        assert self.printed(self.STDIO_ENTRY, indent) in result.output
+        assert "\n    mcp_servers:" not in result.output
+        assert "Add this kagura-memory entry to its mcp_servers: mapping:" in result.output
+        assert "already has a top-level mcp_servers: key" in result.output
+        assert "inline" not in result.output
+        assert recorder.calls == []
+
+    def test_url_form_entry_alone(self, env, recorder):
+        self.config(env).write_text("mcp_servers:\n  other:\n    command: foo\n", encoding="utf-8")
+        result = run("hermes", "--url-form", "--mcp-url", MCP_URL, "-y")
+        assert result.exit_code == 0, result.output
+        entry = [
+            "kagura-memory:",
+            f'  url: "{MCP_URL}"',
+            "  headers:",
+            '    Authorization: "Bearer ${MCP_KAGURA_MEMORY_API_KEY}"',
+        ]
+        assert self.printed(entry, "  ") in result.output
+
+    @pytest.mark.parametrize("value", ["{}", "null", "{other: {command: foo}}", "~"])
+    def test_inline_value_must_become_a_block_first(self, env, recorder, value):
+        self.config(env).write_text(f"mcp_servers: {value}\nmodel: gpt\n", encoding="utf-8")
+        result = run("hermes", "--profile", "default", "-y")
+        assert result.exit_code == 0, result.output
+        assert self.printed(self.STDIO_ENTRY, "  ") in result.output
+        assert "written inline" in result.output
+        assert "rewrite it" in result.output
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "",
+            "model: gpt\n",
+            "agents:\n  mcp_servers:\n    x: {}\n",
+            "# mcp_servers:\n",
+            "mcp_servers_old:\n  x: 1\n",
+        ],
+        ids=["empty", "other-keys", "nested", "comment", "longer-name"],
+    )
+    def test_without_a_top_level_key_prints_the_whole_block(self, env, recorder, text):
+        self.config(env).write_text(text, encoding="utf-8")
+        result = run("hermes", "--profile", "default", "-y")
+        assert result.exit_code == 0, result.output
+        assert self.printed(["mcp_servers:", *(f"  {x}" for x in self.STDIO_ENTRY)], "") in (
+            result.output
+        )
+        assert "Add this kagura-memory entry to it:" in result.output
+        assert "already has" not in result.output
+
+    def test_unreadable_config_prints_the_whole_block_with_a_note(self, env, recorder):
+        self.config(env).mkdir()  # a directory where the file should be
+        result = run("hermes", "--profile", "default", "-y")
+        assert result.exit_code == 0, result.output
+        assert "\n    mcp_servers:\n      kagura-memory:\n" in result.output
+        assert "could not read ~/.hermes/config.yaml" in result.output
+        assert "put only the kagura-memory entry under it" in result.output
+
+
 # =============================================================================
 # OpenClaw
 # =============================================================================
