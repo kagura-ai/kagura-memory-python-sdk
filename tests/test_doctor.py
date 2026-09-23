@@ -381,13 +381,28 @@ _LITELLM_BLOCKED = [
     "1.82.8a1",
     "1.82.8.0",
     "1.82.07",
+    "1.82." + "0" * 40 + "7",  # leading zeros past the 32-digit cap
+    "0" * 40 + "1.82.7",
     "v1.82.7",
     "V1.82.8",
     "0!1.82.7",  # the default epoch: the same release as 1.82.7
     "1!1.82.8",
+    "v0!1.82.7",  # PEP 440 puts the "v" before the epoch
+    "V1!1.82.8",
+    "v0!1.82.7rc1",
     " 1.82.7 ",
 ]
-_LITELLM_ALLOWED = ["1.82.0rc7", "1.82.6", "1.82.9", "1.50.0", "1.83.7", "1.8.27", "1.82"]
+_LITELLM_ALLOWED = [
+    "1.82.0rc7",
+    "1.82.6",
+    "1.82.9",
+    "1.50.0",
+    "1.83.7",
+    "1.8.27",
+    "1.82",
+    "v0!1.82.6",
+    "1.82." + "0" * 40,
+]
 
 
 @pytest.mark.parametrize("version", _LITELLM_BLOCKED)

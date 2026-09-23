@@ -47,8 +47,9 @@ _OPTIONAL_INGESTION_DEPENDENCIES: dict[str, str] = {
 }
 # The LiteLLM releases compromised in the March 2026 supply-chain attack.
 _LITELLM_BLOCKED_RELEASES = frozenset({(1, 82, 7), (1, 82, 8)})
-# A PEP 440 epoch: "0!1.82.7" is the release 1.82.7.
-_PEP440_EPOCH_RE = re.compile(r"\A\d+!", re.ASCII)
+# A PEP 440 epoch, after the optional "v": "0!1.82.7" and "v0!1.82.7" are the
+# release 1.82.7. The "v" goes with it, since parse_version needs none.
+_PEP440_EPOCH_RE = re.compile(r"\Av?\d+!", re.ASCII | re.IGNORECASE)
 _PROVIDER_ENV_KEYS: dict[str, str] = {
     "gemini": "GEMINI_API_KEY",
     "anthropic": "ANTHROPIC_API_KEY",

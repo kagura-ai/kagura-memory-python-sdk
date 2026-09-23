@@ -14,7 +14,6 @@ pre-release:
   version), more ``.N`` components (``1.2.3.4``) or ``.postN``.
 - **Pre-release:** anything else, e.g. ``-rc1`` (SemVer), ``rc1`` / ``a1`` /
   ``b2`` / ``.dev1`` (PEP 440), or stray text such as ``.rc1`` or ``_x``.
-
 A pre-release of a triple comes before that triple (SemVer §11, PEP 440) and
 after every lower one. Anything else is unparseable: a non-``str``, fewer
 than three components (``0.76``), or text such as ``main-abc123``.
@@ -24,11 +23,16 @@ from __future__ import annotations
 
 import re
 
-# At most 32 digits per component, so a longer one is unparseable: past its
-# str-digit limit (4300 by default) int() raises ValueError, and a version a
-# server sends must never make a check raise. ``(?!\d)`` keeps a longer patch
-# from being cut to its first 32 digits.
-_VERSION_RE = re.compile(r"v?(\d{1,32})\.(\d{1,32})\.(\d{1,32})(?!\d)", re.ASCII | re.IGNORECASE)
+# At most 32 significant digits per component, so a longer one is unparseable:
+# past its str-digit limit (4300 by default) int() raises ValueError, and a
+# version a server sends must never make a check raise. Leading zeros are
+# skipped, not counted, as PEP 440 reads them ("1.82.0007" is 1.82.7), and a
+# run of them is a lone 0 so a mismatch backtracks in linear time. ``(?!\d)``
+# keeps a longer patch from being cut to its first 32 digits.
+_COMPONENT = r"0*([1-9]\d{0,31}|0)"
+_VERSION_RE = re.compile(
+    rf"v?{_COMPONENT}\.{_COMPONENT}\.{_COMPONENT}(?!\d)", re.ASCII | re.IGNORECASE
+)
 _RELEASE_TAIL_RE = re.compile(
     r"(?:\.\d+)*(?:\.post\d*)?(?:\+.*)?", re.ASCII | re.IGNORECASE | re.DOTALL
 )

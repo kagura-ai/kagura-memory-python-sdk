@@ -21,6 +21,13 @@ _TABLE: list[tuple[object, tuple[int, int, int] | None, bool | None]] = [
     ("V0.76.0", (0, 76, 0), True),  # PEP 440 reads letters case-insensitively
     ("0.75.12", (0, 75, 12), True),
     ("20260924.1.0", (20260924, 1, 0), True),
+    # Leading zeros are skipped, as PEP 440 reads them, and do not count
+    # towards the 32-digit cap below.
+    ("0.076.00", (0, 76, 0), True),
+    ("0" * 40 + "1.2.3", (1, 2, 3), True),
+    ("1.2." + "0" * 40 + "3", (1, 2, 3), True),
+    ("0" * 5000 + ".0.0", (0, 0, 0), True),
+    ("1" * 32 + ".0.0", (int("1" * 32), 0, 0), True),
     # Build metadata / PEP 440 local version: a release.
     ("1.0.0+build", (1, 0, 0), True),
     ("0.76.0+build.7", (0, 76, 0), True),
@@ -57,6 +64,8 @@ _TABLE: list[tuple[object, tuple[int, int, int] | None, bool | None]] = [
     ("0.76.x", None, None),
     ("０.76.0", None, None),  # FULLWIDTH DIGIT ZERO: ASCII digits only
     ("0.76.٣", None, None),  # ARABIC-INDIC DIGIT THREE
+    ("1" * 33 + ".0.0", None, None),  # 33 significant digits
+    ("0.76." + "0" * 40 + "1" * 33, None, None),
     ("1" * 5000 + ".0.0", None, None),  # past int()'s str-digit limit: None, not ValueError
     ("0.76." + "1" * 5000, None, None),
     (None, None, None),
@@ -121,6 +130,8 @@ def test_meets_minimum_boundary(value, expected):
         "0.17.10",
         "0.9.99",
         "1.0.0",
+        "0.017.001",
+        "0.17.0001rc1",
     ],
 )
 def test_meets_minimum_agrees_with_pep_440(value):
