@@ -82,11 +82,14 @@ file and edits nothing. Options:
   block, their only guardrail lane.
 - `--agents-md [PATH]` — write the context's guardrail export block (the
   `kagura guardrails digest --out` block) into the file the harness loads.
-  Interactive Hermes/OpenClaw runs offer it. Needs a context (`--context-id` with `-y`).
+  Interactive Hermes/OpenClaw runs offer it. Needs a context (`--context-id`
+  with `-y` or without a terminal).
 - `--url-form --mcp-url <url> [--api-key-env VAR]` — a URL entry that reads a
   long-lived API key from an environment variable; setup never sees the key.
 - `--force` replaces an existing entry of the same name (setup stops otherwise);
-  `-y` never prompts and never hands the terminal to `hermes mcp add`.
+  `-y` never prompts and never hands the terminal to `hermes mcp add`. Your
+  shell has no terminal, so setup behaves as with `-y` either way: it never
+  stops at a prompt, and Hermes gets the printed block.
 
 Relay:
 

@@ -880,7 +880,14 @@ the CLI on `PATH` (or, for Hermes, without a terminal or with `-y`), it prints
 the block and the file to add it to and edits nothing. An entry of the same name
 stops setup unless you pass `--force`; setup says what kind of entry it is
 (stdio, URL with a bearer from an environment variable, URL with OAuth) and
-never prints its values.
+never prints its values. Setup asks questions only with a terminal and without
+`-y`; run from an agent's shell or CI, it behaves as with `-y` and never stops
+at a prompt.
+
+The connection check, the context lookup and the `AGENTS.md` export use the
+`--profile` login alone, even when `KAGURA_API_KEY` is set, because that is the
+only credential the entry's `kagura-mcp` uses (`kagura setup claude` does the
+same).
 
 | | Codex | Hermes Agent | OpenClaw |
 |---|---|---|---|
@@ -893,7 +900,11 @@ never prints its values.
 `--context-id <uuid>` the entry runs `kagura-mcp --guardrails <uuid>` and Codex
 receives that context's tool guardrail digest at every connect (server
 v0.74.0+). Use a context whose editor list you control: every editor's guardrail
-summaries reach the model. Hermes and OpenClaw do not read `instructions`: they
+summaries reach the model. The server falls back to its base text, silently,
+when the entry's credential cannot read the context, the context has no
+guardrails, or the deployment turns the digest off; setup prints the
+`kagura guardrails digest <uuid> --target instructions` command that previews
+what Codex receives. Hermes and OpenClaw do not read `instructions`: they
 see guardrails in the `guardrails` block of `get_context_info`, which
 `?guardrails=off` would remove, so `--guardrails off` is refused for them (exit 2)
 and a context id is never written into their entry.
@@ -903,22 +914,30 @@ snapshot of the context's tool guardrails — the same block as
 `kagura guardrails digest --out` — into a file the harness loads every session:
 for Hermes the first of `.hermes.md`, `HERMES.md`, `AGENTS.override.md`,
 `AGENTS.md`, `CLAUDE.md` in the current directory (else `AGENTS.md`); for OpenClaw
-`~/.openclaw/workspace/AGENTS.md`; for Codex `~/.codex/AGENTS.md`, rarely needed
-since the digest already arrives in `instructions`. An interactive Hermes or
-OpenClaw run offers it (default no). Only the text between the
+`~/.openclaw/workspace/AGENTS.md`; for Codex `$CODEX_HOME/AGENTS.md` (`~/.codex`),
+or `AGENTS.override.md` there when it exists, since Codex reads it instead —
+rarely needed, as the digest already arrives in `instructions`. An interactive
+Hermes or OpenClaw run offers it (default no) and lists the profile's contexts;
+without a terminal or with `-y`, pass `--context-id`. Only the text between the
 `kagura-memory:guardrails` markers changes; a context with no guardrails writes
 nothing. Setup prints the command that refreshes the block.
 
 **Codex and the `kagura-memory` plugin's hooks.** memory-cloud's Codex plugin
 reads the credential for its guardrail hooks only from a URL entry
 (`bearer_token_env_var`, `env_http_headers` or `http_headers`), so a stdio entry
-turns them into no-ops. When the hooks are turned on, setup says so and suggests
-`--url-form`; an interactive run asks before writing the stdio entry.
+turns them into no-ops. When the hooks are turned on for the entry being
+written (their `config.json`'s `mcp_server`, `kagura-memory` by default, equals
+`--name`), setup says so and suggests `--url-form`; an interactive run asks
+before writing the stdio entry.
 
 **URL form.** With a long-lived API key, and no wish to run the proxy on the
 harness host, `--url-form --mcp-url https://memory.kagura-ai.com/mcp/w/<workspace-id>`
 writes a URL entry instead. The key never passes through setup: the entry
 references an environment variable, and you put the key there yourself.
+`--profile` is optional here: it only lists contexts and fetches the `AGENTS.md`
+export, so it must be a login on the `--mcp-url` server (exit 2 otherwise).
+Without it, the export uses the usual `kagura` credential chain, which must
+point at that server too (`KAGURA_MCP_URL` for `KAGURA_API_KEY`).
 
 | | The entry sends | Where the key goes |
 |---|---|---|
