@@ -99,7 +99,17 @@ def test_meets_minimum_at_its_own_triple(value, triple, is_release):
         ("v0.17.1", True),
         ("0.17.1+build", True),
         ("0.17.1.post1", True),
+        # Only the dotted ".postN" is a post-release. PEP 440's other
+        # spellings of 0.17.1.post1 fall under "any other text", so they come
+        # before the minimum, the conservative side.
+        ("0.17.1post1", False),
+        ("0.17.1-post1", False),
+        ("0.17.1_post1", False),
+        ("0.17.1-1", False),
+        ("0.17.1r1", False),
+        ("0.17.1.rev1", False),
         ("0.17.2-rc1", True),  # a pre-release of a higher triple is above it
+        ("0.17.2post1", True),
         ("0.17.10", True),
         ("0.100.0", True),
         ("1.0.0-rc1", True),
@@ -135,7 +145,9 @@ def test_meets_minimum_boundary(value, expected):
     ],
 )
 def test_meets_minimum_agrees_with_pep_440(value):
-    # For PEP 440 spellings the answer is PEP 440's own ordering.
+    # For these PEP 440 spellings the answer is PEP 440's own ordering. Its
+    # other post-release spellings (0.17.1post1, 0.17.1-1, ...) do not agree:
+    # they come before the minimum (see test_meets_minimum_boundary).
     version = pytest.importorskip("packaging.version")
     expected = version.Version(value) >= version.Version("0.17.1")
     assert meets_minimum(value, (0, 17, 1)) is expected

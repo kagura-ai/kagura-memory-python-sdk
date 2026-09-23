@@ -14,6 +14,9 @@ pre-release:
   version), more ``.N`` components (``1.2.3.4``) or ``.postN``.
 - **Pre-release:** anything else, e.g. ``-rc1`` (SemVer), ``rc1`` / ``a1`` /
   ``b2`` / ``.dev1`` (PEP 440), or stray text such as ``.rc1`` or ``_x``.
+  That includes PEP 440's other post-release spellings (``post1``,
+  ``-post1``, ``-1``, ``r1``, ``.rev1``): only ``.postN`` is read as one.
+
 A pre-release of a triple comes before that triple (SemVer §11, PEP 440) and
 after every lower one. Anything else is unparseable: a non-``str``, fewer
 than three components (``0.76``), or text such as ``main-abc123``.
