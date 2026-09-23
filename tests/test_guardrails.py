@@ -34,8 +34,9 @@ from kagura_memory import (
     MemoryClient,
     ToolTrigger,
 )
+from kagura_memory._guardrail_export import splice_guardrail_block, write_guardrail_block
 from kagura_memory.auth.credentials import reset_state_cache
-from kagura_memory.cli import _splice_guardrail_block, _write_guardrail_block, main
+from kagura_memory.cli import main
 
 CTX = "11111111-2222-3333-4444-555555555555"
 MEM_A = "aaaaaaaa-0000-0000-0000-000000000001"
@@ -766,30 +767,30 @@ NEW_BLOCK = EXPORT_BLOCK.replace(VERSION, "0123456789abcdef").replace(
 
 def test_splice_appends_to_file_without_block():
     text = "# Project\n\nRules.\n"
-    assert _splice_guardrail_block(text, EXPORT_BLOCK) == text + "\n" + EXPORT_BLOCK
+    assert splice_guardrail_block(text, EXPORT_BLOCK) == text + "\n" + EXPORT_BLOCK
 
 
 def test_splice_adds_missing_trailing_newline_before_block():
-    assert _splice_guardrail_block("# P", EXPORT_BLOCK) == "# P\n\n" + EXPORT_BLOCK
+    assert splice_guardrail_block("# P", EXPORT_BLOCK) == "# P\n\n" + EXPORT_BLOCK
 
 
 def test_splice_into_empty_file_writes_only_the_block():
-    assert _splice_guardrail_block("", EXPORT_BLOCK) == EXPORT_BLOCK
+    assert splice_guardrail_block("", EXPORT_BLOCK) == EXPORT_BLOCK
 
 
 def test_splice_replaces_existing_block_in_place():
     text = "# Project\n\n" + EXPORT_BLOCK + "\n## After\n"
-    assert _splice_guardrail_block(text, NEW_BLOCK) == "# Project\n\n" + NEW_BLOCK + "\n## After\n"
+    assert splice_guardrail_block(text, NEW_BLOCK) == "# Project\n\n" + NEW_BLOCK + "\n## After\n"
 
 
 def test_splice_same_block_is_identity():
     text = "# Project\n\n" + EXPORT_BLOCK
-    assert _splice_guardrail_block(text, EXPORT_BLOCK) == text
+    assert splice_guardrail_block(text, EXPORT_BLOCK) == text
 
 
 def test_splice_empty_digest_removes_block_and_preceding_newline():
     text = "# Project\n\n" + EXPORT_BLOCK
-    assert _splice_guardrail_block(text, "") == "# Project\n"
+    assert splice_guardrail_block(text, "") == "# Project\n"
 
 
 @pytest.mark.parametrize(
@@ -807,11 +808,11 @@ def test_splice_empty_digest_keeps_the_line_above_intact(before, after):
     # the line above (e.g. the user's own heading) stays.
     text = before + EXPORT_BLOCK + after
     expected = (before[:-1] if before.endswith("\n\n") else before) + after
-    assert _splice_guardrail_block(text, "") == expected
+    assert splice_guardrail_block(text, "") == expected
 
 
 def test_splice_empty_digest_without_block_is_identity():
-    assert _splice_guardrail_block("# Project\n", "") == "# Project\n"
+    assert splice_guardrail_block("# Project\n", "") == "# Project\n"
 
 
 @pytest.mark.parametrize(
@@ -825,7 +826,7 @@ def test_splice_empty_digest_without_block_is_identity():
 )
 def test_splice_rejects_malformed_fetched_block(block):
     with pytest.raises(ValueError, match="marker"):
-        _splice_guardrail_block("# Project\n", block)
+        splice_guardrail_block("# Project\n", block)
 
 
 @pytest.mark.parametrize(
@@ -839,32 +840,32 @@ def test_splice_rejects_malformed_fetched_block(block):
 )
 def test_splice_refuses_ambiguous_file(text):
     with pytest.raises(ValueError, match="by hand"):
-        _splice_guardrail_block(text, NEW_BLOCK)
+        splice_guardrail_block(text, NEW_BLOCK)
 
 
 def test_write_block_keeps_crlf_line_endings(tmp_path):
     out = tmp_path / "AGENTS.md"
     out.write_bytes(b"# Title\r\n\r\nLine one\r\nLine two\r\n")
 
-    assert _write_guardrail_block(out, EXPORT_BLOCK) == "written"
+    assert write_guardrail_block(out, EXPORT_BLOCK) == "written"
     assert out.read_bytes() == (
         b"# Title\r\n\r\nLine one\r\nLine two\r\n\r\n" + EXPORT_BLOCK.replace("\n", "\r\n").encode()
     )
     # The CRLF file with this block is recognized as up to date...
-    assert _write_guardrail_block(out, EXPORT_BLOCK) == "unchanged"
+    assert write_guardrail_block(out, EXPORT_BLOCK) == "unchanged"
     # ...and a removal keeps CRLF too.
-    assert _write_guardrail_block(out, "") == "removed"
+    assert write_guardrail_block(out, "") == "removed"
     assert out.read_bytes() == b"# Title\r\n\r\nLine one\r\nLine two\r\n"
 
 
 def test_write_block_keeps_lf_line_endings(tmp_path):
     existing = tmp_path / "AGENTS.md"
     existing.write_bytes(b"# Title\n")
-    assert _write_guardrail_block(existing, EXPORT_BLOCK) == "written"
+    assert write_guardrail_block(existing, EXPORT_BLOCK) == "written"
     assert existing.read_bytes() == b"# Title\n\n" + EXPORT_BLOCK.encode()
 
     created = tmp_path / "NEW.md"
-    assert _write_guardrail_block(created, EXPORT_BLOCK) == "written"
+    assert write_guardrail_block(created, EXPORT_BLOCK) == "written"
     assert created.read_bytes() == EXPORT_BLOCK.encode()  # LF on every platform
 
 
@@ -1091,7 +1092,7 @@ def test_cli_guardrails_digest_out_failed_replace_keeps_file_and_cleans_tmp(tmp_
     def boom(src, dst):
         raise OSError("disk full")
 
-    monkeypatch.setattr("kagura_memory.cli.os.replace", boom)
+    monkeypatch.setattr("kagura_memory._guardrail_export.os.replace", boom)
     result, _ = _digest(CTX, "--out", str(out))
     assert result.exit_code == 1
     assert "disk full" in result.output
