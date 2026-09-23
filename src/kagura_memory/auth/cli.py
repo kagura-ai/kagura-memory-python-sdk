@@ -371,26 +371,36 @@ def auth_status(profile: str | None) -> None:
 
 
 def _print_mcp_json_mode(project_dir: Path) -> None:
-    """Report the Claude Code ``.mcp.json`` integration mode for ``project_dir``.
+    """Report the Claude Code integration mode for ``project_dir``.
 
-    Informational only — silent when there is no ``.mcp.json`` (or no
-    ``kagura-memory`` entry) so ``kagura auth status`` stays quiet outside a
-    project configured for Claude Code. Lazy import avoids pulling the setup
-    machinery (and its ``KaguraClient`` dependency) into the common auth path.
+    Reports the ``kagura-memory`` entry Claude Code uses there — the strongest
+    of local / project (``.mcp.json``) / user scope — and where it comes from
+    (#258). Informational only — silent when no scope has a usable entry so
+    ``kagura auth status`` stays quiet outside a project configured for Claude
+    Code. Lazy import keeps the Claude Code config reader off the common auth
+    path.
     """
-    from ..setup_claude import MCP_PROXY_COMMAND, detect_mcp_json_mode
+    from ..claude_code import MCP_PROXY_COMMAND, find_kagura_mcp_entries
 
-    mode = detect_mcp_json_mode(project_dir)
+    entries = find_kagura_mcp_entries(project_dir)
+    if not entries:
+        return
+    effective = entries[0]
+    label = f"Claude Code ({effective.source}, {effective.scope} scope)"
+    mode = effective.mode
     if mode == "stdio":
-        click.echo(f"Claude Code (.mcp.json): refresh-aware ({MCP_PROXY_COMMAND} stdio proxy)")
+        click.echo(f"{label}: refresh-aware ({MCP_PROXY_COMMAND} stdio proxy)")
     elif mode == "static-token":
         click.echo(
-            "Claude Code (.mcp.json): legacy static API-key token (no auto-refresh)\n"
+            f"{label}: legacy static API-key token (no auto-refresh)\n"
             "  Migrate to refresh-aware: kagura setup claude --profile <name>"
         )
     elif mode == "url":
-        click.echo("Claude Code (.mcp.json): url form (no Authorization header)")
-    # "none" / "absent" → print nothing
+        click.echo(f"{label}: url form (no Authorization header)")
+    else:  # "absent": an entry, but not a form the SDK recognises
+        return
+    for hidden in entries[1:]:
+        click.echo(f"  (hides the {hidden.scope}-scope entry in {hidden.source})")
 
 
 # ---------------------------------------------------------------------------

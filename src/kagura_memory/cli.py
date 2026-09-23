@@ -21,7 +21,7 @@ from ._auth import (
     _resolve_auth,
     _StaticAuth,
 )
-from ._http import validate_lat_lon
+from ._http import normalize_guardrails, validate_lat_lon
 from .auth.cli import auth as _auth_group
 from .client import KaguraClient
 from .config import load_config
@@ -443,7 +443,15 @@ def remember(
     default=None,
     help="Request/skip reranking for this call (default: follow the context's search config)",
 )
-def recall(query, context_id, k, rerank):
+@click.option(
+    "--trusted-only",
+    is_flag=True,
+    help=(
+        "Exclude external / connector-ingested memories (filters.trust_tier=trusted; "
+        "server v0.24.0+). Use it for reads fed back to an agent, like the SessionStart hook."
+    ),
+)
+def recall(query, context_id, k, rerank, trusted_only):
     """
     Search memories directly (without AI analysis).
 
@@ -456,9 +464,13 @@ def recall(query, context_id, k, rerank):
       kagura recall "OAuth2 implementation" -k 10
       kagura recall -c dev "error handling pattern"
       kagura recall "latency-sensitive lookup" --no-rerank
+      kagura recall "project context" --trusted-only
     """
+    filters = {"trust_tier": "trusted"} if trusted_only else None
     _run_client_command(
-        lambda client, ctx: client.recall(context_id=ctx, query=query, k=k, use_rerank=rerank),
+        lambda client, ctx: client.recall(
+            context_id=ctx, query=query, k=k, use_rerank=rerank, filters=filters
+        ),
         context_id,
     )
 
@@ -1509,6 +1521,22 @@ def setup():
     pass
 
 
+def _guardrails_option(ctx, param, value: str | None) -> str | None:
+    """Accept only ``off`` or a context UUID: the server silently ignores anything else."""
+    if value is None:
+        return None
+    try:
+        return normalize_guardrails(value)
+    except ValueError as e:
+        raise click.BadParameter(str(e)) from None
+
+
+def _tool_profile_option(ctx, param, value: str | None) -> str | None:
+    if value is not None and not value.strip():
+        raise click.BadParameter("must not be empty")
+    return value.strip() if value is not None else None
+
+
 @setup.command(name="claude")
 @click.option("--api-key", help="Kagura API key (skip prompt)")
 @click.option("--mcp-url", help="MCP URL (skip prompt)")
@@ -1518,30 +1546,119 @@ def setup():
     default=None,
     help=(
         "OAuth profile name (from `kagura auth login`). Writes the refresh-aware "
-        "`kagura-mcp` stdio .mcp.json form instead of a static API-key url. "
+        "`kagura-mcp` stdio entry instead of a static API-key url. "
         "Mutually exclusive with --api-key."
     ),
 )
 @click.option("--project-dir", default=".", help="Project directory (default: current)")
 @click.option("--non-interactive", "-y", is_flag=True, help="No prompts, use defaults/flags")
 @click.option("--no-auto-context", is_flag=True, help="Disable auto-select by directory name")
+@click.option(
+    "--scope",
+    type=click.Choice(["project", "user"]),
+    default="project",
+    show_default=True,
+    help=(
+        "Where the kagura-memory MCP entry goes. project: <project>/.mcp.json. "
+        "user: every project on this machine, written with `claude mcp add-json "
+        "--scope user` (needs the claude CLI); recommended with --profile when one "
+        "profile serves every project. With an API key, the user-scope entry sends "
+        "$KAGURA_MCP_API_KEY, which Claude Code reads when it connects: set it where "
+        "Claude Code starts. A stronger scope's entry (local > project > "
+        "user) hides a weaker one: setup warns, and with -y refuses to write an "
+        "entry that would be hidden."
+    ),
+)
+@click.option(
+    "--guardrails",
+    default=None,
+    metavar="off|CONTEXT_ID",
+    callback=_guardrails_option,
+    help=(
+        "Add ?guardrails= to the upstream MCP URL (server v0.74.0+; kagura-mcp "
+        "--guardrails, or the url's query for an API key). A re-run without it drops an "
+        "earlier value. 'off' stops the server's guardrail digest AND "
+        "removes the guardrails block from get_context_info: use it only when hooks, "
+        "such as the kagura-memory plugin's, deliver guardrails. A context UUID picks "
+        "that context's digest."
+    ),
+)
+@click.option(
+    "--tool-profile",
+    default=None,
+    metavar="NAME",
+    callback=_tool_profile_option,
+    help=(
+        "Add ?profile=NAME to the upstream MCP URL to limit tools/list (server "
+        "v0.73.0+). The server knows 'full' and 'core' (case-sensitive) and fails "
+        "tools/list for any other name, which leaves Claude Code with no Kagura tools. "
+        "A ?tools= allowlist already on the URL wins over it."
+    ),
+)
+@click.option(
+    "--session-hook/--no-session-hook",
+    default=None,
+    help=(
+        "SessionStart hook that recalls trusted project memories (default: on). "
+        "--no-session-hook removes one setup installed."
+    ),
+)
+@click.option(
+    "--sync-hook/--no-sync-hook",
+    default=True,
+    help=(
+        "PostToolUse hook that syncs .claude/memory/ writes (default: on). "
+        "--no-sync-hook removes one setup installed."
+    ),
+)
+@click.option(
+    "--commands/--no-commands",
+    default=None,
+    help=(
+        "/kagura-recall and /kagura-remember (default: on). --no-commands removes the "
+        "files setup wrote."
+    ),
+)
 def setup_claude(
-    api_key, mcp_url, context_id, profile, project_dir, non_interactive, no_auto_context
+    api_key,
+    mcp_url,
+    context_id,
+    profile,
+    project_dir,
+    non_interactive,
+    no_auto_context,
+    scope,
+    guardrails,
+    tool_profile,
+    session_hook,
+    sync_hook,
+    commands,
 ):
     """
     Set up Kagura Memory integration for Claude Code.
 
-    Configures .kagura.json, .mcp.json, hooks, and skills in the target project.
+    Configures .kagura.json, the kagura-memory MCP entry, hooks, and skills
+    for the target project.
 
+    \b
     Two auth modes:
-      - default (API key): static token baked into .mcp.json (CI / service accounts)
+      - default (API key): static token baked into the entry (CI / service accounts)
       - --profile NAME (OAuth): refresh-aware `kagura-mcp` stdio proxy, no silent 401s
 
+    When the memory-cloud kagura-memory Claude Code plugin is installed, an
+    interactive run offers to skip /kagura-recall and /kagura-remember, which
+    duplicate its commands, asks whether to keep the SessionStart recall hook
+    (the plugin has no automatic recall), and prints the plugin's settings.
+
+    \b
     Examples:
       kagura setup claude
       kagura setup claude --profile default        # OAuth via kagura-mcp (recommended)
+      kagura setup claude --profile default --scope user   # one entry for every project
+      kagura setup claude --profile default --guardrails off --tool-profile core
       kagura setup claude --api-key kagura_xxx --mcp-url http://localhost:8080/mcp/w/{workspace_id}
       kagura setup claude -y --api-key kagura_xxx --context-id my-project
+      kagura setup claude --no-commands      # plugin users: its /kagura-memory:* instead
       kagura setup claude --no-auto-context  # always show full context list
     """
     try:
@@ -1553,6 +1670,12 @@ def setup_claude(
             non_interactive=non_interactive,
             no_auto_context=no_auto_context,
             profile=profile,
+            scope=scope,
+            guardrails=guardrails,
+            tool_profile=tool_profile,
+            session_hook=session_hook,
+            sync_hook=sync_hook,
+            commands=commands,
         )
     except (click.Abort, click.ClickException):
         # click.Abort fires on Ctrl+D / explicit abort during prompts — let Click

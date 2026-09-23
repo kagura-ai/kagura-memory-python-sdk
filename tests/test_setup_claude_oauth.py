@@ -124,6 +124,21 @@ class TestDetectMcpJsonMode:
         (project_dir / ".mcp.json").write_text(json.dumps(existing))
         assert detect_mcp_json_mode(project_dir) == "static-token"
 
+    @pytest.mark.parametrize("entry_type", ["http", "url"])
+    def test_static_token_for_http_and_legacy_url(self, project_dir: Path, entry_type: str) -> None:
+        """#258: Claude Code's ``http`` type and the SDK's legacy ``url`` read the same."""
+        existing = {
+            "mcpServers": {
+                MCP_SERVER_NAME: {
+                    "type": entry_type,
+                    "url": "https://x/mcp",
+                    "headers": {"Authorization": "Bearer kagura_x"},
+                }
+            }
+        }
+        (project_dir / ".mcp.json").write_text(json.dumps(existing))
+        assert detect_mcp_json_mode(project_dir) == "static-token"
+
     def test_static_token_case_insensitive_header(self, project_dir: Path) -> None:
         existing = {
             "mcpServers": {

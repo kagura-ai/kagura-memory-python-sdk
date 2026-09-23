@@ -619,7 +619,11 @@ def test_main_returns_amain_exit_code(monkeypatch: pytest.MonkeyPatch):
 
 
 async def _run_amain(
-    monkeypatch: pytest.MonkeyPatch, tmp_path, stdin: list[dict[str, Any]], handler: Any
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    stdin: list[dict[str, Any]],
+    handler: Any,
+    argv: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Run ``_amain`` end to end over ``stdin``; return the replies it wrote to stdout.
 
@@ -642,7 +646,7 @@ async def _run_amain(
 
     monkeypatch.setattr(mcp_proxy.httpx, "AsyncClient", fake_async_client)
 
-    assert await mcp_proxy._amain([]) == 0
+    assert await mcp_proxy._amain(argv or []) == 0
     return [json.loads(line) for line in out.getvalue().splitlines()]
 
 
@@ -723,3 +727,92 @@ async def test_amain_recovers_from_expired_upstream_session(
         "tools/call",
     ]
     assert server.requests[4][0] == _INITIALIZE
+
+
+# ---------------------------------------------------------------------------
+# _amain — --guardrails / --tool-profile build the upstream URL (#258)
+# ---------------------------------------------------------------------------
+
+_CTX_UUID = "11111111-2222-3333-4444-555555555555"
+
+
+async def _posted_url(monkeypatch: pytest.MonkeyPatch, tmp_path, argv: list[str]) -> str:
+    """Run ``_amain`` with ``argv`` for one ``tools/list``; return the URL it POSTed to."""
+    urls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        urls.append(str(request.url))
+        return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": {"tools": []}})
+
+    request = {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}
+    await _run_amain(monkeypatch, tmp_path, [request], handler, argv)
+    assert len(urls) == 1
+    return urls[0]
+
+
+@pytest.mark.asyncio
+async def test_amain_without_query_flags_posts_to_the_profile_url(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+):
+    assert await _posted_url(monkeypatch, tmp_path, []) == "https://test.example.com/mcp"
+
+
+@pytest.mark.asyncio
+async def test_amain_guardrails_and_tool_profile_extend_the_profile_url(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+):
+    url = await _posted_url(
+        monkeypatch, tmp_path, ["--guardrails", "off", "--tool-profile", "core"]
+    )
+    assert url == "https://test.example.com/mcp?guardrails=off&profile=core"
+
+
+@pytest.mark.asyncio
+async def test_amain_query_flags_keep_the_server_query_and_replace_guardrails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+):
+    """--server keeps its own query; an earlier ``guardrails`` value is replaced, not
+    appended (memory-cloud reads only the first one)."""
+    server = f"https://test.example.com/mcp/w/ws-1?guardrails={_CTX_UUID}&tools=recall"
+    url = await _posted_url(monkeypatch, tmp_path, ["--server", server, "--guardrails", "off"])
+    assert url == "https://test.example.com/mcp/w/ws-1?tools=recall&guardrails=off"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("query", ["?tools=recall", ""], ids=["tools-allowlist", "no-query"])
+async def test_amain_warns_when_a_tools_allowlist_overrides_the_tool_profile(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, capsys, query: str
+):
+    """memory-cloud applies ``tools`` instead of ``profile``: --tool-profile would do nothing."""
+    server = f"https://test.example.com/mcp{query}"
+    await _posted_url(monkeypatch, tmp_path, ["--server", server, "--tool-profile", "core"])
+    warned = "?tools= allowlist" in capsys.readouterr().err
+    assert warned == bool(query)
+
+
+@pytest.mark.asyncio
+async def test_amain_guardrails_uuid_is_canonicalized(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    url = await _posted_url(monkeypatch, tmp_path, ["--guardrails", _CTX_UUID.upper()])
+    assert url == f"https://test.example.com/mcp?guardrails={_CTX_UUID}"
+
+
+@pytest.mark.parametrize("bad", ["on", "my-context", ""])
+def test_parser_rejects_guardrails_that_is_neither_off_nor_uuid(bad: str, capsys):
+    """The server silently ignores such a value, so the proxy refuses to start."""
+    with pytest.raises(SystemExit) as exc:
+        mcp_proxy._build_parser().parse_args(["--guardrails", bad])
+    assert exc.value.code == 2
+    assert "'off' or a context UUID" in capsys.readouterr().err
+
+
+def test_parser_rejects_an_empty_tool_profile(capsys):
+    with pytest.raises(SystemExit) as exc:
+        mcp_proxy._build_parser().parse_args(["--tool-profile", " "])
+    assert exc.value.code == 2
+    assert "--tool-profile" in capsys.readouterr().err
+
+
+def test_parser_help_warns_that_off_removes_the_context_info_block(capsys):
+    with pytest.raises(SystemExit):
+        mcp_proxy._build_parser().parse_args(["--help"])
+    assert "get_context_info" in " ".join(capsys.readouterr().out.split())

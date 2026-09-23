@@ -228,6 +228,21 @@ def agent_binding_dict(
     return row
 
 
+@pytest.fixture(autouse=True)
+def _isolate_claude_code(tmp_path_factory, monkeypatch):
+    """Keep every test away from the developer's Claude Code setup (#258).
+
+    ``kagura setup claude``, ``kagura doctor`` and ``kagura auth status`` read
+    ``~/.claude.json`` and run the ``claude`` CLI (``plugin list``,
+    ``mcp add-json``). Point ``CLAUDE_CONFIG_DIR`` (where the SDK, like Claude
+    Code, looks for ``.claude.json``) at an empty directory and hide ``claude``
+    so no test reads or changes the real configuration. Tests that need either
+    write their own ``.claude.json`` there or patch ``claude_executable``.
+    """
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path_factory.mktemp("claude-config")))
+    monkeypatch.setattr("kagura_memory.claude_code.claude_executable", lambda: None)
+
+
 @pytest.fixture
 def isolated_kagura_credentials(tmp_path, monkeypatch):
     """Isolate a test from real ``~/.kagura/credentials.json`` and env.

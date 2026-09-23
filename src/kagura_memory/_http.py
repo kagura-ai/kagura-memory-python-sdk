@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from datetime import UTC, datetime, time, timedelta
 from importlib.metadata import version as _pkg_version
 from typing import Any, NoReturn, TypeVar
+from urllib.parse import parse_qsl, unquote_plus, urlencode, urlsplit, urlunsplit
 
 import httpx
 from pydantic import BaseModel, ValidationError
@@ -36,16 +37,95 @@ _UPGRADE_HINT = "The server may be newer than this SDK; upgrading kagura-memory 
 def base_url_from_mcp(mcp_url: str) -> str:
     """Derive REST API base URL from an MCP URL.
 
-    Strips ``/mcp`` and everything after it (e.g. ``/mcp/w/{workspace}``).
+    Drops the query and fragment (``/mcp?guardrails=off`` can arrive through
+    ``KAGURA_MCP_URL`` or ``--server``), then strips ``/mcp`` and everything
+    after it (e.g. ``/mcp/w/{workspace}``).
 
     Args:
-        mcp_url: MCP server URL (already stripped of trailing slash).
+        mcp_url: MCP server URL.
 
     Returns:
         Base URL suitable for REST API calls.
     """
-    m = re.search(r"/mcp(?=/|$)", mcp_url)
-    return mcp_url[: m.start()] if m else mcp_url
+    url = re.split(r"[?#]", mcp_url, maxsplit=1)[0].rstrip("/")
+    m = re.search(r"/mcp(?=/|$)", url)
+    return url[: m.start()] if m else url
+
+
+def mcp_url_with_query(
+    mcp_url: str, *, guardrails: str | None = None, tool_profile: str | None = None
+) -> str:
+    """Return ``mcp_url`` with memory-cloud's ``guardrails`` / ``profile`` query set.
+
+    The rest of the existing query is kept verbatim. A key being set replaces
+    every earlier value of it rather than appending, because the server reads
+    only the first ``guardrails`` / ``profile`` it finds. ``None`` leaves that
+    key as it is.
+
+    Args:
+        mcp_url: The MCP endpoint URL, with or without a query.
+        guardrails: ``?guardrails=`` value (see :func:`normalize_guardrails`).
+        tool_profile: ``?profile=`` value, the tool profile ``tools/list``
+            serves (e.g. ``core``); the server rejects an unknown name.
+
+    Returns:
+        The URL to POST MCP requests to.
+    """
+    updates = {
+        key: value
+        for key, value in (("guardrails", guardrails), ("profile", tool_profile))
+        if value is not None
+    }
+    if not updates:
+        return mcp_url
+    parts = urlsplit(mcp_url)
+    kept = [
+        segment
+        for segment in parts.query.split("&")
+        if segment and unquote_plus(segment.split("=", 1)[0]) not in updates
+    ]
+    return urlunsplit(parts._replace(query="&".join([*kept, urlencode(updates)])))
+
+
+def mcp_url_has_tools_allowlist(mcp_url: str) -> bool:
+    """True when ``mcp_url`` carries memory-cloud's ``?tools=`` allowlist.
+
+    The server applies a ``tools`` allowlist instead of ``profile``, so a tool
+    profile set on such a URL has no effect.
+
+    Args:
+        mcp_url: The MCP endpoint URL.
+
+    Returns:
+        Whether its query has a ``tools`` parameter.
+    """
+    query = urlsplit(mcp_url).query
+    return any(key == "tools" for key, _ in parse_qsl(query, keep_blank_values=True))
+
+
+def normalize_guardrails(value: str) -> str:
+    """Validate a ``?guardrails=`` value: ``off`` or a context UUID.
+
+    memory-cloud silently ignores any other value (it neither errors nor
+    switches the lane), so a typo is rejected here instead.
+
+    Args:
+        value: ``off`` (any case) or a context UUID in any spelling
+            ``uuid.UUID`` accepts.
+
+    Returns:
+        ``"off"`` or the canonical UUID string.
+
+    Raises:
+        ValueError: ``value`` is neither.
+    """
+    stripped = value.strip()
+    if stripped.lower() == "off":
+        return "off"
+    try:
+        return normalize_uuid(stripped, label="guardrails")
+    except ValueError:
+        raise ValueError(f"guardrails must be 'off' or a context UUID, got {value!r}") from None
 
 
 def extract_detail(response: httpx.Response) -> str:

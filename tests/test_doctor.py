@@ -10,6 +10,7 @@ from click.testing import CliRunner
 
 from kagura_memory._auth import _OAuthAuth, _StaticAuth
 from kagura_memory.auth.credentials import CredentialsFile, reset_state_cache, save_credentials_file
+from kagura_memory.claude_code import McpEntry, claude_json_label
 from kagura_memory.cli import main
 from kagura_memory.doctor import DoctorCheck, DoctorReport
 from kagura_memory.exceptions import KaguraAuthError, KaguraConnectionError
@@ -36,6 +37,18 @@ def _isolate_doctor_env(monkeypatch, tmp_path):
     reset_state_cache()
 
 
+_STDIO_ENTRY = {"type": "stdio", "command": "kagura-mcp", "args": ["--profile", "default"]}
+_BEARER_ENTRY = {"type": "http", "url": "https://h/mcp", "headers": {"Authorization": "Bearer k"}}
+
+
+def _patch_mcp_entry(monkeypatch, entry: dict) -> None:
+    """Make ``entry`` the project-scope kagura-memory entry doctor finds."""
+    monkeypatch.setattr(
+        "kagura_memory.doctor.find_kagura_mcp_entries",
+        lambda project: [McpEntry("project", ".mcp.json", entry, project.resolve() / ".mcp.json")],
+    )
+
+
 def _patch_common_doctor_surface(monkeypatch, *, resolved, creds_file):
     monkeypatch.setattr(
         "kagura_memory.doctor.load_config",
@@ -43,7 +56,7 @@ def _patch_common_doctor_surface(monkeypatch, *, resolved, creds_file):
     )
     monkeypatch.setattr("kagura_memory.doctor.load_credentials_file", lambda path=None: creds_file)
     monkeypatch.setattr("kagura_memory.doctor._resolve_auth", lambda **_: resolved)
-    monkeypatch.setattr("kagura_memory.doctor.detect_mcp_json_mode", lambda _: "stdio")
+    _patch_mcp_entry(monkeypatch, _STDIO_ENTRY)
     monkeypatch.setattr("kagura_memory.doctor._kagura_mcp_on_path", lambda: True)
     monkeypatch.setattr("kagura_memory.doctor.importlib_metadata.version", lambda _: "1.82.6")
     monkeypatch.setattr("kagura_memory.doctor.find_spec", lambda name: object())
@@ -76,7 +89,9 @@ def test_doctor_happy_path(monkeypatch):
 
     assert report.exit_code == 0
     assert any(check.message == "Effective Auth: KAGURA_API_KEY env" for check in report.checks)
-    assert any(check.message == "MCP Mode: stdio" for check in report.checks)
+    assert any(
+        check.message == "MCP Mode: stdio (project scope, .mcp.json)" for check in report.checks
+    )
     assert any(check.message == "kagura-mcp found on PATH" for check in report.checks)
 
 
@@ -90,7 +105,7 @@ def test_doctor_warns_on_shadowed_oauth_and_legacy_mcp(monkeypatch):
     )
     _patch_common_doctor_surface(monkeypatch, resolved=resolved, creds_file=creds_file)
     monkeypatch.setenv("KAGURA_API_KEY", "kagura_12345678abcdef")
-    monkeypatch.setattr("kagura_memory.doctor.detect_mcp_json_mode", lambda _: "static-token")
+    _patch_mcp_entry(monkeypatch, _BEARER_ENTRY)
     _patch_server(monkeypatch)
 
     from kagura_memory.doctor import run_doctor
@@ -183,7 +198,7 @@ def test_doctor_resolves_env_before_config(monkeypatch, tmp_path):
         encoding="utf-8",
     )
     monkeypatch.setenv("KAGURA_API_KEY", "kagura_env_should_win")
-    monkeypatch.setattr("kagura_memory.doctor.detect_mcp_json_mode", lambda _: "none")
+    monkeypatch.setattr("kagura_memory.doctor.find_kagura_mcp_entries", lambda _: [])
     monkeypatch.setattr("kagura_memory.doctor.find_spec", lambda name: object())
     monkeypatch.setattr("kagura_memory.doctor.importlib_metadata.version", lambda _: "1.82.6")
     _patch_server(monkeypatch)
@@ -206,7 +221,7 @@ def test_doctor_uses_profile_mcp_url_not_config_url(monkeypatch, tmp_path):
     save_credentials_file(
         CredentialsFile(profiles={"dev": make_oauth_creds(server="https://profile.example.com")})
     )
-    monkeypatch.setattr("kagura_memory.doctor.detect_mcp_json_mode", lambda _: "none")
+    monkeypatch.setattr("kagura_memory.doctor.find_kagura_mcp_entries", lambda _: [])
     monkeypatch.setattr("kagura_memory.doctor.find_spec", lambda name: object())
     monkeypatch.setattr("kagura_memory.doctor.importlib_metadata.version", lambda _: "1.82.6")
     _patch_server(monkeypatch)
@@ -235,7 +250,7 @@ def test_doctor_uses_project_dir_for_config_key_shadow_warning(monkeypatch, tmp_
         lambda: {"api_key": "kagura_config", "mcp_url": "https://config.example.com/mcp"},
     )
     monkeypatch.setenv("KAGURA_API_KEY", "kagura_env")
-    monkeypatch.setattr("kagura_memory.doctor.detect_mcp_json_mode", lambda _: "none")
+    monkeypatch.setattr("kagura_memory.doctor.find_kagura_mcp_entries", lambda _: [])
     monkeypatch.setattr("kagura_memory.doctor.find_spec", lambda name: object())
     monkeypatch.setattr("kagura_memory.doctor.importlib_metadata.version", lambda _: "1.82.6")
     _patch_server(monkeypatch)
@@ -249,7 +264,7 @@ def test_doctor_uses_project_dir_for_config_key_shadow_warning(monkeypatch, tmp_
 
 def test_doctor_auth_failure_still_reports_offline_checks(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr("kagura_memory.doctor.detect_mcp_json_mode", lambda _: "none")
+    monkeypatch.setattr("kagura_memory.doctor.find_kagura_mcp_entries", lambda _: [])
     monkeypatch.setattr("kagura_memory.doctor.find_spec", lambda name: None)
     monkeypatch.setattr("kagura_memory.doctor.importlib_metadata.version", lambda _: "1.82.6")
 
@@ -270,7 +285,7 @@ def test_doctor_warns_when_config_key_shadows_oauth(monkeypatch, tmp_path):
         encoding="utf-8",
     )
     save_credentials_file(CredentialsFile(profiles={"default": make_oauth_creds()}))
-    monkeypatch.setattr("kagura_memory.doctor.detect_mcp_json_mode", lambda _: "none")
+    monkeypatch.setattr("kagura_memory.doctor.find_kagura_mcp_entries", lambda _: [])
     monkeypatch.setattr("kagura_memory.doctor.find_spec", lambda name: object())
     monkeypatch.setattr("kagura_memory.doctor.importlib_metadata.version", lambda _: "1.82.6")
     _patch_server(monkeypatch)
@@ -533,17 +548,198 @@ def test_doctor_optional_dependencies_reports_missing(monkeypatch):
     assert "ingest-audio" not in check.details["missing"]
 
 
-def test_doctor_mcp_modes(monkeypatch, tmp_path):
+def test_doctor_mcp_modes(tmp_path):
     from kagura_memory.doctor import _check_mcp
 
-    monkeypatch.setattr("kagura_memory.doctor.detect_mcp_json_mode", lambda _: "url")
-    assert any(check.message == "MCP Mode: url" for check in _check_mcp(tmp_path))
+    assert any(
+        check.message == f"No kagura-memory MCP entry found (.mcp.json, {claude_json_label()})"
+        for check in _check_mcp(tmp_path)
+    )
 
-    monkeypatch.setattr("kagura_memory.doctor.detect_mcp_json_mode", lambda _: "absent")
-    assert any("No usable" in check.message for check in _check_mcp(tmp_path))
+    (tmp_path / ".mcp.json").write_text(json.dumps({"mcpServers": {"github": {}}}))
+    assert any(
+        check.message == "No usable kagura-memory entry found in .mcp.json"
+        for check in _check_mcp(tmp_path)
+    )
 
-    monkeypatch.setattr("kagura_memory.doctor.detect_mcp_json_mode", lambda _: "none")
-    assert any(check.message == "No .mcp.json found" for check in _check_mcp(tmp_path))
+    _write_project_entry(tmp_path, {"type": "http", "url": "https://h/mcp"})
+    assert any(
+        check.message == "MCP Mode: url (project scope, .mcp.json)"
+        for check in _check_mcp(tmp_path)
+    )
+
+
+# ---------------------------------------------------------------------------
+# MCP entry scope (#258): the entry Claude Code uses, from every scope
+# ---------------------------------------------------------------------------
+
+
+def _write_claude_json(data: dict) -> None:
+    """Write the isolated ~/.claude.json (conftest points CLAUDE_CONFIG_DIR at a temp dir)."""
+    from kagura_memory.claude_code import claude_json_path
+
+    claude_json_path().write_text(json.dumps(data), encoding="utf-8")
+
+
+def _write_project_entry(project: Path, entry: dict) -> None:
+    (project / ".mcp.json").write_text(json.dumps({"mcpServers": {"kagura-memory": entry}}))
+
+
+def test_doctor_reports_user_scope_stdio_entry(monkeypatch, tmp_path):
+    """A user-scope entry is the effective one, not "No .mcp.json found"."""
+    from kagura_memory.doctor import _check_mcp
+
+    monkeypatch.setattr("kagura_memory.doctor._kagura_mcp_on_path", lambda: True)
+    _write_claude_json({"mcpServers": {"kagura-memory": _STDIO_ENTRY}})
+
+    checks = _check_mcp(tmp_path)
+    messages = [c.message for c in checks]
+
+    label = claude_json_label()
+    assert f"MCP Mode: stdio (user scope, {label})" in messages
+    assert "kagura-mcp found on PATH" in messages
+    assert not any("No kagura-memory MCP entry" in m or "No .mcp.json" in m for m in messages)
+    assert checks[0].details == {"scope": "user", "source": label}
+
+
+def test_doctor_warns_about_a_shadowed_entry(tmp_path):
+    from kagura_memory.doctor import _check_mcp
+
+    _write_project_entry(tmp_path, _STDIO_ENTRY)
+    _write_claude_json({"mcpServers": {"kagura-memory": _STDIO_ENTRY}})
+
+    checks = _check_mcp(tmp_path)
+
+    assert checks[0].message == "MCP Mode: stdio (project scope, .mcp.json)"
+    shadow = [c for c in checks if "also defined in user scope" in c.message]
+    assert len(shadow) == 1
+    assert shadow[0].status == "warn"
+    assert "project-scope entry" in shadow[0].message
+
+
+def test_doctor_reports_a_parent_mcp_json_entry_from_a_subdirectory(monkeypatch, tmp_path):
+    """Claude Code takes the closest ``.mcp.json`` up the tree; it hides the user entry."""
+    from kagura_memory.doctor import _check_mcp
+
+    monkeypatch.setattr("kagura_memory.doctor._kagura_mcp_on_path", lambda: True)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path.resolve())
+    (tmp_path / "repo" / ".git").mkdir(parents=True)
+    sub = tmp_path / "repo" / "sub"
+    sub.mkdir()
+    _write_project_entry(tmp_path / "repo", _STDIO_ENTRY)
+    _write_claude_json({"mcpServers": {"kagura-memory": _BEARER_ENTRY}})
+
+    checks = _check_mcp(sub)
+
+    assert checks[0].status == "pass"
+    assert checks[0].message == "MCP Mode: stdio (project scope, ~/repo/.mcp.json)"
+    assert any("also defined in user scope" in c.message for c in checks)
+
+
+def test_doctor_legacy_hint_in_a_parent_mcp_json_names_its_directory(tmp_path):
+    """A plain re-run in the subdirectory would write a closer file, not fix this one."""
+    from kagura_memory.doctor import _check_mcp
+
+    repo = tmp_path / "my repo"
+    (repo / "sub").mkdir(parents=True)
+    _write_project_entry(repo, {**_BEARER_ENTRY, "type": "url"})
+
+    [hint] = [c.message for c in _check_mcp(repo / "sub") if 'type "url"' in c.message]
+
+    assert f"re-run `kagura setup claude --project-dir '{repo.resolve()}'`" in hint
+
+
+@pytest.mark.parametrize("env_set", [False, True], ids=["unset", "set"])
+def test_doctor_warns_when_the_entrys_key_variable_is_unset(monkeypatch, tmp_path, env_set):
+    """Setup's user-scope API-key entry sends ${KAGURA_MCP_API_KEY}; unset, it sends nothing."""
+    from kagura_memory.doctor import _check_mcp
+
+    if env_set:
+        monkeypatch.setenv("KAGURA_MCP_API_KEY", "kagura_secret_value")
+    else:
+        monkeypatch.delenv("KAGURA_MCP_API_KEY", raising=False)
+    entry = {**_BEARER_ENTRY, "headers": {"Authorization": "Bearer ${KAGURA_MCP_API_KEY}"}}
+    _write_claude_json({"mcpServers": {"kagura-memory": entry}})
+
+    checks = _check_mcp(tmp_path)
+
+    unset = [c for c in checks if "KAGURA_MCP_API_KEY is not set here" in c.message]
+    assert len(unset) == (0 if env_set else 1)
+    if unset:
+        assert unset[0].status == "warn"
+        assert unset[0].details == {
+            "scope": "user",
+            "source": claude_json_label(),
+            "env": ("KAGURA_MCP_API_KEY"),
+        }
+    assert not any("kagura_secret_value" in c.message for c in checks)
+
+
+def test_doctor_names_the_scope_of_an_unusable_entry(tmp_path):
+    from kagura_memory.doctor import _check_mcp
+
+    _write_claude_json({"mcpServers": {"kagura-memory": {"type": "sse", "url": "https://h/sse"}}})
+
+    checks = _check_mcp(tmp_path)
+
+    assert checks[0].status == "warn"
+    assert checks[0].message == (
+        f"No usable kagura-memory entry found in {claude_json_label()} (user scope)"
+    )
+
+
+def test_doctor_labels_claude_json_where_claude_config_dir_points(monkeypatch, tmp_path):
+    """The message names the file really read, not a fixed ``~/.claude.json``."""
+    from kagura_memory.doctor import _check_mcp
+
+    config_dir = tmp_path / "elsewhere"
+    config_dir.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    _write_claude_json({"mcpServers": {"kagura-memory": _STDIO_ENTRY}})
+
+    [first, *_] = _check_mcp(tmp_path)
+
+    assert first.details == {"scope": "user", "source": str(config_dir / ".claude.json")}
+
+
+@pytest.mark.parametrize("entry_type", ["http", "url"])
+def test_doctor_static_token_legacy_type_suggests_rerunning_setup(tmp_path, entry_type):
+    """Both types read as static-token; only the legacy "url" one gets the re-run hint."""
+    from kagura_memory.doctor import _check_mcp
+
+    _write_project_entry(tmp_path, {**_BEARER_ENTRY, "type": entry_type})
+
+    messages = [c.message for c in _check_mcp(tmp_path)]
+
+    assert any("Legacy static-token configuration detected" in m for m in messages)
+    legacy = [m for m in messages if 'type "url"' in m]
+    assert bool(legacy) == (entry_type == "url")
+    if legacy:
+        assert "re-run `kagura setup claude` to write it" in legacy[0]
+
+
+@pytest.mark.parametrize(
+    ("scope", "fix"),
+    [
+        ("user", "re-run `kagura setup claude --scope user`"),
+        ("local", "remove it (`claude mcp remove --scope local kagura-memory`), then re-run"),
+    ],
+)
+def test_doctor_legacy_type_hint_names_the_scope(tmp_path, scope, fix):
+    """A plain re-run writes project scope: it would not fix a user or local entry."""
+    from kagura_memory.doctor import _check_mcp
+
+    legacy = {**_BEARER_ENTRY, "type": "url"}
+    if scope == "user":
+        _write_claude_json({"mcpServers": {"kagura-memory": legacy}})
+    else:
+        key = str(tmp_path.resolve())
+        _write_claude_json({"projects": {key: {"mcpServers": {"kagura-memory": legacy}}}})
+
+    [hint] = [c.message for c in _check_mcp(tmp_path) if 'type "url"' in c.message]
+
+    assert fix in hint
 
 
 @pytest.mark.parametrize(

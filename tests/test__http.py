@@ -13,10 +13,14 @@ import httpx
 import pytest
 
 from kagura_memory._http import (
+    base_url_from_mcp,
     extract_detail,
     jsonrpc_error_body,
     mcp_session_expired,
     mcp_session_header,
+    mcp_url_has_tools_allowlist,
+    mcp_url_with_query,
+    normalize_guardrails,
     normalize_uuid,
     validate_https_url,
     validate_lat_lon,
@@ -489,3 +493,86 @@ def test_validate_lat_lon_rejects_non_numeric(lat: object, lon: object):
     """
     with pytest.raises(ValueError, match="must be a number"):
         validate_lat_lon(lat, lon)
+
+
+# ---------------------------------------------------------------------------
+# base_url_from_mcp / mcp_url_with_query / normalize_guardrails (#258)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("mcp_url", "expected"),
+    [
+        ("https://host.example/mcp", "https://host.example"),
+        ("https://host.example/mcp/w/ws-1", "https://host.example"),
+        ("https://host.example/mcp?guardrails=off", "https://host.example"),
+        ("https://host.example/mcp/?profile=core", "https://host.example"),
+        ("https://host.example/mcp/w/ws-1?guardrails=off&profile=core", "https://host.example"),
+        ("https://host.example/mcp#frag", "https://host.example"),
+        ("https://host.example/api?x=1", "https://host.example/api"),
+    ],
+)
+def test_base_url_from_mcp_drops_query_and_fragment(mcp_url: str, expected: str):
+    """A query after a bare ``/mcp`` must not leak into the REST base URL."""
+    assert base_url_from_mcp(mcp_url) == expected
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("https://h/mcp?tools=recall,remember", True),
+        ("https://h/mcp?profile=core&tools=", True),  # present, even empty
+        ("https://h/mcp?profile=core", False),
+        ("https://h/mcp?x=tools", False),
+        ("https://h/mcp", False),
+    ],
+)
+def test_mcp_url_has_tools_allowlist(url: str, expected: bool):
+    assert mcp_url_has_tools_allowlist(url) is expected
+
+
+def test_mcp_url_with_query_sets_both_keys_in_order():
+    url = mcp_url_with_query("https://h.example/mcp", guardrails="off", tool_profile="core")
+    assert url == "https://h.example/mcp?guardrails=off&profile=core"
+
+
+def test_mcp_url_with_query_keeps_existing_query_verbatim():
+    url = mcp_url_with_query("https://h.example/mcp/w/ws?tools=recall,remember", guardrails="off")
+    assert url == "https://h.example/mcp/w/ws?tools=recall,remember&guardrails=off"
+
+
+def test_mcp_url_with_query_replaces_every_earlier_value():
+    """The server reads only the first value, so an old one must not survive."""
+    ctx = "11111111-2222-3333-4444-555555555555"
+    url = mcp_url_with_query(
+        f"https://h.example/mcp?guardrails={ctx}&x=1&guardrails=off&profile=full",
+        guardrails="off",
+        tool_profile="core",
+    )
+    assert url == "https://h.example/mcp?x=1&guardrails=off&profile=core"
+
+
+def test_mcp_url_with_query_none_is_a_no_op():
+    url = "https://h.example/mcp?guardrails=off"
+    assert mcp_url_with_query(url) == url
+    assert mcp_url_with_query(url, tool_profile="core") == url + "&profile=core"
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("off", "off"),
+        (" OFF ", "off"),
+        ("11111111-2222-3333-4444-555555555555", "11111111-2222-3333-4444-555555555555"),
+        ("{11111111-2222-3333-4444-555555555555}", "11111111-2222-3333-4444-555555555555"),
+    ],
+)
+def test_normalize_guardrails_accepts_off_or_uuid(value: str, expected: str):
+    assert normalize_guardrails(value) == expected
+
+
+@pytest.mark.parametrize("bad", ["", "on", "false", "my-context", "off,on"])
+def test_normalize_guardrails_rejects_everything_else(bad: str):
+    """The server silently ignores these, so they must fail loudly here."""
+    with pytest.raises(ValueError, match="'off' or a context UUID"):
+        normalize_guardrails(bad)
