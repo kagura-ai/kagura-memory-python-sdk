@@ -14,7 +14,9 @@ from urllib.parse import parse_qsl, urlsplit, urlunsplit
 import click
 
 from . import claude_code
-from ._http import mcp_url_has_tools_allowlist, mcp_url_with_query
+from ._auth import _resolve_profile_auth
+from ._http import mcp_url_guardrails_off, mcp_url_has_tools_allowlist, mcp_url_with_query
+from .auth.credentials import CredentialsFile, OAuthCredentials
 from .claude_code import (
     MCP_API_KEY_ENV,
     MCP_PROXY_COMMAND,
@@ -149,11 +151,14 @@ def _make_client(api_key: str | None, mcp_url: str | None, profile: str | None) 
     """Build a KaguraClient for either the API-key or OAuth-profile path.
 
     When ``profile`` is set, authentication and the MCP URL come from the
-    OAuth profile in ``~/.kagura/credentials.json``; ``api_key`` / ``mcp_url``
-    are ignored. Otherwise the static API-key path is used.
+    OAuth profile in ``~/.kagura/credentials.json`` alone; ``api_key`` /
+    ``mcp_url`` are ignored, and so is ``KAGURA_API_KEY``, which the SDK chain
+    otherwise ranks above a profile: the entry setup writes runs
+    ``kagura-mcp --profile``, which reads nothing else (#260). Otherwise the
+    static API-key path is used.
     """
     if profile is not None:
-        return KaguraClient(profile=profile)
+        return KaguraClient._from_resolved_auth(_resolve_profile_auth(profile))
     return KaguraClient(api_key=api_key, mcp_url=mcp_url)
 
 
@@ -742,8 +747,7 @@ def _resolve_extras(
 def _plugin_server_url(upstream_url: str) -> str:
     """The plugin's ``server_url``: the MCP URL with only ``guardrails=off`` kept in its query."""
     parts = urlsplit(upstream_url)
-    values = [v for k, v in parse_qsl(parts.query, keep_blank_values=True) if k == "guardrails"]
-    query = "guardrails=off" if values and values[0].strip().lower() == "off" else ""
+    query = "guardrails=off" if mcp_url_guardrails_off(upstream_url) else ""
     return urlunsplit(parts._replace(query=query, fragment=""))
 
 
@@ -1181,6 +1185,54 @@ def _write_kagura_config_oauth(project_dir: Path, mcp_url: str, context_id: str)
     return path
 
 
+def _load_profile(profile: str) -> tuple[CredentialsFile, OAuthCredentials]:
+    """The credentials file and the OAuth profile ``profile``; reads the file only.
+
+    Shared by ``setup claude`` and ``setup codex|hermes|openclaw`` (#260).
+
+    Raises:
+        click.ClickException: There is no such profile.
+    """
+    from .auth.credentials import load_credentials_file
+
+    cf = load_credentials_file()
+    creds = cf.get_profile(profile)
+    if creds is None:
+        raise click.ClickException(
+            f"No OAuth profile '{profile}' in ~/.kagura/credentials.json.\n"
+            f"  Run: kagura auth login --profile {profile}"
+        )
+    return cf, creds
+
+
+def _verify_profile(profile: str, creds: OAuthCredentials) -> dict[str, Any]:
+    """Check that ``profile`` works with a ``list_contexts`` call; return its result.
+
+    Auth and the URL come from the profile alone, even when ``KAGURA_API_KEY``
+    is set (see :func:`_make_client`), so the contexts listed are the ones the
+    written ``kagura-mcp --profile`` entry can reach.
+
+    Raises:
+        click.ClickException: Authentication or the connection failed.
+    """
+    click.echo("\nVerifying connection...")
+    try:
+        contexts_response = asyncio.run(_test_connection(profile=profile))
+    except KaguraAuthError as e:
+        raise click.ClickException(
+            f"Authentication failed: {_exc_message(e)}\n"
+            f"  Your token may have expired — re-run: kagura auth login --profile {profile}"
+        ) from e
+    except KaguraConnectionError as e:
+        raise click.ClickException(f"Cannot connect to {creds.server}: {_exc_message(e)}") from e
+    except Exception as e:
+        raise click.ClickException(f"Connection failed: {_exc_message(e)}") from e
+
+    count = contexts_response.get("count", 0)
+    click.echo(f"  Connected as {creds.user_email or '<unknown>'} ({count} contexts available)")
+    return contexts_response
+
+
 def _run_setup_claude_oauth(
     *,
     profile: str,
@@ -1202,17 +1254,9 @@ def _run_setup_claude_oauth(
     writes the stdio entry so Claude Code launches ``kagura-mcp`` as the MCP
     server with an always-fresh bearer token.
     """
-    from .auth.credentials import load_credentials_file
-
     project = Path(project_dir).resolve()
 
-    cf = load_credentials_file()
-    creds = cf.get_profile(profile)
-    if creds is None:
-        raise click.ClickException(
-            f"No OAuth profile '{profile}' in ~/.kagura/credentials.json.\n"
-            f"  Run: kagura auth login --profile {profile}"
-        )
+    cf, creds = _load_profile(profile)
 
     # $PATH check is a warning, never a hard failure: kagura-mcp is a
     # console_script that resolves inside its own venv even when that venv is
@@ -1229,22 +1273,7 @@ def _run_setup_claude_oauth(
     entry = _stdio_entry(profile, guardrails=guardrails, tool_profile=tool_profile)
     plan = _plan_mcp_entry(project, scope, entry, non_interactive)
 
-    # Verify the profile works and list contexts (auth + URL come from profile)
-    click.echo("\nVerifying connection...")
-    try:
-        contexts_response = asyncio.run(_test_connection(profile=profile))
-    except KaguraAuthError as e:
-        raise click.ClickException(
-            f"Authentication failed: {_exc_message(e)}\n"
-            f"  Your token may have expired — re-run: kagura auth login --profile {profile}"
-        ) from e
-    except KaguraConnectionError as e:
-        raise click.ClickException(f"Cannot connect to {creds.server}: {_exc_message(e)}") from e
-    except Exception as e:
-        raise click.ClickException(f"Connection failed: {_exc_message(e)}") from e
-
-    count = contexts_response.get("count", 0)
-    click.echo(f"  Connected as {creds.user_email or '<unknown>'} ({count} contexts available)")
+    contexts_response = _verify_profile(profile, creds)
 
     resolved_context_id = _select_or_create_context(
         contexts_response,

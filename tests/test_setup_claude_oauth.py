@@ -199,10 +199,15 @@ class TestDetectMcpJsonMode:
 
 
 class TestMakeClient:
+    @patch("kagura_memory.setup_claude._resolve_profile_auth")
     @patch("kagura_memory.setup_claude.KaguraClient")
-    def test_dispatches_to_profile(self, mock_kc: MagicMock) -> None:
+    def test_dispatches_to_profile(self, mock_kc: MagicMock, mock_auth: MagicMock) -> None:
+        # The profile alone (#260): KAGURA_API_KEY must not outrank it, since
+        # the written entry runs `kagura-mcp --profile`, which reads nothing else.
         _make_client(None, None, "work")
-        mock_kc.assert_called_once_with(profile="work")
+        mock_auth.assert_called_once_with("work")
+        mock_kc._from_resolved_auth.assert_called_once_with(mock_auth.return_value)
+        mock_kc.assert_not_called()
 
     @patch("kagura_memory.setup_claude.KaguraClient")
     def test_dispatches_to_api_key(self, mock_kc: MagicMock) -> None:
@@ -221,26 +226,31 @@ class TestKaguraMcpOnPath:
 
 
 def _async_client_mock(mock_kc: MagicMock, inner: AsyncMock) -> None:
-    """Wire a patched KaguraClient so `async with KaguraClient(...) as c` yields `inner`."""
-    mock_kc.return_value.__aenter__ = AsyncMock(return_value=inner)
-    mock_kc.return_value.__aexit__ = AsyncMock(return_value=False)
+    """Wire a patched KaguraClient so `async with` on the profile client yields `inner`."""
+    client = mock_kc._from_resolved_auth.return_value
+    client.__aenter__ = AsyncMock(return_value=inner)
+    client.__aexit__ = AsyncMock(return_value=False)
 
 
 class TestConnectionHelpers:
     @pytest.mark.asyncio
+    @patch("kagura_memory.setup_claude._resolve_profile_auth")
     @patch("kagura_memory.setup_claude.KaguraClient")
-    async def test_test_connection_lists_contexts(self, mock_kc: MagicMock) -> None:
+    async def test_test_connection_lists_contexts(
+        self, mock_kc: MagicMock, mock_auth: MagicMock
+    ) -> None:
         inner = AsyncMock()
         inner.list_contexts.return_value = {"count": 2, "contexts": []}
         _async_client_mock(mock_kc, inner)
         out = await _test_connection(profile="work")
         assert out["count"] == 2
         inner.list_contexts.assert_awaited_once()
-        mock_kc.assert_called_once_with(profile="work")
+        mock_auth.assert_called_once_with("work")
 
     @pytest.mark.asyncio
+    @patch("kagura_memory.setup_claude._resolve_profile_auth")
     @patch("kagura_memory.setup_claude.KaguraClient")
-    async def test_create_context_creates(self, mock_kc: MagicMock) -> None:
+    async def test_create_context_creates(self, mock_kc: MagicMock, mock_auth: MagicMock) -> None:
         inner = AsyncMock()
         inner.create_context.return_value = {"context_id": "ctx-new"}
         _async_client_mock(mock_kc, inner)

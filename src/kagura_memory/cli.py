@@ -1,13 +1,8 @@
 """CLI for Kagura Memory SDK."""
 
 import asyncio
-import contextlib
 import json
-import os
-import re
-import shutil
 import sys
-import tempfile
 from collections.abc import Awaitable, Callable
 from datetime import datetime
 from pathlib import Path
@@ -21,8 +16,10 @@ from ._auth import (
     _resolve_auth,
     _StaticAuth,
 )
+from ._guardrail_export import write_guardrail_block
 from ._http import normalize_guardrails, validate_lat_lon
 from .auth.cli import auth as _auth_group
+from .claude_code import MCP_SERVER_NAME
 from .client import KaguraClient
 from .config import load_config
 from .doctor import run_doctor
@@ -45,6 +42,7 @@ from .models import (
 )
 from .resource_client import ResourceClient
 from .setup_claude import run_setup_claude
+from .setup_harness import HarnessName, run_setup_harness
 from .workspace_client import WorkspaceClient
 
 _PROGRESS_CHOICES = ["rich", "json", "none"]
@@ -1305,95 +1303,6 @@ def sleep_rollback(context_id, report_id, yes):
 # Tool Guardrail Commands (issue #253, server v0.74.0+)
 # =============================================================================
 
-# The export block's marker lines, matched at line start. Mirrors the server's
-# Codex cloud recipe (memory-cloud docs/mcp-clients.md § Codex cloud), so a
-# file written by either tool is maintained by the other.
-_GUARDRAIL_BEGIN_RE = re.compile(r"^<!-- kagura-memory:guardrails begin[^\n]*$", re.M)
-_GUARDRAIL_END_RE = re.compile(r"^<!-- kagura-memory:guardrails end -->$", re.M)
-_GUARDRAIL_SPAN_RE = re.compile(
-    _GUARDRAIL_BEGIN_RE.pattern + r".*?" + _GUARDRAIL_END_RE.pattern + r"\n?", re.M | re.S
-)
-
-
-def _splice_guardrail_block(text: str, block: str) -> str:
-    """Return ``text`` with the guardrail export ``block`` put in place.
-
-    The block replaces an earlier one in place, or is appended after a blank
-    line. An empty ``block`` (the context has no tool guardrails) removes an
-    earlier block and the blank line before it, and never creates one — a
-    file never keeps a guardrail the server no longer serves.
-
-    Raises:
-        ValueError: The fetched block does not have exactly one begin and one
-            end marker line, or ``text`` holds more than one block or a broken
-            one — unterminated, or its end before its begin (fix that by hand
-            rather than guess).
-    """
-    block = block.strip()
-    if block and (
-        len(_GUARDRAIL_BEGIN_RE.findall(block)) != 1 or len(_GUARDRAIL_END_RE.findall(block)) != 1
-    ):
-        raise ValueError("fetched block does not have exactly one begin and one end marker line")
-    begins = len(_GUARDRAIL_BEGIN_RE.findall(text))
-    span = _GUARDRAIL_SPAN_RE.search(text)
-    if begins > 1 or begins != len(_GUARDRAIL_END_RE.findall(text)) or (begins and not span):
-        raise ValueError(
-            "the file has more than one guardrail block, or a broken one; fix it by hand"
-        )
-    if span:
-        start, end = span.span()
-        if not block:
-            # Drop the blank line that separated the block from the text
-            # above. A lone newline ends the line above (the block may sit
-            # right under the user's own heading), so it stays.
-            if text[:start].endswith("\n\n"):
-                start -= 1
-            return text[:start] + text[end:]
-        return text[:start] + block + "\n" + text[end:]
-    if not block:
-        return text
-    if not text:
-        return block + "\n"
-    return text + ("" if text.endswith("\n") else "\n") + "\n" + block + "\n"
-
-
-def _write_guardrail_block(path: Path, block: str) -> str:
-    """Splice ``block`` into the file at ``path``; return what happened.
-
-    ``"unchanged"`` when the file already carries this block — the begin
-    marker embeds ``tool_triggered_version``, so an unchanged guardrail set
-    rewrites nothing — ``"removed"`` when an empty digest dropped an earlier
-    block, else ``"written"``. A symlink (``AGENTS.md`` -> ``CLAUDE.md``) is
-    followed so the link survives, and an existing file is replaced
-    atomically with its permission bits kept.
-
-    Line endings are the file's own, on every platform: a file with any CRLF
-    is written back with CRLF, anything else (and a new file) with LF, so a
-    write changes the block and not every line of the file.
-    """
-    target = Path(os.path.realpath(path))
-    exists = target.exists()
-    raw = target.read_bytes().decode("utf-8") if exists else ""
-    newline = "\r\n" if "\r\n" in raw else "\n"
-    text = raw.replace("\r\n", "\n")
-    new = _splice_guardrail_block(text, block)
-    if new == text:
-        return "unchanged"
-    if not exists:
-        target.write_text(new, encoding="utf-8", newline=newline)
-    else:
-        fd, tmp = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8", newline=newline) as f:
-                f.write(new)
-            shutil.copymode(target, tmp)
-            os.replace(tmp, target)
-        except BaseException:
-            with contextlib.suppress(OSError):
-                os.unlink(tmp)
-            raise
-    return "written" if block.strip() else "removed"
-
 
 @main.group()
 def guardrails():
@@ -1501,7 +1410,7 @@ def guardrails_digest(context_id, target, out_path, profile, tools):
             click.echo(digest.text, nl=bool(digest.text) and not digest.text.endswith("\n"))
             return
         try:
-            status = _write_guardrail_block(out_path, digest.text)
+            status = write_guardrail_block(out_path, digest.text)
         except ValueError as e:
             raise click.ClickException(f"{out_path}: {_exc_message(e)}; left unchanged") from e
     except click.ClickException:
@@ -1797,6 +1706,225 @@ def setup_claude(
         raise
     except Exception as e:
         raise click.ClickException(f"Setup failed: {_exc_message(e)}") from e
+
+
+# `kagura setup codex|hermes|openclaw` (#260): one option set, worded per harness.
+_HARNESS_GUARDRAILS_HELP = {
+    "codex": (
+        "Add `--guardrails` to the kagura-mcp arguments (the URL's ?guardrails= with "
+        "--url-form; server v0.74.0+). Codex reads the MCP instructions, which then carry "
+        "that context's tool guardrail digest. Defaults to --context-id, or to 'off' with "
+        "--url-form while the kagura-memory plugin's guardrail hooks are on. Use a context "
+        "whose editor list you control. 'off' also removes the guardrails block from "
+        "get_context_info."
+    ),
+    "hermes": (
+        "Never written: Hermes does not read MCP instructions. 'off' is refused (it would "
+        "remove the get_context_info guardrails block, Hermes's only guardrail lane); a "
+        "context UUID only picks the AGENTS.md export's context."
+    ),
+    "openclaw": (
+        "Never written: OpenClaw does not read MCP instructions. 'off' is refused (it would "
+        "remove the get_context_info guardrails block, OpenClaw's only guardrail lane); a "
+        "context UUID only picks the AGENTS.md export's context."
+    ),
+}
+_HARNESS_AGENTS_MD_HELP = {
+    "codex": (
+        "Also write the context's tool guardrail export block into PATH (default "
+        "~/.codex/AGENTS.md, or AGENTS.override.md when it exists). Rarely needed: the "
+        "digest already arrives in the MCP instructions. Only the marked block changes."
+    ),
+    "hermes": (
+        "Write the context's tool guardrail export block into PATH (default: the context "
+        "file Hermes loads here, the first of .hermes.md, HERMES.md, AGENTS.override.md, "
+        "AGENTS.md, CLAUDE.md, else AGENTS.md). An interactive run offers it. Only the "
+        "marked block changes."
+    ),
+    "openclaw": (
+        "Write the context's tool guardrail export block into PATH (default "
+        "~/.openclaw/workspace/AGENTS.md, which OpenClaw loads every session). An "
+        "interactive run offers it. Only the marked block changes."
+    ),
+}
+_HARNESS_KEY_ENV_HELP = {
+    "codex": (
+        "With --url-form: the variable Codex reads the API key from (bearer_token_env_var; "
+        "default KAGURA_API_KEY, which every kagura command also ranks above OAuth profiles)."
+    ),
+    "hermes": (
+        "Not accepted: Hermes names the variable MCP_<NAME>_API_KEY and asks for the key itself."
+    ),
+    "openclaw": (
+        "With --url-form: the variable the Authorization header references, kept in "
+        "~/.openclaw/.env (default KAGURA_API_KEY)."
+    ),
+}
+
+
+def _harness_command(harness: HarnessName):
+    """Register ``kagura setup <harness>`` with the options every harness takes."""
+
+    def decorate(f):
+        options = [
+            click.option(
+                "--profile",
+                help=(
+                    "OAuth profile (from `kagura auth login`) the entry runs "
+                    "`kagura-mcp --profile` with. Required unless --url-form."
+                ),
+            ),
+            click.option(
+                "--name",
+                default=MCP_SERVER_NAME,
+                show_default=True,
+                help="MCP server name in the harness config",
+            ),
+            click.option(
+                "--context-id",
+                help="Context ID or name, for the guardrails lane and the AGENTS.md export only",
+            ),
+            click.option(
+                "--guardrails",
+                default=None,
+                metavar="off|CONTEXT_ID",
+                callback=_guardrails_option,
+                help=_HARNESS_GUARDRAILS_HELP[harness],
+            ),
+            click.option(
+                "--agents-md",
+                is_flag=False,
+                flag_value="",
+                default=None,
+                metavar="[PATH]",
+                help=_HARNESS_AGENTS_MD_HELP[harness],
+            ),
+            click.option(
+                "--url-form",
+                is_flag=True,
+                help=(
+                    "Write a URL entry that sends a long-lived API key from an environment "
+                    "variable instead of the kagura-mcp stdio entry (needs --mcp-url). Setup "
+                    "never sees the key; an OAuth token never goes in one."
+                ),
+            ),
+            click.option(
+                "--mcp-url",
+                help="With --url-form: the MCP URL your API key works with (…/mcp/w/<workspace>)",
+            ),
+            click.option("--api-key-env", metavar="VAR", help=_HARNESS_KEY_ENV_HELP[harness]),
+            click.option(
+                "--force", is_flag=True, help="Replace an existing entry of the same name"
+            ),
+            click.option(
+                "--non-interactive",
+                "-y",
+                is_flag=True,
+                help="No prompts; never hands the terminal to a harness CLI",
+            ),
+            click.option(
+                "--dry-run",
+                is_flag=True,
+                help="Show the command or block, the entry and the AGENTS.md step; change nothing",
+            ),
+        ]
+        for option in reversed(options):
+            f = option(f)
+        return setup.command(name=harness)(f)
+
+    return decorate
+
+
+def _run_setup_harness_command(harness: HarnessName, params: dict[str, Any]) -> None:
+    try:
+        run_setup_harness(harness, **params)
+    except (click.Abort, click.ClickException):
+        raise
+    except Exception as e:
+        raise click.ClickException(f"Setup failed: {_exc_message(e)}") from e
+
+
+@_harness_command("codex")
+def setup_codex(**params):
+    """
+    Set up Kagura Memory for OpenAI Codex (CLI and IDE extension).
+
+    Adds the kagura-memory MCP server with `codex mcp add`, which writes
+    ~/.codex/config.toml ($CODEX_HOME); --force replaces an entry with
+    `codex mcp remove` first. The entry runs the refresh-aware kagura-mcp
+    proxy, by absolute path, on your `kagura auth login` profile: no API
+    key, and Codex never signs in to Kagura itself. Without codex on PATH,
+    setup prints the [mcp_servers] table to add instead.
+
+    Codex reads the server's MCP instructions, so --context-id (or
+    --guardrails CONTEXT_ID) puts that context's tool guardrail digest in
+    them. The kagura-memory Codex plugin's guardrail hooks read only a URL
+    entry's bearer: with them turned on, use --url-form.
+
+    \b
+    Examples:
+      kagura setup codex --profile default
+      kagura setup codex --profile default --context-id CTX_UUID
+      kagura setup codex --url-form --mcp-url https://memory.kagura-ai.com/mcp/w/WS_ID
+      kagura setup codex --profile default --dry-run
+    """
+    _run_setup_harness_command("codex", params)
+
+
+@_harness_command("hermes")
+def setup_hermes(**params):
+    """
+    Set up Kagura Memory for Hermes Agent.
+
+    Runs `hermes mcp add` attached to this terminal: it probes the server,
+    asks which tools to enable, and asks before replacing an entry. With
+    -y, without a terminal or without hermes on PATH, setup prints the
+    mcp_servers block and the config.yaml to add it to ($HERMES_HOME, or
+    the active Hermes profile's) and changes nothing. The entry runs the
+    refresh-aware kagura-mcp proxy, by absolute path, on your
+    `kagura auth login` profile.
+
+    Hermes does not read MCP instructions: guardrails reach it through
+    get_context_info (on by default) and, if you choose, an AGENTS.md
+    export block (--agents-md; an interactive run offers it).
+
+    \b
+    Examples:
+      kagura setup hermes --profile default
+      kagura setup hermes --profile default --context-id CTX_UUID --agents-md
+      kagura setup hermes --url-form --mcp-url https://memory.kagura-ai.com/mcp/w/WS_ID
+      kagura setup hermes --profile default -y     # print the block only
+    """
+    _run_setup_harness_command("hermes", params)
+
+
+@_harness_command("openclaw")
+def setup_openclaw(**params):
+    """
+    Set up Kagura Memory for OpenClaw.
+
+    Adds the kagura-memory MCP server with `openclaw mcp add`, which
+    probes it before saving; --force replaces an entry with
+    `openclaw mcp set`. Both write ~/.openclaw/openclaw.json
+    (OPENCLAW_CONFIG_PATH), which the Gateway hot-reloads. Without openclaw
+    on PATH, setup prints the mcp.servers block instead. The entry runs the
+    refresh-aware kagura-mcp proxy, by absolute path, on your
+    `kagura auth login` profile; a --url-form entry always sets transport
+    "streamable-http" (OpenClaw defaults a URL entry to SSE).
+
+    OpenClaw does not read MCP instructions: guardrails reach it through
+    get_context_info (on by default) and, if you choose, an export block in
+    ~/.openclaw/workspace/AGENTS.md (--agents-md; an interactive run
+    offers it).
+
+    \b
+    Examples:
+      kagura setup openclaw --profile default
+      kagura setup openclaw --profile default --context-id CTX_UUID --agents-md
+      kagura setup openclaw --url-form --mcp-url https://memory.kagura-ai.com/mcp/w/WS_ID
+      kagura setup openclaw --profile default --force
+    """
+    _run_setup_harness_command("openclaw", params)
 
 
 # =============================================================================

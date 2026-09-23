@@ -233,3 +233,26 @@ def _resolve_auth(
         "  Or set: KAGURA_API_KEY=<your key>\n"
         '  Or create: .kagura.json with {"api_key": "..."}'
     )
+
+
+def _resolve_profile_auth(profile: str) -> _OAuthAuth:
+    """The OAuth profile ``profile`` alone, with its stored MCP URL.
+
+    Unlike :func:`_resolve_auth`, ``KAGURA_API_KEY`` never outranks it. For
+    callers that must use the credential a ``kagura-mcp --profile`` entry
+    uses, which reads nothing else (``kagura setup``, #260).
+
+    Raises:
+        KaguraAuthError: credentials.json has no such profile.
+    """
+    state = get_shared_state(profile=profile)
+    if state is None:
+        raise KaguraAuthError(
+            f"Profile '{profile}' not found in credentials.json.\n"
+            f"  Run: kagura auth login --profile {profile}"
+        )
+    return _OAuthAuth(
+        oauth=KaguraOAuth(state),
+        mcp_url=state.credentials.mcp_url,
+        workspace_id=state.credentials.workspace_id,
+    )

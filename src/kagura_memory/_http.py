@@ -103,6 +103,23 @@ def mcp_url_has_tools_allowlist(mcp_url: str) -> bool:
     return any(key == "tools" for key, _ in parse_qsl(query, keep_blank_values=True))
 
 
+def mcp_url_guardrails_off(mcp_url: str) -> bool:
+    """True when ``mcp_url``'s first ``guardrails`` value is ``off`` (any case).
+
+    The server reads only the first value, and ``off`` also drops the
+    ``guardrails`` block from ``get_context_info``.
+
+    Args:
+        mcp_url: The MCP endpoint URL.
+
+    Returns:
+        Whether the URL turns both guardrail lanes off.
+    """
+    query = urlsplit(mcp_url).query
+    values = [v for k, v in parse_qsl(query, keep_blank_values=True) if k == "guardrails"]
+    return bool(values) and values[0].strip().lower() == "off"
+
+
 def normalize_guardrails(value: str) -> str:
     """Validate a ``?guardrails=`` value: ``off`` or a context UUID.
 
