@@ -740,23 +740,31 @@ async def test_recall_omits_use_rerank_by_default():
 
 @pytest.mark.asyncio
 async def test_recall_use_rerank_false_serializes_to_json_false():
-    """Issue #251: the JSON-RPC body httpx puts on the wire carries ``"use_rerank": false``."""
+    """Issue #251: the JSON-RPC body httpx puts on the wire carries ``"use_rerank": false``.
+
+    A MockTransport captures the bytes httpx actually sends, so this pins the
+    serialized request rather than the dict handed to ``post``.
+    """
+    sent: list[bytes] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {"content": [{"type": "text", "text": '{"results": []}'}]},
+            },
+        )
+
     client = _make_initialized_client()
-    mock_response = MagicMock()
-    mock_response.raise_for_status = MagicMock()
-    mock_response.json.return_value = {
-        "jsonrpc": "2.0",
-        "id": 1,
-        "result": {"content": [{"type": "text", "text": '{"results": []}'}]},
-    }
+    client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
 
     try:
-        with patch.object(client._client, "post", new_callable=AsyncMock) as mock_post:
-            mock_post.return_value = mock_response
-            await client.recall(context_id="ctx", query="test", use_rerank=False)
-            body = mock_post.call_args.kwargs["json"]
-            wire = httpx.Request("POST", client.mcp_url, json=body).content
-            assert json.loads(wire)["params"]["arguments"]["use_rerank"] is False
+        await client.recall(context_id="ctx", query="test", use_rerank=False)
+        assert len(sent) == 1
+        assert json.loads(sent[0])["params"]["arguments"]["use_rerank"] is False
     finally:
         await client.close()
 
