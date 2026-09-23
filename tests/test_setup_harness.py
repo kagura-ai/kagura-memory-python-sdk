@@ -321,6 +321,16 @@ class TestCodex:
         [argv] = recorder.mutating()
         assert argv[argv.index("--url") + 1] == MCP_URL
 
+    def test_url_form_keeps_a_guardrails_context_already_in_the_url(self, on_path, recorder):
+        # Codex reads MCP instructions: the context the URL names still does something.
+        on_path("codex")
+        url = f"{MCP_URL}?guardrails={CTX}"
+        result = run("codex", "--url-form", "--mcp-url", url, "-y")
+        assert result.exit_code == 0, result.output
+        [argv] = recorder.mutating()
+        assert argv[argv.index("--url") + 1] == url
+        assert "not written" not in result.output
+
     def test_static_header_entry_is_described_not_echoed(self, env, on_path):
         on_path("codex")
         codex_config(env).write_text(
@@ -747,6 +757,67 @@ class TestOpenClaw:
             }
         }
         assert recorder.calls == []
+
+
+def printed_url(harness: str, output: str) -> str:
+    """The URL in the Hermes or OpenClaw block setup printed."""
+    if harness == "openclaw":
+        return printed_json(output)["mcp"]["servers"]["kagura-memory"]["url"]
+    [line] = [x for x in output.splitlines() if x.strip().startswith("url: ")]
+    return json.loads(line.split("url: ", 1)[1])
+
+
+@pytest.mark.parametrize("harness", ["hermes", "openclaw"])
+class TestNoInstructionsUrl:
+    """A ``?guardrails=`` context in ``--mcp-url`` never reaches their entry (#274)."""
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            f"guardrails={CTX}&profile=core",
+            f"profile=core&guardrails={CTX}&guardrails=off",  # the server reads the first
+            f"guard%72ails={CTX}&profile=core",  # the server decodes the name
+            "guardrails=typo&profile=core",
+        ],
+        ids=["context", "context-first", "encoded-name", "not-a-context"],
+    )
+    def test_guardrails_value_is_dropped_with_a_warning(self, harness, recorder, query):
+        result = run(harness, "--url-form", "--mcp-url", f"{MCP_URL}?{query}", "-y")
+        assert result.exit_code == 0, result.output
+        assert printed_url(harness, result.output) == f"{MCP_URL}?profile=core"
+        assert "?guardrails= value in\n  --mcp-url has no effect there and is not written" in (
+            result.output
+        )
+        assert CTX not in result.output
+
+    def test_url_without_other_parameters_loses_its_query(self, harness, recorder):
+        result = run(harness, "--url-form", "--mcp-url", f"{MCP_URL}?guardrails={CTX}", "-y")
+        assert result.exit_code == 0, result.output
+        assert printed_url(harness, result.output) == MCP_URL
+
+    @pytest.mark.parametrize(
+        ("query", "written"),
+        [
+            ("profile=core&guardrails=off", "profile=core&guardrails=off"),
+            # The server reads the first value: only that off is kept, never the context.
+            (f"guardrails=OFF&guardrails={CTX}", "guardrails=off"),
+        ],
+        ids=["off", "off-first"],
+    )
+    def test_guardrails_off_is_kept_with_a_warning(self, harness, recorder, query, written):
+        result = run(harness, "--url-form", "--mcp-url", f"{MCP_URL}?{query}", "-y")
+        assert result.exit_code == 0, result.output
+        assert printed_url(harness, result.output) == f"{MCP_URL}?{written}"
+        assert "--mcp-url has ?guardrails=off" in result.output
+        assert "not written" not in result.output
+        assert CTX not in result.output
+
+    def test_url_without_guardrails_is_left_alone(self, harness, recorder):
+        url = f"{MCP_URL}?profile=core&tools=a,b"
+        result = run(harness, "--url-form", "--mcp-url", url, "-y")
+        assert result.exit_code == 0, result.output
+        assert printed_url(harness, result.output) == url
+        assert "Warning" not in result.output
 
 
 # =============================================================================

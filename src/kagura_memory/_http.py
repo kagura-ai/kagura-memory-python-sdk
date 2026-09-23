@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 import uuid
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from datetime import UTC, datetime, time, timedelta
 from importlib.metadata import version as _pkg_version
 from typing import Any, NoReturn, TypeVar
@@ -79,12 +79,37 @@ def mcp_url_with_query(
     if not updates:
         return mcp_url
     parts = urlsplit(mcp_url)
-    kept = [
-        segment
-        for segment in parts.query.split("&")
-        if segment and unquote_plus(segment.split("=", 1)[0]) not in updates
-    ]
+    kept = _query_without(parts.query, updates)
     return urlunsplit(parts._replace(query="&".join([*kept, urlencode(updates)])))
+
+
+def _query_without(query: str, keys: Collection[str]) -> list[str]:
+    """The non-empty ``&`` segments of ``query`` whose decoded name is not in ``keys``."""
+    return [
+        segment
+        for segment in query.split("&")
+        if segment and unquote_plus(segment.split("=", 1)[0]) not in keys
+    ]
+
+
+def mcp_url_without_query(mcp_url: str, key: str) -> str:
+    """Return ``mcp_url`` with every ``key`` parameter dropped from its query.
+
+    Names are compared decoded, as the server reads them (``guard%72ails`` is
+    ``guardrails``); the rest of the query is kept verbatim.
+
+    Args:
+        mcp_url: The MCP endpoint URL.
+        key: The query parameter to drop, e.g. ``guardrails``.
+
+    Returns:
+        ``mcp_url`` itself when it has no ``key`` parameter.
+    """
+    parts = urlsplit(mcp_url)
+    kept = _query_without(parts.query, (key,))
+    if kept == _query_without(parts.query, ()):
+        return mcp_url
+    return urlunsplit(parts._replace(query="&".join(kept)))
 
 
 def mcp_url_has_tools_allowlist(mcp_url: str) -> bool:

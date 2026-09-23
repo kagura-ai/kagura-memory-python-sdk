@@ -67,6 +67,7 @@ from ._http import (
     base_url_from_mcp,
     mcp_url_guardrails_off,
     mcp_url_with_query,
+    mcp_url_without_query,
     normalize_uuid,
     validate_https_url,
 )
@@ -863,13 +864,29 @@ def _codex_hook_warning(
         raise click.ClickException("Setup cancelled; nothing was written.")
 
 
-def _warn_guardrails_off_url(h: _Harness, url: str) -> None:
-    """Warn when a Hermes/OpenClaw URL already carries ``?guardrails=off``."""
+def _url_for_no_instructions(h: _Harness, url: str) -> str:
+    """``url`` for a Hermes/OpenClaw entry, without a ``?guardrails=`` context.
+
+    Neither reads MCP instructions, so a context there changes nothing, and a
+    context id is never written into their entry: every ``guardrails`` value
+    goes, with a warning. ``off``, when it comes first (the value the server
+    reads), is kept as asked, alone and with a warning too: it removes the
+    ``get_context_info`` block, the lane they have.
+    """
     if mcp_url_guardrails_off(url):
         click.echo(
             f"\n  Warning: --mcp-url has ?guardrails=off, which removes the guardrails block\n"
             f"  from get_context_info: {h.title} then gets no guardrails from Kagura."
         )
+        return mcp_url_with_query(url, guardrails="off")
+    kept = mcp_url_without_query(url, "guardrails")
+    if kept != url:
+        click.echo(
+            f"\n  Warning: {h.title} does not read MCP instructions, so the ?guardrails= value in\n"
+            f"  --mcp-url has no effect there and is not written. Guardrails reach {h.title}\n"
+            "  through get_context_info (on by default) and the AGENTS.md export (--agents-md)."
+        )
+    return kept
 
 
 def _resolve_context(
@@ -1125,9 +1142,9 @@ def run_setup_harness(
             # A dry run's placeholder for a context name (a UUID or "off" never
             # starts with "<"), shown as it is rather than URL-encoded.
             url = url.replace(f"guardrails={quote_plus(guardrails)}", f"guardrails={guardrails}")
-        entry = _Entry(url=url, key_env=h.key_env(name, api_key_env))
         if not h.reads_instructions:
-            _warn_guardrails_off_url(h, url)
+            url = _url_for_no_instructions(h, url)
+        entry = _Entry(url=url, key_env=h.key_env(name, api_key_env))
     command = h.replace_args(name, entry) if existing is not None else h.add_args(name, entry)
     reason = _print_reason(h, exe, non_interactive, interactive)
 

@@ -1721,12 +1721,14 @@ _HARNESS_GUARDRAILS_HELP = {
     "hermes": (
         "Never written: Hermes does not read MCP instructions. 'off' is refused (it would "
         "remove the get_context_info guardrails block, Hermes's only guardrail lane); a "
-        "context UUID only picks the AGENTS.md export's context."
+        "context UUID only picks the AGENTS.md export's context. A ?guardrails= context in "
+        "--mcp-url is dropped too."
     ),
     "openclaw": (
         "Never written: OpenClaw does not read MCP instructions. 'off' is refused (it would "
         "remove the get_context_info guardrails block, OpenClaw's only guardrail lane); a "
-        "context UUID only picks the AGENTS.md export's context."
+        "context UUID only picks the AGENTS.md export's context. A ?guardrails= context in "
+        "--mcp-url is dropped too."
     ),
 }
 _HARNESS_AGENTS_MD_HELP = {
