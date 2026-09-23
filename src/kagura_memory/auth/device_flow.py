@@ -27,7 +27,7 @@ from urllib.parse import quote, urlsplit
 
 import httpx
 
-from .._http import SDK_VERSION, extract_detail, validate_https_url
+from .._http import SDK_VERSION, _retry_after_seconds, extract_detail, validate_https_url
 from ..exceptions import (
     KaguraAuthDeniedError,
     KaguraAuthError,
@@ -46,6 +46,10 @@ _PATH_SYSTEM_INFO = "/api/v1/system/info"
 
 # RFC 8628 §3.5 — "slow_down" requires the client to add 5 seconds.
 _SLOW_DOWN_INCREMENT_SEC = 5
+
+# memory-cloud's per-IP device-flow window (memory-cloud#1667, v0.76.0): the
+# wait to report when a 429 carries no usable Retry-After.
+_DEVICE_RATE_LIMIT_RETRY_AFTER_SEC = 60
 
 DEFAULT_CLIENT_ID = "kagura-cli"
 """The pre-registered public client ID seeded by memory-cloud #624."""
@@ -159,7 +163,14 @@ async def authorize_device(
     client_id: str = DEFAULT_CLIENT_ID,
     scope: str = "memory:read",
 ) -> DeviceAuthorizationResponse:
-    """POST ``/api/v1/oauth/device/authorize`` and parse the response."""
+    """POST ``/api/v1/oauth/device/authorize`` and parse the response.
+
+    Raises:
+        KaguraAuthError: the server refused the request. A 429 (memory-cloud
+            v0.76.0+ limits this endpoint per client address) says how long
+            to wait, from ``Retry-After``.
+        KaguraConnectionError: network failure.
+    """
     url = f"{server.rstrip('/')}{_PATH_DEVICE_AUTHORIZE}"
     # memory-cloud's device/authorize accepts JSON (DeviceAuthorizationRequest
     # pydantic model), unlike the /oauth/token/ + /oauth/revoke endpoints
@@ -170,6 +181,8 @@ async def authorize_device(
         response = await client.post(url, json=body)
         response.raise_for_status()
     except httpx.HTTPStatusError as e:
+        if e.response.status_code == 429:
+            raise KaguraAuthError(_device_rate_limited_message(e.response)) from e
         detail = extract_detail(e.response) or e.response.text
         raise KaguraAuthError(
             f"Device authorization failed (HTTP {e.response.status_code}): {detail}\n"
@@ -547,6 +560,25 @@ def invite_support(system_info: dict[str, Any] | None) -> InviteSupport:
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+
+def _device_rate_limited_message(response: httpx.Response) -> str:
+    """Explain a 429 from ``device/authorize``, with the wait from ``Retry-After``.
+
+    memory-cloud v0.76.0 (memory-cloud#1667) limits ``device/authorize`` per
+    client address and answers 429 with ``Retry-After: 60`` and an RFC 6749
+    ``error_description``, which is kept. A missing or non-numeric
+    ``Retry-After`` reads as that same 60 s window.
+    """
+    retry_after = _retry_after_seconds(response)
+    if retry_after is None:
+        retry_after = _DEVICE_RATE_LIMIT_RETRY_AFTER_SEC
+    message = (
+        "Too many sign-in attempts from this address (HTTP 429). "
+        f"Retry after {retry_after} seconds."
+    )
+    detail = extract_detail(response)
+    return f"{message}\n  Server said: {detail}" if detail else message
 
 
 def _check_invite_token(token: str) -> None:

@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 from click.testing import CliRunner
 
@@ -1088,6 +1089,36 @@ def test_login_connection_error_surfaces(
     result = CliRunner().invoke(main, ["auth", "login", "--no-browser"])
     assert result.exit_code != 0
     assert "Lost connection" in result.output
+
+
+@patch("kagura_memory.auth.cli.poll_for_token", new_callable=AsyncMock)
+@patch("kagura_memory.auth.cli.make_oauth_client")
+def test_login_rate_limited_says_how_long_to_wait(
+    mock_client_factory,
+    mock_poll,
+    patched_default_path: Path,
+):
+    """memory-cloud v0.76.0 (#1667) answers device/authorize over its per-IP limit with 429."""
+    body = {
+        "error": "invalid_request",
+        "error_description": "Too many device authorization requests. Please try again later.",
+    }
+    mock_client_factory.return_value = httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(429, json=body, headers={"Retry-After": "60"})
+        )
+    )
+
+    result = CliRunner().invoke(
+        main, ["auth", "login", "--server", "https://test.example.com", "--no-browser"]
+    )
+    assert result.exit_code == 1, result.output
+    assert "Error: Too many sign-in attempts from this address (HTTP 429)." in result.output
+    assert "Retry after 60 seconds." in result.output
+    assert "Too many device authorization requests. Please try again later." in result.output
+    assert "Device authorization failed" not in result.output
+    mock_poll.assert_not_called()
+    assert not patched_default_path.exists()
 
 
 def test_refresh_no_profile_errors(patched_default_path: Path):
