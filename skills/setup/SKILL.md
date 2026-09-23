@@ -94,7 +94,14 @@ file and edits nothing. Options:
 Relay:
 
 - A printed block ("Setup does not edit … itself"): the user adds it to the named
-  file. Never edit `config.toml`, `config.yaml` or `openclaw.json` yourself.
+  file. When setup says to add the entry to the file's existing `mcp_servers:`
+  mapping (Hermes), the user pastes it under that key at the printed indent and
+  never adds a second `mcp_servers:` key: YAML keeps the last one, which drops
+  every server under the first. Never edit `config.toml`, `config.yaml` or
+  `openclaw.json` yourself.
+- A Hermes/OpenClaw warning that `--guardrails` or a `?guardrails=` value in
+  `--mcp-url` is not written: expected. Neither reads MCP instructions; their
+  guardrails come from `get_context_info` and the `--agents-md` export.
 - An existing-entry stop: relay its kind and ask whether to re-run with `--force`.
 - The URL form's key note: the user puts the key in the named variable or `.env`
   file. Never print, ask for, or pass the key on a command line.
