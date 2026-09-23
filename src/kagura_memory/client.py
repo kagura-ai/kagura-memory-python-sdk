@@ -1599,8 +1599,8 @@ class KaguraClient:
             - ``limit`` / ``can_create``: the plan's context maximum and whether
               another context fits. Absent when the caller has no current
               workspace; ``0`` / ``False`` when the server could not read the
-              quota (so :meth:`create_context` then refuses with
-              :class:`KaguraQuotaError`).
+              quota (:meth:`create_context` then skips its local pre-check
+              and lets the server decide).
             - ``hint``: present only when the caller can see no context at all
               (memory-cloud v0.75.0+, #1658). With a workspace it says how to
               create a context or get access; without one it says to create or
