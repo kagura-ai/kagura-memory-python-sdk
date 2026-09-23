@@ -1,11 +1,12 @@
 """``kagura setup codex|hermes|openclaw`` (#260).
 
 Every test runs against a temporary home: ``HOME`` points into ``tmp_path``
-and ``CODEX_HOME``, ``HERMES_HOME``, ``OPENCLAW_STATE_DIR`` and
-``OPENCLAW_CONFIG_PATH`` are unset unless a test sets them, the
-credentials file is a temporary one, no harness CLI is on the (patched)
-``PATH`` unless a test puts it there, and ``subprocess.run`` is a recorder —
-nothing reads or changes the developer's real harness configuration.
+and ``CODEX_HOME``, ``HERMES_HOME``, ``OPENCLAW_STATE_DIR``,
+``OPENCLAW_CONFIG_PATH`` and ``OPENCLAW_WORKSPACE_DIR`` are unset unless a
+test sets them, the credentials file is a temporary one, no harness CLI is on
+the (patched) ``PATH`` unless a test puts it there, and ``subprocess.run`` is
+a recorder — nothing reads or changes the developer's real harness
+configuration.
 """
 
 from __future__ import annotations
@@ -98,7 +99,13 @@ def env(tmp_path, monkeypatch, isolated_kagura_credentials):
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("USERPROFILE", str(home))
-    for var in ("CODEX_HOME", "HERMES_HOME", "OPENCLAW_STATE_DIR", "OPENCLAW_CONFIG_PATH"):
+    for var in (
+        "CODEX_HOME",
+        "HERMES_HOME",
+        "OPENCLAW_STATE_DIR",
+        "OPENCLAW_CONFIG_PATH",
+        "OPENCLAW_WORKSPACE_DIR",
+    ):
         monkeypatch.delenv(var, raising=False)
     work = tmp_path / "work"
     work.mkdir()
@@ -908,6 +915,27 @@ class TestOpenClaw:
         assert result.exit_code == 0, result.output
         assert "OpenClaw (~/oc-state/openclaw.json)" in result.output
         assert "~/oc-state/workspace/AGENTS.md" in result.output
+
+    def test_workspace_dir_wins_over_state_dir_for_the_export(
+        self, tmp_path, monkeypatch, recorder, digest
+    ):
+        # OpenClaw's resolveDefaultAgentWorkspaceDir reads $OPENCLAW_WORKSPACE_DIR first.
+        state, workspace = tmp_path / "oc-state", tmp_path / "ws"
+        monkeypatch.setenv("OPENCLAW_STATE_DIR", str(state))
+        monkeypatch.setenv("OPENCLAW_WORKSPACE_DIR", f" {workspace} ")
+        result = run("openclaw", "--profile", "default", "--context-id", CTX, "--agents-md", "-y")
+        assert result.exit_code == 0, result.output
+        assert (workspace / "AGENTS.md").read_text(encoding="utf-8") == EXPORT_BLOCK
+        assert not (state / "workspace").exists()
+        # The config and the key's .env stay in the state directory.
+        assert f"OpenClaw ({state / 'openclaw.json'})" in result.output
+
+    def test_workspace_dir_expands_a_leading_tilde(self, monkeypatch, recorder):
+        monkeypatch.setenv("OPENCLAW_WORKSPACE_DIR", "~/oc-ws")
+        result = run("openclaw", "--profile", "default", "-y")
+        assert result.exit_code == 0, result.output
+        assert "~/oc-ws/AGENTS.md,\n  which OpenClaw loads" in result.output
+        assert "OpenClaw (~/.openclaw/openclaw.json)" in result.output
 
     def test_config_path_wins_over_state_dir(self, tmp_path, monkeypatch, recorder):
         monkeypatch.setenv("OPENCLAW_STATE_DIR", str(tmp_path / "oc-state"))

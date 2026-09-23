@@ -943,7 +943,10 @@ snapshot of the context's tool guardrails — the same block as
 `kagura guardrails digest --out` — into a file the harness loads every session:
 for Hermes the first of `.hermes.md`, `HERMES.md`, `AGENTS.override.md`,
 `AGENTS.md`, `CLAUDE.md` in the current directory (else `AGENTS.md`); for OpenClaw
-`~/.openclaw/workspace/AGENTS.md` (`$OPENCLAW_STATE_DIR/workspace/AGENTS.md`); for Codex `$CODEX_HOME/AGENTS.md` (`~/.codex`),
+`AGENTS.md` in its default workspace, found as OpenClaw finds it:
+`$OPENCLAW_WORKSPACE_DIR`, else `workspace` in `$OPENCLAW_STATE_DIR`, else
+`~/.openclaw/workspace` (setup does not read an `agents.defaults.workspace` set in
+`openclaw.json`: pass that path to `--agents-md`); for Codex `$CODEX_HOME/AGENTS.md` (`~/.codex`),
 or `AGENTS.override.md` there when it exists, since Codex reads it instead —
 rarely needed, as the digest already arrives in `instructions`. An interactive
 Hermes or OpenClaw run offers it (default no) and lists the profile's contexts;

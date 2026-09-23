@@ -1744,9 +1744,10 @@ _HARNESS_AGENTS_MD_HELP = {
         "marked block changes."
     ),
     "openclaw": (
-        "Write the context's tool guardrail export block into PATH (default "
-        "workspace/AGENTS.md in $OPENCLAW_STATE_DIR, else ~/.openclaw, which OpenClaw loads "
-        "every session). An interactive run offers it. Only the marked block changes."
+        "Write the context's tool guardrail export block into PATH (default AGENTS.md in "
+        "the workspace OpenClaw loads every session: $OPENCLAW_WORKSPACE_DIR, else workspace/ "
+        "in $OPENCLAW_STATE_DIR or ~/.openclaw). An interactive run offers it. Only the "
+        "marked block changes."
     ),
 }
 _HARNESS_KEY_ENV_HELP = {
@@ -1922,8 +1923,9 @@ def setup_openclaw(**params):
 
     OpenClaw does not read MCP instructions: guardrails reach it through
     get_context_info (on by default) and, if you choose, an export block in
-    workspace/AGENTS.md in that state directory (--agents-md; an
-    interactive run offers it).
+    AGENTS.md in its default workspace, $OPENCLAW_WORKSPACE_DIR or else
+    workspace/ in that state directory (--agents-md; an interactive run
+    offers it).
 
     \b
     Examples:

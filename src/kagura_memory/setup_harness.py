@@ -631,13 +631,23 @@ def _openclaw_env_path(var: str) -> Path | None:
 
 
 def openclaw_state_dir() -> Path:
-    """``$OPENCLAW_STATE_DIR``, else ``~/.openclaw``: OpenClaw's config, ``.env`` and workspace."""
+    """``$OPENCLAW_STATE_DIR``, else ``~/.openclaw``: OpenClaw's config and ``.env``."""
     return _openclaw_env_path("OPENCLAW_STATE_DIR") or Path.home() / ".openclaw"
 
 
 def openclaw_config_path() -> Path:
     """``$OPENCLAW_CONFIG_PATH``, else ``openclaw.json`` in :func:`openclaw_state_dir`."""
     return _openclaw_env_path("OPENCLAW_CONFIG_PATH") or openclaw_state_dir() / "openclaw.json"
+
+
+def openclaw_workspace_dir() -> Path:
+    """OpenClaw's default agent workspace, as its ``resolveDefaultAgentWorkspaceDir`` finds it.
+
+    ``$OPENCLAW_WORKSPACE_DIR``, else ``workspace`` in :func:`openclaw_state_dir`.
+    An ``agents.defaults.workspace`` in openclaw.json overrides both there; setup
+    has no JSON5 reader, so ``--agents-md PATH`` names such a workspace.
+    """
+    return _openclaw_env_path("OPENCLAW_WORKSPACE_DIR") or openclaw_state_dir() / "workspace"
 
 
 class _OpenClaw(_Harness):
@@ -701,8 +711,8 @@ class _OpenClaw(_Harness):
         return ["mcp", "doctor", name, "--probe"]
 
     def agents_md_path(self) -> Path:
-        # The default agents.defaults.workspace, which OpenClaw loads every session.
-        return openclaw_state_dir() / "workspace" / "AGENTS.md"
+        # The default agent workspace, which OpenClaw loads every session.
+        return openclaw_workspace_dir() / "AGENTS.md"
 
     def notes(self) -> list[str]:
         return [
