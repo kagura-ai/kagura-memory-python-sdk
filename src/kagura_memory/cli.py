@@ -1,8 +1,13 @@
 """CLI for Kagura Memory SDK."""
 
 import asyncio
+import contextlib
 import json
+import os
+import re
+import shutil
 import sys
+import tempfile
 from collections.abc import Awaitable, Callable
 from datetime import datetime
 from pathlib import Path
@@ -24,7 +29,8 @@ from .doctor import run_doctor
 from .exceptions import KaguraError, _exc_message
 from .files_client import FilesClient
 from .logger import VerboseLogger
-from .models import FileObject, ResourceEventRequest
+from .memory_client import MemoryClient
+from .models import FileObject, GuardrailDigest, ResourceEventRequest
 from .resource_client import ResourceClient
 from .setup_claude import run_setup_claude
 from .workspace_client import WorkspaceClient
@@ -151,6 +157,20 @@ def _build_details(details: str | None, location: str | None) -> dict[str, Any] 
     return {**(parsed or {}), "location": loc}
 
 
+def _require_context_id(context_id: str | None, config: dict[str, Any]) -> str:
+    """Return the context from the command line, else ``.kagura.json``.
+
+    The hint names neither ``--context-id`` nor a positional argument:
+    commands take the context either way.
+    """
+    ctx_id = context_id or config.get("context_id") or ""
+    if not ctx_id:
+        raise click.ClickException(
+            "context_id required. Pass the context ID or set context_id in .kagura.json"
+        )
+    return ctx_id
+
+
 def _run_client_command(
     operation: Callable[[KaguraClient, str], Awaitable[dict[str, Any]]],
     context_id: str | None,
@@ -169,13 +189,7 @@ def _run_client_command(
     try:
         config = load_config()
 
-        ctx_id = ""
-        if needs_context:
-            ctx_id = context_id or config.get("context_id") or ""
-            if not ctx_id:
-                raise click.ClickException(
-                    "context_id required. Use --context-id or set in .kagura.json"
-                )
+        ctx_id = _require_context_id(context_id, config) if needs_context else ""
 
         client = KaguraClient(
             api_key=config.get("api_key") or None,
@@ -1230,6 +1244,225 @@ def sleep_rollback(context_id, report_id, yes):
 
 
 # =============================================================================
+# Tool Guardrail Commands (issue #253, server v0.74.0+)
+# =============================================================================
+
+# The export block's marker lines, matched at line start. Mirrors the server's
+# Codex cloud recipe (memory-cloud docs/mcp-clients.md § Codex cloud), so a
+# file written by either tool is maintained by the other.
+_GUARDRAIL_BEGIN_RE = re.compile(r"^<!-- kagura-memory:guardrails begin[^\n]*$", re.M)
+_GUARDRAIL_END_RE = re.compile(r"^<!-- kagura-memory:guardrails end -->$", re.M)
+_GUARDRAIL_SPAN_RE = re.compile(
+    _GUARDRAIL_BEGIN_RE.pattern + r".*?" + _GUARDRAIL_END_RE.pattern + r"\n?", re.M | re.S
+)
+
+
+def _splice_guardrail_block(text: str, block: str) -> str:
+    """Return ``text`` with the guardrail export ``block`` put in place.
+
+    The block replaces an earlier one in place, or is appended after a blank
+    line. An empty ``block`` (the context has no tool guardrails) removes an
+    earlier block and the blank line before it, and never creates one — a
+    file never keeps a guardrail the server no longer serves.
+
+    Raises:
+        ValueError: The fetched block does not have exactly one begin and one
+            end marker line, or ``text`` holds more than one block or a broken
+            one — unterminated, or its end before its begin (fix that by hand
+            rather than guess).
+    """
+    block = block.strip()
+    if block and (
+        len(_GUARDRAIL_BEGIN_RE.findall(block)) != 1 or len(_GUARDRAIL_END_RE.findall(block)) != 1
+    ):
+        raise ValueError("fetched block does not have exactly one begin and one end marker line")
+    begins = len(_GUARDRAIL_BEGIN_RE.findall(text))
+    span = _GUARDRAIL_SPAN_RE.search(text)
+    if begins > 1 or begins != len(_GUARDRAIL_END_RE.findall(text)) or (begins and not span):
+        raise ValueError(
+            "the file has more than one guardrail block, or a broken one; fix it by hand"
+        )
+    if span:
+        start, end = span.span()
+        if not block:
+            # Drop the blank line that separated the block from the text
+            # above. A lone newline ends the line above (the block may sit
+            # right under the user's own heading), so it stays.
+            if text[:start].endswith("\n\n"):
+                start -= 1
+            return text[:start] + text[end:]
+        return text[:start] + block + "\n" + text[end:]
+    if not block:
+        return text
+    if not text:
+        return block + "\n"
+    return text + ("" if text.endswith("\n") else "\n") + "\n" + block + "\n"
+
+
+def _write_guardrail_block(path: Path, block: str) -> str:
+    """Splice ``block`` into the file at ``path``; return what happened.
+
+    ``"unchanged"`` when the file already carries this block — the begin
+    marker embeds ``tool_triggered_version``, so an unchanged guardrail set
+    rewrites nothing — ``"removed"`` when an empty digest dropped an earlier
+    block, else ``"written"``. A symlink (``AGENTS.md`` -> ``CLAUDE.md``) is
+    followed so the link survives, and an existing file is replaced
+    atomically with its permission bits kept.
+
+    Line endings are the file's own, on every platform: a file with any CRLF
+    is written back with CRLF, anything else (and a new file) with LF, so a
+    write changes the block and not every line of the file.
+    """
+    target = Path(os.path.realpath(path))
+    exists = target.exists()
+    raw = target.read_bytes().decode("utf-8") if exists else ""
+    newline = "\r\n" if "\r\n" in raw else "\n"
+    text = raw.replace("\r\n", "\n")
+    new = _splice_guardrail_block(text, block)
+    if new == text:
+        return "unchanged"
+    if not exists:
+        target.write_text(new, encoding="utf-8", newline=newline)
+    else:
+        fd, tmp = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8", newline=newline) as f:
+                f.write(new)
+            shutil.copymode(target, tmp)
+            os.replace(tmp, target)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
+            raise
+    return "written" if block.strip() else "removed"
+
+
+@main.group()
+def guardrails():
+    """Inspect a context's tool guardrails (server v0.74.0+)."""
+    pass
+
+
+@guardrails.command(name="load")
+@click.argument("context_id", required=False)
+@click.option(
+    "--cap",
+    type=click.IntRange(1, 1000),
+    help="Max tool-triggered memories (1-1000, server default 50)",
+)
+def guardrails_load(context_id, cap):
+    """
+    Load the full guardrail set (pinned + tool-triggered lanes) as JSON.
+
+    CONTEXT_ID defaults to context_id in .kagura.json. Check
+    pinned_truncated / tool_triggered_truncated before trusting the set as
+    complete.
+
+    Examples:
+      kagura guardrails load
+      kagura guardrails load CTX_UUID --cap 200
+    """
+
+    async def op(client: KaguraClient, ctx: str) -> dict[str, Any]:
+        result = await client.load_guardrails(ctx, cap=cap)
+        return result.model_dump(mode="json")
+
+    _run_client_command(op, context_id)
+
+
+@guardrails.command(name="digest")
+@click.argument("context_id", required=False)
+@click.option(
+    "--target",
+    type=click.Choice(["export", "instructions"]),
+    default="export",
+    show_default=True,
+    help="export: the AGENTS.md block; instructions: the MCP server instructions preview",
+)
+@click.option(
+    "--out",
+    "out_path",
+    type=click.Path(dir_okay=False, path_type=Path),
+    help="Write the export block into FILE (e.g. AGENTS.md) instead of printing it",
+)
+@click.option(
+    "--profile",
+    help="With --target instructions: the MCP URL's ?profile= value (full | core)",
+)
+@click.option(
+    "--tools",
+    help="With --target instructions: the MCP URL's ?tools= allowlist",
+)
+def guardrails_digest(context_id, target, out_path, profile, tools):
+    """
+    Render the tool guardrails for clients without tool hooks.
+
+    Prints the digest (REST, API key or OAuth profile). With --out, splices
+    the export block into FILE between its marker lines: an earlier block is
+    replaced in place, an unchanged set rewrites nothing, and an empty set
+    removes an earlier block. CONTEXT_ID defaults to context_id in
+    .kagura.json.
+
+    The block is workspace memory, not repository content: point --out at
+    an untracked file, or keep a tracked one out of commits (git
+    update-index --skip-worktree AGENTS.md) — in a public repository a
+    committed block publishes the guardrail summaries.
+
+    --target instructions previews a bare MCP URL (the full tool view). For
+    a URL with ?profile= or ?tools=, repeat them with --profile / --tools:
+    they decide which tool the truncation note names.
+
+    Examples:
+      kagura guardrails digest CTX_UUID
+      kagura guardrails digest CTX_UUID --out AGENTS.md
+      kagura guardrails digest CTX_UUID --target instructions --profile core
+    """
+    if out_path is not None and target != "export":
+        raise click.UsageError("--out writes the export block; drop --target instructions")
+    if (profile is not None or tools is not None) and target != "instructions":
+        raise click.UsageError(
+            "--profile / --tools shape the instructions preview; add --target instructions"
+        )
+    try:
+        config = load_config()
+        ctx_id = _require_context_id(context_id, config)
+        client = MemoryClient._from_resolved_auth(_resolve_cli_auth(config))
+
+        async def _run() -> GuardrailDigest:
+            async with client:
+                return await client.get_guardrail_digest(
+                    ctx_id, target=target, profile=profile, tools=tools
+                )
+
+        digest = asyncio.run(_run())
+        if out_path is None:
+            if not digest.text:
+                click.echo(f"No tool guardrails in context {ctx_id}.", err=True)
+            # The export block already ends in a newline; the instructions
+            # preview does not, and should not glue itself to the prompt.
+            click.echo(digest.text, nl=bool(digest.text) and not digest.text.endswith("\n"))
+            return
+        try:
+            status = _write_guardrail_block(out_path, digest.text)
+        except ValueError as e:
+            raise click.ClickException(f"{out_path}: {_exc_message(e)}; left unchanged") from e
+    except click.ClickException:
+        raise
+    except Exception as e:
+        raise click.ClickException(_exc_message(e)) from e
+    click.echo(
+        json.dumps(
+            {
+                "path": str(out_path),
+                "status": status,
+                "tool_triggered_version": digest.tool_triggered_version,
+            },
+            ensure_ascii=False,
+        )
+    )
+
+
+# =============================================================================
 # Setup Commands
 # =============================================================================
 
@@ -1298,18 +1531,15 @@ def setup_claude(
 # =============================================================================
 
 
-def _get_resource_client() -> ResourceClient:
-    """Load config and create ResourceClient via the canonical SDK chain.
+def _resolve_cli_auth(config: dict[str, Any]) -> _StaticAuth | _OAuthAuth:
+    """Resolve a REST client's credential via the canonical SDK chain.
 
     Walks :func:`_resolve_auth`'s precedence (``env > OAuth profile >
-    .kagura.json``), matching :class:`FilesClient` and :class:`KaguraClient`.
-    OAuth-only operators can run all ``kagura resource`` commands except
-    ``kagura resource setup``, which currently requires a static api_key
-    (see :meth:`ResourceClient.setup_resource`).
+    .kagura.json``), matching :class:`FilesClient` and :class:`KaguraClient`,
+    and turns a credential error into a clean ``ClickException``.
     """
     from .exceptions import KaguraAuthError
 
-    config = load_config()
     try:
         # mcp_url=None so each resolver branch pairs its credential with
         # its own URL source (env → KAGURA_MCP_URL, OAuth → profile's
@@ -1317,7 +1547,7 @@ def _get_resource_client() -> ResourceClient:
         # ``config.get("mcp_url")`` here would override every branch
         # with the config / env-default URL — including OAuth profiles
         # bound to a non-default server (see PR #119 review).
-        resolved = _resolve_auth(
+        return _resolve_auth(
             api_key=None,
             mcp_url=None,
             profile=None,
@@ -1325,7 +1555,16 @@ def _get_resource_client() -> ResourceClient:
         )
     except KaguraAuthError as e:
         raise click.ClickException(_exc_message(e)) from e
-    return ResourceClient._from_resolved_auth(resolved)
+
+
+def _get_resource_client() -> ResourceClient:
+    """Load config and create ResourceClient via the canonical SDK chain.
+
+    OAuth-only operators can run all ``kagura resource`` commands except
+    ``kagura resource setup``, which currently requires a static api_key
+    (see :meth:`ResourceClient.setup_resource`).
+    """
+    return ResourceClient._from_resolved_auth(_resolve_cli_auth(load_config()))
 
 
 def _get_kagura_client() -> KaguraClient:

@@ -37,6 +37,7 @@ from .models import (
     Edge,
     EmbeddingModelsResponse,
     EmbeddingStatus,
+    GuardrailSet,
     ListTagsResponse,
     MemoryListResponse,
     MemoryStatsResponse,
@@ -44,10 +45,12 @@ from .models import (
     ServerInfo,
     SleepReport,
     SleepReportDetail,
+    ToolTrigger,
     UsageInfo,
     _agent_update_payload,
     _binding_scope_payload,
     _bootstrap_payload,
+    _details_with_tool_trigger,
 )
 
 _T = TypeVar("_T", bound=_BaseModel)
@@ -377,6 +380,8 @@ class KaguraClient:
         context: dict[str, Any] | None = None,
         delivery_mode: Literal["always", "on_recall", "on_trigger"] = "on_recall",
         supersedes: str | None = None,
+        *,
+        tool_trigger: ToolTrigger | dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Call remember MCP tool.
 
@@ -402,7 +407,9 @@ class KaguraClient:
                 which is the search-target text.
             details: Structured details JSON. Use for additional metadata
                 like code locations, parent/child links, or any caller-defined
-                payload that the server should store as-is.
+                payload that the server should store as-is. Reserved keys the
+                server validates: ``location``, ``trigger`` (``type="time"``)
+                and ``tool_trigger`` (see ``tool_trigger`` below).
             context: Open-ended context metadata JSON. Less structured than
                 ``details``; useful for free-form provenance hints.
             delivery_mode: When the memory is surfaced. ``"on_recall"``
@@ -424,10 +431,29 @@ class KaguraClient:
                 version of a fact — that pair destroys the history the
                 supersede edge exists to preserve. Requires memory-cloud
                 server v0.45.0+ (#1208).
+            tool_trigger: Mark the memory as a **tool guardrail** (memory-cloud
+                v0.74.0+): a client hook injects its summary when a matching
+                tool call happens, and :meth:`load_guardrails` serves it. Sent
+                as ``details["tool_trigger"]``, merged with any other
+                ``details`` keys; see :class:`~kagura_memory.models.ToolTrigger`
+                for the fields. Needs context **editor** or above (else
+                ``permission_denied``) and a user credential (an agent-bound
+                key gets ``validation_error`` /
+                ``tool_trigger_requires_user_credential``). The server
+                validates the patterns and returns
+                ``invalid details.tool_trigger: <code>: ...`` on a bad one.
+                Keyword-only.
 
         Returns:
             API response with ``memory_id``.
+
+        Raises:
+            ValueError: ``tool_trigger`` is given and ``details`` already has
+                a ``"tool_trigger"`` key — pass the guardrail one way only.
+            KaguraError: Server-side rejection, e.g. ``permission_denied`` or
+                ``validation_error`` for a guardrail write.
         """
+        details = _details_with_tool_trigger(details, tool_trigger)
         arguments: dict[str, Any] = {
             "context_id": context_id,
             "summary": summary,
@@ -706,6 +732,51 @@ class KaguraClient:
         if cap is not None:
             arguments["cap"] = cap
         return await self._call_tool_checked("load_pinned", arguments)
+
+    async def load_guardrails(self, context_id: str, *, cap: int | None = None) -> GuardrailSet:
+        """Deterministically load a context's guardrail set for a client-side hook.
+
+        Calls the ``load_guardrails`` MCP tool (memory-cloud v0.74.0+, #1619) —
+        :meth:`load_pinned`'s twin: no search, no ranking, trusted-tier rows
+        only. Two independently capped lanes: ``pinned``
+        (``delivery_mode="always"``, bounded by the server's pinned cap) and
+        ``tool_triggered`` (memories marked with ``details.tool_trigger`` —
+        see :meth:`remember`'s ``tool_trigger``), bounded by ``cap``. The
+        server returns the patterns as data and never runs them; matching
+        is the hook's job.
+
+        The set is never silently cut: check ``pinned_truncated`` and
+        ``tool_triggered_truncated`` (``truncated`` is either one) and re-call
+        with a larger ``cap`` if the tool-triggered lane is incomplete. A
+        memory that is both pinned and tool-triggered appears in both lists.
+
+        Requires memory-cloud v0.74.0+; older servers return an MCP
+        "tool not found". The REST twin for API-key-only callers is
+        :meth:`MemoryClient.load_guardrails
+        <kagura_memory.memory_client.MemoryClient.load_guardrails>`.
+
+        Args:
+            context_id: Target context UUID.
+            cap: Max tool-triggered memories returned (1-1000; the server
+                clamps out-of-range values on this surface). Omit for the
+                server default (50). Does not bound the pinned lane.
+
+        Returns:
+            :class:`~kagura_memory.models.GuardrailSet`.
+
+        Raises:
+            KaguraNotFoundError: Context not found (uniform — nonexistent and
+                not-yours are indistinguishable).
+            KaguraResponseError: The response does not parse as a
+                ``GuardrailSet`` — e.g. a truncation flag is missing, so the
+                set cannot be trusted as complete.
+            KaguraError: Other server-side error.
+        """
+        arguments: dict[str, Any] = {"context_id": context_id}
+        if cap is not None:
+            arguments["cap"] = cap
+        result = await self._call_tool_checked("load_guardrails", arguments)
+        return parse_response(GuardrailSet, result, operation="load_guardrails")
 
     async def feedback(
         self,
@@ -1432,6 +1503,7 @@ class KaguraClient:
         details: dict[str, Any] | None = None,
         *,
         dismiss_supersede_candidate: bool = False,
+        tool_trigger: ToolTrigger | dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Update an existing memory in-place or upsert by external ID.
 
@@ -1462,7 +1534,8 @@ class KaguraClient:
                 wholesale** — the server does not deep-merge, so read the
                 current value with :meth:`reference` and re-send every key you
                 want to keep (notably ``location``, which otherwise drops off
-                :meth:`recall_nearby`). Omit to leave details unchanged.
+                :meth:`recall_nearby`, and ``tool_trigger``, which otherwise
+                unmarks a guardrail). Omit to leave details unchanged.
             dismiss_supersede_candidate: Reject this memory's current
                 ``supersede_candidate`` (the older near-duplicate that
                 :meth:`recall` / :meth:`reference` suggest it replaces), for two
@@ -1473,6 +1546,16 @@ class KaguraClient:
                 dismissal-only call then succeeds as an empty in-place update
                 that dismisses nothing and refreshes ``updated_at``. To accept
                 the suggestion instead, create a ``supersedes`` edge.
+            tool_trigger: Mark (or re-mark) the memory as a tool guardrail —
+                sent as ``details["tool_trigger"]``, merged with ``details``;
+                same contract and permissions as :meth:`remember`'s
+                ``tool_trigger`` (memory-cloud v0.74.0+). Because ``details``
+                is replaced wholesale, passing only ``tool_trigger`` sends
+                ``details={"tool_trigger": ...}`` and drops every other key —
+                pass the keys to keep in ``details`` alongside it. To unmark,
+                send ``details`` without the key (or with
+                ``"tool_trigger": None``). Any edit of a memory that already
+                carries a trigger needs context editor or above. Keyword-only.
 
         Returns:
             API response with updated memory info. When a dismissal applied,
@@ -1483,9 +1566,13 @@ class KaguraClient:
 
         Raises:
             ValueError: If neither or both of ``memory_id`` and ``external_id``
-                are given, or if ``dismiss_supersede_candidate`` is combined
+                are given; if ``dismiss_supersede_candidate`` is combined
                 with ``external_id`` (the server rejects that pair: an upsert
-                replaces the memory and its suggestion).
+                replaces the memory and its suggestion); or if
+                ``tool_trigger`` is given together with a
+                ``details["tool_trigger"]`` key.
+            KaguraError: Server-side rejection, e.g. ``permission_denied`` for
+                a guardrail edit below context editor.
         """
         if not memory_id and not external_id:
             raise ValueError("Provide exactly one of memory_id or external_id")
@@ -1496,6 +1583,7 @@ class KaguraClient:
                 "dismiss_supersede_candidate requires memory_id (in-place mode); "
                 "an external_id upsert replaces the memory and its suggestion."
             )
+        details = _details_with_tool_trigger(details, tool_trigger)
 
         arguments: dict[str, Any] = {"context_id": context_id}
         if memory_id is not None:
@@ -1535,6 +1623,14 @@ class KaguraClient:
         Delete by specific memory_id or by search query.
         Soft delete with 30-day retention.
 
+        A target the caller may not delete is **silently skipped**, not an
+        error. Since memory-cloud v0.74.0 that includes every tool guardrail
+        (a memory carrying ``details.tool_trigger``) when the caller is below
+        context editor or uses an agent-bound key: a ``memory_id`` delete
+        then reports ``deleted_count: 0``, and a ``query`` sweep deletes its
+        other matches without counting the guardrail. Check
+        ``deleted_count`` rather than assuming success.
+
         Args:
             context_id: Context ID
             memory_id: UUID of specific memory to delete
@@ -1542,7 +1638,8 @@ class KaguraClient:
             k: Number of memories to delete in query mode (default: 10)
 
         Returns:
-            API response with deletion results
+            API response with deletion results (``deleted_count``,
+            ``memory_ids``) — may be fewer than targeted, see above.
 
         Raises:
             ValueError: If neither ``memory_id`` nor ``query`` is provided —
@@ -1943,7 +2040,10 @@ class KaguraClient:
             include_details: Include memory count breakdown (default: True).
 
         Returns:
-            ContextInfo with context metadata, search_config, stats, and instructions.
+            ContextInfo with context metadata, search_config, stats, and
+            instructions — plus, on memory-cloud v0.74.0+, the ``guardrails``
+            block (the context's tool guardrails for hookless clients; see
+            :class:`~kagura_memory.models.ContextInfo` for its three states).
         """
         arguments: dict[str, Any] = {
             "context_id": context_id,

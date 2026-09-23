@@ -29,7 +29,7 @@
 
 ## What is this?
 
-This SDK connects your Python code to [Kagura Memory Cloud](https://github.com/kagura-ai/memory-cloud), giving AI assistants the ability to **remember, search, and learn** from past interactions — and to **ingest documents** (PDFs, URLs) directly into a searchable memory graph. It provides **six clients** (plus a document ingestor) for different use cases:
+This SDK connects your Python code to [Kagura Memory Cloud](https://github.com/kagura-ai/memory-cloud), giving AI assistants the ability to **remember, search, and learn** from past interactions — and to **ingest documents** (PDFs, URLs) directly into a searchable memory graph. It provides **seven clients** (plus a document ingestor) for different use cases:
 
 | Client | Protocol | Use Case |
 |--------|----------|----------|
@@ -39,6 +39,7 @@ This SDK connects your Python code to [Kagura Memory Cloud](https://github.com/k
 | **`SecretClient`** | REST + age crypto | Zero-knowledge secrets — age recipient encryption, **local decryption** (the server only ever stores armored ciphertext) |
 | **`WorkspaceClient`** | REST API | Workspace member / invitation management + owner-provisioned member keys (owner API key only) |
 | **`AgentsClient`** | REST API | Agent bootstrap — one-call session-start rehydration for API-key-only callers (server v0.49.0+) |
+| **`MemoryClient`** | REST API | Tool guardrails for API-key-only hooks and setup scripts — `load_guardrails` + the `AGENTS.md` digest (server v0.74.0+) |
 | **`FileIngestor`** | CLI + SDK | Document ingestion — PDF/Office/HTML/EPUB, audio & YouTube transcripts → memory graph + R2 archive |
 
 ## 60-second demo
@@ -190,8 +191,9 @@ signal, and a TTL-bounded run-state lane kept separate from knowledge:
 ```python
 async with KaguraClient(api_key="kagura_...", mcp_url="https://...") as client:
     # Deterministic delivery — pin on write, load the full pinned set every turn
-    # (Goal / Guardrail / critical-policy memories, distinct from probabilistic recall)
-    await client.remember(context_id="dev", summary="Guardrail: never delete prod",
+    # (Goal / critical-policy memories, distinct from probabilistic recall).
+    # For a rule tied to a tool call, use a tool guardrail (next section).
+    await client.remember(context_id="dev", summary="Goal: ship the v2 importer by June",
                           content="...", delivery_mode="always")
     pinned = await client.load_pinned(context_id="dev")
 
@@ -229,6 +231,59 @@ async with KaguraClient(api_key="kagura_...", mcp_url="https://...") as client:
     await client.set_state(context_id="dev", key="step", value={"n": 3}, ttl_seconds=3600)
     state = await client.get_state(context_id="dev", key="step")  # omit key → all live entries
 ```
+
+#### Tool guardrails (v0.39.0, server v0.74.0+)
+
+A memory whose `details.tool_trigger` names a tool (and optionally a pattern in its
+input) is a **tool guardrail**: a client-side hook injects its summary when a matching
+call happens (`action="inform"`), or denies the call with the summary as the reason
+(`action="block"`). The server validates the patterns on write and never runs them;
+matching happens in the hook, which loads the set deterministically with
+`load_guardrails`:
+
+```python
+from kagura_memory import KaguraClient, MemoryClient, ToolTrigger
+
+CTX = "ctx-uuid"
+
+async with KaguraClient() as client:
+    # Needs context editor+ and a user credential (agent-bound keys can read, not author).
+    await client.remember(
+        context_id=CTX,
+        summary="Never force-push to main; open a PR instead",
+        content="...",
+        tool_trigger=ToolTrigger(tool="Bash", match=r"git\s+push\s+--force", action="block"),
+    )
+
+    # Two independently capped lanes (pinned + tool_triggered), never silently cut.
+    rails = await client.load_guardrails(CTX)
+    if rails.tool_triggered_truncated:
+        rails = await client.load_guardrails(CTX, cap=1000)
+
+    # Hookless clients get the tool-triggered set in the get_context_info() block.
+    info = await client.get_context_info(CTX)
+    block = info.guardrails  # None when the MCP URL carries ?guardrails=off
+
+async with MemoryClient.from_mcp_url() as memory:  # REST twin for API-key hooks / scripts
+    rails = await memory.load_guardrails(CTX)
+    digest = await memory.get_guardrail_digest(CTX)  # the AGENTS.md export block
+    print(digest.tool_triggered_version)             # changes when the set changes
+```
+
+- `update_memory(details=...)` replaces `details` wholesale: re-send `tool_trigger` with
+  any other details you change, or the memory stops being a guardrail. Passing both
+  `tool_trigger=` and `details["tool_trigger"]` raises `ValueError`.
+- `forget` silently skips a guardrail the caller may not delete (below context editor,
+  or an agent-bound key), so `deleted_count` can be `0` with no error.
+- A hook that caches the set treats a `GuardrailSet.format` greater than
+  `GUARDRAIL_FORMAT` as absent (fail-open): `format` bumps only when a field changes meaning.
+- With an OAuth profile, `MemoryClient.load_guardrails` (a `POST`) needs `memory:write`;
+  a `--read-only` login loads the set through `KaguraClient.load_guardrails` (MCP) instead.
+- `kagura guardrails digest <ctx> --out AGENTS.md` keeps an always-loaded file in sync
+  (see [CLI](#other-commands)). The block is workspace memory, not repository content:
+  point `--out` at an untracked file, or run `git update-index --skip-worktree AGENTS.md`
+  on a tracked one, so the guardrail summaries never land in a commit (or, in a public
+  repository, get published).
 
 #### Agent bootstrap — one-call session-start rehydration (v0.37.0, server v0.49.0+)
 
@@ -412,7 +467,7 @@ The same client also provisions **member API keys** (memory-cloud [#1165](https:
 
 | SDK | Min memory-cloud | Notes |
 |---|---|---|
-| 0.39.0+ | 0.17.1 (per-surface: see notes) | **`list_contexts` / `recall_upcoming` options and supersede dismissal.** `update_memory(dismiss_supersede_candidate=True)` / `kagura update-memory --dismiss-supersede-candidate` needs memory-cloud **0.65.0+** ([#1504](https://github.com/kagura-ai/memory-cloud/issues/1504)). It rejects the memory's `supersede_candidate` suggestion and needs `memory_id`: combined with `external_id` it raises `ValueError` before any network call. Before 0.65.0 the server silently drops the flag, so a dismissal-only call succeeds as an empty update that dismisses nothing and refreshes `updated_at`; `supersede_candidate_dismissed` in the response is the only confirmation that a dismissal happened. `list_contexts(name_contains=…, include_summary=…, include_details=…)` / `kagura context list --name-contains/--summary/--details` and `recall_upcoming(include_details=True)` need **0.73.0+** ([#1600](https://github.com/kagura-ai/memory-cloud/issues/1600), [#1599](https://github.com/kagura-ai/memory-cloud/issues/1599)); `include_stats` / `--stats` works on any server. From memory-cloud 0.73.0, `list_contexts` rows are slim by default (`id`/`name`/`is_private`/`is_locked`/`last_used_at`; `summary` and `embedding_model` are opt-in), and the envelope adds `total` (rows returned) beside `count` (quota usage, unaffected by `name_contains`). 0.75.0 adds an optional `hint` when the caller can see no context ([#1658](https://github.com/kagura-ai/memory-cloud/issues/1658)). `recall_upcoming` items carry `trigger` in place of `details` unless `include_details=True`. Every new argument is omitted from the wire when unset, and older servers ignore it (before 0.73.0 there is also no `total`: use `len(result["contexts"])`). `MIN_SERVER_VERSION` stays **0.17.1**. |
+| 0.39.0+ | 0.17.1 (per-surface: see notes; 0.74.0 for tool guardrails) | **Tool guardrails.** `KaguraClient.load_guardrails()` (MCP), `MemoryClient.load_guardrails()` / `get_guardrail_digest()` (REST `POST /api/v1/memory/guardrails`, `GET /api/v1/memory/guardrails/digest`), `remember`/`update_memory(tool_trigger=…)`, the `ContextInfo.guardrails` block and `kagura guardrails load\|digest` need memory-cloud **0.74.0+** ([#1619](https://github.com/kagura-ai/memory-cloud/issues/1619) / [#1621](https://github.com/kagura-ai/memory-cloud/issues/1621)). Against an older server the MCP tool returns "tool not found", `MemoryClient.load_guardrails` raises `KaguraConnectionError` (HTTP 405) and `get_guardrail_digest` raises `KaguraNotFoundError` (a 404 indistinguishable from an unknown or denied context), `ContextInfo.guardrails` stays `None`, and `details.tool_trigger` is stored unvalidated as an ordinary details key. **`list_contexts` / `recall_upcoming` options and supersede dismissal.** `update_memory(dismiss_supersede_candidate=True)` / `kagura update-memory --dismiss-supersede-candidate` needs memory-cloud **0.65.0+** ([#1504](https://github.com/kagura-ai/memory-cloud/issues/1504)). It rejects the memory's `supersede_candidate` suggestion and needs `memory_id`: combined with `external_id` it raises `ValueError` before any network call. Before 0.65.0 the server silently drops the flag, so a dismissal-only call succeeds as an empty update that dismisses nothing and refreshes `updated_at`; `supersede_candidate_dismissed` in the response is the only confirmation that a dismissal happened. `list_contexts(name_contains=…, include_summary=…, include_details=…)` / `kagura context list --name-contains/--summary/--details` and `recall_upcoming(include_details=True)` need **0.73.0+** ([#1600](https://github.com/kagura-ai/memory-cloud/issues/1600), [#1599](https://github.com/kagura-ai/memory-cloud/issues/1599)); `include_stats` / `--stats` works on any server. From memory-cloud 0.73.0, `list_contexts` rows are slim by default (`id`/`name`/`is_private`/`is_locked`/`last_used_at`; `summary` and `embedding_model` are opt-in), and the envelope adds `total` (rows returned) beside `count` (quota usage, unaffected by `name_contains`). 0.75.0 adds an optional `hint` when the caller can see no context ([#1658](https://github.com/kagura-ai/memory-cloud/issues/1658)). `recall_upcoming` items carry `trigger` in place of `details` unless `include_details=True`. Every new argument is omitted from the wire when unset, and older servers ignore it (before 0.73.0 there is also no `total`: use `len(result["contexts"])`). `MIN_SERVER_VERSION` stays **0.17.1**. |
 | 0.38.1+ | 0.17.1 (the fix matters against 0.43.0+ for Sleep, 0.68.0+ for the indexer) | **Forward-tolerant Sleep and indexer responses.** memory-cloud **0.43.0+** grades a Sleep run `degraded` when some judge-LLM calls fail ([#1183](https://github.com/kagura-ai/memory-cloud/issues/1183)) — and since **0.46.0** also when a phase fails ([#1229](https://github.com/kagura-ai/memory-cloud/issues/1229)) — and **0.68.0+** records `skipped_reason="memories_per_day_exceeded"` when the resource indexer defers a batch to the daily quota reset ([#1549](https://github.com/kagura-ai/memory-cloud/issues/1549)). SDKs up to 0.38.0 rejected both values: one degraded run broke `get_sleep_history` and `kagura sleep history|report|rollback`, and one deferred run broke `get_indexer_status` and `kagura resource indexer-status`. `SleepReport.status`, `RollbackResult.status`, `IndexerState.job_status` and `IndexerStateMetrics.skipped_reason` are now `str`, so values a newer server adds pass through (the `SleepRunStatus` / `IndexerJobStatus` / `IndexerSkippedReason` Literals list the known values). `SleepReport` gains `llm_call_failures` and `SleepReportDetail` gains `merge_retention_result`. A response the `KaguraClient` MCP tool methods or the REST clients still cannot parse (a model mismatch or a missing/`null` list or object in the envelope) raises `KaguraResponseError` naming the operation, not a raw pydantic `ValidationError`, `KeyError` or `TypeError`; the REST clients' envelope-shape errors move from `KaguraConnectionError` to it too. `KaguraClient`'s REST-backed methods (`get_server_info`, `get_memory_stats`, `list_memories`, …) still raise `KaguraConnectionError` — catch `KaguraError` for both. `MIN_SERVER_VERSION` stays **0.17.1**. |
 | 0.38.0+ | 0.17.1 (per-surface: see notes) | **Client-surface parity — four server capabilities the SDK could not reach.** `recall_nearby()` + `details.location` (the WHERE axis) need memory-cloud **0.53.0+** ([#1331](https://github.com/kagura-ai/memory-cloud/issues/1331)); `remember(supersedes=…)` and its read-back counterpart `recall(include_superseded=True)` need **0.45.0+** ([#1208](https://github.com/kagura-ai/memory-cloud/issues/1208)); `list_tags(with_tags=…)` faceted drill-down needs **0.17.2+** ([#830](https://github.com/kagura-ai/memory-cloud/issues/830)); `update_memory(details=…)` works on any server that already accepted `details` on the MCP tool, and **replaces `details` wholesale** — the server does not deep-merge, so re-send `location` when revising or the memory drops off `recall_nearby`. CLI gains `kagura remember --details/--location`. All four are additive and omitted from the wire when unset, so existing calls are unchanged. `MIN_SERVER_VERSION` stays **0.17.1**. |
 | 0.37.0+ | 0.17.1 (0.49.0 for the agent control plane) | **Agent control plane (RFC-0002 P0-1/2/3).** `KaguraClient.get_agent_bootstrap()` (MCP) and `AgentsClient.bootstrap()` (REST, `POST /api/v1/agents/{agent_id}/bootstrap`) need memory-cloud **0.49.0+** ([#1276](https://github.com/kagura-ai/memory-cloud/issues/1276)); the same release covers the **registry + binding wrappers** (`register_agent`/`get_agent`/`list_agents`/`update_agent`/`delete_agent` on both surfaces; bindings as `bind_agent_context`/`list_agent_bindings`/`update_agent_binding`/`unbind_agent_context` on `KaguraClient`, mirrored as `bind_context`/`list_bindings`/`update_binding`/`unbind_context` on `AgentsClient` — owner/admin-gated server-side, [#1274](https://github.com/kagura-ai/memory-cloud/issues/1274)/[#1275](https://github.com/kagura-ai/memory-cloud/issues/1275)), so an SDK-only consumer can provision the agent + binding that bootstrap requires. Against an older server the MCP tools return "tool not found" and the REST routes 404. `MIN_SERVER_VERSION` stays **0.17.1**. |
@@ -524,6 +579,13 @@ kagura sleep history <context-id> --limit 5
 kagura sleep report <context-id> <report-id>
 kagura sleep rollback <context-id> <report-id> -y    # destructive: prompts unless --yes / -y is set
 
+# Tool guardrails (server v0.74.0+); context-id defaults to .kagura.json
+kagura guardrails load <context-id> --cap 200         # pinned + tool-triggered lanes as JSON
+kagura guardrails digest <context-id>                 # print the AGENTS.md export block
+kagura guardrails digest <context-id> --out AGENTS.md # splice it in; unchanged set → no write, empty set → block removed
+                                                      # (keep it out of commits: untracked file or --skip-worktree)
+kagura guardrails digest <context-id> --target instructions --profile core  # preview the MCP instructions for ?profile=core
+
 # File uploads (R2 checksum binding)
 kagura files upload ./report.pdf -c <context-id>
 kagura files upload ./plan.pdf -c <context-id> --binding-context-id <ctx>   # bind to an owning context for ACL (v0.41.0+)
@@ -631,6 +693,11 @@ Or use the CLI directly:
 kagura remember -s "FastAPIのDIパターン" --content "DIはDepends()を使う" -c dev
 ```
 
+Also running the memory-cloud `kagura-memory` Claude Code plugin (its guardrail hooks and
+`/kagura-memory:setup`)? Both expect the MCP entry named `kagura-memory`, and the plugin's
+hooks need their own API key — see the coexistence note in
+[`skills/setup/SKILL.md`](skills/setup/SKILL.md).
+
 ### Claude Code plugin (CLI-as-skills)
 
 This repo also ships a thin **Claude Code plugin** under
@@ -658,6 +725,8 @@ follow-up.
 | Agent session-state lane (set_state/get_state, TTL) | `KaguraClient` | MCP | API Key |
 | Agent bootstrap (get_agent_bootstrap — one-call session-start rehydration) | `KaguraClient` / `AgentsClient` | MCP + REST | API Key |
 | Agent registry + context bindings (register/list/update/delete, bind/unbind — owner/admin) | `KaguraClient` / `AgentsClient` | MCP + REST | API Key |
+| Tool guardrails (load_guardrails, remember/update_memory `tool_trigger=`, get_context_info `guardrails`) | `KaguraClient` / `MemoryClient` | MCP + REST | API Key |
+| Guardrail digest (`AGENTS.md` export block / server-instructions preview) | `MemoryClient` | REST | API Key |
 | Context (create/update/list/delete/get_context_info) | `KaguraClient` | MCP | API Key |
 | Workspace (get_usage) | `KaguraClient` | MCP | API Key |
 | Search config (update_search_config) | `KaguraClient` | MCP | API Key |

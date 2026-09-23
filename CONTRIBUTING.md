@@ -86,4 +86,5 @@ All PRs must pass codecov/patch — every changed line needs a test.
 | `SecretClient` | REST + age crypto | Zero-knowledge secrets — age recipient encryption, local decrypt (server stores only ciphertext) |
 | `WorkspaceClient` | REST API | Workspace member / invitation management + owner-provisioned member keys (owner API key only) |
 | `AgentsClient` | REST API | Agent control plane — bootstrap, registry CRUD, context bindings (server v0.49.0+) |
+| `MemoryClient` | REST API | Tool guardrails — `load_guardrails` + the `AGENTS.md` digest (server v0.74.0+) |
 | `FileIngestor` | CLI + SDK | Document ingestion (PDF → memory graph + R2 archive) |

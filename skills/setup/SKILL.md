@@ -28,3 +28,37 @@ kagura setup claude --profile <name> # bind to a named OAuth profile
 - Relay which `.mcp.json` was written. A "kagura-mcp not on PATH" message is a
   warning, not a failure.
 - Suggest `kagura doctor` (the `doctor` skill) to confirm the wiring end-to-end.
+
+## Coexisting with the memory-cloud `kagura-memory` plugin
+
+The memory-cloud repo ships its own Claude Code plugin, `kagura-memory` (distinct
+from this `kagura-cli` plugin). It adds tool-guardrail hooks and, from memory-cloud
+v0.75.0, a `/kagura-memory:setup` command that checks the MCP entry and configures
+those hooks. The two overlap in three places:
+
+- **One MCP entry named `kagura-memory`.** `kagura setup claude` writes it into the
+  project `.mcp.json`; the plugin's docs and `/kagura-memory:setup` expect an entry
+  with that name and do not add a second one. Keep a single entry per scope — a second
+  one (e.g. `claude mcp add kagura-memory ...` at user scope) shadows or is shadowed by
+  the project entry. When the entry is missing, `/kagura-memory:setup` sends the user
+  back to `kagura setup claude --profile <name>`; run that first, then the plugin
+  command.
+- **Two SessionStart injections.** `kagura setup claude` adds `kagura recall`
+  (SessionStart) and `kagura remember` (PostToolUse) hooks to `.claude/settings.json`;
+  the plugin adds its own SessionStart, PreToolUse, PostToolUse and PostToolUseFailure
+  guardrail hooks. They do
+  different jobs (memory sync vs. guardrail delivery) and both run — neither replaces
+  the other.
+- **Credentials.** The plugin's hooks authenticate with a static API key entered in
+  the plugin's `userConfig`. The OAuth `kagura-mcp` entry this skill writes holds no
+  key, so enabling the hooks needs a separate user API key (an agent-bound key can
+  read guardrails but not author them).
+
+With the hooks active, the plugin recommends `?guardrails=off` on the MCP URL so the
+server does not also send a guardrail digest. The `kagura-mcp` entry cannot carry that
+query through the profile; `/kagura-memory:setup` explains the `--server` override, and
+re-running `kagura setup claude --profile <name>` rewrites the entry, so re-apply it
+afterwards. `kagura guardrails load <the plugin's context_id>` shows that context's set
+as the CLI's own credential sees it (the bare command uses `.kagura.json`'s context,
+which may be a different one). The hooks use their own API key, and an agent binding
+filters the set per credential, so what they load can differ from that output.
