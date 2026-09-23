@@ -623,6 +623,16 @@ def test_status_reports_user_scope_stdio_entry(patched_default_path: Path):
     assert "Claude Code (~/.claude.json, user scope): refresh-aware" in result.output
 
 
+def test_status_silent_for_an_unrecognised_entry(patched_default_path: Path):
+    _seed_credentials(patched_default_path.parent.parent, _make_creds())
+    _write_user_scope_entry({"type": "sse", "url": "https://x/sse"})
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        result = runner.invoke(main, ["auth", "status"])
+    assert result.exit_code == 0, result.output
+    assert "Claude Code (" not in result.output
+
+
 def test_status_names_the_scope_a_project_entry_hides(patched_default_path: Path):
     _seed_credentials(patched_default_path.parent.parent, _make_creds())
     _write_user_scope_entry({"type": "http", "url": "https://x/mcp"})

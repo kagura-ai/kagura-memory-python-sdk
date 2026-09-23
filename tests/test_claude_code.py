@@ -26,7 +26,11 @@ from kagura_memory.claude_code import (
     detect_mcp_json_mode,
     find_kagura_mcp_entries,
     mcp_add_json_args,
+    same_mcp_entry,
 )
+
+# Bound at import, before the autouse fixture swaps it for a stub.
+from kagura_memory.claude_code import claude_executable as real_claude_executable
 
 _STDIO = {"type": "stdio", "command": "kagura-mcp", "args": ["--profile", "default"]}
 _BEARER = {"type": "http", "url": "https://h/mcp", "headers": {"Authorization": "Bearer k"}}
@@ -68,6 +72,7 @@ def test_claude_json_path_defaults_to_home(monkeypatch, tmp_path: Path) -> None:
     ("entry", "mode"),
     [
         (_STDIO, "stdio"),
+        ({"command": "kagura-mcp", "args": []}, "stdio"),  # Claude Code's default type
         (_BEARER, "static-token"),
         ({**_BEARER, "type": "url"}, "static-token"),  # legacy SDK form
         ({**_BEARER, "type": "streamable-http"}, "static-token"),
@@ -81,6 +86,13 @@ def test_claude_json_path_defaults_to_home(monkeypatch, tmp_path: Path) -> None:
 )
 def test_classify_mcp_entry(entry: object, mode: str) -> None:
     assert classify_mcp_entry(entry) == mode
+
+
+def test_same_mcp_entry_ignores_empty_values() -> None:
+    """``claude mcp add`` stores ``"env": {}``; that must not read as a different entry."""
+    assert same_mcp_entry({**_STDIO, "env": {}}, _STDIO)
+    assert not same_mcp_entry({**_STDIO, "env": {"A": "1"}}, _STDIO)
+    assert not same_mcp_entry({**_STDIO, "args": ["--profile", "work"]}, _STDIO)
 
 
 def test_legacy_type_flags_only_url() -> None:
@@ -164,6 +176,11 @@ def test_mcp_add_json_args() -> None:
     args = mcp_add_json_args("user", _STDIO)
     assert args[:5] == ["mcp", "add-json", "--scope", "user", MCP_SERVER_NAME]
     assert json.loads(args[5]) == _STDIO
+
+
+def test_claude_executable_looks_up_claude_on_path(monkeypatch) -> None:
+    monkeypatch.setattr(claude_code.shutil, "which", lambda name: f"/opt/bin/{name}")
+    assert real_claude_executable() == "/opt/bin/claude"
 
 
 def test_run_claude_without_claude_raises_file_not_found() -> None:

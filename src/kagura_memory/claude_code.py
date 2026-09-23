@@ -87,7 +87,8 @@ def classify_mcp_entry(entry: object) -> str:
     if not isinstance(entry, dict):
         return "absent"
     kind = entry.get("type")
-    if kind == "stdio" and entry.get("command") == MCP_PROXY_COMMAND:
+    # Claude Code reads an entry without a type as stdio.
+    if kind in (None, "stdio") and entry.get("command") == MCP_PROXY_COMMAND:
         return "stdio"
     if kind in _HTTP_TYPES:
         headers = entry.get("headers")
@@ -131,6 +132,19 @@ def _local_servers(claude_json: dict[str, Any], project: Path) -> object:
     return None
 
 
+def same_mcp_entry(a: dict[str, Any], b: dict[str, Any]) -> bool:
+    """True when two entries configure the same server.
+
+    Keys with an empty value (``"env": {}`` as ``claude mcp add`` stores it)
+    count as absent.
+    """
+
+    def significant(entry: dict[str, Any]) -> dict[str, Any]:
+        return {k: v for k, v in entry.items() if v not in ({}, [], None)}
+
+    return significant(a) == significant(b)
+
+
 def find_kagura_mcp_entries(project_dir: Path) -> list[McpEntry]:
     """Every scope that defines ``kagura-memory`` for ``project_dir``, strongest first.
 
@@ -163,7 +177,7 @@ def detect_mcp_json_mode(project_dir: Path) -> str:
       without a usable ``kagura-memory`` entry.
     * ``"none"``   — no ``.mcp.json`` and no entry in ``~/.claude.json``.
 
-    Used by ``kagura auth status`` and ``kagura doctor``.
+    Used by ``kagura doctor``.
     """
     entries = find_kagura_mcp_entries(project_dir)
     if entries:

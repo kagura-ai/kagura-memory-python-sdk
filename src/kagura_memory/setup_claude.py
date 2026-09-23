@@ -22,6 +22,7 @@ from .claude_code import (
     McpScope,
     _read_json_safe,
     find_kagura_mcp_entries,
+    same_mcp_entry,
 )
 
 # Re-exported: the detector lived here before #258, and callers import it from here.
@@ -376,9 +377,10 @@ class _McpPlan:
     entry: dict[str, Any]
     #: Weaker-scope entries the new one hides in this project.
     hidden: list[McpEntry] = field(default_factory=list)
-    #: A different user-scope entry exists; ``claude mcp add-json`` refuses to
-    #: overwrite one, so it is removed first.
-    replace_user: bool = False
+    #: A different user-scope entry to replace. ``claude mcp add-json``
+    #: refuses to overwrite one, so it is removed first (and restored if the
+    #: add fails).
+    replaces: dict[str, Any] | None = None
     #: The user-scope entry already matches; nothing to write.
     unchanged: bool = False
 
@@ -439,13 +441,13 @@ def _plan_mcp_entry(
         return plan
 
     current = next((e for e in entries if e.scope == "user"), None)
-    plan.unchanged = current is not None and current.config == entry
-    plan.replace_user = current is not None and not plan.unchanged
-    if plan.unchanged:
+    if current is not None and same_mcp_entry(current.config, entry):
+        plan.unchanged = True
         return plan
+    plan.replaces = current.config if current is not None else None
     if claude_code.claude_executable() is None:
         commands = [claude_code.mcp_add_json_args("user", _redact_entry(entry))]
-        if plan.replace_user:
+        if plan.replaces is not None:
             commands.insert(0, claude_code.mcp_remove_args("user"))
         click.echo("\n  Add the user-scope entry yourself, then re-run this setup:")
         for args in commands:
@@ -456,7 +458,7 @@ def _plan_mcp_entry(
             "`claude mcp add-json`. Nothing was written."
         )
     if (
-        plan.replace_user
+        plan.replaces is not None
         and not non_interactive
         and not click.confirm(
             f"Replace the existing user-scope {MCP_SERVER_NAME} entry (~/.claude.json)?",
@@ -470,12 +472,17 @@ def _plan_mcp_entry(
 def _run_claude_or_fail(args: list[str]) -> None:
     """Run ``claude <args>``; turn any failure into a ClickException.
 
-    The message names only the subcommand: ``args`` can hold an API key.
+    The message names only the subcommand: ``args`` can hold an API key, and
+    a ``SubprocessError``'s own message quotes the whole command line.
     """
     name = f"claude {' '.join(args[:2])}"
     try:
         proc = claude_code.run_claude(args)
-    except (OSError, subprocess.SubprocessError) as e:
+    except subprocess.TimeoutExpired as e:
+        raise click.ClickException(f"`{name}` failed: timed out after {e.timeout:g}s") from None
+    except subprocess.SubprocessError as e:
+        raise click.ClickException(f"`{name}` failed: {type(e).__name__}") from None
+    except OSError as e:
         raise click.ClickException(f"`{name}` failed: {_exc_message(e)}") from e
     if proc.returncode != 0:
         detail = (proc.stderr or proc.stdout).strip() or f"exit code {proc.returncode}"
@@ -489,9 +496,16 @@ def _write_mcp_entry(project: Path, plan: _McpPlan) -> str:
         return f"Wrote {path.relative_to(project)}"
     if plan.unchanged:
         return f"User-scope {MCP_SERVER_NAME} entry already up to date (~/.claude.json)"
-    if plan.replace_user:
+    if plan.replaces is None:
+        _run_claude_or_fail(claude_code.mcp_add_json_args("user", plan.entry))
+    else:
         _run_claude_or_fail(claude_code.mcp_remove_args("user"))
-    _run_claude_or_fail(claude_code.mcp_add_json_args("user", plan.entry))
+        try:
+            _run_claude_or_fail(claude_code.mcp_add_json_args("user", plan.entry))
+        except click.ClickException:
+            # Put the removed entry back rather than leave none at all.
+            _run_claude_or_fail(claude_code.mcp_add_json_args("user", plan.replaces))
+            raise
     return f"Added {MCP_SERVER_NAME} at user scope (claude mcp add-json --scope user)"
 
 

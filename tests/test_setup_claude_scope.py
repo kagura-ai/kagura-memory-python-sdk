@@ -26,6 +26,7 @@ from kagura_memory.setup_claude import (
     SESSIONSTART_HOOK_COMMAND,
     _install_hooks,
     _plugin_server_url,
+    _remove_sdk_hook,
 )
 
 CTX = "11111111-2222-3333-4444-555555555555"
@@ -240,6 +241,86 @@ def test_scope_user_replacement_declined_interactively(
     assert "Setup cancelled; nothing was written." in result.output
     assert fake_claude.mcp_calls() == []
     assert not (tmp_path / ".kagura.json").exists()
+
+
+def test_scope_user_entry_with_empty_env_counts_as_identical(
+    connection, fake_claude, tmp_path: Path
+) -> None:
+    write_claude_json({"mcpServers": {MCP_SERVER_NAME: {**STDIO_DEFAULT, "env": {}}}})
+
+    result = run_setup(tmp_path, "--scope", "user")
+
+    assert result.exit_code == 0, result.output
+    assert "already up to date" in result.output
+    assert fake_claude.mcp_calls() == []
+
+
+def test_scope_user_without_claude_prints_remove_before_add(connection, tmp_path: Path) -> None:
+    write_claude_json({"mcpServers": {MCP_SERVER_NAME: {**STDIO_DEFAULT, "args": ["x"]}}})
+
+    result = run_setup(tmp_path, "--scope", "user")
+
+    assert result.exit_code == 1
+    remove = result.output.index("claude mcp remove --scope user kagura-memory")
+    assert remove < result.output.index("claude mcp add-json --scope user kagura-memory")
+
+
+def test_scope_user_failed_replacement_restores_the_old_entry(
+    connection, fake_claude, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``add-json`` fails after ``remove``: the removed entry is put back, not lost."""
+    old_entry = {**STDIO_DEFAULT, "args": ["--profile", "work"]}
+    write_claude_json({"mcpServers": {MCP_SERVER_NAME: old_entry}})
+    adds: list[dict[str, Any]] = []
+
+    def run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        fake_claude(argv, **kwargs)
+        if argv[1:3] == ["mcp", "add-json"]:
+            adds.append(json.loads(argv[-1]))
+            code = 1 if len(adds) == 1 else 0  # the new entry fails, the restore succeeds
+            return subprocess.CompletedProcess(argv, code, stdout="", stderr="boom")
+        return subprocess.CompletedProcess(argv, 0, stdout="[]", stderr="")
+
+    monkeypatch.setattr(claude_code.subprocess, "run", run)
+
+    result = run_setup(tmp_path, "--scope", "user")
+
+    assert result.exit_code == 1
+    assert "`claude mcp add-json` failed: boom" in result.output
+    assert [c[1] for c in fake_claude.mcp_calls()] == ["remove", "add-json", "add-json"]
+    assert adds == [STDIO_DEFAULT, old_entry]
+
+
+@pytest.mark.parametrize(
+    ("make_error", "detail"),
+    [
+        # TimeoutExpired's own message quotes the argv, API key included.
+        (lambda argv: subprocess.TimeoutExpired(argv, 30), "timed out after 30s"),
+        (lambda argv: subprocess.SubprocessError(str(argv)), "SubprocessError"),
+        (lambda argv: PermissionError("permission denied: claude"), "permission denied"),
+    ],
+    ids=["timeout", "subprocess-error", "os-error"],
+)
+def test_scope_user_claude_error_is_reported_without_the_key(
+    connection,
+    fake_claude,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    make_error: Any,
+    detail: str,
+) -> None:
+    def run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if argv[1:3] == ["mcp", "add-json"]:
+            raise make_error(argv)
+        return subprocess.CompletedProcess(argv, 0, stdout="[]", stderr="")
+
+    monkeypatch.setattr(claude_code.subprocess, "run", run)
+
+    result = run_setup(tmp_path, "--scope", "user", oauth=False)
+
+    assert result.exit_code == 1
+    assert f"`claude mcp add-json` failed: {detail}" in result.output
+    assert API_KEY not in result.output
 
 
 def test_scope_user_add_json_failure_is_reported_without_the_key(
@@ -623,3 +704,27 @@ def test_plugin_notes_with_guardrails_off_and_an_api_key(
 )
 def test_plugin_server_url_keeps_only_guardrails_off(upstream: str, expected: str) -> None:
     assert _plugin_server_url(upstream) == expected
+
+
+def test_remove_sdk_hook_keeps_other_hooks_in_a_shared_entry() -> None:
+    """Only the SDK hook leaves an entry it shares; malformed entries are skipped."""
+    sdk = SESSIONSTART_HOOK_COMMAND.format(context_id=CTX)
+    settings: dict[str, Any] = {
+        "hooks": {
+            "SessionStart": [
+                "not-an-entry",
+                {"hooks": "not-a-list"},
+                {"hooks": [{"command": sdk}, {"command": "echo mine"}, "odd"]},
+            ]
+        }
+    }
+
+    assert _remove_sdk_hook(settings, "SessionStart", SESSIONSTART_HOOK_COMMAND)
+
+    assert settings["hooks"]["SessionStart"] == [
+        "not-an-entry",
+        {"hooks": "not-a-list"},
+        {"hooks": [{"command": "echo mine"}, "odd"]},
+    ]
+    assert not _remove_sdk_hook(settings, "SessionStart", SESSIONSTART_HOOK_COMMAND)
+    assert not _remove_sdk_hook({"hooks": []}, "SessionStart", SESSIONSTART_HOOK_COMMAND)

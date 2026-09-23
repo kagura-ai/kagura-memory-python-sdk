@@ -598,6 +598,19 @@ def test_doctor_warns_about_a_shadowed_entry(tmp_path):
     assert "project-scope entry" in shadow[0].message
 
 
+def test_doctor_names_the_scope_of_an_unusable_entry(tmp_path):
+    from kagura_memory.doctor import _check_mcp
+
+    _write_claude_json({"mcpServers": {"kagura-memory": {"type": "sse", "url": "https://h/sse"}}})
+
+    checks = _check_mcp(tmp_path)
+
+    assert checks[0].status == "warn"
+    assert checks[0].message == (
+        "No usable kagura-memory entry found in ~/.claude.json (user scope)"
+    )
+
+
 @pytest.mark.parametrize("entry_type", ["http", "url"])
 def test_doctor_static_token_legacy_type_suggests_rerunning_setup(tmp_path, entry_type):
     """Both types read as static-token; only the legacy "url" one gets the re-run hint."""
