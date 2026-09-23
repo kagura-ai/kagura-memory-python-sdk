@@ -1459,3 +1459,28 @@ async def test_fetch_digest_uses_the_given_credential(monkeypatch):
     digest = await REAL_FETCH_DIGEST(auth, CTX)
     assert digest.text == EXPORT_BLOCK
     assert seen == [auth]
+
+
+def test_url_form_export_without_any_credential_writes_nothing(
+    on_path, recorder, digest, tmp_path, monkeypatch
+):
+    from kagura_memory.exceptions import KaguraAuthError
+
+    def no_credential(**kwargs):
+        raise KaguraAuthError("No credentials found.")
+
+    monkeypatch.setattr(setup_harness, "_resolve_auth", no_credential)
+    on_path("codex")
+    path = tmp_path / "AGENTS.md"
+    args = ("--url-form", "--mcp-url", MCP_URL, "--context-id", CTX, "--agents-md", str(path))
+    result = run("codex", *args, "-y")
+    assert result.exit_code == 1
+    assert "The AGENTS.md export has no credential: No credentials found." in result.output
+    assert recorder.mutating() == []
+    assert digest.calls == []
+
+
+def test_dry_run_export_without_a_context_names_the_prompt(tty):
+    result = run("openclaw", "--profile", "default", "--agents-md", "--dry-run")
+    assert result.exit_code == 0, result.output
+    assert "for context <chosen at the context prompt>" in result.output
