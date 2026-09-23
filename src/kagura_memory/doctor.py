@@ -16,10 +16,11 @@ from ._auth import _SOURCE_LABEL, _OAuthAuth, _resolve_auth, _StaticAuth
 from ._http import validate_https_url
 from .auth.cli import _redact_token
 from .auth.credentials import REFRESH_SKEW_SEC, load_credentials_file
+from .claude_code import detect_mcp_json_mode, find_kagura_mcp_entries
 from .client import MIN_SERVER_VERSION, KaguraClient
 from .config import load_config
 from .exceptions import KaguraAuthError, KaguraConnectionError, _exc_message
-from .setup_claude import _kagura_mcp_on_path, detect_mcp_json_mode
+from .setup_claude import _kagura_mcp_on_path
 
 DoctorStatus = Literal["pass", "warn", "fail", "info"]
 
@@ -461,33 +462,84 @@ def _check_https(mcp_url: str) -> DoctorCheck:
 
 
 def _check_mcp(project_dir: Path) -> list[DoctorCheck]:
+    """Report the kagura-memory entry Claude Code uses here, from every scope (#258)."""
     checks: list[DoctorCheck] = []
     mode = detect_mcp_json_mode(project_dir)
+    # The entry Claude Code uses (strongest scope) first, then any it shadows.
+    entries = find_kagura_mcp_entries(project_dir)
+    where = f" ({entries[0].scope} scope, {entries[0].source})" if entries else ""
+    details = {"scope": entries[0].scope, "source": entries[0].source} if entries else {}
     if mode == "stdio":
-        checks.append(DoctorCheck(section="mcp", status="pass", message="MCP Mode: stdio"))
+        checks.append(
+            DoctorCheck(
+                section="mcp", status="pass", message=f"MCP Mode: stdio{where}", details=details
+            )
+        )
     elif mode == "static-token":
         checks.append(
             DoctorCheck(
                 section="mcp",
                 status="warn",
                 message=(
-                    "Legacy static-token configuration detected; run "
+                    f"Legacy static-token configuration detected{where}; run "
                     "`kagura setup claude --profile NAME` to migrate"
                 ),
+                details=details,
             )
         )
     elif mode == "url":
-        checks.append(DoctorCheck(section="mcp", status="pass", message="MCP Mode: url"))
+        checks.append(
+            DoctorCheck(
+                section="mcp", status="pass", message=f"MCP Mode: url{where}", details=details
+            )
+        )
     elif mode == "absent":
         checks.append(
             DoctorCheck(
                 section="mcp",
                 status="warn",
-                message="No usable kagura-memory entry found in .mcp.json",
+                message=(
+                    f"No usable kagura-memory entry found in {entries[0].source} "
+                    f"({entries[0].scope} scope)"
+                    if entries
+                    else "No usable kagura-memory entry found in .mcp.json"
+                ),
+                details=details,
             )
         )
     else:
-        checks.append(DoctorCheck(section="mcp", status="info", message="No .mcp.json found"))
+        checks.append(
+            DoctorCheck(
+                section="mcp",
+                status="info",
+                message="No kagura-memory MCP entry found (.mcp.json, ~/.claude.json)",
+            )
+        )
+
+    if entries and entries[0].legacy_type:
+        checks.append(
+            DoctorCheck(
+                section="mcp",
+                status="warn",
+                message=(
+                    'The kagura-memory entry has type "url", which Claude Code does not '
+                    'accept; re-run `kagura setup claude` to rewrite it as "http"'
+                ),
+                details=details,
+            )
+        )
+    for hidden in entries[1:]:
+        checks.append(
+            DoctorCheck(
+                section="mcp",
+                status="warn",
+                message=(
+                    f"kagura-memory is also defined in {hidden.scope} scope ({hidden.source}), "
+                    f"but Claude Code uses the {entries[0].scope}-scope entry here"
+                ),
+                details={"scope": hidden.scope, "source": hidden.source},
+            )
+        )
 
     if mode == "stdio":
         if _kagura_mcp_on_path():
@@ -503,7 +555,7 @@ def _check_mcp(project_dir: Path) -> list[DoctorCheck]:
             DoctorCheck(
                 section="mcp",
                 status="info",
-                message="kagura-mcp PATH check skipped because .mcp.json is not stdio mode",
+                message="kagura-mcp PATH check skipped because the MCP entry is not stdio mode",
             )
         )
 

@@ -601,6 +601,42 @@ def test_status_reports_url_mode_without_auth(patched_default_path: Path):
     assert "url form (no Authorization header)" in result.output
 
 
+def _write_user_scope_entry(entry: dict) -> None:
+    """Write the isolated ~/.claude.json (conftest points CLAUDE_CONFIG_DIR at a temp dir)."""
+    from kagura_memory.claude_code import claude_json_path
+
+    claude_json_path().write_text(
+        json.dumps({"mcpServers": {"kagura-memory": entry}}), encoding="utf-8"
+    )
+
+
+def test_status_reports_user_scope_stdio_entry(patched_default_path: Path):
+    """#258: a user-scope entry in ~/.claude.json is reported, not silently missed."""
+    _seed_credentials(patched_default_path.parent.parent, _make_creds())
+    _write_user_scope_entry(
+        {"type": "stdio", "command": "kagura-mcp", "args": ["--profile", "default"]}
+    )
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        result = runner.invoke(main, ["auth", "status"])
+    assert result.exit_code == 0, result.output
+    assert "Claude Code (~/.claude.json, user scope): refresh-aware" in result.output
+
+
+def test_status_names_the_scope_a_project_entry_hides(patched_default_path: Path):
+    _seed_credentials(patched_default_path.parent.parent, _make_creds())
+    _write_user_scope_entry({"type": "http", "url": "https://x/mcp"})
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        _write_cwd_mcp_json(
+            {"type": "http", "url": "https://x/mcp", "headers": {"Authorization": "Bearer k"}}
+        )
+        result = runner.invoke(main, ["auth", "status"])
+    assert result.exit_code == 0, result.output
+    assert "Claude Code (.mcp.json, project scope): legacy static API-key token" in result.output
+    assert "hides the user-scope entry in ~/.claude.json" in result.output
+
+
 # ---------------------------------------------------------------------------
 # list
 # ---------------------------------------------------------------------------

@@ -543,7 +543,78 @@ def test_doctor_mcp_modes(monkeypatch, tmp_path):
     assert any("No usable" in check.message for check in _check_mcp(tmp_path))
 
     monkeypatch.setattr("kagura_memory.doctor.detect_mcp_json_mode", lambda _: "none")
-    assert any(check.message == "No .mcp.json found" for check in _check_mcp(tmp_path))
+    assert any(
+        check.message == "No kagura-memory MCP entry found (.mcp.json, ~/.claude.json)"
+        for check in _check_mcp(tmp_path)
+    )
+
+
+# ---------------------------------------------------------------------------
+# MCP entry scope (#258): the entry Claude Code uses, from every scope
+# ---------------------------------------------------------------------------
+
+_STDIO_ENTRY = {"type": "stdio", "command": "kagura-mcp", "args": ["--profile", "default"]}
+
+
+def _write_claude_json(data: dict) -> None:
+    """Write the isolated ~/.claude.json (conftest points CLAUDE_CONFIG_DIR at a temp dir)."""
+    from kagura_memory.claude_code import claude_json_path
+
+    claude_json_path().write_text(json.dumps(data), encoding="utf-8")
+
+
+def _write_project_entry(project: Path, entry: dict) -> None:
+    (project / ".mcp.json").write_text(json.dumps({"mcpServers": {"kagura-memory": entry}}))
+
+
+def test_doctor_reports_user_scope_stdio_entry(monkeypatch, tmp_path):
+    """A user-scope entry is the effective one, not "No .mcp.json found"."""
+    from kagura_memory.doctor import _check_mcp
+
+    monkeypatch.setattr("kagura_memory.doctor._kagura_mcp_on_path", lambda: True)
+    _write_claude_json({"mcpServers": {"kagura-memory": _STDIO_ENTRY}})
+
+    checks = _check_mcp(tmp_path)
+    messages = [c.message for c in checks]
+
+    assert "MCP Mode: stdio (user scope, ~/.claude.json)" in messages
+    assert "kagura-mcp found on PATH" in messages
+    assert not any("No kagura-memory MCP entry" in m or "No .mcp.json" in m for m in messages)
+    assert checks[0].details == {"scope": "user", "source": "~/.claude.json"}
+
+
+def test_doctor_warns_about_a_shadowed_entry(tmp_path):
+    from kagura_memory.doctor import _check_mcp
+
+    _write_project_entry(tmp_path, _STDIO_ENTRY)
+    _write_claude_json({"mcpServers": {"kagura-memory": _STDIO_ENTRY}})
+
+    checks = _check_mcp(tmp_path)
+
+    assert checks[0].message == "MCP Mode: stdio (project scope, .mcp.json)"
+    shadow = [c for c in checks if "also defined in user scope" in c.message]
+    assert len(shadow) == 1
+    assert shadow[0].status == "warn"
+    assert "project-scope entry" in shadow[0].message
+
+
+@pytest.mark.parametrize("entry_type", ["http", "url"])
+def test_doctor_static_token_legacy_type_suggests_rerunning_setup(tmp_path, entry_type):
+    """Both types read as static-token; only the legacy "url" one gets the re-run hint."""
+    from kagura_memory.doctor import _check_mcp
+
+    _write_project_entry(
+        tmp_path,
+        {"type": entry_type, "url": "https://h/mcp", "headers": {"Authorization": "Bearer k"}},
+    )
+
+    messages = [c.message for c in _check_mcp(tmp_path)]
+
+    assert any("Legacy static-token configuration detected" in m for m in messages)
+    legacy = [m for m in messages if 'type "url"' in m]
+    assert bool(legacy) == (entry_type == "url")
+    if legacy:
+        assert "kagura setup claude" in legacy[0]
 
 
 @pytest.mark.parametrize(

@@ -1,0 +1,237 @@
+"""Tests for kagura_memory.claude_code — the read-only view of Claude Code's MCP config (#258).
+
+``~/.claude.json`` is never the real one: the autouse ``_isolate_claude_code``
+fixture (conftest.py) points ``CLAUDE_CONFIG_DIR`` at an empty temp directory
+and hides the ``claude`` CLI.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+from pathlib import Path
+from typing import Any
+from unittest.mock import MagicMock
+
+import pytest
+
+from kagura_memory import claude_code
+from kagura_memory.claude_code import (
+    MCP_SERVER_NAME,
+    McpEntry,
+    classify_mcp_entry,
+    claude_json_path,
+    detect_kagura_plugin,
+    detect_mcp_json_mode,
+    find_kagura_mcp_entries,
+    mcp_add_json_args,
+)
+
+_STDIO = {"type": "stdio", "command": "kagura-mcp", "args": ["--profile", "default"]}
+_BEARER = {"type": "http", "url": "https://h/mcp", "headers": {"Authorization": "Bearer k"}}
+
+
+def write_claude_json(data: dict[str, Any]) -> Path:
+    """Write the isolated ``~/.claude.json`` the SDK reads (see conftest)."""
+    path = claude_json_path()
+    path.write_text(json.dumps(data), encoding="utf-8")
+    return path
+
+
+def write_mcp_json(project: Path, entry: dict[str, Any]) -> None:
+    (project / ".mcp.json").write_text(json.dumps({"mcpServers": {MCP_SERVER_NAME: entry}}))
+
+
+# =============================================================================
+# claude_json_path
+# =============================================================================
+
+
+def test_claude_json_path_follows_claude_config_dir(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+    assert claude_json_path() == tmp_path / ".claude.json"
+
+
+def test_claude_json_path_defaults_to_home(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    assert claude_json_path() == tmp_path / ".claude.json"
+
+
+# =============================================================================
+# classify_mcp_entry
+# =============================================================================
+
+
+@pytest.mark.parametrize(
+    ("entry", "mode"),
+    [
+        (_STDIO, "stdio"),
+        (_BEARER, "static-token"),
+        ({**_BEARER, "type": "url"}, "static-token"),  # legacy SDK form
+        ({**_BEARER, "type": "streamable-http"}, "static-token"),
+        ({"type": "http", "url": "https://h/mcp"}, "url"),
+        ({"type": "url", "url": "https://h/mcp"}, "url"),
+        ({"type": "http", "url": "https://h/mcp", "headers": ["Authorization"]}, "url"),
+        ({"type": "sse", "url": "https://h/sse"}, "absent"),
+        ({"type": "stdio", "command": "other"}, "absent"),
+        ("not-a-dict", "absent"),
+    ],
+)
+def test_classify_mcp_entry(entry: object, mode: str) -> None:
+    assert classify_mcp_entry(entry) == mode
+
+
+def test_legacy_type_flags_only_url() -> None:
+    assert McpEntry("project", ".mcp.json", {**_BEARER, "type": "url"}).legacy_type
+    assert not McpEntry("project", ".mcp.json", _BEARER).legacy_type
+
+
+# =============================================================================
+# find_kagura_mcp_entries / detect_mcp_json_mode
+# =============================================================================
+
+
+def test_finds_every_scope_strongest_first(tmp_path: Path) -> None:
+    project = tmp_path / "proj"
+    project.mkdir()
+    write_mcp_json(project, _BEARER)
+    write_claude_json(
+        {
+            "mcpServers": {MCP_SERVER_NAME: _STDIO},
+            "projects": {str(project.resolve()): {"mcpServers": {MCP_SERVER_NAME: _STDIO}}},
+        }
+    )
+
+    entries = find_kagura_mcp_entries(project)
+
+    assert [(e.scope, e.source) for e in entries] == [
+        ("local", "~/.claude.json"),
+        ("project", ".mcp.json"),
+        ("user", "~/.claude.json"),
+    ]
+    assert detect_mcp_json_mode(project) == "stdio"  # the local entry wins
+
+
+def test_local_scope_of_another_project_is_ignored(tmp_path: Path) -> None:
+    write_claude_json({"projects": {"/somewhere/else": {"mcpServers": {MCP_SERVER_NAME: _STDIO}}}})
+    assert find_kagura_mcp_entries(tmp_path) == []
+    assert detect_mcp_json_mode(tmp_path) == "none"
+
+
+def test_user_scope_entry_is_detected_without_a_project_file(tmp_path: Path) -> None:
+    write_claude_json({"mcpServers": {MCP_SERVER_NAME: _STDIO}})
+    assert [e.scope for e in find_kagura_mcp_entries(tmp_path)] == ["user"]
+    assert detect_mcp_json_mode(tmp_path) == "stdio"
+
+
+def test_project_file_without_entry_is_absent_unless_another_scope_has_one(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / ".mcp.json").write_text(json.dumps({"mcpServers": {"github": {}}}))
+    assert detect_mcp_json_mode(tmp_path) == "absent"
+
+    write_claude_json({"mcpServers": {MCP_SERVER_NAME: _BEARER}})
+    assert detect_mcp_json_mode(tmp_path) == "static-token"
+
+
+@pytest.mark.parametrize("content", ["{not json", "[1, 2]", '{"mcpServers": []}'])
+def test_malformed_claude_json_is_ignored(tmp_path: Path, content: str) -> None:
+    claude_json_path().write_text(content, encoding="utf-8")
+    assert find_kagura_mcp_entries(tmp_path) == []
+
+
+def test_non_dict_entry_is_skipped(tmp_path: Path) -> None:
+    write_claude_json({"mcpServers": {MCP_SERVER_NAME: "oops"}})
+    assert find_kagura_mcp_entries(tmp_path) == []
+
+
+def test_detection_never_writes_claude_json(tmp_path: Path) -> None:
+    path = write_claude_json({"mcpServers": {MCP_SERVER_NAME: _STDIO}})
+    before = (path.read_bytes(), os.stat(path).st_mtime_ns)
+    find_kagura_mcp_entries(tmp_path)
+    detect_mcp_json_mode(tmp_path)
+    assert (path.read_bytes(), os.stat(path).st_mtime_ns) == before
+
+
+# =============================================================================
+# claude CLI helpers
+# =============================================================================
+
+
+def test_mcp_add_json_args() -> None:
+    args = mcp_add_json_args("user", _STDIO)
+    assert args[:5] == ["mcp", "add-json", "--scope", "user", MCP_SERVER_NAME]
+    assert json.loads(args[5]) == _STDIO
+
+
+def test_run_claude_without_claude_raises_file_not_found() -> None:
+    with pytest.raises(FileNotFoundError):
+        claude_code.run_claude(["plugin", "list"])
+
+
+def _plugin_list(monkeypatch, *, stdout: str = "", returncode: int = 0, exc=None) -> MagicMock:
+    """Make ``claude plugin list --json`` answer ``stdout`` (or raise ``exc``)."""
+    monkeypatch.setattr(claude_code, "claude_executable", lambda: "/usr/bin/claude")
+    run = MagicMock(
+        side_effect=exc,
+        return_value=subprocess.CompletedProcess([], returncode, stdout=stdout, stderr=""),
+    )
+    monkeypatch.setattr(claude_code.subprocess, "run", run)
+    return run
+
+
+def _plugins(*rows: dict[str, Any]) -> str:
+    return json.dumps(list(rows))
+
+
+def test_plugin_present(monkeypatch, tmp_path: Path) -> None:
+    run = _plugin_list(
+        monkeypatch,
+        stdout=_plugins(
+            {"id": "other@x", "enabled": True},
+            {"id": "kagura-memory@kagura-memory-cloud", "enabled": True, "scope": "user"},
+        ),
+    )
+    assert detect_kagura_plugin(tmp_path) == "kagura-memory@kagura-memory-cloud"
+    assert run.call_args.args[0] == ["/usr/bin/claude", "plugin", "list", "--json"]
+    assert run.call_args.kwargs["cwd"] == tmp_path
+
+
+@pytest.mark.parametrize(
+    "stdout",
+    [
+        _plugins({"id": "other@x", "enabled": True}),  # absent
+        _plugins({"id": "kagura-memory@kagura-memory-cloud", "enabled": False}),  # disabled
+        _plugins({"id": "kagura-memory-extra@x", "enabled": True}),  # a different name
+        _plugins({"id": "kagura-memory@x"}),  # no enabled field
+        "not json",
+        '{"plugins": []}',
+        "[1, 2]",
+    ],
+    ids=["absent", "disabled", "other-name", "no-enabled", "garbage", "object", "non-dicts"],
+)
+def test_plugin_not_detected(monkeypatch, tmp_path: Path, stdout: str) -> None:
+    _plugin_list(monkeypatch, stdout=stdout)
+    assert detect_kagura_plugin(tmp_path) is None
+
+
+def test_plugin_not_detected_when_claude_fails(monkeypatch, tmp_path: Path) -> None:
+    _plugin_list(
+        monkeypatch, stdout=_plugins({"id": "kagura-memory@x", "enabled": True}), returncode=1
+    )
+    assert detect_kagura_plugin(tmp_path) is None
+
+
+@pytest.mark.parametrize(
+    "exc", [subprocess.TimeoutExpired(["claude"], 30), PermissionError("denied")]
+)
+def test_plugin_not_detected_when_claude_errors(monkeypatch, tmp_path: Path, exc) -> None:
+    _plugin_list(monkeypatch, exc=exc)
+    assert detect_kagura_plugin(tmp_path) is None
+
+
+def test_plugin_not_detected_without_claude(tmp_path: Path) -> None:
+    """The autouse fixture hides ``claude``; detection must quietly say "no"."""
+    assert detect_kagura_plugin(tmp_path) is None
