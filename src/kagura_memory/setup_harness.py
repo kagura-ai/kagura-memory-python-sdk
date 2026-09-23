@@ -239,9 +239,13 @@ class _Harness(ABC):
     def add_args(self, name: str, entry: _Entry) -> list[str]:
         """The harness command (after its name) that adds ``entry`` as ``name``."""
 
-    def replace_args(self, name: str, entry: _Entry) -> list[list[str]]:
-        """The commands that replace an existing ``name`` (``--force``)."""
-        return [self.add_args(name, entry)]
+    def replace_args(self, name: str, entry: _Entry) -> list[str]:
+        """The harness command that replaces an existing ``name`` (``--force``).
+
+        One command, never a remove and then an add: a failed add would then
+        leave no entry at all.
+        """
+        return self.add_args(name, entry)
 
     @abstractmethod
     def block(self, name: str, entry: _Entry) -> str:
@@ -354,13 +358,11 @@ class _Codex(_Harness):
         return _classify(entry) if isinstance(entry, dict) else None
 
     def add_args(self, name: str, entry: _Entry) -> list[str]:
+        # `mcp add` also replaces an entry of the same name, whatever its form.
         if entry.command is not None:
             return ["mcp", "add", name, "--", entry.command, *entry.args]
         assert entry.url is not None and entry.key_env is not None
         return ["mcp", "add", name, "--url", entry.url, "--bearer-token-env-var", entry.key_env]
-
-    def replace_args(self, name: str, entry: _Entry) -> list[list[str]]:
-        return [["mcp", "remove", name], self.add_args(name, entry)]
 
     def block(self, name: str, entry: _Entry) -> str:
         q = json.dumps  # a JSON string is a TOML basic string
@@ -572,9 +574,9 @@ class _OpenClaw(_Harness):
             *("--header", f"Authorization={entry.auth_header()}", "--no-probe"),
         ]
 
-    def replace_args(self, name: str, entry: _Entry) -> list[list[str]]:
+    def replace_args(self, name: str, entry: _Entry) -> list[str]:
         # `mcp add` refuses an existing name; `mcp set` replaces the entry.
-        return [["mcp", "set", name, json.dumps(self.server(entry))]]
+        return ["mcp", "set", name, json.dumps(self.server(entry))]
 
     def block(self, name: str, entry: _Entry) -> str:
         return json.dumps({"mcp": {"servers": {name: self.server(entry)}}}, indent=2)
@@ -1108,7 +1110,7 @@ def run_setup_harness(
         entry = _Entry(url=url, key_env=h.key_env(name, api_key_env))
         if not h.reads_instructions:
             _warn_guardrails_off_url(h, url)
-    commands = h.replace_args(name, entry) if existing is not None else [h.add_args(name, entry)]
+    command = h.replace_args(name, entry) if existing is not None else h.add_args(name, entry)
     reason = _print_reason(h, exe, non_interactive, interactive)
 
     click.echo("")
@@ -1116,8 +1118,7 @@ def run_setup_harness(
         verb = "Would run" if dry_run else "Running"
         if dry_run and existing is not None and not force:
             verb = "With --force, would run"
-        for args in commands:
-            click.echo(f"  {verb}: {shlex.join([h.cli, *args])}")
+        click.echo(f"  {verb}: {shlex.join([h.cli, *command])}")
     else:
         replace = " in place of the existing one" if existing is not None else ""
         click.echo(
@@ -1134,15 +1135,7 @@ def run_setup_harness(
     # 6. Write through the harness
     if reason is None:
         assert exe is not None
-        for i, args in enumerate(commands):
-            try:
-                _run_or_fail(h, exe, args, attached=h.interactive_add)
-            except click.ClickException as e:
-                if i:
-                    e.message += (
-                        f"\nThe previous {name} entry was removed; re-run setup to add one."
-                    )
-                raise
+        _run_or_fail(h, exe, command, attached=h.interactive_add)
         if not h.saved(name, exe, entry):
             skipped = " and skipped the AGENTS.md export" if export_path is not None else ""
             raise click.ClickException(

@@ -277,12 +277,12 @@ class TestCodex:
         assert result.exit_code == 0, result.output
         assert "bearer token from an environment variable" in result.output
         assert "guardrail hooks read their credential" in result.output
+        # `codex mcp add` overwrites an entry of the same name: no remove first (#274).
         assert recorder.mutating() == [
-            ["/usr/bin/codex", "mcp", "remove", "kagura-memory"],
             ["/usr/bin/codex", "mcp", "add", "kagura-memory", "--", PROXY, "--profile", "default"],
         ]
 
-    def test_failed_add_after_remove_says_the_entry_is_gone(self, env, on_path, recorder):
+    def test_failed_force_add_leaves_the_previous_entry(self, env, on_path, recorder):
         on_path("codex")
         codex_config(env).write_text(
             '[mcp_servers.kagura-memory]\ncommand = "kagura-mcp"\n', encoding="utf-8"
@@ -291,7 +291,22 @@ class TestCodex:
         result = run("codex", "--profile", "default", "--force", "-y")
         assert result.exit_code == 1
         assert "codex mcp add` failed: boom" in result.output
-        assert "previous kagura-memory entry was removed" in result.output
+        assert "removed" not in result.output
+        assert [argv[1:3] for argv in recorder.mutating()] == [["mcp", "add"]]
+
+    def test_dry_run_with_an_existing_entry_shows_a_single_add(self, env, on_path, recorder):
+        on_path("codex")
+        codex_config(env).write_text(
+            '[mcp_servers.kagura-memory]\ncommand = "kagura-mcp"\n', encoding="utf-8"
+        )
+        result = run("codex", "--profile", "default", "--dry-run")
+        assert result.exit_code == 0, result.output
+        assert (
+            f"With --force, would run: codex mcp add kagura-memory -- {PROXY} --profile default"
+            in result.output
+        )
+        assert "mcp remove" not in result.output
+        assert recorder.mutating() == []
 
     def test_static_header_entry_is_described_not_echoed(self, env, on_path):
         on_path("codex")

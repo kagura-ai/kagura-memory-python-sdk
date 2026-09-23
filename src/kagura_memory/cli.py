@@ -1850,11 +1850,12 @@ def setup_codex(**params):
     Set up Kagura Memory for OpenAI Codex (CLI and IDE extension).
 
     Adds the kagura-memory MCP server with `codex mcp add`, which writes
-    ~/.codex/config.toml ($CODEX_HOME); --force replaces an entry with
-    `codex mcp remove` first. The entry runs the refresh-aware kagura-mcp
-    proxy, by absolute path, on your `kagura auth login` profile: no API
-    key, and Codex never signs in to Kagura itself. Without codex on PATH,
-    setup prints the [mcp_servers] table to add instead.
+    ~/.codex/config.toml ($CODEX_HOME); with --force the same command
+    replaces an entry of the same name. The entry runs the refresh-aware
+    kagura-mcp proxy, by absolute path, on your `kagura auth login`
+    profile: no API key, and Codex never signs in to Kagura itself.
+    Without codex on PATH, setup prints the [mcp_servers] table to add
+    instead.
 
     Codex reads the server's MCP instructions, so --context-id (or
     --guardrails CONTEXT_ID) puts that context's tool guardrail digest in
