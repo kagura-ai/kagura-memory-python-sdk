@@ -418,7 +418,15 @@ def remember(
     default=None,
     help="Request/skip reranking for this call (default: follow the context's search config)",
 )
-def recall(query, context_id, k, rerank):
+@click.option(
+    "--trusted-only",
+    is_flag=True,
+    help=(
+        "Exclude external / connector-ingested memories (filters.trust_tier=trusted). "
+        "Use it for reads fed back to an agent, like the SessionStart hook."
+    ),
+)
+def recall(query, context_id, k, rerank, trusted_only):
     """
     Search memories directly (without AI analysis).
 
@@ -431,9 +439,13 @@ def recall(query, context_id, k, rerank):
       kagura recall "OAuth2 implementation" -k 10
       kagura recall -c dev "error handling pattern"
       kagura recall "latency-sensitive lookup" --no-rerank
+      kagura recall "project context" --trusted-only
     """
+    filters = {"trust_tier": "trusted"} if trusted_only else None
     _run_client_command(
-        lambda client, ctx: client.recall(context_id=ctx, query=query, k=k, use_rerank=rerank),
+        lambda client, ctx: client.recall(
+            context_id=ctx, query=query, k=k, use_rerank=rerank, filters=filters
+        ),
         context_id,
     )
 

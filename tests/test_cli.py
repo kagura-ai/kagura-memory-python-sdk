@@ -161,6 +161,20 @@ def test_recall_rerank_flag(mock_client_cls, mock_config, flags, expected):
     assert mock_client.recall.call_args.kwargs.get("use_rerank") is expected
 
 
+@pytest.mark.parametrize(
+    ("flags", "expected"),
+    [((), None), (("--trusted-only",), {"trust_tier": "trusted"})],
+    ids=["default", "trusted-only"],
+)
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_recall_trusted_only_flag(mock_client_cls, mock_config, flags, expected):
+    """Issue #258: --trusted-only excludes connector-ingested memories; no flag sends no filter."""
+    result, mock_client = _recall_cli(mock_client_cls, mock_config, *flags)
+    assert result.exit_code == 0, result.output
+    assert mock_client.recall.call_args.kwargs.get("filters") == expected
+
+
 def test_forget_requires_memory_id_or_query():
     """forget should fail without --memory-id or --query."""
     runner = CliRunner()
