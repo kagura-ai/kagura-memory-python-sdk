@@ -1,12 +1,12 @@
 ---
 name: setup
-description: Wire Claude Code to Kagura Memory Cloud by writing the MCP config. Use during onboarding to connect this machine's Claude Code to a Kagura workspace.
+description: Wire Claude Code, OpenAI Codex, Hermes Agent or OpenClaw to Kagura Memory Cloud by writing the MCP config. Use during onboarding to connect a coding agent on this machine to a Kagura workspace.
 ---
 
-# kagura setup claude — onboarding
+# kagura setup — onboarding
 
-Connect Claude Code to Kagura Memory via the refresh-aware `kagura-mcp` stdio
-proxy. Thin wrapper around the installed `kagura` CLI.
+Connect Claude Code (or Codex, Hermes Agent, OpenClaw) to Kagura Memory via the
+refresh-aware `kagura-mcp` stdio proxy. Thin wrapper around the installed `kagura` CLI.
 
 ## Preflight
 
@@ -61,6 +61,44 @@ Options (all optional; the defaults write the same files as before):
 - Relay which `.mcp.json` was written. A "kagura-mcp not on PATH" message is a
   warning, not a failure.
 - Suggest `kagura doctor` (the `doctor` skill) to confirm the wiring end-to-end.
+
+## Codex, Hermes Agent and OpenClaw
+
+```bash
+kagura setup codex --profile <name>       # or: hermes, openclaw
+kagura setup codex --profile <name> --dry-run
+```
+
+The entry runs the same `kagura-mcp` proxy by absolute path with `--profile`
+(these harnesses filter the environment and cannot sign in with OAuth
+themselves yet). Setup writes it only through the harness CLI (`codex mcp add`,
+`hermes mcp add`, `openclaw mcp add|set`); otherwise it prints the block and the
+file and edits nothing. Options:
+
+- `--context-id <id|name>` — Codex: the entry runs `kagura-mcp --guardrails <uuid>`,
+  so that context's tool guardrail digest arrives in the MCP instructions.
+  Hermes/OpenClaw do not read instructions; `--guardrails off` is refused for
+  them (exit 2) because it would also remove the `get_context_info` guardrails
+  block, their only guardrail lane.
+- `--agents-md [PATH]` — write the context's guardrail export block (the
+  `kagura guardrails digest --out` block) into the file the harness loads.
+  Interactive Hermes/OpenClaw runs offer it. Needs a context (`--context-id` with `-y`).
+- `--url-form --mcp-url <url> [--api-key-env VAR]` — a URL entry that reads a
+  long-lived API key from an environment variable; setup never sees the key.
+- `--force` replaces an existing entry of the same name (setup stops otherwise);
+  `-y` never prompts and never hands the terminal to `hermes mcp add`.
+
+Relay:
+
+- A printed block ("Setup does not edit … itself"): the user adds it to the named
+  file. Never edit `config.toml`, `config.yaml` or `openclaw.json` yourself.
+- An existing-entry stop: relay its kind and ask whether to re-run with `--force`.
+- The URL form's key note: the user puts the key in the named variable or `.env`
+  file. Never print, ask for, or pass the key on a command line.
+- The Codex plugin-hooks warning: a stdio entry turns the kagura-memory Codex
+  plugin's guardrail hooks into no-ops; suggest `--url-form` if the user relies on them.
+- Suggest the printed check command (`codex mcp get`, `hermes mcp test`,
+  `openclaw mcp doctor --probe`).
 
 ## Coexisting with the memory-cloud `kagura-memory` plugin
 
