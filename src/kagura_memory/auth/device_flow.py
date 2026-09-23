@@ -61,18 +61,15 @@ _INVITE_TOKEN_RULE = "20-128 characters from A-Z, a-z, 0-9, '_' and '-'"
 _SEMVER_PREFIX_RE = re.compile(r"v?(\d+)\.(\d+)\.(\d+)")
 _DEFAULT_PORTS = {"http": 80, "https": 443}
 
-JOIN_RETURN_TO_MIN_SERVER_VERSION: tuple[int, int, int] | None = None
+JOIN_RETURN_TO_MIN_SERVER_VERSION: tuple[int, int, int] = (0, 76, 0)
 """First memory-cloud release whose ``/join/<token>`` honours ``return_to``.
 
-memory-cloud#1655 (the ``/join`` → ``/device`` hand-off) is merged on
-memory-cloud main (#1666) but not in any release yet, so this is ``None``
-and :func:`invite_support` never answers ``"hand_off"``: every server gets
-the two-step fallback. #1666 shipped with no capability flag, so the
-version is the switch: set it to the first release that tags #1666. That
-is a release after 0.75.0, never ``(0, 75, 0)``, because memory-cloud main
-still reports 0.75.0 with #1666 on it. The link shape
-:func:`build_invite_link` builds is the one memory-cloud documents in
-``docs/deployment.md`` ("Invites and device or MCP sign-in").
+memory-cloud v0.76.0 ships the ``/join`` → ``/device`` hand-off
+(memory-cloud#1655, merged as memory-cloud#1666). It came with no capability
+flag, so the server version is the switch: from 0.76.0 :func:`invite_support`
+answers ``"hand_off"``, and 0.75.x and older get the two-step fallback. The
+link shape :func:`build_invite_link` builds is the one memory-cloud documents
+in ``docs/deployment.md`` ("Invites and device or MCP sign-in").
 """
 
 # The /system/info probe runs while the device code is already ticking, so a
@@ -448,14 +445,17 @@ def build_invite_link(
 
     ``{base}/join/{token}?return_to=<path and query of verification_uri_complete>``,
     with ``base`` from :func:`invite_base_url`. ``return_to`` is a
-    same-origin relative path (e.g. ``/device?user_code=ABCD-1234``), the
-    form ``/join`` accepts once memory-cloud#1655 ships. Named so the
-    TypeScript CLI can mirror it as ``buildInviteLink``
-    (kagura-memory-typescript-sdk#44).
+    same-origin relative path (e.g. ``/device?user_code=ABCD-1234``),
+    percent-encoded whole. memory-cloud v0.76.0 (memory-cloud#1666) reads it
+    with ``URLSearchParams`` and keeps it only when its ``safeReturnTo``
+    passes: a path starting with exactly one ``/``, with no backslash or C0
+    control character. Named so the TypeScript CLI can mirror it as
+    ``buildInviteLink`` (kagura-memory-typescript-sdk#44).
 
     Returns:
-        The link, or ``None`` when ``/join`` cannot be placed: no ``base``,
-        or ``verification_uri_complete`` on a different origin.
+        The link, or ``None`` when ``/join`` cannot be placed or would drop
+        ``return_to``: no ``base``, ``verification_uri_complete`` on a
+        different origin, or a path ``/join`` would not accept.
 
     Raises:
         ValueError: ``token`` does not match the invite-token pattern.
@@ -466,6 +466,8 @@ def build_invite_link(
         return None
     parts = urlsplit(verification_uri_complete)
     return_to = f"{parts.path}?{parts.query}" if parts.query else parts.path
+    if not _join_keeps_return_to(return_to):
+        return None
     return f"{base}/join/{token}?return_to={quote(return_to, safe='')}"
 
 
@@ -525,22 +527,21 @@ def invite_support(system_info: dict[str, Any] | None) -> InviteSupport:
         ``"disabled"`` when ``features`` is an object whose ``beta_invites``
         is not ``true`` (invites have no effect on this server);
         ``"hand_off"`` when the server version is at least
-        :data:`JOIN_RETURN_TO_MIN_SERVER_VERSION`, so one ``/join`` link
-        carries the user on to ``/device``; otherwise ``"two_step"`` (no
-        info or no ``features`` object, an older or unparseable version, or
-        the hand-off not released yet).
+        :data:`JOIN_RETURN_TO_MIN_SERVER_VERSION` (memory-cloud v0.76.0), so
+        one ``/join`` link carries the user on to ``/device``; otherwise
+        ``"two_step"`` (no info or no ``features`` object, or an older or
+        unparseable version).
     """
     if system_info is None:
         return "two_step"
     features = system_info.get("features")
     if isinstance(features, dict) and features.get("beta_invites") is not True:
         return "disabled"
-    minimum = JOIN_RETURN_TO_MIN_SERVER_VERSION
     version = system_info.get("version")
-    if minimum is None or not isinstance(version, str):
-        return "two_step"
-    parsed = _parse_version_prefix(version)
-    return "hand_off" if parsed is not None and parsed >= minimum else "two_step"
+    parsed = _parse_version_prefix(version) if isinstance(version, str) else None
+    if parsed is not None and parsed >= JOIN_RETURN_TO_MIN_SERVER_VERSION:
+        return "hand_off"
+    return "two_step"
 
 
 # ---------------------------------------------------------------------------
@@ -552,6 +553,21 @@ def _check_invite_token(token: str) -> None:
     """Raise ``ValueError`` (without echoing ``token``) unless it is well-formed."""
     if not _INVITE_TOKEN_RE.fullmatch(token):
         raise ValueError(f"an invite token must be {_INVITE_TOKEN_RULE}")
+
+
+def _join_keeps_return_to(path: str) -> bool:
+    """Whether memory-cloud's ``/join`` keeps ``path`` as its ``return_to``.
+
+    Mirrors the relative-path branch of the frontend's ``safeReturnTo``
+    (memory-cloud v0.76.0): exactly one leading ``/``, no backslash and no
+    C0 control character. ``/join`` drops any other value silently and sends
+    the invitee to the dashboard, so the CLI prints the two steps instead.
+    """
+    return (
+        path.startswith("/")
+        and not path.startswith("//")
+        and not any(ch == "\\" or ord(ch) <= 0x1F for ch in path)
+    )
 
 
 def _parse_version_prefix(version: str) -> tuple[int, int, int] | None:

@@ -288,12 +288,13 @@ def _print_invite_prompt(
 ) -> None:
     """Print the ``--invite`` prompt: the code first, then the link(s) in order.
 
-    ``hand_off`` prints one ``/join`` link whose ``return_to`` lands on the
-    approval page, always followed by the plain ``verification_uri_complete``
-    (for an already-signed-in user, or a ``/join`` that still ends on the
-    dashboard). ``two_step`` — every released server today — asks for the
-    invite first, then the approval page. ``disabled`` drops the invite.
-    The token appears only inside the printed ``/join`` link.
+    ``hand_off`` (memory-cloud v0.76.0+) prints one ``/join`` link whose
+    ``return_to`` lands on the approval page, always followed by the plain
+    ``verification_uri_complete`` (for an already-signed-in user, or a
+    ``/join`` that still ends on the dashboard). ``two_step`` (older servers,
+    or a failed ``/system/info`` probe) asks for the invite first, then the
+    approval page. ``disabled`` drops the invite. The token appears only
+    inside the printed ``/join`` link.
     """
     if support == "disabled":
         click.echo()
@@ -326,7 +327,7 @@ def _print_invite_prompt(
     join_link = f"{base}/join/{invite.token}" if base is not None else invite.link
     minutes = max(1, round(device.expires_in / 60))
     # Worded to stay true on a server that has the hand-off: here when the
-    # link could not be built, or before JOIN_RETURN_TO_MIN_SERVER_VERSION is set.
+    # link could not be built, or when the /system/info probe failed.
     click.echo("  Accept your invite before you approve the code, in this order:")
     if join_link is not None:
         click.echo(f"    1. Open your invite link and sign up:   {join_link}")

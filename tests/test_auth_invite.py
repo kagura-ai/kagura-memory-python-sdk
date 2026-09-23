@@ -4,10 +4,10 @@ Covers the pure helpers in :mod:`kagura_memory.auth.device_flow`
 (``parse_invite``, ``build_invite_link``, ``invite_support``,
 ``fetch_system_info``) and the CLI prompt built on top of them.
 
-The single-link ``/join`` → ``/device`` hand-off needs memory-cloud#1655,
-which no released server ships yet, so
-``JOIN_RETURN_TO_MIN_SERVER_VERSION`` is ``None`` and every server gets the
-two-step fallback. Tests that exercise the single link patch that constant.
+The single-link ``/join`` → ``/device`` hand-off needs memory-cloud v0.76.0
+(memory-cloud#1655, merged as memory-cloud#1666), which is
+``JOIN_RETURN_TO_MIN_SERVER_VERSION``: a 0.76.0 server gets the single link,
+0.75.x and older the two-step fallback.
 """
 
 from __future__ import annotations
@@ -43,7 +43,9 @@ WEB = "https://app.example.com"
 API = "https://api.example.com"
 DEVICE_URI = f"{WEB}/device"
 DEVICE_URI_COMPLETE = f"{WEB}/device?user_code=ABCD-1234"
-HAND_OFF_VERSION = (0, 76, 0)
+# The first memory-cloud release with the /join return_to hand-off, and the last before it.
+HAND_OFF = "0.76.0"
+BEFORE_HAND_OFF = "0.75.0"
 # make_oauth_client's default. Not httpx's own 5 s default, which would hide
 # a /system/info probe that forgot its short timeout.
 _OAUTH_TIMEOUT = 30.0
@@ -59,14 +61,6 @@ def patched_default_path(tmp_path: Path, monkeypatch):
     reset_state_cache()
     yield fake_path
     reset_state_cache()
-
-
-@pytest.fixture
-def hand_off_released(monkeypatch):
-    """Pretend memory-cloud#1655 shipped in v0.76.0."""
-    monkeypatch.setattr(
-        "kagura_memory.auth.device_flow.JOIN_RETURN_TO_MIN_SERVER_VERSION", HAND_OFF_VERSION
-    )
 
 
 def _device(
@@ -98,7 +92,7 @@ def _token() -> TokenResponse:
     )
 
 
-def _system_info(version: str = "0.76.0", *, beta_invites: bool | None = True) -> dict:
+def _system_info(version: str = HAND_OFF, *, beta_invites: bool | None = True) -> dict:
     features: dict = {"neural_memory": False}
     if beta_invites is not None:
         features["beta_invites"] = beta_invites
@@ -315,6 +309,11 @@ def test_build_invite_link_allows_localhost_http():
         ("http://app.example.com/device", "http://app.example.com/device?user_code=X"),
         ("javascript:alert(1)/device", "javascript:alert(1)/device"),
         (DEVICE_URI, "https://other.example.com/device?user_code=ABCD-1234"),
+        # return_to values memory-cloud's /join drops (safeReturnTo): a `//`
+        # path (FRONTEND_URL with a trailing slash), a backslash, a C0 control.
+        (f"{WEB}//device", f"{WEB}//device?user_code=ABCD-1234"),
+        (DEVICE_URI, f"{WEB}/de\\vice?user_code=ABCD-1234"),
+        (DEVICE_URI, f"{WEB}/device?user_code=AB\x01CD-1234"),
     ],
 )
 def test_build_invite_link_returns_none_when_join_cannot_be_placed(
@@ -358,54 +357,66 @@ def test_check_invite_origin_rejects_another_origin(verification_uri: str, named
 # ---------------------------------------------------------------------------
 
 
-def test_hand_off_version_is_unset_until_memory_cloud_1655_ships():
-    assert device_flow.JOIN_RETURN_TO_MIN_SERVER_VERSION is None
+def test_hand_off_version_is_memory_cloud_0_76_0():
+    # memory-cloud v0.76.0 is the first release with memory-cloud#1666.
+    assert device_flow.JOIN_RETURN_TO_MIN_SERVER_VERSION == (0, 76, 0)
 
 
-def test_invite_support_never_hands_off_while_the_constant_is_unset():
-    assert invite_support(_system_info("99.0.0")) == "two_step"
+@pytest.mark.parametrize(
+    ("version", "parsed"),
+    [
+        ("0.76.0", (0, 76, 0)),
+        ("v0.76.0", (0, 76, 0)),
+        ("0.75.12", (0, 75, 12)),
+        ("0.76.0+build.7", (0, 76, 0)),
+        ("0.76", None),
+        ("main-abc123", None),
+    ],
+)
+def test_parse_version_prefix(version: str, parsed: tuple[int, int, int] | None):
+    assert device_flow._parse_version_prefix(version) == parsed
 
 
-def test_invite_support_hands_off_at_or_after_the_release(hand_off_released):
-    assert invite_support(_system_info("0.76.0")) == "hand_off"
-    assert invite_support(_system_info("0.77.3")) == "hand_off"
-    assert invite_support(_system_info("v1.0.0")) == "hand_off"
+@pytest.mark.parametrize("version", [HAND_OFF, "v0.76.0", "0.76.1", "0.77.3", "v1.0.0"])
+def test_invite_support_hands_off_from_0_76_0(version: str):
+    assert invite_support(_system_info(version)) == "hand_off"
 
 
-def test_invite_support_older_version_falls_back(hand_off_released):
-    assert invite_support(_system_info("0.75.9")) == "two_step"
+@pytest.mark.parametrize("version", [BEFORE_HAND_OFF, "0.75.9", "v0.75.1", "0.70.0", "0.9.99"])
+def test_invite_support_before_0_76_0_falls_back(version: str):
+    assert invite_support(_system_info(version)) == "two_step"
 
 
 @pytest.mark.parametrize("version", ["", "dev", "0.76", "latest", None, 76])
-def test_invite_support_unparseable_version_falls_back(hand_off_released, version):
+def test_invite_support_unparseable_version_falls_back(version):
     info = _system_info()
     info["version"] = version
     assert invite_support(info) == "two_step"
 
 
-def test_invite_support_no_info_falls_back(hand_off_released):
+def test_invite_support_no_info_falls_back():
     assert invite_support(None) == "two_step"
 
 
-def test_invite_support_beta_invites_false_disables(hand_off_released):
-    assert invite_support(_system_info("0.76.0", beta_invites=False)) == "disabled"
+def test_invite_support_beta_invites_false_disables():
+    assert invite_support(_system_info(HAND_OFF, beta_invites=False)) == "disabled"
 
 
 @pytest.mark.parametrize("flag", [None, "true", 1, {}], ids=["missing", "str", "int", "obj"])
-def test_invite_support_beta_invites_not_true_disables(hand_off_released, flag):
+def test_invite_support_beta_invites_not_true_disables(flag):
     # memory-cloud reads a missing flag as off, and a server older than the
     # flag (before v0.70.0) has no /join route at all.
-    info = _system_info("0.76.0", beta_invites=None)
+    info = _system_info(HAND_OFF, beta_invites=None)
     if flag is not None:
         info["features"]["beta_invites"] = flag
     assert invite_support(info) == "disabled"
 
 
-def test_invite_support_without_a_features_object_is_unknown(hand_off_released):
+def test_invite_support_without_a_features_object_is_unknown():
     # No features object says nothing about invites: fall through to the version.
-    assert invite_support({"version": "0.76.0"}) == "hand_off"
-    assert invite_support({"version": "0.76.0", "features": "weird"}) == "hand_off"
-    assert invite_support({"version": "0.75.0", "features": None}) == "two_step"
+    assert invite_support({"version": HAND_OFF}) == "hand_off"
+    assert invite_support({"version": HAND_OFF, "features": "weird"}) == "hand_off"
+    assert invite_support({"version": BEFORE_HAND_OFF, "features": None}) == "two_step"
 
 
 # ---------------------------------------------------------------------------
@@ -421,9 +432,9 @@ async def _fetch(handler: Callable[[httpx.Request], httpx.Response]) -> dict | N
 
 @pytest.mark.asyncio
 async def test_fetch_system_info_returns_raw_json():
-    server = _Server(_system_info("0.75.0", beta_invites=False))
+    server = _Server(_system_info(BEFORE_HAND_OFF, beta_invites=False))
     info = await _fetch(server)
-    assert info == _system_info("0.75.0", beta_invites=False)
+    assert info == _system_info(BEFORE_HAND_OFF, beta_invites=False)
     [request] = server.requests
     assert str(request.url) == f"{API}/api/v1/system/info"
     assert request.method == "GET"
@@ -494,7 +505,7 @@ def test_login_without_invite_does_not_probe_system_info(patched_default_path: P
 
 
 # ---------------------------------------------------------------------------
-# CLI: single-link hand-off (constant patched)
+# CLI: single-link hand-off (memory-cloud v0.76.0+)
 # ---------------------------------------------------------------------------
 
 
@@ -510,8 +521,9 @@ def _prompt_block(output: str) -> list[str]:
     return block
 
 
-def test_login_invite_single_link(hand_off_released, patched_default_path: Path):
-    server = _Server(_system_info("0.76.0"))
+@pytest.mark.parametrize("version", [HAND_OFF, "v0.76.0", "0.77.1"])
+def test_login_invite_single_link(version: str, patched_default_path: Path):
+    server = _Server(_system_info(version))
     result, _, poll, browser = _invoke(["--invite", f"{WEB}/join/{SENTINEL}"], server)
     assert result.exit_code == 0, result.output
 
@@ -527,11 +539,9 @@ def test_login_invite_single_link(hand_off_released, patched_default_path: Path)
     poll.assert_awaited_once()
 
 
-def test_login_invite_link_host_comes_from_verification_uri_not_server(
-    hand_off_released, patched_default_path: Path
-):
+def test_login_invite_link_host_comes_from_verification_uri_not_server(patched_default_path: Path):
     """API on api.<host>, web app on <host>: the link lands on the web app."""
-    server = _Server(_system_info("0.76.0"))
+    server = _Server(_system_info(HAND_OFF))
     result, authorize, _, browser = _invoke(["--server", API, "--invite", SENTINEL], server)
     assert result.exit_code == 0, result.output
     assert authorize.call_args.args[1] == API
@@ -543,10 +553,8 @@ def test_login_invite_link_host_comes_from_verification_uri_not_server(
     assert API not in opened
 
 
-def test_login_invite_no_browser_prints_but_does_not_open(
-    hand_off_released, patched_default_path: Path
-):
-    server = _Server(_system_info("0.76.0"))
+def test_login_invite_no_browser_prints_but_does_not_open(patched_default_path: Path):
+    server = _Server(_system_info(HAND_OFF))
     result, _, _, browser = _invoke(["--invite", SENTINEL, "--no-browser"], server)
     assert result.exit_code == 0, result.output
     browser.assert_not_called()
@@ -555,10 +563,8 @@ def test_login_invite_no_browser_prints_but_does_not_open(
     assert _prompt_block(result.output)[-1].strip() == DEVICE_URI_COMPLETE
 
 
-def test_login_invite_browser_failure_prints_manual_hint(
-    hand_off_released, patched_default_path: Path
-):
-    server = _Server(_system_info("0.76.0"))
+def test_login_invite_browser_failure_prints_manual_hint(patched_default_path: Path):
+    server = _Server(_system_info(HAND_OFF))
     result, _, _, _ = _invoke(["--invite", SENTINEL], server, browser_ok=False)
     assert result.exit_code == 0, result.output
     assert "Could not auto-open" in result.output
@@ -569,10 +575,8 @@ def test_login_invite_browser_failure_prints_manual_hint(
 # ---------------------------------------------------------------------------
 
 
-def test_login_invite_from_another_server_fails_before_polling(
-    hand_off_released, patched_default_path: Path
-):
-    server = _Server(_system_info("0.76.0"))
+def test_login_invite_from_another_server_fails_before_polling(patched_default_path: Path):
+    server = _Server(_system_info(HAND_OFF))
     other = "https://other.example.org"
     result, _, poll, browser = _invoke(["--invite", f"{other}/join/{SENTINEL}"], server)
     assert result.exit_code != 0
@@ -620,60 +624,55 @@ def _assert_two_step(result, browser) -> None:
     browser.assert_called_once_with(f"{WEB}/join/{SENTINEL}")
 
 
-def test_login_invite_defaults_to_two_step_while_hand_off_unreleased(
-    patched_default_path: Path,
-):
-    server = _Server(_system_info("99.0.0"))
-    result, _, _, browser = _invoke(["--invite", SENTINEL], server)
-    _assert_two_step(result, browser)
-
-
-def test_login_invite_older_server_version_falls_back(
-    hand_off_released, patched_default_path: Path
-):
-    server = _Server(_system_info("0.75.0"))
+@pytest.mark.parametrize("version", [BEFORE_HAND_OFF, "0.75.9", "v0.74.2"])
+def test_login_invite_server_before_0_76_0_gets_two_step(version: str, patched_default_path: Path):
+    server = _Server(_system_info(version))
     result, _, _, browser = _invoke(["--invite", f"{WEB}/join/{SENTINEL}"], server)
     _assert_two_step(result, browser)
 
 
-def test_login_invite_unparseable_version_falls_back(hand_off_released, patched_default_path: Path):
+def test_login_invite_unparseable_version_falls_back(patched_default_path: Path):
     server = _Server(_system_info("main-abc123"))
     result, _, _, browser = _invoke(["--invite", SENTINEL], server)
     _assert_two_step(result, browser)
 
 
-def test_login_invite_system_info_404_falls_back(hand_off_released, patched_default_path: Path):
+def test_login_invite_system_info_404_falls_back(patched_default_path: Path):
     server = _Server(status=404)
     result, _, _, browser = _invoke(["--invite", SENTINEL], server)
     _assert_two_step(result, browser)
     assert [r.url.path for r in server.requests] == ["/api/v1/system/info"]
 
 
-def test_login_invite_system_info_timeout_falls_back(hand_off_released, patched_default_path: Path):
+def test_login_invite_system_info_timeout_falls_back(patched_default_path: Path):
     server = _Server(exc=lambda r: httpx.ReadTimeout("timed out", request=r))
     result, _, _, browser = _invoke(["--invite", SENTINEL], server)
     _assert_two_step(result, browser)
 
 
 def test_login_invite_expiry_comes_from_expires_in(patched_default_path: Path):
-    result, _, _, _ = _invoke(["--invite", SENTINEL], _Server(), device=_device(expires_in=900))
+    server = _Server(_system_info(BEFORE_HAND_OFF))
+    result, _, _, _ = _invoke(["--invite", SENTINEL], server, device=_device(expires_in=900))
     assert result.exit_code == 0, result.output
     assert "(in 15 min)" in result.output
 
 
 def test_login_invite_two_step_no_browser(patched_default_path: Path):
-    result, _, _, browser = _invoke(["--invite", SENTINEL, "--no-browser"], _Server())
+    server = _Server(_system_info(BEFORE_HAND_OFF))
+    result, _, _, browser = _invoke(["--invite", SENTINEL, "--no-browser"], server)
     assert result.exit_code == 0, result.output
     browser.assert_not_called()
     assert f"{WEB}/join/{SENTINEL}" in result.output
+    assert "1. " in result.output
+    assert "return_to" not in result.output
     assert "--no-browser" in result.output
 
 
 def test_login_invite_verification_uri_without_device_falls_back_to_given_link(
-    hand_off_released, patched_default_path: Path
+    patched_default_path: Path,
 ):
     device = _device(f"{WEB}/activate", f"{WEB}/activate?user_code=ABCD-1234")
-    server = _Server(_system_info("0.76.0"))
+    server = _Server(_system_info(HAND_OFF))
     given = f"{WEB}/app/join/{SENTINEL}"
     result, _, _, browser = _invoke(["--invite", f"{given}?utm=1"], server, device=device)
     assert result.exit_code == 0, result.output
@@ -690,11 +689,9 @@ def test_login_invite_verification_uri_without_device_falls_back_to_given_link(
     browser.assert_called_once_with(given)
 
 
-def test_login_invite_verification_uri_without_device_and_bare_token(
-    hand_off_released, patched_default_path: Path
-):
+def test_login_invite_verification_uri_without_device_and_bare_token(patched_default_path: Path):
     device = _device(f"{WEB}/activate", f"{WEB}/activate?user_code=ABCD-1234")
-    server = _Server(_system_info("0.76.0"))
+    server = _Server(_system_info(HAND_OFF))
     result, _, poll, browser = _invoke(["--invite", SENTINEL], server, device=device)
     assert result.exit_code == 0, result.output
     # No link can be built: the CLI never invents a host, so it points the
@@ -706,10 +703,8 @@ def test_login_invite_verification_uri_without_device_and_bare_token(
     poll.assert_awaited_once()
 
 
-def test_login_invite_beta_invites_false_prints_normal_prompt(
-    hand_off_released, patched_default_path: Path
-):
-    server = _Server(_system_info("0.76.0", beta_invites=False))
+def test_login_invite_beta_invites_false_prints_normal_prompt(patched_default_path: Path):
+    server = _Server(_system_info(HAND_OFF, beta_invites=False))
     result, _, poll, browser = _invoke(["--invite", SENTINEL], server)
     assert result.exit_code == 0, result.output
     assert "this server does not accept invites" in result.output
@@ -739,16 +734,12 @@ def test_login_invite_server_without_beta_invites_flag_prints_normal_prompt(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("released", [True, False], ids=["single-link", "two-step"])
+@pytest.mark.parametrize("version", [HAND_OFF, BEFORE_HAND_OFF], ids=["single-link", "two-step"])
 def test_login_invite_token_only_appears_in_printed_links(
-    released: bool, monkeypatch, caplog, patched_default_path: Path
+    version: str, caplog, patched_default_path: Path
 ):
-    if released:
-        monkeypatch.setattr(
-            "kagura_memory.auth.device_flow.JOIN_RETURN_TO_MIN_SERVER_VERSION", HAND_OFF_VERSION
-        )
     caplog.set_level(logging.DEBUG)
-    server = _Server(_system_info("0.76.0"))
+    server = _Server(_system_info(version))
     result, authorize, poll, _ = _invoke(["--invite", f"{WEB}/join/{SENTINEL}"], server)
     assert result.exit_code == 0, result.output
 
