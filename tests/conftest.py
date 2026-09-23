@@ -1,7 +1,10 @@
 """Shared pytest fixtures and helpers."""
 
+import json
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
+import httpx
 import pytest
 
 from kagura_memory.auth.credentials import OAuthCredentials
@@ -246,3 +249,80 @@ def isolated_kagura_credentials(tmp_path, monkeypatch):
     reset_state_cache()
     yield
     reset_state_cache()
+
+
+# ---------------------------------------------------------------------------
+# In-memory MCP endpoint with expiring sessions (#252)
+# ---------------------------------------------------------------------------
+
+#: memory-cloud's reply to a request naming a session it no longer holds
+#: (``backend/src/mcp_server/transport.py``, the ``POST /mcp`` session check).
+SESSION_EXPIRED_BODY: dict[str, Any] = {
+    "jsonrpc": "2.0",
+    "error": {
+        "code": -32603,
+        "message": "MCP session not found or expired. Please re-initialize your connection.",
+        "data": {"action": "Send a new 'initialize' request without Mcp-Session-Id header"},
+    },
+    "id": None,
+}
+
+
+class FakeMcpServer:
+    """In-memory legacy MCP endpoint whose sessions live until :meth:`restart`.
+
+    Models the MCP Streamable HTTP session contract as memory-cloud's
+    ``POST /mcp`` session check implements it: ``initialize``, or any request
+    that carries no session id, opens a session and returns its id in
+    ``mcp-session-id``; a request naming an unknown session gets the ``404``
+    :data:`SESSION_EXPIRED_BODY` before dispatch. (memory-cloud v0.75.0's
+    deployed routes skip that check and re-adopt the unknown id instead; the
+    SDK's recovery is for a server that enforces it.) Every request is
+    recorded as ``(body, session_id)``.
+    """
+
+    def __init__(self) -> None:
+        self.sessions: set[str] = set()
+        self.requests: list[tuple[dict[str, Any], str | None]] = []
+        self._opened = 0
+
+    @staticmethod
+    def tool_result(session_id: str) -> dict[str, Any]:
+        """The ``tools/call`` result served in ``session_id``."""
+        text = json.dumps({"status": "success", "session": session_id})
+        return {"content": [{"type": "text", "text": text}]}
+
+    def restart(self) -> None:
+        """Drop every session, as an idle-hour expiry or a deploy does."""
+        self.sessions.clear()
+
+    def record(self, request: httpx.Request) -> dict[str, Any]:
+        """Record ``request`` and return its JSON-RPC body."""
+        body = json.loads(request.content)
+        self.requests.append((body, request.headers.get("mcp-session-id")))
+        return body
+
+    def methods(self) -> list[str]:
+        return [body["method"] for body, _ in self.requests]
+
+    def calls(self) -> list[tuple[str, str | None]]:
+        return [(body["method"], session_id) for body, session_id in self.requests]
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        body = self.record(request)
+        session_id = request.headers.get("mcp-session-id")
+        if body["method"] == "initialize" or session_id is None:
+            self._opened += 1
+            session_id = f"sess-{self._opened}"
+            self.sessions.add(session_id)
+        elif session_id not in self.sessions:
+            return httpx.Response(404, json=SESSION_EXPIRED_BODY)
+        if "id" not in body:
+            return httpx.Response(202)
+        is_initialize = body["method"] == "initialize"
+        result = {"serverInfo": {}} if is_initialize else self.tool_result(session_id)
+        return httpx.Response(
+            200,
+            json={"jsonrpc": "2.0", "id": body["id"], "result": result},
+            headers={"mcp-session-id": session_id},
+        )

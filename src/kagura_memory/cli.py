@@ -399,17 +399,27 @@ def remember(
 @click.argument("query")
 @click.option("--context-id", "-c", help="Context ID (or set in .kagura.json)")
 @click.option("-k", type=int, default=5, help="Number of results (default: 5)")
-def recall(query, context_id, k):
+@click.option(
+    "--rerank/--no-rerank",
+    default=None,
+    help="Request/skip reranking for this call (default: follow the context's search config)",
+)
+def recall(query, context_id, k, rerank):
     """
     Search memories directly (without AI analysis).
+
+    Without --rerank/--no-rerank the server follows the context's search
+    config (memory-cloud v0.69.0+). --rerank applies only when the context
+    enables reranking; --no-rerank always skips it.
 
     Examples:
       kagura recall "FastAPI dependency injection"
       kagura recall "OAuth2 implementation" -k 10
       kagura recall -c dev "error handling pattern"
+      kagura recall "latency-sensitive lookup" --no-rerank
     """
     _run_client_command(
-        lambda client, ctx: client.recall(context_id=ctx, query=query, k=k),
+        lambda client, ctx: client.recall(context_id=ctx, query=query, k=k, use_rerank=rerank),
         context_id,
     )
 
@@ -900,7 +910,11 @@ def context_update(context_id, display_name, description, summary, usage_guide, 
 @click.option("--bm25", type=click.FloatRange(0.0, 1.0), help="BM25 weight (0.0-1.0)")
 @click.option("--fetch-factor", type=click.IntRange(1, 10), help="Fetch multiplier (1-10)")
 @click.option("--rerank/--no-rerank", default=None, help="Enable/disable reranking")
-@click.option("--reranker", type=click.Choice(["voyage", "cohere"]), help="Reranker provider")
+@click.option(
+    "--reranker",
+    type=click.Choice(["voyage", "cohere", "self_hosted"]),
+    help="Reranker provider (self_hosted: the deployment's keyless local reranker)",
+)
 @click.option("--reranker-model", help="Reranker model name")
 def context_search_config(
     context_id, semantic, bm25, fetch_factor, rerank, reranker, reranker_model
@@ -913,6 +927,7 @@ def context_search_config(
     Examples:
       kagura context search-config CTX_UUID --semantic 0.5 --bm25 0.5
       kagura context search-config CTX_UUID --rerank --reranker voyage
+      kagura context search-config CTX_UUID --rerank --reranker self_hosted
     """
     if all(v is None for v in (semantic, bm25, fetch_factor, rerank, reranker, reranker_model)):
         raise click.ClickException("At least one option is required")

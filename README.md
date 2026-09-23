@@ -165,6 +165,13 @@ async with KaguraClient(api_key="kagura_...", mcp_url="https://...") as client:
     # Cross-context recall — search several contexts at once
     results = await client.recall(query="auth", context_ids=["ctx-1", "ctx-2"], k=10)
 
+    # Reranking is tri-state (memory-cloud v0.69.0+). Omit use_rerank to follow the
+    # context's search config (update_search_config); True requests it, applied only
+    # when the context enables it; False skips it for this call, e.g. to save latency.
+    # With context_ids, the first listed context's config decides.
+    # Servers before v0.69.0 rerank only on True.
+    fast = await client.recall(context_id="dev", query="OAuth2", use_rerank=False)
+
     # Trust-tier filter (provenance) — exclude untrusted / connector-ingested
     # memories from behaviour-influencing reads (OWASP LLM01/LLM03)
     safe = await client.recall(context_id="dev", query="policy",
@@ -451,8 +458,11 @@ refreshes tokens, so a short-lived OAuth `access_token` baked into
 stdio proxy, which owns `~/.kagura/credentials.json`, forwards every
 MCP request to the server, and injects an always-fresh bearer token —
 so the same `kagura auth login` credentials power both the CLI and
-Claude Code. Use the long-lived API-key path only for CI / service
-accounts, where a static token is preferable.
+Claude Code. If the server rejects an expired MCP session (the MCP
+Streamable HTTP `404`), the proxy — like a long-lived `KaguraClient` —
+re-runs the `initialize` handshake and retries the request once, so
+Claude Code keeps working without a restart. Use the long-lived API-key
+path only for CI / service accounts, where a static token is preferable.
 
 Credential resolution order when `KaguraClient()` is called with no
 arguments: `KAGURA_API_KEY` env (CI / service accounts always win) →
@@ -485,6 +495,7 @@ not fail CI.
 kagura remember -s "FastAPI DI" --content "Use Depends()..." -c dev
 kagura remember -s "Coffee with Sato" --content "..." --location "35.68,139.76,Tokyo HQ"
 kagura recall "dependency injection" -k 10
+kagura recall "dependency injection" --no-rerank   # skip reranking; no flag follows the context config (v0.69.0+)
 kagura explore -m "memory-uuid" --depth 3
 kagura forget -m "memory-uuid"
 kagura contexts

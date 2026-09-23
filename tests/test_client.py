@@ -1,5 +1,7 @@
 """Tests for KaguraClient."""
 
+import asyncio
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -30,6 +32,8 @@ from kagura_memory import (
     UsageInfo,
 )
 from tests.conftest import (
+    SESSION_EXPIRED_BODY,
+    FakeMcpServer,
     agent_binding_dict,
     agent_dict,
     bootstrap_envelope_dict,
@@ -196,6 +200,201 @@ async def test_make_jsonrpc_request_connection_error_surfaces():
             await client._make_jsonrpc_request("tools/list", {})
 
     await client.close()
+
+
+# ============================================================================
+# Expired MCP session recovery (#252)
+# ============================================================================
+
+_SESSION_EXPIRED_MESSAGE = SESSION_EXPIRED_BODY["error"]["message"]
+
+
+def _client_on(handler) -> KaguraClient:
+    client = KaguraClient(api_key="test", mcp_url="https://test.com/mcp")
+    client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    return client
+
+
+def _slow(server: FakeMcpServer):
+    """``server.handler`` behind a short await, so concurrent calls interleave."""
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(0.01)
+        return server.handler(request)
+
+    return handler
+
+
+@pytest.mark.asyncio
+async def test_expired_session_reinitializes_and_retries_once():
+    """A 404 on a session request re-opens the session and retries the call once."""
+    server = FakeMcpServer()
+    client = _client_on(server.handler)
+    try:
+        assert await client._call_tool("list_contexts", {}) == {
+            "status": "success",
+            "session": "sess-1",
+        }
+        server.restart()  # idle-hour expiry or a deploy: every session is gone
+
+        result = await client._call_tool("list_contexts", {})
+
+        assert result == {"status": "success", "session": "sess-2"}
+        assert server.calls()[2:] == [
+            ("tools/call", "sess-1"),  # rejected: session gone
+            ("initialize", None),  # exactly one re-initialize, without the stale id
+            ("tools/call", "sess-2"),  # exactly one retry, on the new session
+        ]
+        assert client._session_id == "sess-2"
+
+        # The recovered session is kept: no further initialize on the next call.
+        await client._call_tool("list_contexts", {})
+        assert server.methods().count("initialize") == 2
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_calls_on_an_expired_session_share_one_reinitialize():
+    """N in-flight calls that all hit the expired session open ONE new session, not N.
+
+    ``Ingestor`` fans writes out with ``asyncio.gather``, so an ingest that
+    spans a server restart would otherwise leave N-1 orphan sessions.
+    """
+    server = FakeMcpServer()
+    client = _client_on(_slow(server))
+    try:
+        await client._call_tool("list_contexts", {})
+        server.restart()
+
+        results = await asyncio.gather(*[client._call_tool("list_contexts", {}) for _ in range(5)])
+
+        assert results == [{"status": "success", "session": "sess-2"}] * 5
+        assert server.methods().count("initialize") == 2  # the handshake + ONE re-open
+        assert client._session_id == "sess-2"
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_first_calls_share_one_initialize():
+    """Concurrent calls on a fresh client share the first handshake too."""
+    server = FakeMcpServer()
+    client = _client_on(_slow(server))
+    try:
+        await asyncio.gather(*[client._call_tool("list_contexts", {}) for _ in range(3)])
+        assert server.methods() == ["initialize"] + ["tools/call"] * 3
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_expired_session_second_404_raises_with_server_message():
+    """If the retry 404s too, raise KaguraConnectionError carrying the server's message."""
+    server = FakeMcpServer()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        response = server.handler(request)
+        server.restart()  # every session dies as soon as it is opened
+        return response
+
+    client = _client_on(handler)
+    try:
+        with pytest.raises(KaguraConnectionError, match=_SESSION_EXPIRED_MESSAGE) as exc_info:
+            await client._call_tool("list_contexts", {})
+        assert str(exc_info.value).startswith("HTTP 404: ")
+        # initialize → call (404) → ONE re-initialize → ONE retry (404) → raise; no loop.
+        assert server.methods() == ["initialize", "tools/call", "initialize", "tools/call"]
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_expired_session_reinitialize_failure_raises_without_retry():
+    """A failing re-initialize surfaces its own error; the call is not re-sent."""
+    server = FakeMcpServer()
+    client = _client_on(server.handler)
+    try:
+        await client._call_tool("list_contexts", {})
+        server.restart()
+
+        def down(request: httpx.Request) -> httpx.Response:
+            if json.loads(request.content)["method"] == "initialize":
+                server.record(request)
+                return httpx.Response(503, text="Service Unavailable")
+            return server.handler(request)
+
+        await client._client.aclose()
+        client._client = httpx.AsyncClient(transport=httpx.MockTransport(down))
+        with pytest.raises(KaguraConnectionError, match="HTTP 503"):
+            await client._call_tool("list_contexts", {})
+        assert server.methods()[2:] == ["tools/call", "initialize"]
+        assert client._session_id is None  # next call starts a fresh session
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_401_on_session_request_raises_auth_error_without_reinitialize():
+    """Only a 404 means "session gone": a 401 keeps its KaguraAuthError path."""
+    server = FakeMcpServer()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if json.loads(request.content)["method"] == "tools/call":
+            server.record(request)
+            return httpx.Response(401, json={"error": "invalid_token"})
+        return server.handler(request)
+
+    client = _client_on(handler)
+    try:
+        with pytest.raises(KaguraAuthError):
+            await client._call_tool("list_contexts", {})
+        assert server.methods() == ["initialize", "tools/call"]
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "body", "expected"),
+    [
+        pytest.param(
+            400,
+            {
+                "jsonrpc": "2.0",
+                "error": {"code": -32600, "message": "Invalid Request: missing method"},
+                "id": None,
+            },
+            "HTTP 400: Invalid Request: missing method",
+            id="jsonrpc-error",
+        ),
+        pytest.param(
+            403,
+            {
+                "error": "workspace_mismatch",
+                "error_description": "API key workspace does not match URL workspace. "
+                "Use an API key scoped to this workspace.",
+            },
+            "HTTP 403: API key workspace does not match URL workspace",
+            id="oauth-style-workspace-403",
+        ),
+    ],
+)
+async def test_mcp_4xx_surfaces_server_message(status: int, body: dict, expected: str):
+    """A 4xx from the MCP endpoint reaches the caller as the server's message, not the reason."""
+    server = FakeMcpServer()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if json.loads(request.content)["method"] == "tools/call":
+            return httpx.Response(status, json=body)
+        return server.handler(request)
+
+    client = _client_on(handler)
+    try:
+        with pytest.raises(KaguraConnectionError, match=expected):
+            await client._call_tool("list_contexts", {})
+    finally:
+        await client.close()
 
 
 # ============================================================================
@@ -697,17 +896,76 @@ async def test_remember_with_empty_linked_memory_ids():
 
 
 @pytest.mark.asyncio
-async def test_recall_with_rerank():
-    """recall() should pass use_rerank when True."""
+@pytest.mark.parametrize("use_rerank", [True, False])
+@pytest.mark.parametrize(
+    "target",
+    [{"context_id": "ctx"}, {"context_ids": ["ctx-1", "ctx-2"]}],
+    ids=["single", "cross-context"],
+)
+async def test_recall_sends_explicit_use_rerank(use_rerank, target):
+    """Issue #251: an explicit use_rerank is sent as-is — False included.
+
+    Since memory-cloud v0.69.0 (#1572) an omitted ``use_rerank`` follows the
+    context's search config, so ``False`` must be sent — dropping it would let
+    a rerank-enabled context rerank anyway.
+    """
     client = _make_initialized_client()
 
-    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
-        mock.return_value = {"results": []}
-        await client.recall(context_id="ctx", query="test", use_rerank=True)
-        args = mock.call_args[0][1]
-        assert args["use_rerank"] is True
+    try:
+        with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+            mock.return_value = {"results": []}
+            await client.recall(query="test", use_rerank=use_rerank, **target)
+            args = mock.call_args[0][1]
+            assert args["use_rerank"] is use_rerank
+    finally:
+        await client.close()
 
-    await client.close()
+
+@pytest.mark.asyncio
+async def test_recall_omits_use_rerank_by_default():
+    """Issue #251: the default (None) omits the key so the server follows the context config."""
+    client = _make_initialized_client()
+
+    try:
+        with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+            mock.return_value = {"results": []}
+            await client.recall(context_id="ctx", query="test")
+            assert "use_rerank" not in mock.call_args[0][1]
+            await client.recall(context_id="ctx", query="test", use_rerank=None)
+            assert "use_rerank" not in mock.call_args[0][1]
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_recall_use_rerank_false_serializes_to_json_false():
+    """Issue #251: the JSON-RPC body httpx puts on the wire carries ``"use_rerank": false``.
+
+    A MockTransport captures the bytes httpx actually sends, so this pins the
+    serialized request rather than the dict handed to ``post``.
+    """
+    sent: list[bytes] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {"content": [{"type": "text", "text": '{"results": []}'}]},
+            },
+        )
+
+    client = _make_initialized_client()
+    client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+    try:
+        await client.recall(context_id="ctx", query="test", use_rerank=False)
+        assert len(sent) == 1
+        assert json.loads(sent[0])["params"]["arguments"]["use_rerank"] is False
+    finally:
+        await client.close()
 
 
 @pytest.mark.asyncio

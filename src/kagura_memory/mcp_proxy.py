@@ -25,6 +25,19 @@ Design (see issue #101, gate1 review):
 - **mcp_url comes from the profile** (or ``--server``) explicitly — never via
   ``KaguraClient`` env resolution, which ignores ``KAGURA_MCP_URL`` and would
   silently fall back to the hardcoded cloud URL.
+- **The proxy owns the upstream session** (issue #252). When an upstream
+  drops the MCP session it answers the next request with ``404`` (MCP
+  Streamable HTTP), and Claude Code, which only talks stdio to us, can neither
+  see that nor re-initialize. On that ``404`` we replay the downstream's own
+  cached ``initialize`` and retry the message once, mirroring the one-shot
+  ``401`` refresh. (memory-cloud v0.75.0 as deployed re-adopts an unknown
+  session id instead of 404ing; see ``mcp_session_expired``.)
+- **Upstream JSON-RPC errors pass through.** A non-2xx whose body is a
+  JSON-RPC ``error`` (``-32600``, ``-32022`` …) is forwarded with its own
+  code/message/data rather than flattened into ``-32000``. Only the ``401``
+  (the proxy's re-login message) and a failed ``initialize`` replay (the
+  proxy's own ``-32000``, since the error is not about the message being
+  answered) are reported by the proxy itself.
 """
 
 from __future__ import annotations
@@ -38,11 +51,22 @@ from typing import Any
 
 import httpx
 
-from ._http import SDK_VERSION, validate_https_url
+from ._http import (
+    SDK_VERSION,
+    extract_detail,
+    jsonrpc_error_body,
+    mcp_session_expired,
+    mcp_session_header,
+    validate_https_url,
+)
 from .auth.credentials import KaguraOAuth, get_shared_state
 
 _PROXY_TIMEOUT_SEC = 60.0
 _JSONRPC_INTERNAL_ERROR = -32000
+_INITIALIZED_NOTIFICATION: dict[str, Any] = {
+    "jsonrpc": "2.0",
+    "method": "notifications/initialized",
+}
 
 
 class _Upstream:
@@ -50,7 +74,9 @@ class _Upstream:
 
     Owns the upstream ``mcp-session-id`` lifecycle: the value returned by the
     ``initialize`` response header is captured and replayed on every
-    subsequent request, mirroring :class:`KaguraClient`'s transport.
+    subsequent request, mirroring :class:`KaguraClient`'s transport. When the
+    upstream drops the session, the downstream's cached ``initialize`` is
+    replayed to open a new one.
     """
 
     def __init__(self, http: httpx.AsyncClient, mcp_url: str, oauth: KaguraOAuth) -> None:
@@ -58,26 +84,62 @@ class _Upstream:
         self._mcp_url = mcp_url
         self._oauth = oauth
         self._session_id: str | None = None
+        # The last ``initialize`` the upstream accepted, kept for replay.
+        self._initialize: dict[str, Any] | None = None
 
     async def forward(self, message: dict[str, Any]) -> dict[str, Any] | None:
         """Forward one JSON-RPC message; return the response dict, or ``None``.
 
         ``None`` means "no response body to write back" — a JSON-RPC
         notification (no ``id``) the upstream acknowledged with ``202`` /
-        an empty body. The caller must not emit anything in that case.
-        """
-        resp = await self._post_with_retry(message)
-        session_id = resp.headers.get("mcp-session-id")
-        if session_id:
-            self._session_id = session_id
-        resp.raise_for_status()
-        if resp.status_code == 202 or not resp.content:
-            return None
-        return resp.json()
+        an empty body, or answered with an error. The caller must not emit
+        anything in that case.
 
-    async def _post_with_retry(self, message: dict[str, Any]) -> httpx.Response:
-        """POST once; on ``401`` force a token refresh and retry exactly once."""
-        headers = {"mcp-session-id": self._session_id} if self._session_id else {}
+        Raises:
+            httpx.HTTPStatusError: A ``401`` that survived the forced refresh,
+                a non-2xx without a JSON-RPC error body to forward, or a
+                replayed ``initialize`` that failed (see :meth:`_reopen_session`).
+        """
+        is_initialize = message.get("method") == "initialize"
+        # ``initialize`` opens a new session; sending the old id with it would
+        # 404 once that session had expired.
+        session_id = None if is_initialize else self._session_id
+        resp = await self._post_with_retry(message, session_id)
+        if mcp_session_expired(resp, session_id):
+            # Rejected before dispatch, so the one retry is safe for tools/call.
+            await self._reopen_session()
+            resp = await self._post_with_retry(message, self._session_id)
+        if is_initialize and resp.is_success:
+            self._initialize = message
+        return _downstream_response(message, resp)
+
+    async def _reopen_session(self) -> None:
+        """Open a new upstream session in place of one the upstream dropped.
+
+        Replays the downstream's cached ``initialize`` and the
+        ``notifications/initialized`` the MCP lifecycle requires after it.
+        With nothing cached the stale id is only forgotten, and the retry goes
+        without one (memory-cloud then opens a session for it).
+
+        Raises:
+            httpx.HTTPStatusError: The replayed ``initialize`` failed.
+        """
+        self._session_id = None
+        if self._initialize is None:
+            return
+        resp = await self._post_with_retry(self._initialize, None)
+        resp.raise_for_status()
+        await self._post_with_retry(_INITIALIZED_NOTIFICATION, self._session_id)
+
+    async def _post_with_retry(
+        self, message: dict[str, Any], session_id: str | None
+    ) -> httpx.Response:
+        """POST once in ``session_id``; on ``401`` force a token refresh and retry once.
+
+        Captures the ``mcp-session-id`` the response carries, so the next
+        message goes out in the session an ``initialize`` just opened.
+        """
+        headers = mcp_session_header(session_id)
         resp = await self._http.post(self._mcp_url, json=message, headers=headers)
         if resp.status_code == 401:
             # The per-request KaguraOAuth refresh only fires inside the skew
@@ -85,7 +147,36 @@ class _Upstream:
             # a refresh and retry the single request.
             await self._oauth.force_refresh()
             resp = await self._http.post(self._mcp_url, json=message, headers=headers)
+        new_session_id = resp.headers.get("mcp-session-id")
+        if new_session_id:
+            self._session_id = new_session_id
         return resp
+
+
+def _downstream_response(message: dict[str, Any], resp: httpx.Response) -> dict[str, Any] | None:
+    """Turn the upstream reply to ``message`` into the line to write back, if any.
+
+    A non-2xx carrying a JSON-RPC error body is forwarded unchanged — only a
+    ``null`` id (the server could not read one) is replaced with the
+    downstream's. A ``401`` always raises so :func:`_error_response` can
+    attach the re-login hint.
+
+    Raises:
+        httpx.HTTPStatusError: A non-2xx with nothing to forward.
+    """
+    if not resp.is_success and resp.status_code != 401:
+        body = jsonrpc_error_body(resp)
+        if body is not None:
+            msg_id = message.get("id")
+            if msg_id is None:  # a notification never gets a reply, not even an error
+                return None
+            if body.get("id") is None:
+                body["id"] = msg_id
+            return body
+    resp.raise_for_status()
+    if resp.status_code == 202 or not resp.content:
+        return None
+    return resp.json()
 
 
 def _error_response(message: dict[str, Any], exc: Exception) -> dict[str, Any] | None:
@@ -93,17 +184,23 @@ def _error_response(message: dict[str, Any], exc: Exception) -> dict[str, Any] |
 
     A notification (no ``id``) gets no response even on failure — replying
     would violate JSON-RPC. The error text is made actionable for the common
-    refresh-failure case so Claude Code surfaces the re-login hint to the user.
+    refresh-failure case so Claude Code surfaces the re-login hint to the user;
+    any other HTTP error carries the server's own explanation when it sent one
+    (e.g. the OAuth-style ``error_description`` of a workspace-URL ``403``).
     """
     msg_id = message.get("id")
     if msg_id is None:
         return None
     detail = str(exc)
-    if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 401:
-        detail = (
-            "Kagura authentication failed and the token could not be refreshed. "
-            "Run `kagura auth login` to re-authenticate."
-        )
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code
+        if status == 401:
+            detail = (
+                "Kagura authentication failed and the token could not be refreshed. "
+                "Run `kagura auth login` to re-authenticate."
+            )
+        elif server_detail := extract_detail(exc.response):
+            detail = f"HTTP {status}: {server_detail}"
     return {
         "jsonrpc": "2.0",
         "id": msg_id,
@@ -133,6 +230,9 @@ async def serve(
             message = json.loads(stripped)
         except json.JSONDecodeError:
             # Unparseable input has no id to correlate an error to — drop it.
+            continue
+        if not isinstance(message, dict):
+            # Nor has a batch array (the upstream rejects batches) or a scalar.
             continue
         try:
             response = await upstream.forward(message)
