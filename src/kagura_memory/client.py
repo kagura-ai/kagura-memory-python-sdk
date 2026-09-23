@@ -12,6 +12,8 @@ from ._auth import _resolve_auth, _StaticAuth
 from ._http import (
     SDK_VERSION,
     base_url_from_mcp,
+    mcp_session_expired,
+    mcp_session_header,
     raise_for_kagura_status,
     validate_https_url,
     validate_lat_lon,
@@ -205,10 +207,8 @@ class KaguraClient:
             "params": params,
         }
 
-        headers = {"mcp-session-id": self._session_id} if self._session_id else {}
-
         try:
-            response = await self._client.post(self.mcp_url, json=body, headers=headers)
+            response = await self._post_in_session(body)
             response.raise_for_status()
 
             data = response.json() or {}
@@ -222,6 +222,35 @@ class KaguraClient:
             raise_for_kagura_status(e)
         except httpx.RequestError as e:
             raise KaguraConnectionError(f"Connection failed: {_exc_message(e)}") from e
+
+    async def _post_in_session(self, body: dict[str, Any]) -> httpx.Response:
+        """POST ``body`` in the MCP session, re-opening the session once if it expired.
+
+        memory-cloud drops sessions after an idle hour and on every restart, so
+        without this a long-lived client fails every call from then on. The
+        server rejects the request before dispatch, which makes the single
+        retry safe even for a non-idempotent ``tools/call``. A second ``404``
+        is returned for the caller's ``raise_for_status`` to report.
+
+        Args:
+            body: The JSON-RPC request.
+
+        Returns:
+            The response to the request, or to its one retry.
+        """
+        session_id = self._session_id
+        response = await self._client.post(
+            self.mcp_url, json=body, headers=mcp_session_header(session_id)
+        )
+        if not mcp_session_expired(response, session_id):
+            return response
+        # A concurrent call may already have re-opened it; keep that session.
+        if self._session_id == session_id:
+            self._session_id = None
+        await self._initialize_session()
+        return await self._client.post(
+            self.mcp_url, json=body, headers=mcp_session_header(self._session_id)
+        )
 
     async def _rest_get(
         self,

@@ -199,6 +199,198 @@ async def test_make_jsonrpc_request_connection_error_surfaces():
 
 
 # ============================================================================
+# Expired MCP session recovery (#252)
+# ============================================================================
+
+_SESSION_EXPIRED_MESSAGE = "MCP session not found or expired. Please re-initialize your connection."
+
+
+def _session_expired_response() -> httpx.Response:
+    """memory-cloud's reply to a request naming a session it no longer holds."""
+    return httpx.Response(
+        404,
+        json={
+            "jsonrpc": "2.0",
+            "error": {
+                "code": -32603,
+                "message": _SESSION_EXPIRED_MESSAGE,
+                "data": {"action": "Send a new 'initialize' request without Mcp-Session-Id header"},
+            },
+            "id": None,
+        },
+    )
+
+
+class _FakeMcpServer:
+    """In-memory legacy MCP endpoint: sessions live until :meth:`restart`.
+
+    Mirrors memory-cloud's transport: ``initialize`` opens a session and
+    returns its id in ``mcp-session-id``; any other request naming an unknown
+    session gets the 404 session-expired reply before dispatch.
+    """
+
+    def __init__(self) -> None:
+        self.sessions: set[str] = set()
+        self.calls: list[tuple[str, str | None]] = []
+        self._opened = 0
+
+    def restart(self) -> None:
+        self.sessions.clear()
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        session_id = request.headers.get("mcp-session-id")
+        self.calls.append((body["method"], session_id))
+        if body["method"] == "initialize":
+            self._opened += 1
+            new_id = f"sess-{self._opened}"
+            self.sessions.add(new_id)
+            return httpx.Response(
+                200,
+                json={"jsonrpc": "2.0", "id": body["id"], "result": {}},
+                headers={"mcp-session-id": new_id},
+            )
+        if session_id not in self.sessions:
+            return _session_expired_response()
+        text = json.dumps({"status": "success", "session": session_id})
+        return httpx.Response(
+            200,
+            json={"jsonrpc": "2.0", "id": body["id"], "result": {"content": [{"text": text}]}},
+        )
+
+    def methods(self) -> list[str]:
+        return [method for method, _ in self.calls]
+
+
+def _client_on(handler) -> KaguraClient:
+    client = KaguraClient(api_key="test", mcp_url="https://test.com/mcp")
+    client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    return client
+
+
+@pytest.mark.asyncio
+async def test_expired_session_reinitializes_and_retries_once():
+    """A 404 on a session request re-opens the session and retries the call once."""
+    server = _FakeMcpServer()
+    client = _client_on(server.handler)
+    try:
+        assert await client._call_tool("list_contexts", {}) == {
+            "status": "success",
+            "session": "sess-1",
+        }
+        server.restart()  # idle-hour expiry or a deploy: every session is gone
+
+        result = await client._call_tool("list_contexts", {})
+
+        assert result == {"status": "success", "session": "sess-2"}
+        assert server.calls[2:] == [
+            ("tools/call", "sess-1"),  # rejected: session gone
+            ("initialize", None),  # exactly one re-initialize, without the stale id
+            ("tools/call", "sess-2"),  # exactly one retry, on the new session
+        ]
+        assert client._session_id == "sess-2"
+
+        # The recovered session is kept: no further initialize on the next call.
+        await client._call_tool("list_contexts", {})
+        assert server.methods().count("initialize") == 2
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_expired_session_second_404_raises_with_server_message():
+    """If the retry 404s too, raise KaguraConnectionError carrying the server's message."""
+    server = _FakeMcpServer()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        response = server.handler(request)
+        server.restart()  # every session dies as soon as it is opened
+        return response
+
+    client = _client_on(handler)
+    try:
+        with pytest.raises(KaguraConnectionError, match=_SESSION_EXPIRED_MESSAGE) as exc_info:
+            await client._call_tool("list_contexts", {})
+        assert str(exc_info.value).startswith("HTTP 404: ")
+        # initialize → call (404) → ONE re-initialize → ONE retry (404) → raise; no loop.
+        assert server.methods() == ["initialize", "tools/call", "initialize", "tools/call"]
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_expired_session_reinitialize_failure_raises_without_retry():
+    """A failing re-initialize surfaces its own error; the call is not re-sent."""
+    server = _FakeMcpServer()
+    client = _client_on(server.handler)
+    try:
+        await client._call_tool("list_contexts", {})
+        server.restart()
+
+        def down(request: httpx.Request) -> httpx.Response:
+            if json.loads(request.content)["method"] == "initialize":
+                server.calls.append(("initialize", None))
+                return httpx.Response(503, text="Service Unavailable")
+            return server.handler(request)
+
+        await client._client.aclose()
+        client._client = httpx.AsyncClient(transport=httpx.MockTransport(down))
+        with pytest.raises(KaguraConnectionError, match="HTTP 503"):
+            await client._call_tool("list_contexts", {})
+        assert server.methods()[2:] == ["tools/call", "initialize"]
+        assert client._session_id is None  # next call starts a fresh session
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_401_on_session_request_raises_auth_error_without_reinitialize():
+    """Only a 404 means "session gone": a 401 keeps its KaguraAuthError path."""
+    server = _FakeMcpServer()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if json.loads(request.content)["method"] == "tools/call":
+            server.calls.append(("tools/call", request.headers.get("mcp-session-id")))
+            return httpx.Response(401, json={"error": "invalid_token"})
+        return server.handler(request)
+
+    client = _client_on(handler)
+    try:
+        with pytest.raises(KaguraAuthError):
+            await client._call_tool("list_contexts", {})
+        assert server.methods() == ["initialize", "tools/call"]
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_jsonrpc_error_body_on_4xx_surfaces_server_message():
+    """A 4xx JSON-RPC error body reaches the caller as the server's message, not the reason."""
+    server = _FakeMcpServer()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if json.loads(request.content)["method"] == "tools/call":
+            return httpx.Response(
+                400,
+                json={
+                    "jsonrpc": "2.0",
+                    "error": {"code": -32600, "message": "Invalid Request: missing method"},
+                    "id": None,
+                },
+            )
+        return server.handler(request)
+
+    client = _client_on(handler)
+    try:
+        with pytest.raises(
+            KaguraConnectionError, match="HTTP 400: Invalid Request: missing method"
+        ):
+            await client._call_tool("list_contexts", {})
+    finally:
+        await client.close()
+
+
+# ============================================================================
 # Tool definitions (existing tests)
 # ============================================================================
 
