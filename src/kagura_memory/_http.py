@@ -591,17 +591,20 @@ def normalize_uuid(value: object, *, label: str) -> str:
         raise ValueError(f"{label} must be a UUID, got {value!r}") from exc
 
 
-def validate_lat_lon(lat: object, lon: object) -> None:
-    """Reject coordinates the server would reject anyway (memory-cloud #1331).
+def validate_coordinate(label: str, value: object, limit: int) -> None:
+    """Reject one coordinate the server would reject anyway.
 
-    Shared by every geo surface — the ``recall_nearby`` query point and the
-    CLI's ``--location`` write shorthand — so the WHERE axis has one definition
-    of a valid coordinate. Unlike ``radius_m``, which the server clamps, the
-    server *rejects* out-of-range lat/lon, so checking locally only saves a
-    round-trip that could return nothing but a 422.
+    The single definition of a valid coordinate on the WHERE axis, shared by
+    every geo surface — the ``recall_nearby`` query point and the CLI's
+    ``--location`` write shorthand (both via :func:`validate_lat_lon`), and
+    each ``list_memories`` bbox bound. Unlike ``radius_m``, which the server
+    clamps, the server *rejects* out-of-range lat/lon (memory-cloud #1331,
+    #1334), so checking locally only saves a round-trip that could return
+    nothing but a 422.
 
     Args:
-        lat: Latitude, -90 to 90. Typed ``object`` for the same reason as
+        label: Parameter name used in the error message.
+        value: The coordinate. Typed ``object`` for the same reason as
             :func:`normalize_uuid`: this is a runtime guard at the
             public-parameter trust boundary, so a non-numeric value from an
             untyped caller is rejected with a uniform ValueError rather than
@@ -609,23 +612,37 @@ def validate_lat_lon(lat: object, lon: object) -> None:
             is rejected rather than coerced — the server 422s string-typed
             numerics, so silently accepting ``"35.68"`` would only move the
             failure to the wire.
+        limit: The range is ``-limit`` to ``limit`` — 90 for a latitude,
+            180 for a longitude.
+
+    Raises:
+        ValueError: If ``value`` is non-numeric or outside its range.
+    """
+    # bool is a subclass of int, but True is never a coordinate.
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise ValueError(
+            f"{label} must be a number, got {type(value).__name__} ({value!r}). "
+            "The server rejects string-typed coordinates."
+        )
+    # NaN fails every comparison, so this form rejects it. Do not rewrite
+    # it as `value < -limit or value > limit` — that looks equivalent but
+    # evaluates False for NaN, letting it through.
+    if not -limit <= value <= limit:
+        raise ValueError(f"{label} must be between -{limit} and {limit}, got {value}")
+
+
+def validate_lat_lon(lat: object, lon: object) -> None:
+    """Reject a lat/lon point the server would reject anyway (memory-cloud #1331).
+
+    Args:
+        lat: Latitude, -90 to 90. See :func:`validate_coordinate` for the rules.
         lon: Longitude, -180 to 180. Same rules.
 
     Raises:
         ValueError: If either coordinate is non-numeric or outside its range.
     """
-    for label, value, limit in (("lat", lat, 90), ("lon", lon, 180)):
-        # bool is a subclass of int, but True is never a coordinate.
-        if not isinstance(value, (int, float)) or isinstance(value, bool):
-            raise ValueError(
-                f"{label} must be a number, got {type(value).__name__} ({value!r}). "
-                "The server rejects string-typed coordinates."
-            )
-        # NaN fails every comparison, so this form rejects it. Do not rewrite
-        # it as `value < -limit or value > limit` — that looks equivalent but
-        # evaluates False for NaN, letting it through.
-        if not -limit <= value <= limit:
-            raise ValueError(f"{label} must be between -{limit} and {limit}, got {value}")
+    validate_coordinate("lat", lat, 90)
+    validate_coordinate("lon", lon, 180)
 
 
 def validate_https_url(url: str, *, label: str = "URL") -> None:

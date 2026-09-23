@@ -4,15 +4,18 @@
 Goes beyond examples/client_basics.py: recall filters (tags / date
 range), cross-context recall, tag-vocabulary discovery and faceted
 drill-down, workspace usage, per-memory stats, duplicate detection, the
-WHERE axis (``recall_nearby``), and supersede/history.
+WHERE axis (``recall_nearby`` and the ``list_memories`` bbox), and
+supersede/history.
 
 Server floors: ``list_tags()`` needs memory-cloud v0.15.4+, its
 ``with_tags`` drill-down v0.17.2+, ``supersedes`` / ``include_superseded``
-v0.45.0+, and ``recall_nearby`` / ``details.location`` v0.53.0+. Against an
-older server those calls raise ``KaguraConnectionError`` ("MCP error: Tool not
-found") — MCP-level errors surface as a *connection* error even though the
-connection is fine; it subclasses ``KaguraError``. This script does not catch
-them, so it stops at the first surface the server lacks.
+v0.45.0+, ``recall_nearby`` / ``details.location`` v0.53.0+, and the
+``list_memories`` bbox v0.54.0+ (an older server ignores it rather than
+failing). Against an older server the other calls raise
+``KaguraConnectionError`` ("MCP error: Tool not found") — MCP-level errors
+surface as a *connection* error even though the connection is fine; it
+subclasses ``KaguraError``. This script does not catch them, so it stops at
+the first surface the server lacks.
 
 Usage:
     export KAGURA_API_KEY="kagura_..."
@@ -108,6 +111,15 @@ async def main():
             # distance_m. radius_m/k are keyword-only. Needs server v0.53.0+.
             near = await client.recall_nearby(context_id=ctx, lat=35.68, lon=139.76, radius_m=500)
             print(f"Nearby: {[(r['summary'], r['distance_m']) for r in near.get('results', [])]}")
+
+            # Map viewport over the REST list — any bbox bound keeps only located
+            # memories (each item carries .location); bounds are keyword-only and
+            # lon_min > lon_max selects the antimeridian box. Needs server v0.54.0+;
+            # an older server ignores the bbox and returns an unfiltered page.
+            boxed = await client.list_memories(
+                context_id=ctx, lat_min=35.6, lat_max=35.8, lon_min=139.6, lon_max=139.9
+            )
+            print(f"In the Tokyo box: {[(m.summary, m.location) for m in boxed.memories]}")
 
             # update_memory REPLACES details wholesale — there is no deep-merge.
             # Spread the current value, or location is dropped and the memory

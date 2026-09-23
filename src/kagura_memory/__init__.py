@@ -61,8 +61,13 @@ from .models import (
     IngestErrorRecord,
     IngestResult,
     ListTagsResponse,
+    MeasurementAggregate,
+    MeasurementPeriod,
+    MeasurementResult,
+    MeasurementSeries,
     MemberAPIKey,
     MemoryListItem,
+    MemoryListItemLocation,
     MemoryListResponse,
     MemoryStatItem,
     MemoryStatsResponse,
@@ -86,6 +91,7 @@ from .models import (
     RollbackResult,
     RollbackSummary,
     SearchConfig,
+    SeriesBucket,
     ServerFeatures,
     ServerInfo,
     SleepAction,
@@ -133,9 +139,16 @@ __all__ = [
     # Embedding status (v0.6.1)
     "EmbeddingStatus",
     "FailedMemoryInfo",
-    # Memory list (SDK issue #143)
+    # Memory list (SDK issue #143; bbox + location #254, server v0.54.0+)
     "MemoryListItem",
+    "MemoryListItemLocation",
     "MemoryListResponse",
+    # Measurement lane — HOW-MUCH axis (#254, server v0.54.0+)
+    "MeasurementPeriod",
+    "MeasurementAggregate",
+    "MeasurementResult",
+    "MeasurementSeries",
+    "SeriesBucket",
     # Memory stats & duplicates (v0.6.1)
     "MemoryStatItem",
     "MemoryStatsResponse",
