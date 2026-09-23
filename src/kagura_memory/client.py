@@ -803,14 +803,18 @@ class KaguraClient:
 
         Calls the ``record_measurement`` MCP tool. Measurements are a lane
         **separate from memories**: never embedded, never returned by
-        :meth:`recall`, never touched by Sleep consolidation. The lane is
-        append-only — nothing is upserted, so recording the same point twice
-        stores two rows. Store raw numbers here (weight, revenue, reps) and
-        prose such as "hit goal weight" with :meth:`remember`. Read a series
-        back with :meth:`recall_series`.
+        :meth:`recall`, never merged or rewritten by Sleep consolidation. The
+        lane is append-only — nothing is upserted, so recording the same point
+        twice stores two rows, and there is no delete tool. Store raw numbers
+        here (weight, revenue, reps) and prose such as "hit goal weight" with
+        :meth:`remember`. Read a series back with :meth:`recall_series`.
 
         Requires memory-cloud server v0.54.0+ (#1333); older servers return
-        an MCP "tool not found".
+        an MCP "tool not found". Retention: from server v0.55.0 (#1355) an
+        operator can set ``SLEEP_MEASUREMENT_RETENTION_DAYS`` > 0 (or a
+        per-context config row; default 0 = keep forever), and Sleep then
+        **hard-deletes** observations older than that window — ``kagura sleep
+        rollback`` / :meth:`rollback_sleep_run` cannot restore them.
 
         Args:
             context_id: Target context UUID (the series is scoped to it).

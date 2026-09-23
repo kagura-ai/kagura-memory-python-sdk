@@ -1551,9 +1551,10 @@ def measure():
 def measure_record(context_id, metric, value, unit, measured_at):
     """Append one numeric observation to METRIC's series in a context.
 
-    Append-only: recording the same point twice stores two rows. Measurements
-    are never embedded, never returned by recall, and never touched by Sleep;
-    use `kagura remember` for prose such as "hit goal weight".
+    Append-only: recording the same point twice stores two rows, and there is
+    no delete. Measurements are never embedded, never returned by recall, and
+    never merged or rewritten by Sleep consolidation; use `kagura remember` for
+    prose such as "hit goal weight".
 
     \b
     Examples:

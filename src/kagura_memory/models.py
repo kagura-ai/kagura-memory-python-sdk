@@ -352,7 +352,9 @@ class MeasurementResult(BaseModel):
     """One observation as stored by ``record_measurement``.
 
     Measurements are a lane separate from memories: never embedded, never
-    returned by ``recall()``, never touched by Sleep. ``measured_at`` is the
+    returned by ``recall()``, never merged or rewritten by Sleep consolidation
+    (an operator-set retention window can purge old rows; see
+    ``KaguraClient.record_measurement``). ``measured_at`` is the
     observation time the server stored (``Z``-tagged UTC; "now" when the call
     omitted it). ``value`` is exact ``NUMERIC`` at rest and arrives as a float.
     """
