@@ -1870,7 +1870,9 @@ class KaguraClient:
             fetch_factor: Candidate fetch multiplier (1-10, server default 3).
             use_rerank: Enable AI reranking. Since server v0.69.0 this is also
                 what a :meth:`recall` that omits ``use_rerank`` follows.
-            reranker_provider: Reranker provider ("voyage", "cohere", or "ollama").
+            reranker_provider: Reranker provider ("voyage", "cohere", or
+                "self_hosted" for the deployment's keyless local reranker;
+                server v0.42.0+ renamed it from "ollama").
             reranker_model: Reranker model name.
 
         Returns:

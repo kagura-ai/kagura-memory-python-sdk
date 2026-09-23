@@ -355,6 +355,37 @@ def test_context_search_config(mock_client_cls, mock_config):
     assert "success" in result.output
 
 
+@pytest.mark.parametrize("provider", ["voyage", "cohere", "self_hosted"])
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_context_search_config_reranker_choices(mock_client_cls, mock_config, provider):
+    """--reranker accepts the server's provider enum, incl. keyless self_hosted (v0.42.0+)."""
+    mock_config.return_value = {"api_key": "key", "mcp_url": "https://test.com/mcp"}
+
+    mock_client = AsyncMock()
+    mock_client.update_search_config.return_value = {"status": "success"}
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    mock_client_cls.return_value = mock_client
+
+    result = CliRunner().invoke(
+        main, ["context", "search-config", "uuid-1", "--rerank", "--reranker", provider]
+    )
+    assert result.exit_code == 0, result.output
+    kwargs = mock_client.update_search_config.call_args.kwargs
+    assert kwargs["reranker_provider"] == provider
+    assert kwargs["use_rerank"] is True
+
+
+def test_context_search_config_rejects_legacy_ollama_reranker():
+    """The server renamed ollama → self_hosted (v0.42.0) and rejects the old key."""
+    result = CliRunner().invoke(
+        main, ["context", "search-config", "uuid-1", "--reranker", "ollama"]
+    )
+    assert result.exit_code != 0
+    assert "Invalid value for '--reranker'" in result.output
+
+
 def test_context_search_config_requires_option():
     """context search-config should fail without options."""
     runner = CliRunner()

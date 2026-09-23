@@ -910,7 +910,11 @@ def context_update(context_id, display_name, description, summary, usage_guide, 
 @click.option("--bm25", type=click.FloatRange(0.0, 1.0), help="BM25 weight (0.0-1.0)")
 @click.option("--fetch-factor", type=click.IntRange(1, 10), help="Fetch multiplier (1-10)")
 @click.option("--rerank/--no-rerank", default=None, help="Enable/disable reranking")
-@click.option("--reranker", type=click.Choice(["voyage", "cohere"]), help="Reranker provider")
+@click.option(
+    "--reranker",
+    type=click.Choice(["voyage", "cohere", "self_hosted"]),
+    help="Reranker provider (self_hosted: the deployment's keyless local reranker)",
+)
 @click.option("--reranker-model", help="Reranker model name")
 def context_search_config(
     context_id, semantic, bm25, fetch_factor, rerank, reranker, reranker_model
@@ -923,6 +927,7 @@ def context_search_config(
     Examples:
       kagura context search-config CTX_UUID --semantic 0.5 --bm25 0.5
       kagura context search-config CTX_UUID --rerank --reranker voyage
+      kagura context search-config CTX_UUID --rerank --reranker self_hosted
     """
     if all(v is None for v in (semantic, bm25, fetch_factor, rerank, reranker, reranker_model)):
         raise click.ClickException("At least one option is required")
