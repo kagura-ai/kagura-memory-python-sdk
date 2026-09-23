@@ -29,7 +29,11 @@ Options (all optional; the defaults write the same files as before):
   (default) is `<project>/.mcp.json`. `user` serves every project on the machine
   and is the better fit for `--profile` when one profile serves them all; it is
   written through `claude mcp add-json --scope user` (without `claude` on PATH,
-  setup prints that command and stops). Claude Code uses the entry from the
+  setup prints that command and stops). With an API key instead of `--profile`,
+  the user-scope entry sends `Bearer ${KAGURA_MCP_API_KEY}`, which Claude Code
+  fills in when it connects, so the key is never on a command line or in
+  `~/.claude.json`: the user sets `KAGURA_MCP_API_KEY` in the environment that
+  starts Claude Code. Claude Code uses the entry from the
   strongest scope (local > project > user), so setup warns when a stronger one
   would hide the new entry, and with `-y` exits 1 without writing.
 - `--guardrails off|<context-uuid>` (server v0.74.0+) and `--tool-profile <name>`
@@ -49,7 +53,9 @@ Options (all optional; the defaults write the same files as before):
 ## Consume the result
 
 - With `--scope user` the entry lives in `~/.claude.json` (via `claude mcp
-  add-json`), not in `.mcp.json`. A shadowing warning names the scope that wins
+  add-json`), not in `.mcp.json`. For an API key, relay setup's
+  `KAGURA_MCP_API_KEY` note, and never print or ask for the key yourself: the
+  user sets the variable. A shadowing warning names the scope that wins
   and the `claude mcp remove` command for it: relay it, and never remove an
   entry on the user's behalf.
 - Relay which `.mcp.json` was written. A "kagura-mcp not on PATH" message is a

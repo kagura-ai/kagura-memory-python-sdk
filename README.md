@@ -697,6 +697,18 @@ serves all your projects, put it at Claude Code's **user** scope:
 kagura setup claude --profile default --scope user   # via `claude mcp add-json --scope user`
 ```
 
+With an API key instead of `--profile`, the user-scope entry does not hold the
+key: it sends `Authorization: Bearer ${KAGURA_MCP_API_KEY}`, which Claude Code
+fills in from its own environment when it connects. The key is never on the
+`claude mcp add-json` command line, where any local user could read it in the
+process list, and never in `~/.claude.json`. Set the variable in the environment
+that starts Claude Code, e.g. `export KAGURA_MCP_API_KEY=kagura_xxx` in your shell
+profile. Setup says whether the current shell has it, and `kagura doctor` warns
+when it is unset. It is a separate variable from `KAGURA_API_KEY`, which the SDK
+ranks above `.kagura.json` and OAuth profiles for every `kagura` command. (The
+`--profile` entry needs no key at all. `--scope project` still writes the key into
+`.mcp.json`, so keep that file out of version control.)
+
 `--scope project` (the default) writes `<project>/.mcp.json`: that is the scope
 Claude Code shares through version control, and it asks you to approve a new
 project server before first use. `--scope user` writes through the `claude`
