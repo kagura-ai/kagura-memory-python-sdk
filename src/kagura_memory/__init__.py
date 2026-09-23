@@ -20,6 +20,7 @@ from .exceptions import (
 )
 from .files_client import FilesClient
 from .ingest import FileIngestor
+from .memory_client import MemoryClient
 from .models import (
     Agent,
     AgentBinding,
@@ -29,6 +30,8 @@ from .models import (
     AgentBootstrapCorrelation,
     AgentBootstrapResponse,
     ContextDetail,
+    ContextGuardrailItem,
+    ContextGuardrails,
     ContextInfo,
     ContextStats,
     CostBreakdown,
@@ -43,6 +46,10 @@ from .models import (
     FieldDefinition,
     FileListResponse,
     FileObject,
+    GuardrailDigest,
+    GuardrailDigestTarget,
+    GuardrailItem,
+    GuardrailSet,
     IndexerJobStatus,
     IndexerSkippedReason,
     IndexerState,
@@ -83,6 +90,7 @@ from .models import (
     SleepReportDetail,
     SleepRunStatus,
     TagInfo,
+    ToolTrigger,
     UsageInfo,
     UsageQuota,
     UsageQuotaLimitOnly,
@@ -102,6 +110,7 @@ __all__ = [
     "FilesClient",
     "WorkspaceClient",
     "AgentsClient",
+    "MemoryClient",
     "MIN_SERVER_VERSION",
     # Embedding models
     "EmbeddingModel",
@@ -177,6 +186,14 @@ __all__ = [
     "AgentBootstrapComponentName",
     "AgentBootstrapCorrelation",
     "AgentBootstrapResponse",
+    # Tool guardrails (#253, server v0.74.0+)
+    "ToolTrigger",
+    "GuardrailItem",
+    "GuardrailSet",
+    "GuardrailDigest",
+    "GuardrailDigestTarget",
+    "ContextGuardrails",
+    "ContextGuardrailItem",
     # File ingestion (Issue #80)
     "FileIngestor",
     "IngestResult",

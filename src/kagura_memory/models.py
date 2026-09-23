@@ -1,9 +1,11 @@
 """Pydantic models for Kagura Memory SDK."""
 
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any, Literal, TypeVar
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+
+_M = TypeVar("_M", bound=BaseModel)
 
 # ---------------------------------------------------------------------------
 # Embedding model metadata
@@ -115,14 +117,78 @@ class ContextStats(BaseModel):
     details: dict[str, Any] | None = None
 
 
+def _validate_or_none(model: type[_M], value: Any) -> _M | None:
+    """Parse an optional, fail-open server block, degrading to ``None``.
+
+    For blocks the server itself serves fail-open (a guardrail block, a
+    guardrail's ``tool_trigger``): a shape the SDK cannot read is "not
+    usable", never a failed read of the enclosing response.
+    """
+    if value is None or isinstance(value, model):
+        return value
+    try:
+        return model.model_validate(value)
+    except ValidationError:
+        return None
+
+
+class ContextGuardrailItem(BaseModel):
+    """One entry of :class:`ContextGuardrails` — L1 only, summary cut server-side."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    memory_id: str
+    summary: str
+    importance: float | None = None
+    authored_by_caller: bool | None = None
+    source_type: str | None = None
+
+
+class ContextGuardrails(BaseModel):
+    """The ``guardrails`` block of ``get_context_info`` (memory-cloud v0.74.0+, #1621).
+
+    The context's trusted-only, binding-filtered **tool-triggered** set for
+    MCP clients without tool hooks: at most 10 entries with summaries cut to
+    300 characters, and ≤ 4,000 characters of JSON in total. ``truncated``
+    reports that entries were left out; ``total_available`` is the full set
+    size. ``tool_triggered_version`` changes whenever the served
+    tool-triggered set changes (the same value as the digest header and the
+    export block's begin marker); it is NOT ``GuardrailSet.version``, which
+    also covers the pinned list. The full set, with patterns, is
+    :meth:`KaguraClient.load_guardrails`.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    items: list[ContextGuardrailItem] = Field(default_factory=list)
+    total_available: int = 0
+    truncated: bool = False
+    tool_triggered_version: str | None = None
+
+
 class ContextInfo(BaseModel):
-    """Full response from get_context_info."""
+    """Full response from get_context_info.
+
+    ``guardrails`` (memory-cloud v0.74.0+) has three states: the key is
+    **absent** when the MCP endpoint URL carries ``?guardrails=off`` (a client
+    whose hooks already deliver guardrails), it is ``null`` when the server's
+    read failed, and otherwise it is a :class:`ContextGuardrails`. Both of the
+    first two read as ``None``; tell them apart with
+    ``"guardrails" in info.model_fields_set``. A block the SDK cannot parse
+    also reads as ``None`` rather than failing the call.
+    """
 
     status: str = "success"
     context: ContextDetail
     workspace: WorkspaceInfo | None = None
     stats: ContextStats | None = None
     instructions: str | None = None
+    guardrails: ContextGuardrails | None = None
+
+    @field_validator("guardrails", mode="before")
+    @classmethod
+    def _unreadable_guardrails_is_none(cls, value: Any) -> ContextGuardrails | None:
+        return _validate_or_none(ContextGuardrails, value)
 
 
 # ---------------------------------------------------------------------------
@@ -1192,3 +1258,173 @@ class AgentBinding(BaseModel):
     created_by: str
     created_at: datetime
     updated_at: datetime
+
+
+# ---------------------------------------------------------------------------
+# Tool guardrails (#253, server v0.74.0+, memory-cloud #1619/#1621)
+# ---------------------------------------------------------------------------
+
+
+class ToolTrigger(BaseModel):
+    """``details.tool_trigger`` — marks a memory as a tool guardrail.
+
+    A client-side hook injects the memory's summary into the model's context
+    when a tool call matches: ``tool`` is a regex **fully** matched against
+    the tool name (``"Bash|PowerShell"``, ``"Edit|Write"``,
+    ``"mcp__.*__remember"``); ``match`` is an optional regex **searched** in
+    the call's subject (the command, file path or argument JSON for
+    ``on="pre"``; the error or result text for ``on="result"``). ``on`` is
+    ``"pre"`` (default) or ``"result"``; ``action`` is ``"inform"`` (default)
+    or ``"block"`` (deny the call, with the summary as the reason).
+
+    The server is the validator and the SDK does not re-implement it: both
+    patterns must fit a safe-regex subset shared by Python and JavaScript
+    (``tool`` ≤ 128 characters, ``match`` ≤ 200), and ``action="block"``
+    needs ``on="pre"`` plus a ``match`` naming at least one literal that
+    cannot match the empty string. A rejected trigger raises
+    :class:`~kagura_memory.exceptions.KaguraError` whose message carries a
+    stable code (``invalid details.tool_trigger: <code>: ...``). Writing one
+    needs context **editor** or above and a user credential (an agent-bound
+    key is refused with ``tool_trigger_requires_user_credential``).
+
+    ``on`` / ``action`` are typed ``str`` and unknown keys are ignored so a
+    read never breaks on a value a newer server adds — a hook skips a trigger
+    whose ``on`` / ``action`` it does not know.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    tool: str
+    on: str = "pre"
+    match: str | None = None
+    action: str = "inform"
+
+
+def _details_with_tool_trigger(
+    details: dict[str, Any] | None,
+    tool_trigger: ToolTrigger | dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Merge a ``tool_trigger=`` argument into the ``details`` payload.
+
+    Shared by ``remember`` and ``update_memory``. Supplying the trigger both
+    ways is rejected rather than silently resolved (the ``--location`` vs
+    ``details["location"]`` rule), so neither value is quietly dropped. A
+    :class:`ToolTrigger` is dumped without ``None`` fields — the server
+    rejects ``"match": null``; a dict is forwarded verbatim for the server to
+    validate. The caller's ``details`` dict is never mutated.
+
+    Raises:
+        ValueError: ``tool_trigger`` is given and ``details`` already has a
+            ``"tool_trigger"`` key.
+    """
+    if tool_trigger is None:
+        return details
+    if details is not None and "tool_trigger" in details:
+        raise ValueError(
+            "Pass the guardrail either as tool_trigger=... or as details['tool_trigger'], not both"
+        )
+    trigger = (
+        tool_trigger.model_dump(exclude_none=True)
+        if isinstance(tool_trigger, ToolTrigger)
+        else tool_trigger
+    )
+    return {**(details or {}), "tool_trigger": trigger}
+
+
+class GuardrailItem(BaseModel):
+    """One entry of a :class:`GuardrailSet` — the same shape on both lanes.
+
+    ``summary`` (L1) is the text a hook injects; ``context_summary`` (L2) is
+    present on pinned items only. ``tool_trigger`` is the normalized trigger
+    on tool-triggered items and ``None`` on pinned ones; a legacy value the
+    SDK cannot read as a trigger also reads as ``None`` (skip it). Provenance:
+    ``source_type`` and ``authored_by_caller`` (``None`` = unknown) let a
+    client label a guardrail someone else wrote.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    memory_id: str
+    summary: str
+    context_summary: str | None = None
+    type: str | None = None
+    importance: float
+    delivery_mode: str | None = None
+    tool_trigger: ToolTrigger | None = None
+    source_type: str | None = None
+    authored_by_caller: bool | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+    @field_validator("tool_trigger", mode="before")
+    @classmethod
+    def _unreadable_trigger_is_none(cls, value: Any) -> ToolTrigger | None:
+        return _validate_or_none(ToolTrigger, value)
+
+
+class GuardrailSet(BaseModel):
+    """Response of ``load_guardrails`` — MCP tool and ``POST /api/v1/memory/guardrails``.
+
+    Two independently capped lanes, each ordered ``importance DESC,
+    created_at ASC, id ASC`` (keep the order; do not re-sort): ``pinned``
+    (``delivery_mode="always"``, bounded by the server's ``pinned_cap``) and
+    ``tool_triggered`` (memories carrying ``details.tool_trigger``, bounded by
+    ``cap``). Both are trusted-tier only — connector-ingested memories are
+    never served. A memory that is both pinned and tool-triggered appears in
+    both lists; dedupe by ``memory_id`` before injecting.
+
+    **Never a silent truncation**: ``pinned_truncated`` /
+    ``tool_triggered_truncated`` say which lane is incomplete (``truncated``
+    is either-lane, ``total_available`` the sum of the per-lane totals).
+    These fields are required, so a response without them fails to parse
+    instead of reading as complete. ``format`` is the shared cache/payload
+    format version; ``version`` is an opaque hash of the served set (equal
+    means unchanged). ``context_id`` / ``context_name`` are filled on the MCP
+    surface only.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    status: str = "success"
+    format: int
+    version: str
+    pinned: list[GuardrailItem]
+    tool_triggered: list[GuardrailItem]
+    total_available: int
+    truncated: bool
+    cap: int
+    pinned_cap: int
+    pinned_total_available: int
+    pinned_truncated: bool
+    tool_triggered_total_available: int
+    tool_triggered_truncated: bool
+    context_id: str | None = None
+    context_name: str | None = None
+
+
+GuardrailDigestTarget = Literal["export", "instructions"]
+"""Valid ``target`` values for ``GET /api/v1/memory/guardrails/digest``."""
+
+
+class GuardrailDigest(BaseModel):
+    """A rendered guardrail digest (``GET /api/v1/memory/guardrails/digest``).
+
+    ``target="export"``: ``text`` is the ``AGENTS.md`` block (``text/markdown``)
+    between a ``<!-- kagura-memory:guardrails begin context=<uuid>
+    tool_triggered_version=<hash> -->`` line and an end marker line, or ``""``
+    when the context has no tool guardrails (nothing to write — remove an
+    earlier block). ``target="instructions"``: ``text`` is the exact MCP
+    server ``instructions`` string this credential would receive.
+
+    ``tool_triggered_version`` is the ``X-Kagura-Guardrails-Tool-Triggered-Version``
+    response header — compare it with a stored value to detect a change
+    without parsing ``text``.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    context_id: str
+    target: str
+    text: str
+    tool_triggered_version: str | None = None
+    content_type: str | None = None
