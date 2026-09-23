@@ -6,7 +6,7 @@ import re
 import uuid
 from importlib.metadata import version as _pkg_version
 from typing import Any, NoReturn, TypeVar
-from urllib.parse import unquote_plus, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, unquote_plus, urlencode, urlsplit, urlunsplit
 
 import httpx
 from pydantic import BaseModel, ValidationError
@@ -80,6 +80,22 @@ def mcp_url_with_query(
         if segment and unquote_plus(segment.split("=", 1)[0]) not in updates
     ]
     return urlunsplit(parts._replace(query="&".join([*kept, urlencode(updates)])))
+
+
+def mcp_url_has_tools_allowlist(mcp_url: str) -> bool:
+    """True when ``mcp_url`` carries memory-cloud's ``?tools=`` allowlist.
+
+    The server applies a ``tools`` allowlist instead of ``profile``, so a tool
+    profile set on such a URL has no effect.
+
+    Args:
+        mcp_url: The MCP endpoint URL.
+
+    Returns:
+        Whether its query has a ``tools`` parameter.
+    """
+    query = urlsplit(mcp_url).query
+    return any(key == "tools" for key, _ in parse_qsl(query, keep_blank_values=True))
 
 
 def normalize_guardrails(value: str) -> str:

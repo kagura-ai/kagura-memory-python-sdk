@@ -779,6 +779,18 @@ async def test_amain_query_flags_keep_the_server_query_and_replace_guardrails(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("query", ["?tools=recall", ""], ids=["tools-allowlist", "no-query"])
+async def test_amain_warns_when_a_tools_allowlist_overrides_the_tool_profile(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, capsys, query: str
+):
+    """memory-cloud applies ``tools`` instead of ``profile``: --tool-profile would do nothing."""
+    server = f"https://test.example.com/mcp{query}"
+    await _posted_url(monkeypatch, tmp_path, ["--server", server, "--tool-profile", "core"])
+    warned = "?tools= allowlist" in capsys.readouterr().err
+    assert warned == bool(query)
+
+
+@pytest.mark.asyncio
 async def test_amain_guardrails_uuid_is_canonicalized(monkeypatch: pytest.MonkeyPatch, tmp_path):
     url = await _posted_url(monkeypatch, tmp_path, ["--guardrails", _CTX_UUID.upper()])
     assert url == f"https://test.example.com/mcp?guardrails={_CTX_UUID}"

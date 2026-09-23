@@ -60,6 +60,7 @@ from ._http import (
     jsonrpc_error_body,
     mcp_session_expired,
     mcp_session_header,
+    mcp_url_has_tools_allowlist,
     mcp_url_with_query,
     normalize_guardrails,
     validate_https_url,
@@ -283,11 +284,11 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="off|CONTEXT_ID",
         help=(
-            "Set ?guardrails= on the upstream URL, replacing any earlier value. "
-            "'off' stops the server's guardrail digest AND removes the guardrails "
-            "block from get_context_info: use it only when client hooks (e.g. the "
-            "kagura-memory plugin's) deliver guardrails. A context UUID selects "
-            "that context's digest."
+            "Set ?guardrails= on the upstream URL (server v0.74.0+), replacing any "
+            "earlier value. 'off' stops the server's guardrail digest AND removes the "
+            "guardrails block from get_context_info: use it only when client hooks "
+            "(e.g. the kagura-memory plugin's) deliver guardrails. A context UUID "
+            "selects that context's digest."
         ),
     )
     parser.add_argument(
@@ -296,8 +297,9 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="NAME",
         help=(
-            "Set ?profile= on the upstream URL to limit tools/list (e.g. core); "
-            "the server rejects an unknown profile."
+            "Set ?profile= on the upstream URL to limit tools/list (server v0.73.0+). "
+            "The server knows 'full' and 'core' (case-sensitive) and fails tools/list "
+            "for any other name. A ?tools= allowlist already on the URL wins over it."
         ),
     )
     return parser
@@ -316,10 +318,15 @@ async def _amain(argv: list[str] | None = None) -> int:
         )
         return 1
 
+    base_url = args.server or state.credentials.mcp_url
+    if args.tool_profile is not None and mcp_url_has_tools_allowlist(base_url):
+        print(
+            "kagura-mcp: warning: the upstream URL has a ?tools= allowlist, which the "
+            "server applies instead of --tool-profile.",
+            file=sys.stderr,
+        )
     mcp_url = mcp_url_with_query(
-        args.server or state.credentials.mcp_url,
-        guardrails=args.guardrails,
-        tool_profile=args.tool_profile,
+        base_url, guardrails=args.guardrails, tool_profile=args.tool_profile
     )
     # Enforce HTTPS (localhost allowed for dev), matching KaguraClient.
     validate_https_url(mcp_url, label="MCP URL")
