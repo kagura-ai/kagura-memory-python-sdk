@@ -1458,6 +1458,19 @@ def test_extract_existing_file_returns_none_when_body_is_not_dict():
     assert _extract_existing_file(err) is None
 
 
+def test_extract_existing_file_drift_raises_kagura_response_error():
+    """An ``existing_file`` the SDK cannot parse is a KaguraResponseError (#250)."""
+    from kagura_memory.exceptions import KaguraResponseError
+    from kagura_memory.files_client import _extract_existing_file
+
+    resp = _error_response(409)
+    resp.json.return_value = {"existing_file": {"id": "f-1"}}
+    err = _make_dedup_error(resp)
+    with pytest.raises(KaguraResponseError) as exc_info:
+        _extract_existing_file(err)
+    assert exc_info.value.operation == "FilesClient.upload"
+
+
 # ============================================================================
 # extract_detail (_http.py) — non-dict body fallthrough
 # ============================================================================

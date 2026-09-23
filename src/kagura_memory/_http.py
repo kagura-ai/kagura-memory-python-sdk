@@ -5,19 +5,27 @@ from __future__ import annotations
 import re
 import uuid
 from importlib.metadata import version as _pkg_version
-from typing import Any, NoReturn
+from typing import Any, NoReturn, TypeVar
 
 import httpx
+from pydantic import BaseModel, ValidationError
 
 from .exceptions import (
     KaguraAuthError,
     KaguraConnectionError,
     KaguraRateLimitError,
+    KaguraResponseError,
     _exc_message,
 )
 
 SDK_VERSION: str = _pkg_version("kagura-memory")
 """Package version string, shared across client modules."""
+
+_M = TypeVar("_M", bound=BaseModel)
+
+_MAX_LISTED_RESPONSE_ERRORS = 3
+
+_UPGRADE_HINT = "The server may be newer than this SDK; upgrading kagura-memory may help."
 
 
 def base_url_from_mcp(mcp_url: str) -> str:
@@ -210,8 +218,75 @@ def raise_for_kagura_status(e: httpx.HTTPStatusError) -> NoReturn:
     raise KaguraConnectionError(f"HTTP {status}: {detail}") from e
 
 
+def parse_response(model: type[_M], data: Any, *, operation: str) -> _M:
+    """Validate a server response payload into ``model`` (#250).
+
+    Drift — a payload the model rejects, usually because the server is
+    newer than the SDK — raises :class:`KaguraResponseError` naming
+    ``operation`` and the failing fields instead of letting a raw
+    ``pydantic.ValidationError`` escape the client. The message leaves
+    payload values out (they can be secret ciphertext or key plaintext);
+    the full error stays on ``__cause__``, whose own text does include
+    them.
+
+    Response side only: request models built from caller arguments must
+    keep raising ``ValidationError``, which reports a caller mistake.
+
+    Args:
+        model: Pydantic model the payload should match.
+        data: Decoded JSON payload. Pass a missing or ``null`` envelope
+            key through as ``None`` so it fails here too.
+        operation: Call being parsed, used as the message prefix and the
+            exception's ``operation`` attribute.
+
+    Raises:
+        KaguraResponseError: If ``data`` does not validate against ``model``.
+    """
+    try:
+        return model.model_validate(data)
+    except ValidationError as exc:
+        errors = exc.errors(include_url=False, include_context=False, include_input=False)
+        listed = _format_validation_errors(errors[:_MAX_LISTED_RESPONSE_ERRORS])
+        if len(errors) > _MAX_LISTED_RESPONSE_ERRORS:
+            listed += f" (+{len(errors) - _MAX_LISTED_RESPONSE_ERRORS} more)"
+        problem = f"for {model.__name__} ({listed})"
+        raise KaguraResponseError(
+            f"{operation}: unexpected server response {problem}. {_UPGRADE_HINT}",
+            operation=operation,
+        ) from exc
+
+
+def parse_response_list(model: type[_M], data: Any, *, operation: str) -> list[_M]:
+    """Validate a JSON array of ``model`` rows, each as :func:`parse_response` does.
+
+    ``data`` that is not a list — its envelope key was missing, ``null`` or
+    another type — raises :class:`KaguraResponseError` instead of a
+    ``TypeError`` on iteration.
+    """
+    if not isinstance(data, list):
+        raise response_shape_error(
+            operation, f"expected a list of {model.__name__}, got {type(data).__name__}"
+        )
+    return [parse_response(model, row, operation=operation) for row in data]
+
+
+def response_shape_error(operation: str, problem: str) -> KaguraResponseError:
+    """Build the :class:`KaguraResponseError` for a mis-shaped 2xx envelope.
+
+    For drift caught before any model sees it (a list field that is not a
+    list), so nothing is chained. ``problem`` describes the shape only,
+    never payload values.
+    """
+    return KaguraResponseError(
+        f"{operation}: unexpected server response ({problem}). {_UPGRADE_HINT}",
+        operation=operation,
+    )
+
+
 def _format_validation_errors(errors: list[Any]) -> str:
     # Silent-skip malformed entries so a single bad entry doesn't blank the line.
+    # ``loc`` is a list on the wire (FastAPI) and a tuple from pydantic's own
+    # ``ValidationError.errors()`` (parse_response).
     parts: list[str] = []
     for entry in errors:
         if not isinstance(entry, dict):
@@ -220,7 +295,7 @@ def _format_validation_errors(errors: list[Any]) -> str:
         if not isinstance(msg, str) or not msg:
             continue
         loc = entry.get("loc")
-        if isinstance(loc, list) and loc:
+        if isinstance(loc, (list, tuple)) and loc:
             loc_path = ".".join(str(part) for part in loc)
             parts.append(f"{loc_path}: {msg}")
         else:

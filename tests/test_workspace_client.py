@@ -16,6 +16,7 @@ from kagura_memory.exceptions import (
     KaguraConnectionError,
     KaguraNotFoundError,
     KaguraQuotaError,
+    KaguraResponseError,
 )
 from kagura_memory.models import WorkspaceInvitation, WorkspaceMember
 from kagura_memory.workspace_client import (
@@ -591,15 +592,14 @@ async def test_destructive_ids_require_strict_int():
 
 @pytest.mark.asyncio
 async def test_mint_salvages_plaintext_on_shape_mismatch():
-    from kagura_memory.exceptions import KaguraError
-
     def handler(request: httpx.Request) -> httpx.Response:
         # Server drift: required fields renamed, but the one-time secret is there
         return httpx.Response(201, json={"plaintext_key": "kagura_salvaged_secret"})
 
     async with make_client(handler) as c:
-        with pytest.raises(KaguraError, match="kagura_salvaged_secret"):
+        with pytest.raises(KaguraResponseError, match="kagura_salvaged_secret") as exc_info:
             await c.mint_member_key(WS, "u2", "ci-bot", 30)
+    assert exc_info.value.operation == "WorkspaceClient.mint_member_key"
 
 
 @pytest.mark.asyncio
@@ -612,8 +612,9 @@ async def test_non_json_200_maps_to_kagura_error():
 @pytest.mark.asyncio
 async def test_list_endpoint_rejects_non_list_body():
     async with make_client(lambda r: httpx.Response(200, json={"oops": True})) as c:
-        with pytest.raises(KaguraConnectionError, match="expected a JSON array"):
+        with pytest.raises(KaguraResponseError, match="expected a JSON array") as exc_info:
             await c.list_invitations(WS)
+    assert exc_info.value.operation == "WorkspaceClient.list_invitations"
 
 
 @pytest.mark.asyncio
@@ -689,17 +690,16 @@ def test_from_resolved_auth_oauth_branch():
 
 @pytest.mark.asyncio
 async def test_mint_shape_mismatch_without_plaintext_points_at_recovery():
-    from kagura_memory.exceptions import KaguraError
-
     async with make_client(lambda r: httpx.Response(201, json={"unexpected": True})) as c:
-        with pytest.raises(KaguraError, match="list-keys"):
+        with pytest.raises(KaguraResponseError, match="list-keys") as exc_info:
             await c.mint_member_key(WS, "u2", "ci-bot", 30)
+    assert exc_info.value.operation == "WorkspaceClient.mint_member_key"
 
 
 @pytest.mark.asyncio
 async def test_list_member_keys_rejects_non_dict_body():
     async with make_client(lambda r: httpx.Response(200, json=[1, 2])) as c:
-        with pytest.raises(KaguraConnectionError, match="api_keys"):
+        with pytest.raises(KaguraResponseError, match="api_keys"):
             await c.list_member_keys(WS, "u2")
 
 
@@ -743,8 +743,8 @@ async def test_list_member_keys_rejects_null_or_non_list_api_keys_field():
     async with make_client(
         lambda r: httpx.Response(200, json={"api_keys": None, "target_user_role": "member"})
     ) as c:
-        with pytest.raises(KaguraConnectionError, match="api_keys"):
+        with pytest.raises(KaguraResponseError, match="api_keys"):
             await c.list_member_keys(WS, "u2")
     async with make_client(lambda r: httpx.Response(200, json={"api_keys": {"oops": 1}})) as c:
-        with pytest.raises(KaguraConnectionError, match="api_keys"):
+        with pytest.raises(KaguraResponseError, match="api_keys"):
             await c.list_member_keys(WS, "u2")

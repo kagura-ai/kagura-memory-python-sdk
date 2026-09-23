@@ -15,6 +15,8 @@ from ._http import (
     base_url_from_mcp,
     mcp_session_expired,
     mcp_session_header,
+    parse_response,
+    parse_response_list,
     raise_for_kagura_status,
     validate_https_url,
     validate_lat_lon,
@@ -79,7 +81,14 @@ class KaguraClient:
     returning them as data (issue #180): a missing context/memory/report
     raises :class:`KaguraNotFoundError`, and any other domain error raises
     :class:`KaguraError`. Callers should use ``try/except`` rather than
-    inspecting ``result["status"]``.
+    inspecting ``result["status"]``. On the tool methods that return a
+    model, a success payload that does not match it (a server newer than
+    the SDK) raises :class:`KaguraResponseError` naming the tool (#250).
+    The REST-backed methods (``get_server_info``, ``check_server_version``,
+    ``get_embedding_status``, ``get_memory_stats``, ``find_duplicates``,
+    ``list_memories``, ``list_embedding_models``) still raise
+    :class:`KaguraConnectionError` ("Invalid response format") on drift;
+    catch :class:`KaguraError` to cover both.
     """
 
     def __init__(
@@ -896,7 +905,7 @@ class KaguraClient:
             ),
         }
         result = await self._call_tool_checked("get_agent_bootstrap", arguments)
-        return AgentBootstrapResponse.model_validate(result)
+        return parse_response(AgentBootstrapResponse, result, operation="get_agent_bootstrap")
 
     async def register_agent(
         self,
@@ -943,7 +952,7 @@ class KaguraClient:
         if version is not None:
             arguments["version"] = version
         result = await self._call_tool_checked("register_agent", arguments)
-        return Agent.model_validate(result["agent"])
+        return parse_response(Agent, result.get("agent"), operation="register_agent")
 
     async def get_agent(self, agent_id: str) -> Agent:
         """Fetch one registered agent by id (owner/admin only).
@@ -959,7 +968,7 @@ class KaguraClient:
             KaguraNotFoundError: Agent not found (uniform 404).
         """
         result = await self._call_tool_checked("get_agent", {"agent_id": agent_id})
-        return Agent.model_validate(result["agent"])
+        return parse_response(Agent, result.get("agent"), operation="get_agent")
 
     async def list_agents(self) -> list[Agent]:
         """List the workspace's registered agents, newest first (owner/admin only).
@@ -968,7 +977,7 @@ class KaguraClient:
             List of :class:`Agent` rows in the active workspace.
         """
         result = await self._call_tool_checked("list_agents", {})
-        return [Agent.model_validate(a) for a in result.get("agents", [])]
+        return parse_response_list(Agent, result.get("agents", []), operation="list_agents")
 
     async def update_agent(
         self,
@@ -1028,7 +1037,7 @@ class KaguraClient:
         if not changes:
             raise ValueError("update_agent requires at least one field to update")
         result = await self._call_tool_checked("update_agent", {"agent_id": agent_id, **changes})
-        return Agent.model_validate(result["agent"])
+        return parse_response(Agent, result.get("agent"), operation="update_agent")
 
     async def delete_agent(self, agent_id: str) -> bool:
         """Hard-delete an Agent Registry row (owner/admin only).
@@ -1097,7 +1106,7 @@ class KaguraClient:
             ),
         }
         result = await self._call_tool_checked("bind_agent_context", arguments)
-        return AgentBinding.model_validate(result["binding"])
+        return parse_response(AgentBinding, result.get("binding"), operation="bind_agent_context")
 
     async def list_agent_bindings(self, agent_id: str) -> list[AgentBinding]:
         """List an agent's context bindings (owner/admin only).
@@ -1112,7 +1121,9 @@ class KaguraClient:
             KaguraNotFoundError: Agent not found.
         """
         result = await self._call_tool_checked("list_agent_bindings", {"agent_id": agent_id})
-        return [AgentBinding.model_validate(b) for b in result.get("bindings", [])]
+        return parse_response_list(
+            AgentBinding, result.get("bindings", []), operation="list_agent_bindings"
+        )
 
     async def update_agent_binding(
         self,
@@ -1157,7 +1168,7 @@ class KaguraClient:
             "update_agent_binding",
             {"agent_id": agent_id, "binding_id": binding_id, **changes},
         )
-        return AgentBinding.model_validate(result["binding"])
+        return parse_response(AgentBinding, result.get("binding"), operation="update_agent_binding")
 
     async def unbind_agent_context(self, agent_id: str, binding_id: str) -> bool:
         """Delete a binding — the agent loses that context (owner/admin only).
@@ -1265,7 +1276,7 @@ class KaguraClient:
         if with_tags:
             arguments["with_tags"] = with_tags
         result = await self._call_tool_checked("list_tags", arguments)
-        return ListTagsResponse.model_validate(result)
+        return parse_response(ListTagsResponse, result, operation="list_tags")
 
     async def get_tool_definitions(self) -> list[dict[str, Any]]:
         """
@@ -1681,7 +1692,7 @@ class KaguraClient:
         if limit is not None:
             arguments["limit"] = limit
         result = await self._call_tool_checked("list_edges", arguments)
-        return [Edge.model_validate(e) for e in result.get("edges", [])]
+        return parse_response_list(Edge, result.get("edges", []), operation="list_edges")
 
     async def create_edge(
         self,
@@ -1735,7 +1746,7 @@ class KaguraClient:
             "confidence": confidence,
         }
         result = await self._call_tool_checked("create_edge", arguments)
-        return Edge.model_validate(result.get("edge", result))
+        return parse_response(Edge, result.get("edge", result), operation="create_edge")
 
     async def update_edge(
         self,
@@ -1775,7 +1786,7 @@ class KaguraClient:
         if edge_type is not None:
             arguments["edge_type"] = edge_type
         result = await self._call_tool_checked("update_edge", arguments)
-        return Edge.model_validate(result.get("edge", result))
+        return parse_response(Edge, result.get("edge", result), operation="update_edge")
 
     async def delete_edge(
         self,
@@ -1819,7 +1830,7 @@ class KaguraClient:
             UsageInfo with plan, memories, contexts, members, and MCP call limits.
         """
         result = await self._call_tool_checked("get_usage", {})
-        return UsageInfo.model_validate(result)
+        return parse_response(UsageInfo, result, operation="get_usage")
 
     async def get_context_info(
         self,
@@ -1840,7 +1851,7 @@ class KaguraClient:
             "include_details": include_details,
         }
         result = await self._call_tool_checked("get_context_info", arguments)
-        return ContextInfo.model_validate(result)
+        return parse_response(ContextInfo, result, operation="get_context_info")
 
     async def _get_context_info_cached(self, context_id: str) -> ContextInfo | None:
         """Best-effort, cached :meth:`get_context_info` for ingest steering.
@@ -1882,11 +1893,11 @@ class KaguraClient:
             info: ContextInfo | None = await self.get_context_info(context_id)
         except Exception as e:  # noqa: BLE001
             # Best-effort contract: ingest must never crash because steering
-            # could not be fetched. Catch broadly — not just KaguraError but
-            # also a pydantic ValidationError from get_context_info's
-            # model_validate on a malformed/changed server payload — log a
-            # warning, and cache None so we degrade to steering=None without
-            # re-fetching. (python.md permits a broad catch that logs.)
+            # could not be fetched. Catch broadly — KaguraError (including the
+            # KaguraResponseError a malformed/changed server payload raises)
+            # and anything unexpected — log a warning, and cache None so we
+            # degrade to steering=None without re-fetching. (python.md
+            # permits a broad catch that logs.)
             logging.getLogger("kagura_memory").warning(
                 "get_context_info failed for context %s; ingest steering disabled: %s",
                 context_id,
@@ -2153,6 +2164,18 @@ class KaguraClient:
     ) -> list[SleepReport]:
         """List recent Sleep Maintenance runs for a context.
 
+        Each run's ``status`` is one of :data:`SleepRunStatus` —
+        ``running``, ``completed``, ``degraded``, ``failed``, ``cancelled``
+        or ``rolled_back`` — or a newer value passed through as-is.
+        ``degraded`` means the run finished, but some judge-LLM calls
+        failed (server v0.43.0+; ``llm_call_failures`` gives the count) or,
+        since server v0.46.0, a phase failed; its changes were applied and
+        can be rolled back. ``failed`` means the run errored — every
+        judge-LLM call failed or the run raised — or a later rollback of it
+        only partly succeeded. These summaries do not carry the reason:
+        :meth:`get_sleep_report` returns it as ``error_message``
+        (e.g. ``phase_failure: <phases>`` on a degraded run).
+
         Args:
             context_id: Context UUID.
             limit: Maximum number of runs to return (server clamps to 1-50,
@@ -2164,13 +2187,16 @@ class KaguraClient:
 
         Raises:
             KaguraNotFoundError: Context not found.
+            KaguraResponseError: A run did not match the SDK's model.
             KaguraError: Other server-side error.
         """
         result = await self._call_tool_checked(
             "get_sleep_history",
             {"context_id": context_id, "limit": limit},
         )
-        return [SleepReport.model_validate(r) for r in result["reports"]]
+        return parse_response_list(
+            SleepReport, result.get("reports"), operation="get_sleep_history"
+        )
 
     async def get_sleep_report(
         self,
@@ -2190,6 +2216,7 @@ class KaguraClient:
 
         Raises:
             KaguraNotFoundError: Report not found or not owned by caller.
+            KaguraResponseError: The report did not match the SDK's model.
             KaguraError: Other server-side error.
         """
         result = await self._call_tool_checked(
@@ -2199,24 +2226,26 @@ class KaguraClient:
         # The MCP tool wraps the report fields under a "report" key;
         # flatten so SleepReportDetail (a SleepReport subclass) validates
         # naturally without forcing callers through an extra ``.report.``
-        # accessor.
-        return SleepReportDetail.model_validate(
-            {
-                **result["report"],
-                "actions": result["actions"],
-                "action_count": result["action_count"],
+        # accessor. A missing or non-object "report" is passed through
+        # unflattened so it fails validation like any other drift.
+        report = result.get("report")
+        if isinstance(report, dict):
+            report = {
+                **report,
+                **{key: result[key] for key in ("actions", "action_count") if key in result},
             }
-        )
+        return parse_response(SleepReportDetail, report, operation="get_sleep_report")
 
     async def rollback_sleep_run(
         self,
         context_id: str,
         report_id: str,
     ) -> RollbackResult:
-        """Reverse the effects of a completed Sleep Maintenance run.
+        """Reverse the effects of a completed (or degraded) Sleep Maintenance run.
 
         Reverses edge creation, memory merges, importance updates, scope
-        promotions, and archives. The server processes actions in reverse
+        promotions, and archives. Only ``completed`` and ``degraded`` runs
+        can be rolled back. The server processes actions in reverse
         order with per-step commits — a 5xx or partial failure means SOME
         actions may have been reversed before the error surfaced.
 
@@ -2237,7 +2266,7 @@ class KaguraClient:
             "rollback_sleep_run",
             {"context_id": context_id, "report_id": report_id},
         )
-        return RollbackResult.model_validate(result)
+        return parse_response(RollbackResult, result, operation="rollback_sleep_run")
 
     async def list_embedding_models(self) -> EmbeddingModelsResponse:
         """List available embedding models.

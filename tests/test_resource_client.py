@@ -24,7 +24,7 @@ from kagura_memory.auth.credentials import (
     save_credentials_file,
 )
 from kagura_memory.resource_client import _SETUP_OAUTH_NOT_SUPPORTED_MSG
-from tests.conftest import make_oauth_creds
+from tests.conftest import indexer_status_dict, make_oauth_creds
 
 # ============================================================================
 # HTTPS enforcement (C-3)
@@ -697,6 +697,27 @@ async def test_get_indexer_status_with_recent_events():
         assert result.recent_events[1].version is None
         assert result.state is not None
         assert result.state.metrics.skipped_reason == "no_pending_events"
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "reason",
+    # memories_per_day_exceeded: server v0.68.0+ (#1549) defers a batch to the
+    # quota's UTC reset. The second value stands in for a reason added later.
+    ["memories_per_day_exceeded", "some_future_reason"],
+)
+async def test_get_indexer_status_tolerates_newer_skipped_reasons(reason):
+    """A skip reason this SDK does not know must not fail the call (#250)."""
+    client = ResourceClient(api_key="test", base_url="https://test.com")
+
+    with patch.object(client._client, "request", new_callable=AsyncMock) as mock_req:
+        mock_req.return_value = _mock_response(200, indexer_status_dict(skipped_reason=reason))
+        result = await client.get_indexer_status("products")
+
+    assert result.state is not None
+    assert result.state.metrics.skipped_reason == reason
 
     await client.close()
 

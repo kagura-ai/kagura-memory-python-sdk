@@ -37,6 +37,7 @@ from tests.conftest import (
     agent_binding_dict,
     agent_dict,
     bootstrap_envelope_dict,
+    sleep_report_detail_dict,
     sleep_report_summary_dict,
 )
 
@@ -2090,12 +2091,12 @@ async def test_get_context_info_cached_degrades_on_failure():
 
 @pytest.mark.asyncio
 async def test_get_context_info_cached_degrades_on_malformed_payload():
-    """A malformed server payload (pydantic ValidationError) degrades to None."""
+    """A malformed server payload (KaguraResponseError, #250) degrades to None."""
     client = _make_initialized_client()
 
     with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
-        # Missing the required `context` field → ContextInfo.model_validate raises
-        # a pydantic ValidationError, which is NOT a KaguraError.
+        # Missing the required `context` field → get_context_info raises
+        # KaguraResponseError (wrapping the pydantic ValidationError).
         mock.return_value = {"status": "success"}
         result = await client._get_context_info_cached("uuid-1")
 
@@ -2955,6 +2956,55 @@ async def test_get_sleep_history_success():
     assert result[0].status == "completed"
     assert result[0].edges_created == 2
     mock.assert_called_once_with("get_sleep_history", {"context_id": "ctx-1", "limit": 5})
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_get_sleep_history_returns_every_run_when_degraded_runs_mixed_in():
+    """One ``degraded`` run (server v0.43.0+, #1183) must not fail the whole listing."""
+    client = _make_initialized_client()
+
+    degraded = {**sleep_report_summary_dict("rid-2"), "status": "degraded", "llm_call_failures": 3}
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {
+            "status": "success",
+            "reports": [
+                sleep_report_summary_dict("rid-1"),
+                degraded,
+                sleep_report_summary_dict("rid-3"),
+            ],
+            "count": 3,
+        }
+        result = await client.get_sleep_history(context_id="ctx-1")
+
+    assert [r.report_id for r in result] == ["rid-1", "rid-2", "rid-3"]
+    assert [r.status for r in result] == ["completed", "degraded", "completed"]
+    assert result[1].llm_call_failures == 3
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_get_sleep_report_degraded_run():
+    """get_sleep_report() parses a degraded run, incl. ``merge_retention_result``."""
+    client = _make_initialized_client()
+
+    report = sleep_report_detail_dict(
+        "rid-9", status="degraded", llm_call_failures=1, merge_retention_result={"purged": 2}
+    )
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {
+            "status": "success",
+            "report": report,
+            "actions": [],
+            "action_count": 0,
+        }
+        result = await client.get_sleep_report(context_id="ctx-1", report_id="rid-9")
+
+    assert result.status == "degraded"
+    assert result.llm_call_failures == 1
+    assert result.merge_retention_result == {"purged": 2}
 
     await client.close()
 

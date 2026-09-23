@@ -23,7 +23,12 @@ from pydantic import ValidationError
 from ._auth import _SOURCE_LABEL
 from ._http import _retry_after_seconds, extract_detail, normalize_uuid, sanitize_server_detail
 from ._rest_base import KaguraRestClient
-from .exceptions import KaguraConnectionError, KaguraError, KaguraQuotaError
+from .exceptions import (
+    KaguraConnectionError,
+    KaguraError,
+    KaguraQuotaError,
+    KaguraResponseError,
+)
 from .models import MemberAPIKey, WorkspaceInvitation, WorkspaceMember
 
 VALID_ASSIGNABLE_ROLES = ("member", "admin", "viewer")
@@ -91,7 +96,10 @@ class WorkspaceClient(KaguraRestClient):
         """
         workspace_id = _normalize_workspace_id(workspace_id)
         resp = await self._request("GET", f"/api/v1/workspaces/{workspace_id}/members")
-        return [WorkspaceMember.model_validate(row) for row in self._expect_list(resp)]
+        return [
+            self._parse(WorkspaceMember, row, "list_members")
+            for row in self._expect_list(resp, "list_members")
+        ]
 
     async def add_member(
         self, workspace_id: str, user_id: str, role: str = "member"
@@ -111,7 +119,7 @@ class WorkspaceClient(KaguraRestClient):
             f"/api/v1/workspaces/{workspace_id}/members",
             json={"user_id": user_id, "role": role},
         )
-        return WorkspaceMember.model_validate(self._json(resp))
+        return self._parse(WorkspaceMember, self._json(resp), "add_member")
 
     async def update_member_role(
         self, workspace_id: str, user_id: str, role: str
@@ -124,7 +132,7 @@ class WorkspaceClient(KaguraRestClient):
             f"/api/v1/workspaces/{workspace_id}/members/{quote(user_id, safe='')}",
             json={"role": role},
         )
-        return WorkspaceMember.model_validate(self._json(resp))
+        return self._parse(WorkspaceMember, self._json(resp), "update_member_role")
 
     async def remove_member(self, workspace_id: str, user_id: str) -> None:
         """Remove a member from the workspace (server returns 204)."""
@@ -181,7 +189,7 @@ class WorkspaceClient(KaguraRestClient):
         resp = await self._request(
             "POST", f"/api/v1/workspaces/{workspace_id}/invitations", json=body
         )
-        return WorkspaceInvitation.model_validate(self._json(resp))
+        return self._parse(WorkspaceInvitation, self._json(resp), "create_invitation")
 
     async def list_invitations(
         self, workspace_id: str, *, include_accepted: bool = False
@@ -193,7 +201,10 @@ class WorkspaceClient(KaguraRestClient):
         resp = await self._request(
             "GET", f"/api/v1/workspaces/{workspace_id}/invitations", params=params
         )
-        return [WorkspaceInvitation.model_validate(row) for row in self._expect_list(resp)]
+        return [
+            self._parse(WorkspaceInvitation, row, "list_invitations")
+            for row in self._expect_list(resp, "list_invitations")
+        ]
 
     async def revoke_invitation(self, workspace_id: str, invitation_id: int) -> None:
         """Revoke a pending invitation (server returns 200 {"success": true})."""
@@ -236,17 +247,22 @@ class WorkspaceClient(KaguraRestClient):
             return MemberAPIKey.model_validate(payload)
         except ValidationError as exc:
             # The key already exists server-side and is force-hidden — a shape
-            # mismatch must not swallow the ONE chance to see the plaintext.
+            # mismatch must not swallow the ONE chance to see the plaintext,
+            # so this path writes its own message instead of using _parse (the
+            # one KaguraResponseError whose message carries a payload value).
+            operation = self._operation("mint_member_key")
             plaintext = payload.get("plaintext_key") if isinstance(payload, dict) else None
             if isinstance(plaintext, str) and plaintext:
-                raise KaguraError(
-                    "Server returned an unexpected mint response shape, but the "
-                    f"key WAS created. Save the plaintext now: {plaintext}"
+                raise KaguraResponseError(
+                    f"{operation}: server returned an unexpected mint response shape, "
+                    f"but the key WAS created. Save the plaintext now: {plaintext}",
+                    operation=operation,
                 ) from exc
-            raise KaguraError(
-                "Server returned an unexpected mint response shape; the key may "
-                "have been created without displaying its plaintext — check "
-                "`kagura auth list-keys` and revoke/re-mint if present."
+            raise KaguraResponseError(
+                f"{operation}: server returned an unexpected mint response shape; "
+                "the key may have been created without displaying its plaintext — check "
+                "`kagura auth list-keys` and revoke/re-mint if present.",
+                operation=operation,
             ) from exc
 
     async def list_member_keys(self, workspace_id: str, user_id: str) -> list[MemberAPIKey]:
@@ -262,7 +278,8 @@ class WorkspaceClient(KaguraRestClient):
             f"/api/v1/workspaces/{workspace_id}/members/{quote(user_id, safe='')}/credentials",
         )
         return [
-            MemberAPIKey.model_validate(row) for row in self._expect_wrapped_list(resp, "api_keys")
+            self._parse(MemberAPIKey, row, "list_member_keys")
+            for row in self._expect_wrapped_list(resp, "api_keys", "list_member_keys")
         ]
 
     async def revoke_member_key(self, workspace_id: str, user_id: str, key_id: int) -> None:

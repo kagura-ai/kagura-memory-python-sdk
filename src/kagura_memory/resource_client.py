@@ -141,7 +141,7 @@ class ResourceClient(KaguraRestClient):
         ).model_dump(exclude_none=True)
 
         response = await self._request("POST", "/api/v1/resource-tokens", json=body)
-        return ResourceTokenCreateResponse.model_validate(response.json())
+        return self._parse(ResourceTokenCreateResponse, self._json(response), "create_token")
 
     async def list_tokens(
         self,
@@ -164,7 +164,7 @@ class ResourceClient(KaguraRestClient):
             params["resource_id"] = resource_id
 
         response = await self._request("GET", "/api/v1/resource-tokens", params=params)
-        return PaginatedResourceTokensResponse.model_validate(response.json())
+        return self._parse(PaginatedResourceTokensResponse, self._json(response), "list_tokens")
 
     async def update_token(
         self,
@@ -188,7 +188,7 @@ class ResourceClient(KaguraRestClient):
         ).model_dump(exclude_none=True)
 
         response = await self._request("PATCH", f"/api/v1/resource-tokens/{token_id}", json=body)
-        return ResourceTokenResponse.model_validate(response.json())
+        return self._parse(ResourceTokenResponse, self._json(response), "update_token")
 
     async def revoke_token(self, token_id: int) -> None:
         """Revoke (soft-delete) a resource token.
@@ -269,7 +269,7 @@ class ResourceClient(KaguraRestClient):
                 description=description,
                 quota_events_per_hour=quota_events_per_hour,
             )
-        return ResourceSetupResponse.model_validate(response)
+        return self._parse(ResourceSetupResponse, response, "setup_resource")
 
     # -------------------------------------------------------------------
     # Resource Stats (Bearer auth)
@@ -288,7 +288,7 @@ class ResourceClient(KaguraRestClient):
             Resource impact stats (token_count, memory_count, schema version).
         """
         response = await self._request("GET", f"/api/v1/resources/{resource_id}/impact")
-        return ResourceImpactResponse.model_validate(response.json())
+        return self._parse(ResourceImpactResponse, self._json(response), "get_resource_impact")
 
     async def list_resources(self) -> ResourceListResponse:
         """List all resources in the caller's workspace (server v0.14+).
@@ -304,7 +304,7 @@ class ResourceClient(KaguraRestClient):
             ResourceListResponse with ``resources`` and ``total`` count.
         """
         response = await self._request("GET", "/api/v1/resources")
-        return ResourceListResponse.model_validate(response.json())
+        return self._parse(ResourceListResponse, self._json(response), "list_resources")
 
     async def get_indexer_status(self, resource_id: str) -> IndexerStatusResponse:
         """Get indexer state and recent ingest events for a resource.
@@ -322,7 +322,7 @@ class ResourceClient(KaguraRestClient):
                 workspace (404; cross-workspace probe protection).
         """
         response = await self._request("GET", f"/api/v1/resources/{resource_id}/indexer-status")
-        return IndexerStatusResponse.model_validate(response.json())
+        return self._parse(IndexerStatusResponse, self._json(response), "get_indexer_status")
 
     async def get_resource_schema(
         self,
@@ -349,7 +349,7 @@ class ResourceClient(KaguraRestClient):
             )
         except KaguraNotFoundError:
             return None
-        return ResourceSchemaResponse.model_validate(response.json())
+        return self._parse(ResourceSchemaResponse, self._json(response), "get_resource_schema")
 
     async def list_resource_events(
         self,
@@ -413,7 +413,7 @@ class ResourceClient(KaguraRestClient):
         response = await self._request(
             "GET", f"/api/v1/resources/{resource_id}/events", params=params
         )
-        return ResourceEventsListResponse.model_validate(response.json())
+        return self._parse(ResourceEventsListResponse, self._json(response), "list_resource_events")
 
     # -------------------------------------------------------------------
     # Event Ingestion (X-Resource-API-Key auth)
@@ -441,7 +441,7 @@ class ResourceClient(KaguraRestClient):
             json=event.model_dump(exclude_none=True),
             extra_headers={"X-Resource-API-Key": resource_api_key},
         )
-        return ResourceEventResponse.model_validate(response.json())
+        return self._parse(ResourceEventResponse, self._json(response), "ingest_event")
 
     async def ingest_events(
         self,
@@ -478,7 +478,7 @@ class ResourceClient(KaguraRestClient):
                 json=batch.model_dump(exclude_none=True),
                 extra_headers={"X-Resource-API-Key": resource_api_key},
             )
-            result = ResourceEventBatchResponse.model_validate(response.json())
+            result = self._parse(ResourceEventBatchResponse, self._json(response), "ingest_events")
         except BaseException as e:
             log.error(
                 f"Batch ingest failed: {e}",

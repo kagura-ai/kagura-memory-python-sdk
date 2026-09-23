@@ -7,7 +7,11 @@ from click.testing import CliRunner
 
 from kagura_memory.auth.credentials import reset_state_cache
 from kagura_memory.cli import _parse_tags, main
-from tests.conftest import sleep_report_summary_dict
+from tests.conftest import (
+    indexer_status_dict,
+    sleep_report_detail_dict,
+    sleep_report_summary_dict,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -1216,6 +1220,109 @@ def test_sleep_rollback_wraps_unexpected_exception(mock_client_cls, mock_config)
     result = runner.invoke(main, ["sleep", "rollback", "ctx-1", "rid-9", "-y"])
     assert result.exit_code != 0
     assert "Error: boom" in result.output
+
+
+# ----------------------------------------------------------------------------
+# Degraded runs end-to-end (#250): the real KaguraClient parses the server
+# payload, so these pin the CLI against the wire shape — not a pre-built model.
+# ----------------------------------------------------------------------------
+
+
+def _degraded_tool_result(tool_name: str, _arguments: dict) -> dict:
+    """Server-shaped MCP results for a ``degraded`` run (memory-cloud v0.43.0+)."""
+    summary = {**sleep_report_summary_dict("rid-d"), "status": "degraded", "llm_call_failures": 2}
+    if tool_name == "get_sleep_history":
+        return {"status": "success", "reports": [sleep_report_summary_dict("rid-c"), summary]}
+    if tool_name == "get_sleep_report":
+        report = sleep_report_detail_dict(
+            "rid-d", status="degraded", llm_call_failures=2, merge_retention_result={"purged": 1}
+        )
+        return {"status": "success", "report": report, "actions": [], "action_count": 4}
+    if tool_name == "rollback_sleep_run":
+        return {
+            "status": "rolled_back",
+            "report_id": "rid-d",
+            "rollback_summary": {"edges_deleted": 4, "errors": []},
+        }
+    raise AssertionError(f"unexpected tool {tool_name}")
+
+
+@pytest.fixture
+def degraded_mcp(monkeypatch):
+    """Real KaguraClient from config, with ``_call_tool`` answering as the server."""
+    from kagura_memory.client import KaguraClient
+
+    monkeypatch.setattr(
+        "kagura_memory.cli.load_config",
+        lambda: {"api_key": "key", "mcp_url": "https://test.com/mcp"},
+    )
+    mock = AsyncMock(side_effect=_degraded_tool_result)
+    monkeypatch.setattr(KaguraClient, "_call_tool", mock)
+    return mock
+
+
+def test_sleep_history_lists_degraded_run(degraded_mcp):
+    result = CliRunner().invoke(main, ["sleep", "history", "ctx-1"])
+    assert result.exit_code == 0, result.output
+    assert '"status": "degraded"' in result.output
+    assert '"llm_call_failures": 2' in result.output
+    assert "rid-c" in result.output
+
+
+def test_sleep_report_shows_degraded_run(degraded_mcp):
+    result = CliRunner().invoke(main, ["sleep", "report", "ctx-1", "rid-d"])
+    assert result.exit_code == 0, result.output
+    assert '"status": "degraded"' in result.output
+    assert '"merge_retention_result"' in result.output
+
+
+def test_sleep_rollback_prefetches_degraded_run_for_confirm(degraded_mcp):
+    """Without -y the confirm prompt pre-fetches the report — degraded must parse."""
+    result = CliRunner().invoke(main, ["sleep", "rollback", "ctx-1", "rid-d"], input="y\n")
+    assert result.exit_code == 0, result.output
+    assert "4 action(s)" in result.output
+    assert '"status": "rolled_back"' in result.output
+    assert [c.args[0] for c in degraded_mcp.call_args_list] == [
+        "get_sleep_report",
+        "rollback_sleep_run",
+    ]
+
+
+def test_sleep_history_drift_is_a_clean_error_naming_the_operation(monkeypatch):
+    """A payload the SDK cannot parse is an ``Error:`` line, not a pydantic traceback."""
+    from kagura_memory.client import KaguraClient
+
+    monkeypatch.setattr(
+        "kagura_memory.cli.load_config",
+        lambda: {"api_key": "key", "mcp_url": "https://test.com/mcp"},
+    )
+    monkeypatch.setattr(
+        KaguraClient,
+        "_call_tool",
+        AsyncMock(return_value={"status": "success", "reports": [{"report_id": "x"}]}),
+    )
+    result = CliRunner().invoke(main, ["sleep", "history", "ctx-1"])
+    assert result.exit_code != 0
+    assert "Error: get_sleep_history: " in result.output
+    assert "Traceback" not in result.output
+
+
+def test_resource_indexer_status_shows_quota_deferred_run(monkeypatch):
+    """`memories_per_day_exceeded` (server v0.68.0+, #1549) renders instead of erroring."""
+    import httpx
+
+    from kagura_memory import ResourceClient
+
+    body = indexer_status_dict(skipped_reason="memories_per_day_exceeded")
+    client = ResourceClient(api_key="key", base_url="https://test.com")
+    client._client = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _request: httpx.Response(200, json=body))
+    )
+    monkeypatch.setattr("kagura_memory.cli._get_resource_client", lambda: client)
+
+    result = CliRunner().invoke(main, ["resource", "indexer-status", "-r", "products"])
+    assert result.exit_code == 0, result.output
+    assert '"skipped_reason": "memories_per_day_exceeded"' in result.output
 
 
 @patch("kagura_memory.cli.load_config")

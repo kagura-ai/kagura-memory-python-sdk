@@ -16,6 +16,7 @@ from kagura_memory.exceptions import (
     KaguraAuthError,
     KaguraConnectionError,
     KaguraNotFoundError,
+    KaguraResponseError,
 )
 from kagura_memory.models import Agent, AgentBinding, AgentBootstrapResponse
 from tests.conftest import agent_binding_dict, agent_dict, bootstrap_envelope_dict
@@ -243,8 +244,9 @@ async def test_list_agents_rejects_malformed_envelope():
         return httpx.Response(200, json={"agents": None})
 
     async with make_client(handler) as client:
-        with pytest.raises(KaguraConnectionError, match="agents"):
+        with pytest.raises(KaguraResponseError, match="'agents' array") as exc_info:
             await client.list_agents()
+    assert exc_info.value.operation == "AgentsClient.list_agents"
 
 
 @pytest.mark.asyncio

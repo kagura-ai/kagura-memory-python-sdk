@@ -16,6 +16,7 @@ from .exceptions import (
     KaguraNotFoundError,
     KaguraQuotaError,
     KaguraRateLimitError,
+    KaguraResponseError,
 )
 from .files_client import FilesClient
 from .ingest import FileIngestor
@@ -196,6 +197,7 @@ __all__ = [
     "KaguraConnectionError",
     "KaguraRateLimitError",
     "KaguraNotFoundError",
+    "KaguraResponseError",
     "KaguraQuotaError",
     "KaguraLLMError",
     "KaguraContextError",
