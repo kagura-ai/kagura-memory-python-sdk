@@ -445,8 +445,12 @@ class ResourceListResponse(BaseModel):
 
 
 IndexerJobStatus = Literal["idle", "queued", "running", "failed"]
-"""Indexer job status. Mirrors the server-side CHECK constraint on
-``indexer_state.job_status``."""
+"""Known indexer job statuses. Mirrors the server-side CHECK constraint on
+``indexer_state.job_status``.
+
+Documents the known values only: :attr:`IndexerState.job_status` is typed
+``str`` so a status a newer server adds does not break
+``get_indexer_status`` (#250)."""
 
 
 IndexerSkippedReason = Literal[
@@ -455,24 +459,40 @@ IndexerSkippedReason = Literal[
     "context_not_found",
     "empty_valid_points",
     "resource_entity_missing",
+    "memories_per_day_exceeded",
 ]
-"""Reasons the indexer may record under ``metrics.skipped_reason`` when a run
-was skipped. Server degrades unknown values to ``None`` on the wire."""
+"""Known reasons the indexer records under ``metrics.skipped_reason`` when a
+run was skipped. ``memories_per_day_exceeded`` (server v0.68.0+,
+memory-cloud #1549) means the batch was deferred until the workspace's daily
+memory quota resets (UTC).
+
+Documents the known values only: :attr:`IndexerStateMetrics.skipped_reason`
+is typed ``str`` (#250). The server nulls reasons *it* does not know, but a
+reason newer than this SDK arrives verbatim — and must stay a string, since
+``None`` on this field means the last run was not skipped."""
 
 
 class IndexerStateMetrics(BaseModel):
-    """Per-run indexer metrics, flattened from the server JSONB column."""
+    """Per-run indexer metrics, flattened from the server JSONB column.
+
+    ``skipped_reason`` is set only when the last run was skipped; see
+    :data:`IndexerSkippedReason` for the known values.
+    """
 
     applied_upserts: int = 0
     applied_deletes: int = 0
     errors: int = 0
-    skipped_reason: IndexerSkippedReason | None = None
+    skipped_reason: str | None = None
 
 
 class IndexerState(BaseModel):
-    """Indexer state snapshot for one resource."""
+    """Indexer state snapshot for one resource.
 
-    job_status: IndexerJobStatus
+    ``job_status`` is a ``str`` for forward compatibility; see
+    :data:`IndexerJobStatus` for the known values.
+    """
+
+    job_status: str
     last_run_at: datetime | None = None
     next_run_at: datetime | None = None
     active_version: int
@@ -509,15 +529,29 @@ class IndexerStatusResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-SleepRunStatus = Literal["running", "completed", "failed", "cancelled", "rolled_back"]
+SleepRunStatus = Literal["running", "completed", "degraded", "failed", "cancelled", "rolled_back"]
+"""Known Sleep run statuses. Mirrors the server's ``valid_sleep_report_status``
+CHECK constraint; ``degraded`` arrived in memory-cloud v0.43.0 (#1183).
+
+Documents the known values only: ``SleepReport.status`` and
+``RollbackResult.status`` are typed ``str`` so a status a newer server adds
+does not break ``get_sleep_history`` (#250)."""
 
 
 class SleepReport(BaseModel):
-    """Summary of a Sleep Maintenance run, returned by ``get_sleep_history``."""
+    """Summary of a Sleep Maintenance run, returned by ``get_sleep_history``.
+
+    ``status`` is a ``str`` for forward compatibility; see
+    :data:`SleepRunStatus` for the known values. ``degraded`` means the run
+    finished but some judge-LLM calls failed or a phase failed — its
+    merges/promotions still happened, so it stays rollbackable.
+    ``llm_call_failures`` is the judge-LLM failure count behind a
+    ``degraded``/``failed`` grade; ``None`` from servers older than v0.43.0.
+    """
 
     report_id: str
     context_id: str | None = None
-    status: SleepRunStatus
+    status: str
     started_at: datetime | None = None
     completed_at: datetime | None = None
     memories_processed: int
@@ -526,6 +560,7 @@ class SleepReport(BaseModel):
     memories_promoted: int
     llm_calls_made: int
     llm_tokens_used: int
+    llm_call_failures: int | None = None
 
 
 class SleepAction(BaseModel):
@@ -560,6 +595,7 @@ class SleepReportDetail(SleepReport):
     error_message: str | None = None
     edge_discovery_result: dict[str, Any] | None = None
     dedup_result: dict[str, Any] | None = None
+    merge_retention_result: dict[str, Any] | None = None
     importance_result: dict[str, Any] | None = None
     consolidation_result: dict[str, Any] | None = None
     reindex_result: dict[str, Any] | None = None
@@ -579,10 +615,14 @@ class RollbackSummary(BaseModel):
 
 
 class RollbackResult(BaseModel):
-    """Result of ``rollback_sleep_run`` on a successful (no-error) run."""
+    """Result of ``rollback_sleep_run`` on a successful (no-error) run.
+
+    ``status`` is ``"rolled_back"`` today; typed ``str`` like
+    ``SleepReport.status``.
+    """
 
     report_id: str
-    status: SleepRunStatus
+    status: str
     rollback_summary: RollbackSummary
 
 

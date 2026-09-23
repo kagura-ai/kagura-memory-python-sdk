@@ -701,6 +701,45 @@ async def test_get_indexer_status_with_recent_events():
     await client.close()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "reason",
+    # memories_per_day_exceeded: server v0.68.0+ (#1549) defers a batch to the
+    # quota's UTC reset. The second value stands in for a reason added later.
+    ["memories_per_day_exceeded", "some_future_reason"],
+)
+async def test_get_indexer_status_tolerates_newer_skipped_reasons(reason):
+    """A skip reason this SDK does not know must not fail the call (#250)."""
+    client = ResourceClient(api_key="test", base_url="https://test.com")
+
+    response_data = {
+        "resource_id": "products",
+        "state": {
+            "job_status": "idle",
+            "last_run_at": "2026-09-20T00:00:00Z",
+            "next_run_at": None,
+            "active_version": 1,
+            "last_offset": 7,
+            "lag_seconds": 1.0,
+            "metrics": {
+                "applied_upserts": 0,
+                "applied_deletes": 0,
+                "errors": 0,
+                "skipped_reason": reason,
+            },
+        },
+        "recent_events": [],
+    }
+    with patch.object(client._client, "request", new_callable=AsyncMock) as mock_req:
+        mock_req.return_value = _mock_response(200, response_data)
+        result = await client.get_indexer_status("products")
+
+    assert result.state is not None
+    assert result.state.metrics.skipped_reason == reason
+
+    await client.close()
+
+
 # ============================================================================
 # Error handling
 # ============================================================================

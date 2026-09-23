@@ -2091,6 +2091,15 @@ class KaguraClient:
     ) -> list[SleepReport]:
         """List recent Sleep Maintenance runs for a context.
 
+        Each run's ``status`` is one of :data:`SleepRunStatus` —
+        ``running``, ``completed``, ``degraded``, ``failed``, ``cancelled``
+        or ``rolled_back`` — or a newer value passed through as-is.
+        ``degraded`` (server v0.43.0+) means the run finished, but some
+        judge-LLM calls failed (``llm_call_failures`` gives the count) or a
+        phase failed (``error_message`` names it); its changes were
+        applied and can be rolled back. ``failed`` means every judge-LLM
+        call failed.
+
         Args:
             context_id: Context UUID.
             limit: Maximum number of runs to return (server clamps to 1-50,
@@ -2151,10 +2160,11 @@ class KaguraClient:
         context_id: str,
         report_id: str,
     ) -> RollbackResult:
-        """Reverse the effects of a completed Sleep Maintenance run.
+        """Reverse the effects of a completed (or degraded) Sleep Maintenance run.
 
         Reverses edge creation, memory merges, importance updates, scope
-        promotions, and archives. The server processes actions in reverse
+        promotions, and archives. Only ``completed`` and ``degraded`` runs
+        can be rolled back. The server processes actions in reverse
         order with per-step commits — a 5xx or partial failure means SOME
         actions may have been reversed before the error surfaced.
 

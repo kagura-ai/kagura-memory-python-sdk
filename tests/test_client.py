@@ -2702,6 +2702,66 @@ async def test_get_sleep_history_success():
 
 
 @pytest.mark.asyncio
+async def test_get_sleep_history_returns_every_run_when_degraded_runs_mixed_in():
+    """One ``degraded`` run (server v0.43.0+, #1183) must not fail the whole listing."""
+    client = _make_initialized_client()
+
+    degraded = {**sleep_report_summary_dict("rid-2"), "status": "degraded", "llm_call_failures": 3}
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {
+            "status": "success",
+            "reports": [
+                sleep_report_summary_dict("rid-1"),
+                degraded,
+                sleep_report_summary_dict("rid-3"),
+            ],
+            "count": 3,
+        }
+        result = await client.get_sleep_history(context_id="ctx-1")
+
+    assert [r.report_id for r in result] == ["rid-1", "rid-2", "rid-3"]
+    assert [r.status for r in result] == ["completed", "degraded", "completed"]
+    assert result[1].llm_call_failures == 3
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_get_sleep_report_degraded_run():
+    """get_sleep_report() parses a degraded run, incl. ``merge_retention_result``."""
+    client = _make_initialized_client()
+
+    report = {
+        **sleep_report_summary_dict("rid-9"),
+        "status": "degraded",
+        "llm_call_failures": 1,
+        "memories_flagged": 0,
+        "embedding_calls_made": 0,
+        "error_message": None,
+        "edge_discovery_result": None,
+        "dedup_result": None,
+        "merge_retention_result": {"purged": 2},
+        "importance_result": None,
+        "consolidation_result": None,
+        "reindex_result": None,
+    }
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {
+            "status": "success",
+            "report": report,
+            "actions": [],
+            "action_count": 0,
+        }
+        result = await client.get_sleep_report(context_id="ctx-1", report_id="rid-9")
+
+    assert result.status == "degraded"
+    assert result.llm_call_failures == 1
+    assert result.merge_retention_result == {"purged": 2}
+
+    await client.close()
+
+
+@pytest.mark.asyncio
 async def test_get_sleep_report_success():
     """get_sleep_report() flattens report + actions into SleepReportDetail."""
     client = _make_initialized_client()

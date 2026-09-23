@@ -1135,7 +1135,7 @@ def sleep_report(context_id, report_id):
 @click.argument("report_id")
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt.")
 def sleep_rollback(context_id, report_id, yes):
-    """Roll back a completed Sleep Maintenance run.
+    """Roll back a completed (or degraded) Sleep Maintenance run.
 
     Reverses edge creation, memory merges, importance updates, scope
     promotions, and archives.

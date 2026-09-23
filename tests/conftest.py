@@ -59,6 +59,8 @@ def sleep_report_summary_dict(report_id: str = "rid-1") -> dict:
         "memories_promoted": 0,
         "llm_calls_made": 3,
         "llm_tokens_used": 1234,
+        # #1183 (server v0.43.0+): judge-LLM failures behind a degraded run.
+        "llm_call_failures": 0,
     }
 
 
