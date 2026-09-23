@@ -31,6 +31,7 @@ from kagura_memory import (
     IndexerSkippedReason,
     IndexerStatusResponse,
     KaguraClient,
+    KaguraConnectionError,
     KaguraError,
     KaguraResponseError,
     ResourceClient,
@@ -44,6 +45,7 @@ from kagura_memory._http import parse_response, parse_response_list
 from kagura_memory.secrets.client import SecretClient
 from tests.conftest import (
     indexer_status_dict,
+    measurement_series_dict,
     sleep_report_detail_dict,
     sleep_report_summary_dict,
 )
@@ -308,6 +310,16 @@ _MCP_DRIFT_CASES: list[tuple[str, Callable[[KaguraClient], Awaitable[Any]], dict
         lambda c: c.update_edge(context_id="ctx-1", source_id="a", target_id="b", weight=1.0),
         {"edge": {"source_id": "a"}},
     ),
+    (
+        "record_measurement",
+        lambda c: c.record_measurement("ctx-1", "weight_kg", 71.5),
+        {"measurement_id": "m", "metric": "weight_kg", "value": 71.5},
+    ),
+    (
+        "recall_series",
+        lambda c: c.recall_series("ctx-1", "weight_kg"),
+        measurement_series_dict(series=[{"bucket": "not-a-date", "value": 1.0, "count": 1}]),
+    ),
 ]
 
 
@@ -375,6 +387,12 @@ _MCP_ENVELOPE_DRIFT_CASES: list[
         "null",
         lambda c: c.create_edge(context_id="ctx-1", source_id="a", target_id="b"),
         {"edge": None},
+    ),
+    (
+        "recall_series",
+        "null",
+        lambda c: c.recall_series("ctx-1", "weight_kg"),
+        measurement_series_dict(series=None),
     ),
 ]
 
@@ -496,5 +514,106 @@ async def test_rest_model_paths_wrap_drift(operation, cls, call, body):
             await call(client)
         assert exc_info.value.operation == operation
         assert str(exc_info.value).startswith(f"{operation}: ")
+    finally:
+        await client.close()
+
+
+# ---------------------------------------------------------------------------
+# KaguraClient REST: list_memories wraps drift, the other _rest_get methods
+# keep KaguraConnectionError (#254)
+# ---------------------------------------------------------------------------
+
+_LIST_MEMORIES_OP = "KaguraClient.list_memories"
+
+
+def _kagura_client(**response_kwargs: Any) -> KaguraClient:
+    """A KaguraClient whose REST GETs all answer 200 with ``response_kwargs``."""
+    client = KaguraClient(api_key="test", mcp_url="https://test.com/mcp")
+    client._client = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _request: httpx.Response(200, **response_kwargs))
+    )
+    return client
+
+
+def _memory_list_body(**item_overrides: Any) -> dict[str, Any]:
+    item = {
+        "id": "mem-1",
+        "summary": "first memory",
+        "type": "note",
+        "scope": "persistent",
+        "importance": 0.7,
+        "created_at": "2026-03-01T00:00:00Z",
+        "updated_at": "2026-03-02T00:00:00Z",
+        **item_overrides,
+    }
+    return {"memories": [item], "total": 1, "has_more": False}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "body, field",
+    [
+        (_memory_list_body(location={"lat": 35.68}), "memories.0.location.lon"),
+        (_memory_list_body(location={"lat": "north", "lon": 139.76}), "memories.0.location.lat"),
+        ({**_memory_list_body(), "memories": None}, "memories"),
+        ({"memories": [], "has_more": False}, "total"),
+    ],
+    ids=["location-missing-lon", "location-string-lat", "memories-null", "missing-total"],
+)
+async def test_list_memories_wraps_drift(body, field):
+    client = _kagura_client(json=body)
+    try:
+        with pytest.raises(KaguraResponseError) as exc_info:
+            await client.list_memories(lat_min=35.0)
+        err = exc_info.value
+        assert err.operation == _LIST_MEMORIES_OP
+        assert str(err).startswith(f"{_LIST_MEMORIES_OP}: ")
+        assert "MemoryListResponse" in str(err)
+        assert field in str(err)
+        assert isinstance(err.__cause__, ValidationError)
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_list_memories_drift_message_omits_payload_values():
+    # A list row carries a summary and coordinates. The old _rest_get path
+    # echoed pydantic's text, input values included; the drift message now
+    # names the field only.
+    body = _memory_list_body(
+        summary="private-summary-xyz", location={"lat": "35.6812-secret", "lon": 139.76}
+    )
+    client = _kagura_client(json=body)
+    try:
+        with pytest.raises(KaguraResponseError) as exc_info:
+            await client.list_memories()
+        message = str(exc_info.value)
+        assert "35.6812-secret" not in message
+        assert "private-summary-xyz" not in message
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_list_memories_non_json_body_stays_a_connection_error():
+    # A proxy's HTML maintenance page is a transport problem, not drift.
+    client = _kagura_client(text="<html>maintenance</html>")
+    try:
+        with pytest.raises(KaguraConnectionError, match="Invalid response format"):
+            await client.list_memories()
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_other_rest_get_methods_keep_connection_error_on_drift():
+    # #250 left these on KaguraConnectionError (kagura doctor catches it on
+    # check_server_version); only list_memories moved to KaguraResponseError.
+    client = _kagura_client(json={"unexpected": "schema"})
+    try:
+        with pytest.raises(KaguraConnectionError, match="Invalid response format"):
+            await client.get_memory_stats("ctx-1")
+        with pytest.raises(KaguraConnectionError, match="Invalid response format"):
+            await client.get_server_info()
     finally:
         await client.close()

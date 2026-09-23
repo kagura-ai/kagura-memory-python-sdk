@@ -155,11 +155,12 @@ class KaguraClient:
     inspecting ``result["status"]``. On the tool methods that return a
     model, a success payload that does not match it (a server newer than
     the SDK) raises :class:`KaguraResponseError` naming the tool (#250).
-    The REST-backed methods (``get_server_info``, ``check_server_version``,
-    ``get_embedding_status``, ``get_memory_stats``, ``find_duplicates``,
-    ``list_memories``, ``list_embedding_models``) still raise
-    :class:`KaguraConnectionError` ("Invalid response format") on drift;
-    catch :class:`KaguraError` to cover both.
+    :meth:`list_memories` does the same with
+    ``operation="KaguraClient.list_memories"``. The other REST-backed methods
+    (``get_server_info``, ``check_server_version``, ``get_embedding_status``,
+    ``get_memory_stats``, ``find_duplicates``, ``list_embedding_models``)
+    still raise :class:`KaguraConnectionError` ("Invalid response format") on
+    drift; catch :class:`KaguraError` to cover both.
     """
 
     def __init__(
@@ -356,6 +357,31 @@ class KaguraClient:
             self.mcp_url, json=body, headers=mcp_session_header(self._session_id)
         )
 
+    async def _rest_get_json(self, path: str, params: dict[str, Any] | None = None) -> Any:
+        """GET a REST endpoint and return its decoded JSON body.
+
+        Args:
+            path: URL path (appended to ``_base_url``).
+            params: Optional query parameters.
+
+        Raises:
+            KaguraAuthError / KaguraRateLimitError / KaguraConnectionError: A
+                non-2xx status (see :func:`raise_for_kagura_status`).
+            KaguraConnectionError: A network failure, or a 2xx body that is
+                not JSON.
+        """
+        url = f"{self._base_url}{path}"
+        try:
+            response = await self._client.get(url, params=params)
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPStatusError as e:
+            raise_for_kagura_status(e)
+        except httpx.RequestError as e:
+            raise KaguraConnectionError(f"Connection failed: {_exc_message(e)}") from e
+        except (ValueError, TypeError) as e:
+            raise KaguraConnectionError(f"Invalid response format: {_exc_message(e)}") from e
+
     async def _rest_get(
         self,
         path: str,
@@ -363,6 +389,13 @@ class KaguraClient:
         params: dict[str, Any] | None = None,
     ) -> _T:
         """GET a REST endpoint and parse into a Pydantic model.
+
+        Drift raises :class:`KaguraConnectionError` ("Invalid response
+        format"), not :class:`KaguraResponseError` — the contract #250 kept
+        for these methods (``kagura doctor`` catches it on
+        ``check_server_version``). A new REST method should instead call
+        :meth:`_rest_get_json` and :func:`parse_response`, as
+        :meth:`list_memories` does.
 
         Args:
             path: URL path (appended to ``_base_url``).
@@ -372,15 +405,9 @@ class KaguraClient:
         Returns:
             Validated model instance.
         """
-        url = f"{self._base_url}{path}"
+        data = await self._rest_get_json(path, params)
         try:
-            response = await self._client.get(url, params=params)
-            response.raise_for_status()
-            return model.model_validate(response.json())
-        except httpx.HTTPStatusError as e:
-            raise_for_kagura_status(e)
-        except httpx.RequestError as e:
-            raise KaguraConnectionError(f"Connection failed: {_exc_message(e)}") from e
+            return model.model_validate(data)
         except (ValueError, TypeError) as e:
             raise KaguraConnectionError(f"Invalid response format: {_exc_message(e)}") from e
 
@@ -838,6 +865,8 @@ class KaguraClient:
                 characters.
             KaguraNotFoundError: Context not found (or a read-only agent
                 binding forbids writes to it).
+            KaguraResponseError: The success payload did not match
+                :class:`MeasurementResult` (``operation="record_measurement"``).
             KaguraError: Other server-side error, e.g. a read-only viewer.
         """
         _validate_metric(metric)
@@ -858,7 +887,7 @@ class KaguraClient:
         if details is not None:
             arguments["details"] = details
         result = await self._call_tool_checked("record_measurement", arguments)
-        return MeasurementResult.model_validate(result)
+        return parse_response(MeasurementResult, result, operation="record_measurement")
 
     async def recall_series(
         self,
@@ -903,6 +932,8 @@ class KaguraClient:
         Raises:
             ValueError: If ``metric`` is empty or over 64 characters.
             KaguraNotFoundError: Context not found.
+            KaguraResponseError: The success payload did not match
+                :class:`MeasurementSeries` (``operation="recall_series"``).
             KaguraError: Other server-side error, e.g. an inverted or
                 over-365-day window.
         """
@@ -918,7 +949,7 @@ class KaguraClient:
         if end is not None:
             arguments["end"] = _iso_arg(end)
         result = await self._call_tool_checked("recall_series", arguments)
-        return MeasurementSeries.model_validate(result)
+        return parse_response(MeasurementSeries, result, operation="recall_series")
 
     async def load_pinned(
         self,
@@ -2663,9 +2694,14 @@ class KaguraClient:
                 locally, as :meth:`recall_nearby` checks its point, since the
                 server would only 422 it.
             KaguraAuthError: Authentication failed.
-            KaguraConnectionError: Network failure or non-2xx response — e.g. a
-                ``context_id`` that does not exist or is not accessible
-                surfaces as ``HTTP 404``.
+            KaguraConnectionError: Network failure, non-JSON body or non-2xx
+                response — e.g. a ``context_id`` that does not exist or is not
+                accessible surfaces as ``HTTP 404``.
+            KaguraResponseError: The 2xx body does not match
+                :class:`MemoryListResponse` (a server newer than the SDK), with
+                ``operation="KaguraClient.list_memories"``. SDK 0.38.1 and
+                earlier raised ``KaguraConnectionError`` here, as the other
+                REST-backed methods still do.
         """
         params: dict[str, Any] = {"limit": limit, "offset": offset}
         if context_id is not None:
@@ -2697,7 +2733,8 @@ class KaguraClient:
             if bound is not None:
                 validate_coordinate(key, bound, max_abs)
                 params[key] = bound
-        return await self._rest_get("/api/v1/memory/list", MemoryListResponse, params=params)
+        data = await self._rest_get_json("/api/v1/memory/list", params)
+        return parse_response(MemoryListResponse, data, operation="KaguraClient.list_memories")
 
     @staticmethod
     def _raise_for_mcp_error(result: dict[str, Any], operation: str) -> None:
