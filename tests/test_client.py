@@ -1,5 +1,6 @@
 """Tests for KaguraClient."""
 
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -696,17 +697,68 @@ async def test_remember_with_empty_linked_memory_ids():
 
 
 @pytest.mark.asyncio
-async def test_recall_with_rerank():
-    """recall() should pass use_rerank when True."""
+@pytest.mark.parametrize("use_rerank", [True, False])
+@pytest.mark.parametrize(
+    "target",
+    [{"context_id": "ctx"}, {"context_ids": ["ctx-1", "ctx-2"]}],
+    ids=["single", "cross-context"],
+)
+async def test_recall_sends_explicit_use_rerank(use_rerank, target):
+    """Issue #251: an explicit use_rerank is sent as-is — False included.
+
+    Since memory-cloud v0.69.0 (#1572) an omitted ``use_rerank`` follows the
+    context's search config, so ``False`` must be sent — dropping it would let
+    a rerank-enabled context rerank anyway.
+    """
     client = _make_initialized_client()
 
-    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
-        mock.return_value = {"results": []}
-        await client.recall(context_id="ctx", query="test", use_rerank=True)
-        args = mock.call_args[0][1]
-        assert args["use_rerank"] is True
+    try:
+        with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+            mock.return_value = {"results": []}
+            await client.recall(query="test", use_rerank=use_rerank, **target)
+            args = mock.call_args[0][1]
+            assert args["use_rerank"] is use_rerank
+    finally:
+        await client.close()
 
-    await client.close()
+
+@pytest.mark.asyncio
+async def test_recall_omits_use_rerank_by_default():
+    """Issue #251: the default (None) omits the key so the server follows the context config."""
+    client = _make_initialized_client()
+
+    try:
+        with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+            mock.return_value = {"results": []}
+            await client.recall(context_id="ctx", query="test")
+            assert "use_rerank" not in mock.call_args[0][1]
+            await client.recall(context_id="ctx", query="test", use_rerank=None)
+            assert "use_rerank" not in mock.call_args[0][1]
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_recall_use_rerank_false_serializes_to_json_false():
+    """Issue #251: the JSON-RPC body httpx puts on the wire carries ``"use_rerank": false``."""
+    client = _make_initialized_client()
+    mock_response = MagicMock()
+    mock_response.raise_for_status = MagicMock()
+    mock_response.json.return_value = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "result": {"content": [{"type": "text", "text": '{"results": []}'}]},
+    }
+
+    try:
+        with patch.object(client._client, "post", new_callable=AsyncMock) as mock_post:
+            mock_post.return_value = mock_response
+            await client.recall(context_id="ctx", query="test", use_rerank=False)
+            body = mock_post.call_args.kwargs["json"]
+            wire = httpx.Request("POST", client.mcp_url, json=body).content
+            assert json.loads(wire)["params"]["arguments"]["use_rerank"] is False
+    finally:
+        await client.close()
 
 
 @pytest.mark.asyncio
