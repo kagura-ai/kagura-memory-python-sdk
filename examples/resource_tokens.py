@@ -24,10 +24,10 @@ async def main():
 
     async with ResourceClient.from_mcp_url(api_key=api_key, mcp_url=mcp_url) as client:
         # One-call setup: create public context + set resource_id + create token.
+        # The context is named after the resource unless you pass context_name.
         # In production, save the token and reuse it — don't call setup_resource() every time.
         token = await client.setup_resource(
             resource_id="example-products",
-            summary="Example product catalog",
             description="Example script token",
             quota_events_per_hour=100,
         )
