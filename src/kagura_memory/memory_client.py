@@ -50,6 +50,8 @@ class MemoryClient(KaguraRestClient):
         KaguraConnectionError: Invalid arguments (422), an OAuth token
             without the scope (403), a server older than v0.74.0 answering
             :meth:`load_guardrails` (405), or any other HTTP/connection error
+        KaguraResponseError: A 2xx body that does not parse as the result
+            model (e.g. a ``GuardrailSet`` missing a truncation flag)
         ValueError: ``context_id`` is not a UUID (raised before any request)
     """
 
@@ -75,7 +77,7 @@ class MemoryClient(KaguraRestClient):
         if cap is not None:
             body["cap"] = cap
         resp = await self._request("POST", "/api/v1/memory/guardrails", json=body)
-        return GuardrailSet.model_validate(self._json(resp))
+        return self._parse(GuardrailSet, self._json(resp), "load_guardrails")
 
     async def get_guardrail_digest(
         self,

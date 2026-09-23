@@ -756,13 +756,16 @@ class KaguraClient:
         Raises:
             KaguraNotFoundError: Context not found (uniform — nonexistent and
                 not-yours are indistinguishable).
+            KaguraResponseError: The response does not parse as a
+                ``GuardrailSet`` — e.g. a truncation flag is missing, so the
+                set cannot be trusted as complete.
             KaguraError: Other server-side error.
         """
         arguments: dict[str, Any] = {"context_id": context_id}
         if cap is not None:
             arguments["cap"] = cap
         result = await self._call_tool_checked("load_guardrails", arguments)
-        return GuardrailSet.model_validate(result)
+        return parse_response(GuardrailSet, result, operation="load_guardrails")
 
     async def feedback(
         self,

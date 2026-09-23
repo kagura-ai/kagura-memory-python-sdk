@@ -1388,6 +1388,7 @@ class GuardrailSet(BaseModel):
     ``tool_triggered_truncated`` say which lane is incomplete (``truncated``
     is either-lane, ``total_available`` the sum of the per-lane totals).
     These fields are required, so a response without them fails to parse
+    (``load_guardrails`` raises :class:`~kagura_memory.exceptions.KaguraResponseError`)
     instead of reading as complete. ``version`` is an opaque hash of the
     served set (equal means unchanged). ``context_id`` / ``context_name`` are
     filled on the MCP surface only.

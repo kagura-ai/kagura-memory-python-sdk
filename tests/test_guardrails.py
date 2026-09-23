@@ -30,6 +30,7 @@ from kagura_memory import (
     KaguraClient,
     KaguraError,
     KaguraNotFoundError,
+    KaguraResponseError,
     MemoryClient,
     ToolTrigger,
 )
@@ -308,6 +309,21 @@ async def test_load_guardrails_mcp_with_cap():
         args = mock.call_args[0][1]
     await client.close()
     assert args == {"context_id": CTX, "cap": 10}
+
+
+@pytest.mark.asyncio
+async def test_load_guardrails_mcp_missing_flag_is_a_response_error():
+    # Drift never reads as a complete set, and never escapes as a raw
+    # pydantic ValidationError (#250).
+    payload = guardrail_set_dict()
+    del payload["pinned_truncated"]
+    client = _mcp_client()
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = payload
+        with pytest.raises(KaguraResponseError) as exc:
+            await client.load_guardrails(CTX)
+    await client.close()
+    assert exc.value.operation == "load_guardrails"
 
 
 @pytest.mark.asyncio
@@ -608,6 +624,20 @@ async def test_rest_load_guardrails_rejects_non_uuid_before_request():
     async with make_rest_client(handler) as client:
         with pytest.raises(ValueError, match="context_id"):
             await client.load_guardrails("not-a-uuid")
+
+
+@pytest.mark.asyncio
+async def test_rest_load_guardrails_missing_flag_is_a_response_error():
+    payload = guardrail_set_dict()
+    del payload["tool_triggered_truncated"]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    async with make_rest_client(handler) as client:
+        with pytest.raises(KaguraResponseError) as exc:
+            await client.load_guardrails(CTX)
+    assert exc.value.operation == "MemoryClient.load_guardrails"
 
 
 @pytest.mark.asyncio
