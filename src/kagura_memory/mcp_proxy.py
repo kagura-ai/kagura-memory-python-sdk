@@ -24,7 +24,10 @@ Design (see issue #101, gate1 review):
   ``kagura auth login``.
 - **mcp_url comes from the profile** (or ``--server``) explicitly — never via
   ``KaguraClient`` env resolution, which ignores ``KAGURA_MCP_URL`` and would
-  silently fall back to the hardcoded cloud URL.
+  silently fall back to the hardcoded cloud URL. ``--guardrails`` and
+  ``--tool-profile`` set memory-cloud's ``?guardrails=`` / ``?profile=`` on it
+  at run time (issue #258), so the profile's URL never has to be copied into
+  ``--server`` to carry a query.
 - **The proxy owns the upstream session** (issue #252). When an upstream
   drops the MCP session it answers the next request with ``404`` (MCP
   Streamable HTTP), and Claude Code, which only talks stdio to us, can neither
@@ -57,6 +60,8 @@ from ._http import (
     jsonrpc_error_body,
     mcp_session_expired,
     mcp_session_header,
+    mcp_url_with_query,
+    normalize_guardrails,
     validate_https_url,
 )
 from .auth.credentials import KaguraOAuth, get_shared_state
@@ -242,6 +247,19 @@ async def serve(
             write_line(json.dumps(response))
 
 
+def _guardrails_arg(value: str) -> str:
+    try:
+        return normalize_guardrails(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from None
+
+
+def _tool_profile_arg(value: str) -> str:
+    if not value.strip():
+        raise argparse.ArgumentTypeError("must not be empty")
+    return value.strip()
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="kagura-mcp",
@@ -256,6 +274,31 @@ def _build_parser() -> argparse.ArgumentParser:
         "--server",
         default=None,
         help="Override the upstream MCP URL (default: the profile's mcp_url).",
+    )
+    # Both are set on the upstream URL at run time, never stored in the
+    # profile: its mcp_url is shared with KaguraClient and the REST clients.
+    parser.add_argument(
+        "--guardrails",
+        type=_guardrails_arg,
+        default=None,
+        metavar="off|CONTEXT_ID",
+        help=(
+            "Set ?guardrails= on the upstream URL, replacing any earlier value. "
+            "'off' stops the server's guardrail digest AND removes the guardrails "
+            "block from get_context_info: use it only when client hooks (e.g. the "
+            "kagura-memory plugin's) deliver guardrails. A context UUID selects "
+            "that context's digest."
+        ),
+    )
+    parser.add_argument(
+        "--tool-profile",
+        type=_tool_profile_arg,
+        default=None,
+        metavar="NAME",
+        help=(
+            "Set ?profile= on the upstream URL to limit tools/list (e.g. core); "
+            "the server rejects an unknown profile."
+        ),
     )
     return parser
 
@@ -273,7 +316,11 @@ async def _amain(argv: list[str] | None = None) -> int:
         )
         return 1
 
-    mcp_url = args.server or state.credentials.mcp_url
+    mcp_url = mcp_url_with_query(
+        args.server or state.credentials.mcp_url,
+        guardrails=args.guardrails,
+        tool_profile=args.tool_profile,
+    )
     # Enforce HTTPS (localhost allowed for dev), matching KaguraClient.
     validate_https_url(mcp_url, label="MCP URL")
 
