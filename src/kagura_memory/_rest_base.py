@@ -31,9 +31,12 @@ from ._http import (
     SDK_VERSION,
     _retry_after_seconds,
     base_url_from_mcp,
+    error_envelope,
     extract_detail,
+    gate_error,
     parse_response,
     response_shape_error,
+    sanitize_server_detail,
     validate_https_url,
 )
 from .auth.credentials import KaguraOAuth
@@ -58,6 +61,9 @@ class KaguraRestClient:
     override the ``_error_*`` builder hooks where their contract differs.
     The default hooks implement the majority behavior:
 
+    - a plan or quota refusal, at any status →
+      :class:`KaguraFeatureNotAvailableError` / :class:`KaguraQuotaError`
+      (see :meth:`_gate_error`; runs before the status hooks)
     - 401 → :class:`KaguraAuthError` with an OAuth-aware recovery hint
     - 403 → the generic ``HTTP 403: <detail>`` mapping
     - 404 → :class:`KaguraNotFoundError` (server detail or "Not found")
@@ -267,6 +273,9 @@ class KaguraRestClient:
         (CodeQL py/mixed-returns vs py/illegal-raise both flagged the
         raising-hook shape).
         """
+        typed = self._gate_error(e)
+        if typed is not None:
+            return typed
         status = e.response.status_code
         if status == 401:
             return self._error_401(e)
@@ -277,6 +286,21 @@ class KaguraRestClient:
         if status == 429:
             return self._error_429(e)
         return self._generic_error(e)
+
+    def _gate_error(self, e: httpx.HTTPStatusError) -> KaguraError | None:
+        """Type a plan or quota refusal from the canonical envelope (#256).
+
+        Runs before the per-status hooks: a refusal is typed by its
+        ``gate`` / error code (see :func:`gate_error`), whatever the status
+        and whichever client hook would otherwise word it — e.g. the 403
+        ``QUOTA-001`` resource-token cap is a quota, not an access problem.
+        """
+        envelope = error_envelope(e.response)
+        if envelope is None:
+            return None
+        code, message, details = envelope
+        safe_message = sanitize_server_detail(message) or f"HTTP {e.response.status_code}"
+        return gate_error(code, safe_message, details, retry_after=_retry_after_seconds(e.response))
 
     # ---- per-status hooks (override where the wire contract differs) ----
 

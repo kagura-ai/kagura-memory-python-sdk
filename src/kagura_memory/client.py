@@ -13,6 +13,7 @@ from ._auth import _resolve_auth, _StaticAuth
 from ._http import (
     SDK_VERSION,
     base_url_from_mcp,
+    gate_error,
     mcp_session_expired,
     mcp_session_header,
     parse_response,
@@ -25,6 +26,7 @@ from .exceptions import (
     KaguraConnectionError,
     KaguraError,
     KaguraNotFoundError,
+    KaguraPartialRollbackError,
     _exc_message,
 )
 from .models import (
@@ -42,6 +44,7 @@ from .models import (
     MemoryListResponse,
     MemoryStatsResponse,
     RollbackResult,
+    RollbackSummary,
     ServerInfo,
     SleepReport,
     SleepReportDetail,
@@ -82,7 +85,10 @@ class KaguraClient:
     MCP tool methods additionally translate the server's structured domain
     errors (``{"status": "error", ...}``) into exceptions rather than
     returning them as data (issue #180): a missing context/memory/report
-    raises :class:`KaguraNotFoundError`, and any other domain error raises
+    raises :class:`KaguraNotFoundError`, a quota refusal
+    :class:`KaguraQuotaError` and a plan/feature gate
+    :class:`KaguraFeatureNotAvailableError`, each carrying the server's
+    detail fields (#256), and any other domain error raises
     :class:`KaguraError`. Callers should use ``try/except`` rather than
     inspecting ``result["status"]``. On the tool methods that return a
     model, a success payload that does not match it (a server newer than
@@ -1685,6 +1691,8 @@ class KaguraClient:
 
         Raises:
             KaguraQuotaError: Context limit reached for this workspace.
+            KaguraFeatureNotAvailableError: The plan does not allow a
+                shared context (``is_private=False``; server v0.75.0+).
         """
         # Pre-check quota
         contexts = await self.list_contexts()
@@ -2341,6 +2349,12 @@ class KaguraClient:
         "message": <str>, ...}`` for domain errors that the JSON-RPC transport
         layer cannot represent (e.g. ``report_not_found``). HTTP-level
         errors (401, 5xx) are already handled by ``_make_jsonrpc_request``.
+
+        A plan or quota refusal raises :class:`KaguraQuotaError` or
+        :class:`KaguraFeatureNotAvailableError` carrying the envelope's gate
+        fields, and ``partial_rollback`` raises
+        :class:`KaguraPartialRollbackError` (#256). Every other code raises
+        :class:`KaguraError`.
         """
         if result.get("status") != "error":
             return
@@ -2354,7 +2368,17 @@ class KaguraClient:
             "binding_not_found",
         ):
             raise KaguraNotFoundError(f"{operation}: {message}")
-        raise KaguraError(f"{operation} failed ({code}): {message}")
+        text = f"{operation} failed ({code}): {message}"
+        if code == "partial_rollback":
+            report_id = result.get("report_id")
+            raise KaguraPartialRollbackError(
+                text,
+                report_id=report_id if isinstance(report_id, str) else None,
+                summary=parse_response(
+                    RollbackSummary, result.get("rollback_summary"), operation=operation
+                ),
+            )
+        raise gate_error(str(code), text, result) or KaguraError(text)
 
     async def get_sleep_history(
         self,
@@ -2457,9 +2481,11 @@ class KaguraClient:
 
         Raises:
             KaguraNotFoundError: Report not found or not owned by caller.
-            KaguraError: Partial rollback (some actions failed) or other
-                server-side error. The exception message includes the
-                server-side error code for triage.
+            KaguraPartialRollbackError: Some undo steps failed. The rest
+                stay reversed; ``.summary`` counts them and lists the
+                failures in ``.summary.errors``.
+            KaguraError: Other server-side error. The exception message
+                includes the server-side error code for triage.
         """
         result = await self._call_tool_checked(
             "rollback_sleep_run",

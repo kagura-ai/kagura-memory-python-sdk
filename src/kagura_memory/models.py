@@ -675,12 +675,23 @@ class SleepReportDetail(SleepReport):
 
 
 class RollbackSummary(BaseModel):
-    """Per-category counts of actions reversed by ``rollback_sleep_run``."""
+    """Per-category counts of actions reversed by ``rollback_sleep_run``.
+
+    ``merges_unreversible`` (server v0.61.0+) counts recorded merges the
+    rollback could not reverse because a later write changed the edge.
+    ``importance_kept`` / ``promotions_kept`` (server v0.66.0+) are
+    by-design skips, not errors: the memory was pinned, forgotten or
+    deleted since the run, so its recorded change is left standing.
+    Failed undo steps are listed in ``errors``.
+    """
 
     edges_deleted: int = 0
     merges_reversed: int = 0
+    merges_unreversible: int = 0
     importance_restored: int = 0
     promotions_reversed: int = 0
+    importance_kept: int = 0
+    promotions_kept: int = 0
     archives_restored: int = 0
     errors: list[str] = Field(default_factory=list)
 
@@ -689,7 +700,8 @@ class RollbackResult(BaseModel):
     """Result of ``rollback_sleep_run`` on a successful (no-error) run.
 
     ``status`` is ``"rolled_back"`` today; typed ``str`` like
-    ``SleepReport.status``.
+    ``SleepReport.status``. A rollback with failed steps raises
+    :class:`~kagura_memory.exceptions.KaguraPartialRollbackError` instead.
     """
 
     report_id: str
