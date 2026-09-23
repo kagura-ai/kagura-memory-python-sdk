@@ -788,10 +788,11 @@ class TagInfo(BaseModel):
 
     Mirrors the wire shape of the server's ``RelatedTagItem`` as emitted by
     the ``list_tags`` MCP tool. ``sample_summary`` from the server-side
-    pydantic model is intentionally omitted because ``list_tags`` does not
-    populate it (only ``recall.related_tags`` does). The schema is otherwise
-    aligned so callers can unify their tag-info type between the two
-    surfaces.
+    pydantic model is intentionally omitted because no MCP tool sends it:
+    ``list_tags`` never populated it, and ``recall``'s ``related_tags``
+    carries only ``{tag, count}`` since memory-cloud v0.73.0 (#1599). The
+    schema is otherwise aligned so callers can unify their tag-info type
+    between the two surfaces.
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -1165,7 +1166,9 @@ class AgentBootstrapResponse(BaseModel):
     recall without a ``query``, with a ``reason``), or ``"error"`` (that
     component failed; the rest still return and the top-level ``degraded``
     flag is set). Component payloads stay dicts because their shapes belong
-    to the standalone tools and evolve with them.
+    to the standalone tools and evolve with them: ``pinned`` lists its rows
+    under ``memories``, and since memory-cloud v0.73.0 ``upcoming`` rows
+    carry ``trigger`` in place of ``details``, with no opt-out.
 
     ``context`` reuses :class:`ContextDetail` — the server emits the block
     byte-compatible with ``get_context_info`` (``search_config`` is not
