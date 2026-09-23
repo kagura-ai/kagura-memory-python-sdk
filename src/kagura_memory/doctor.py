@@ -16,7 +16,12 @@ from ._auth import _SOURCE_LABEL, _OAuthAuth, _resolve_auth, _StaticAuth
 from ._http import validate_https_url
 from .auth.cli import _redact_token
 from .auth.credentials import REFRESH_SKEW_SEC, load_credentials_file
-from .claude_code import detect_mcp_json_mode, find_kagura_mcp_entries
+from .claude_code import (
+    McpScope,
+    claude_json_label,
+    detect_mcp_json_mode,
+    find_kagura_mcp_entries,
+)
 from .client import MIN_SERVER_VERSION, KaguraClient
 from .config import load_config
 from .exceptions import KaguraAuthError, KaguraConnectionError, _exc_message
@@ -461,12 +466,25 @@ def _check_https(mcp_url: str) -> DoctorCheck:
     )
 
 
+# How to replace a legacy ``type: "url"`` entry, by the scope it is in. Setup
+# writes project and user scope; a local one must go first, or the re-run's
+# shadow check refuses to write under it.
+_LEGACY_TYPE_FIX: dict[McpScope, str] = {
+    "project": "re-run `kagura setup claude`",
+    "user": "re-run `kagura setup claude --scope user`",
+    "local": (
+        "remove it (`claude mcp remove --scope local kagura-memory`), then re-run "
+        "`kagura setup claude`"
+    ),
+}
+
+
 def _check_mcp(project_dir: Path) -> list[DoctorCheck]:
     """Report the kagura-memory entry Claude Code uses here, from every scope (#258)."""
     checks: list[DoctorCheck] = []
-    mode = detect_mcp_json_mode(project_dir)
     # The entry Claude Code uses (strongest scope) first, then any it shadows.
     entries = find_kagura_mcp_entries(project_dir)
+    mode = detect_mcp_json_mode(project_dir, entries)
     where = f" ({entries[0].scope} scope, {entries[0].source})" if entries else ""
     details = {"scope": entries[0].scope, "source": entries[0].source} if entries else {}
     if mode == "stdio":
@@ -501,7 +519,7 @@ def _check_mcp(project_dir: Path) -> list[DoctorCheck]:
                 message=(
                     f"No usable kagura-memory entry found in {entries[0].source} "
                     f"({entries[0].scope} scope)"
-                    if entries
+                    if entries  # else: a .mcp.json without a kagura-memory entry
                     else "No usable kagura-memory entry found in .mcp.json"
                 ),
                 details=details,
@@ -512,7 +530,7 @@ def _check_mcp(project_dir: Path) -> list[DoctorCheck]:
             DoctorCheck(
                 section="mcp",
                 status="info",
-                message="No kagura-memory MCP entry found (.mcp.json, ~/.claude.json)",
+                message=f"No kagura-memory MCP entry found (.mcp.json, {claude_json_label()})",
             )
         )
 
@@ -523,7 +541,7 @@ def _check_mcp(project_dir: Path) -> list[DoctorCheck]:
                 status="warn",
                 message=(
                     'The kagura-memory entry has type "url", which Claude Code does not '
-                    'accept; re-run `kagura setup claude` to rewrite it as "http"'
+                    f'accept; {_LEGACY_TYPE_FIX[entries[0].scope]} to write it as "http"'
                 ),
                 details=details,
             )
