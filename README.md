@@ -545,7 +545,8 @@ kagura doctor --json           # machine-readable output for CI/scripts
 ```
 
 The report covers effective auth source, OAuth/static API-key health,
-Claude Code `.mcp.json` mode, `kagura-mcp` PATH wiring, MCP URL HTTPS,
+the Claude Code `kagura-memory` MCP entry in effect (from local, project
+`.mcp.json` or user scope, plus any entry it shadows), `kagura-mcp` PATH wiring, MCP URL HTTPS,
 server reachability/version, optional ingestion extras, LiteLLM supply-chain
 status, and local LLM provider key/model diagnostics. Provider diagnostics are
 local-only: `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, and
@@ -561,6 +562,7 @@ kagura remember -s "FastAPI DI" --content "Use Depends()..." -c dev
 kagura remember -s "Coffee with Sato" --content "..." --location "35.68,139.76,Tokyo HQ"
 kagura recall "dependency injection" -k 10
 kagura recall "dependency injection" --no-rerank   # skip reranking; no flag follows the context config (v0.69.0+)
+kagura recall "project context" --trusted-only     # exclude connector-ingested memories (filters.trust_tier)
 kagura explore -m "memory-uuid" --depth 3
 kagura forget -m "memory-uuid"
 kagura update-memory -m "memory-uuid" --dismiss-supersede-candidate   # server v0.65.0+
@@ -677,8 +679,8 @@ kagura setup claude --profile default      # writes .mcp.json → kagura-mcp std
 This writes a `.mcp.json` that launches `kagura-mcp` as the MCP server (no secret
 in the file), plus `.claude/` hooks and `/kagura-recall` · `/kagura-remember`
 skills. Check the active mode any time with `kagura auth status` (it reports
-`refresh-aware` vs `legacy static API-key token` for the `.mcp.json` in the
-current directory).
+`refresh-aware` vs `legacy static API-key token` for the entry Claude Code uses
+in the current directory, and which scope it comes from).
 
 **CI / service accounts** — use a long-lived API key instead (static token, no
 refresh needed):
@@ -686,6 +688,48 @@ refresh needed):
 ```bash
 kagura setup claude --api-key kagura_xxx --mcp-url https://memory.kagura-ai.com/mcp
 ```
+
+**One entry for every project** — the stdio entry holds nothing
+project-specific (a local command and a profile name), so when one profile
+serves all your projects, put it at Claude Code's **user** scope:
+
+```bash
+kagura setup claude --profile default --scope user   # via `claude mcp add-json --scope user`
+```
+
+`--scope project` (the default) writes `<project>/.mcp.json`: that is the scope
+Claude Code shares through version control, and it asks you to approve a new
+project server before first use. `--scope user` writes through the `claude`
+CLI, since Claude Code owns `~/.claude.json`; without `claude` on `PATH`, setup
+prints the command and stops. Each run still writes the project's
+`.kagura.json` and hooks. Claude Code uses the `kagura-memory` entry from the
+strongest scope — local > project > user — and ignores the rest, so setup
+checks every scope first: it warns (and with `-y` exits 1 without writing) when
+a stronger entry would hide the new one, and notes any weaker entry the new one
+hides. `kagura doctor` reports the same.
+
+**Upstream URL query** — `--guardrails off|<context-uuid>` and
+`--tool-profile <name>` put memory-cloud's `?guardrails=` / `?profile=` on the
+upstream MCP URL: as `kagura-mcp --guardrails … --tool-profile …` arguments for
+`--profile` (the proxy adds them to the profile's URL at run time, replacing any
+earlier value), or in the url's query for an API key. Nothing is copied into
+`--server` or `~/.kagura/credentials.json`, and changing them never forces a
+re-login. `--guardrails off` also removes the `guardrails` block from
+`get_context_info`: use it only when hooks deliver guardrails (see below).
+`--tool-profile core` limits `tools/list` to the memory loop.
+
+**Hooks and commands** — the SessionStart hook recalls project context with
+`kagura recall --trusted-only`, so connector-ingested memories never reach the
+session unreviewed. `--no-session-hook`, `--no-sync-hook` (the `.claude/memory`
+sync) and `--no-commands` (`/kagura-recall` · `/kagura-remember`) skip them;
+re-running with one removes only what setup itself wrote. When the memory-cloud
+**`kagura-memory` plugin** is installed (`claude plugin list`), an interactive
+run offers to skip the SessionStart hook and the commands it duplicates
+(`/kagura-memory:session-start`, `:recall`, `:remember`); `-y` keeps them and
+names the flags. Setup never sets `--guardrails off` for you: once the plugin's
+guardrail hooks are configured (`/kagura-memory:setup`), re-run with
+`--guardrails off`. Setup prints the plugin's `server_url` and `context_id`
+values (never an API key).
 
 Or use the CLI directly:
 
