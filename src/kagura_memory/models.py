@@ -903,6 +903,22 @@ class ListTagsResponse(BaseModel):
     total: int
 
 
+class _ContextTagsBody(BaseModel):
+    """``GET /api/v1/contexts/{id}/tags``, which ``list_tags`` reshapes (#273).
+
+    Unlike the MCP tool, the route sends no ``context_name`` (through
+    memory-cloud v0.76.0; memory-cloud#1669 proposes adding it) and adds a
+    ``sample_summary`` per tag, which :class:`TagInfo` drops.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    context_id: str
+    context_name: str | None = None
+    tags: list[TagInfo]
+    total: int
+
+
 # ---------------------------------------------------------------------------
 # File objects (server v0.15.1+)
 # ---------------------------------------------------------------------------

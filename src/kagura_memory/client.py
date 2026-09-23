@@ -7,6 +7,7 @@ import logging
 import math
 from datetime import datetime
 from typing import Any, Literal, Self, TypeVar
+from urllib.parse import quote
 
 import httpx
 from pydantic import BaseModel as _BaseModel
@@ -16,6 +17,7 @@ from ._http import (
     SDK_VERSION,
     _opt_int,
     base_url_from_mcp,
+    extract_detail,
     gate_error,
     mcp_session_expired,
     mcp_session_header,
@@ -62,6 +64,7 @@ from .models import (
     _agent_update_payload,
     _binding_scope_payload,
     _bootstrap_payload,
+    _ContextTagsBody,
     _details_with_tool_trigger,
 )
 
@@ -255,6 +258,10 @@ class KaguraClient:
         # re-fetching on every section summarization. See
         # :meth:`_get_context_info_cached`.
         self._context_info_cache: dict[str, ContextInfo | None] = {}
+        # Context id (lower case) → name, for the list_tags drill-down, whose
+        # REST route sends no name (#273). Never stale: no server API renames
+        # a context (update_context cannot change ``name``).
+        self._context_names: dict[str, str] = {}
 
     def _next_request_id(self) -> int:
         """Get next JSON-RPC request ID (concurrency-safe via itertools.count)."""
@@ -374,16 +381,31 @@ class KaguraClient:
             self.mcp_url, json=body, headers=mcp_session_header(self._session_id)
         )
 
-    async def _rest_get_json(self, path: str, params: dict[str, Any] | None = None) -> Any:
+    async def _rest_get_json(
+        self,
+        path: str,
+        params: dict[str, Any] | None = None,
+        *,
+        operation: str | None = None,
+    ) -> Any:
         """GET a REST endpoint and return its decoded JSON body.
 
         Args:
             path: URL path (appended to ``_base_url``).
-            params: Optional query parameters.
+            params: Optional query parameters. A list value is sent as one
+                repeated key per item (``?k=a&k=b``), which is how FastAPI
+                reads a ``list[str]`` query.
+            operation: The MCP tool this call stands in for. When set, a
+                ``404`` and a ``422`` raise what that tool's
+                ``context_not_found`` and ``invalid_argument`` errors raise
+                (:meth:`_raise_for_mcp_error`), so a method moved from MCP to
+                REST keeps its exceptions (#273).
 
         Raises:
             KaguraAuthError / KaguraRateLimitError / KaguraConnectionError: A
                 non-2xx status (see :func:`raise_for_kagura_status`).
+            KaguraNotFoundError / KaguraError: A ``404`` / ``422`` when
+                ``operation`` is set.
             KaguraConnectionError: A network failure, or a 2xx body that is
                 not JSON.
         """
@@ -393,6 +415,12 @@ class KaguraClient:
             response.raise_for_status()
             return response.json()
         except httpx.HTTPStatusError as e:
+            code = {404: "context_not_found", 422: "invalid_argument"}.get(e.response.status_code)
+            if operation is not None and code is not None:
+                message = extract_detail(e.response) or f"HTTP {e.response.status_code}"
+                self._raise_for_mcp_error(
+                    {"status": "error", "error": code, "message": message}, operation
+                )
             raise_for_kagura_status(e)
         except httpx.RequestError as e:
             raise KaguraConnectionError(f"Connection failed: {_exc_message(e)}") from e
@@ -1658,6 +1686,16 @@ class KaguraClient:
         needs v0.17.2+. As elsewhere in this client, ``MIN_SERVER_VERSION`` is
         not bumped to match — floors are tracked per surface.
 
+        A ``with_tags`` drill-down is sent to the REST route
+        ``GET /api/v1/contexts/{id}/tags`` rather than MCP: the MCP tool has
+        no ``with_tags`` (through memory-cloud v0.76.0, memory-cloud#1669) and
+        silently returned the unfiltered vocabulary (#273). The result has
+        the same shape. The route sends no ``context_name``, so the client
+        looks it up once per context with a ``list_tags(limit=1)`` MCP call
+        and keeps it; a call without ``with_tags`` fills the same cache. The
+        route takes API keys and OAuth profiles alike (OAuth needs the
+        ``memory:read`` scope, which every ``kagura auth login`` grant has).
+
         Args:
             context_id: Context ID to list tags from.
             limit: Maximum tags to return (1-500, default 50).
@@ -1679,17 +1717,23 @@ class KaguraClient:
                         ctx, query=..., filters={"tags": [...], "tags_match": "all"}
                     )
 
-                Requires memory-cloud server v0.17.2+ (#830). Omitted when
-                empty or unset.
+                Requires memory-cloud server v0.17.2+ (#830). Values are
+                trimmed and blank ones dropped, as the server does; at most 50
+                may remain, each at most 200 characters. An empty result is no
+                drill-down and stays on MCP.
 
         Returns:
             :class:`ListTagsResponse` with ``context_id``, ``context_name``,
             ``tags`` (list of :class:`TagInfo`), and ``total`` count.
 
         Raises:
-            ValueError: If ``limit``, ``min_count``, or ``prefix`` are out of range.
+            ValueError: If ``limit``, ``min_count``, ``prefix`` or
+                ``with_tags`` are out of range, before any request.
+            TypeError: If ``with_tags`` is a ``str`` rather than a list.
             KaguraNotFoundError: Context not found or caller lacks access.
             KaguraError: Other server-side error.
+            KaguraResponseError: A response that does not match
+                :class:`ListTagsResponse` (``operation="list_tags"``).
         """
         if not 1 <= limit <= 500:
             raise ValueError(f"limit must be between 1 and 500, got {limit}")
@@ -1697,21 +1741,72 @@ class KaguraClient:
             raise ValueError(f"min_count must be between 1 and 10000, got {min_count}")
         if len(prefix) > 200:
             raise ValueError(f"prefix must be at most 200 characters, got {len(prefix)}")
+        # A str would be iterated into one-character tags: a wrong drill-down
+        # the server would happily run.
+        if isinstance(with_tags, str):
+            raise TypeError("with_tags must be a list of tags, not a str")
+        # Normalized as the server normalizes it, so the caps below judge the
+        # list the server would. An empty drill-down matches everything
+        # (``tags @> '{}'``), so it is the same as none.
+        drill_down = [s for t in with_tags or () if (s := t.strip())]
+        if len(drill_down) > 50:
+            raise ValueError(f"with_tags accepts at most 50 tags, got {len(drill_down)}")
+        longest = max(map(len, drill_down), default=0)
+        if longest > 200:
+            raise ValueError(f"each with_tags value must be at most 200 characters, got {longest}")
 
-        arguments: dict[str, Any] = {
-            "context_id": context_id,
-            "limit": limit,
-            "min_count": min_count,
-            "sort": sort,
-        }
+        query: dict[str, Any] = {"limit": limit, "min_count": min_count, "sort": sort}
         if prefix:
-            arguments["prefix"] = prefix
-        # An empty list is not a drill-down; omit rather than send [] so the
-        # server keeps its unfiltered behaviour.
-        if with_tags:
-            arguments["with_tags"] = with_tags
-        result = await self._call_tool_checked("list_tags", arguments)
-        return parse_response(ListTagsResponse, result, operation="list_tags")
+            query["prefix"] = prefix
+        if drill_down:
+            # MCP list_tags has no with_tags (#273): the same query, over REST.
+            return await self._list_tags_via_rest(context_id, {**query, "with_tags": drill_down})
+        result = await self._call_tool_checked("list_tags", {"context_id": context_id, **query})
+        return self._remember_context_name(
+            parse_response(ListTagsResponse, result, operation="list_tags")
+        )
+
+    async def _list_tags_via_rest(
+        self, context_id: str, params: dict[str, Any]
+    ) -> ListTagsResponse:
+        """The ``list_tags`` drill-down over ``GET /api/v1/contexts/{id}/tags`` (#273).
+
+        Reshaped to what the MCP tool returns: the route sends no
+        ``context_name``, which :meth:`_context_name_for` supplies.
+        """
+        # Quoted, so a caller's id cannot add segments to the request path.
+        path = f"/api/v1/contexts/{quote(context_id, safe='')}/tags"
+        data = await self._rest_get_json(path, params, operation="list_tags")
+        body = parse_response(_ContextTagsBody, data, operation="list_tags")
+        # Only after the REST call, so its error is the one a caller sees.
+        context_name = body.context_name or await self._context_name_for(body.context_id)
+        return self._remember_context_name(
+            ListTagsResponse(
+                context_id=body.context_id,
+                context_name=context_name,
+                tags=body.tags,
+                total=body.total,
+            )
+        )
+
+    async def _context_name_for(self, context_id: str) -> str:
+        """A context's name, from the cache or from one ``list_tags`` MCP call.
+
+        ``list_tags`` runs the same access check as the REST tags route (both
+        call the server's ``ContextService.aggregate_tags``), is exempt from
+        the MCP rate limit, and with ``limit=1`` carries one tag.
+        """
+        cached = self._context_names.get(context_id.lower())
+        if cached is not None:
+            return cached
+        result = await self._call_tool_checked("list_tags", {"context_id": context_id, "limit": 1})
+        response = parse_response(ListTagsResponse, result, operation="list_tags")
+        return self._remember_context_name(response).context_name
+
+    def _remember_context_name(self, response: ListTagsResponse) -> ListTagsResponse:
+        """Cache the name a ``list_tags`` result carries, and return the result."""
+        self._context_names[response.context_id.lower()] = response.context_name
+        return response
 
     async def get_tool_definitions(self) -> list[dict[str, Any]]:
         """
