@@ -12,7 +12,7 @@ uv run python examples/<script>.py
 | Script | Client | Shows |
 |--------|--------|-------|
 | [`client_basics.py`](client_basics.py) | `KaguraClient` | remember / recall / explore / reference / forget |
-| [`client_advanced.py`](client_advanced.py) | `KaguraClient` | recall filters, cross-context recall, `list_tags` (+ `with_tags` drill-down), `recall_nearby` (WHERE axis), `update_memory`, supersede/history, `get_usage`, `get_memory_stats`, `find_duplicates`, `merge_contexts` |
+| [`client_advanced.py`](client_advanced.py) | `KaguraClient` | recall filters, cross-context recall, `list_tags` (+ `with_tags` drill-down), `recall_nearby` + `list_memories` bbox (WHERE axis), `update_memory`, supersede/history, `get_usage`, `get_memory_stats`, `find_duplicates`, `merge_contexts` |
 | [`agent_bootstrap.py`](agent_bootstrap.py) | `KaguraClient` / `AgentsClient` | one-call agent session-start rehydration (`get_agent_bootstrap`, MCP + REST; server v0.49.0+) |
 | [`resource_tokens.py`](resource_tokens.py) | `ResourceClient` | resource setup, token lifecycle, single + batch event ingestion |
 | [`files_upload.py`](files_upload.py) | `FilesClient` | upload (bytes + dedup), `download_url`, `list`, `delete` |
@@ -29,9 +29,11 @@ extra (or `[ingest-all]`); plain text / Markdown need only the base
 `[ingest]` extra (which carries `litellm` for summarization since v0.37.0).
 `client_advanced.py` spans several server floors: `list_tags()` needs
 memory-cloud v0.15.4+, its `with_tags` drill-down v0.17.2+, supersede
-(`supersedes` / `include_superseded`) v0.45.0+, and `recall_nearby` /
-`details.location` v0.53.0+. Against an older server those specific calls
-raise `KaguraConnectionError` ("MCP error: Tool not found") — note the type:
+(`supersedes` / `include_superseded`) v0.45.0+, `recall_nearby` /
+`details.location` v0.53.0+, and the `list_memories` bbox v0.54.0+ (an older
+server ignores the bbox and returns an unfiltered page instead of failing).
+Against an older server the other version-gated calls raise
+`KaguraConnectionError` ("MCP error: Tool not found") — note the type:
 MCP-level errors surface as a *connection* error even though nothing is wrong
 with the connection. It subclasses `KaguraError`. The script does not catch them, so it
 stops at the first unsupported call. Run it against a current server, or drop
