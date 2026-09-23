@@ -508,18 +508,23 @@ async def fetch_system_info(
 def invite_support(system_info: dict[str, Any] | None) -> InviteSupport:
     """Decide how ``--invite`` is presented, from a raw ``/system/info`` body.
 
+    A ``features`` object without ``beta_invites: true`` means invites are
+    off, as memory-cloud's own web app reads it: the flag is default-off, and
+    a server older than the flag (before 0.70.0) has no ``/join`` route.
+
     Returns:
-        ``"disabled"`` when ``features.beta_invites`` is ``false`` (invites
-        have no effect on this server); ``"hand_off"`` when the server
-        version is at least :data:`JOIN_RETURN_TO_MIN_SERVER_VERSION`, so one
-        ``/join`` link carries the user on to ``/device``; otherwise
-        ``"two_step"`` (no info, an older or unparseable version, or the
-        hand-off not released yet).
+        ``"disabled"`` when ``features`` is an object whose ``beta_invites``
+        is not ``true`` (invites have no effect on this server);
+        ``"hand_off"`` when the server version is at least
+        :data:`JOIN_RETURN_TO_MIN_SERVER_VERSION`, so one ``/join`` link
+        carries the user on to ``/device``; otherwise ``"two_step"`` (no
+        info or no ``features`` object, an older or unparseable version, or
+        the hand-off not released yet).
     """
     if system_info is None:
         return "two_step"
     features = system_info.get("features")
-    if isinstance(features, dict) and features.get("beta_invites") is False:
+    if isinstance(features, dict) and features.get("beta_invites") is not True:
         return "disabled"
     minimum = JOIN_RETURN_TO_MIN_SERVER_VERSION
     version = system_info.get("version")

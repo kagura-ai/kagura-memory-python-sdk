@@ -375,10 +375,21 @@ def test_invite_support_beta_invites_false_disables(hand_off_released):
     assert invite_support(_system_info("0.76.0", beta_invites=False)) == "disabled"
 
 
-def test_invite_support_beta_invites_missing_is_not_disabled(hand_off_released):
-    # Only an explicit ``false`` means "invites have no effect here".
-    assert invite_support(_system_info("0.76.0", beta_invites=None)) == "hand_off"
+@pytest.mark.parametrize("flag", [None, "true", 1, {}], ids=["missing", "str", "int", "obj"])
+def test_invite_support_beta_invites_not_true_disables(hand_off_released, flag):
+    # memory-cloud reads a missing flag as off, and a server older than the
+    # flag (before v0.70.0) has no /join route at all.
+    info = _system_info("0.76.0", beta_invites=None)
+    if flag is not None:
+        info["features"]["beta_invites"] = flag
+    assert invite_support(info) == "disabled"
+
+
+def test_invite_support_without_a_features_object_is_unknown(hand_off_released):
+    # No features object says nothing about invites: fall through to the version.
+    assert invite_support({"version": "0.76.0"}) == "hand_off"
     assert invite_support({"version": "0.76.0", "features": "weird"}) == "hand_off"
+    assert invite_support({"version": "0.75.0", "features": None}) == "two_step"
 
 
 # ---------------------------------------------------------------------------
@@ -677,10 +688,24 @@ def test_login_invite_beta_invites_false_prints_normal_prompt(
     server = _Server(_system_info("0.76.0", beta_invites=False))
     result, _, poll, browser = _invoke(["--invite", SENTINEL], server)
     assert result.exit_code == 0, result.output
-    assert "invites are turned off on this server" in result.output
+    assert "this server does not accept invites" in result.output
     assert "/join/" not in result.output
     assert SENTINEL not in result.output
     assert DEVICE_URI_COMPLETE in result.output
+    browser.assert_called_once_with(DEVICE_URI_COMPLETE)
+    poll.assert_awaited_once()
+
+
+def test_login_invite_server_without_beta_invites_flag_prints_normal_prompt(
+    patched_default_path: Path,
+):
+    """A server older than the flag (v0.17.1-v0.69.x) has no /join route."""
+    server = _Server(_system_info("0.69.0", beta_invites=None))
+    result, _, poll, browser = _invoke(["--invite", SENTINEL], server)
+    assert result.exit_code == 0, result.output
+    assert "this server does not accept invites" in result.output
+    assert "/join/" not in result.output
+    assert SENTINEL not in result.output
     browser.assert_called_once_with(DEVICE_URI_COMPLETE)
     poll.assert_awaited_once()
 

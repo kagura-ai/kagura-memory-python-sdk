@@ -297,7 +297,7 @@ def _print_invite_prompt(
     """
     if support == "disabled":
         click.echo()
-        click.echo("  Note: invites are turned off on this server, so --invite has no effect.")
+        click.echo("  Note: this server does not accept invites, so --invite has no effect.")
         _print_device_prompt(device, attempt_browser=attempt_browser)
         return
 

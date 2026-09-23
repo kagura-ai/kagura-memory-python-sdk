@@ -590,10 +590,11 @@ never written to `credentials.json` or included in an error message. The CLI
 builds the `/join` link on the web app's host (taken from the device flow's
 `verification_uri`, not from `--server`, since the API can live on another
 origin) and refuses a full link for a different server. It then reads the
-public `/api/v1/system/info`: when `features.beta_invites` is `false` it says
-invites have no effect and shows the normal prompt. Otherwise it prints two
-steps in order — open the invite link and sign up, then open the approval URL —
-and opens only the first in the browser (`--no-browser` just prints both). A
+public `/api/v1/system/info`: when `features.beta_invites` is not `true`
+(invites turned off, or a server older than v0.70.0) it says invites have no
+effect and shows the normal prompt. Otherwise it prints two steps in order —
+open the invite link and sign up, then open the approval URL — and opens
+only the first in the browser (`--no-browser` just prints both). A
 single link that signs you up and lands on the approval page with the code
 filled in is built in but switched off until memory-cloud ships the `/join`
 `return_to` hand-off (memory-cloud#1655).
