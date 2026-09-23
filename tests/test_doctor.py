@@ -355,7 +355,7 @@ def test_doctor_insecure_mcp_url_skips_server(monkeypatch):
     assert any("connectivity check skipped" in check.message for check in report.checks)
 
 
-def test_doctor_litellm_missing_and_blocked(monkeypatch):
+def test_doctor_litellm_missing(monkeypatch):
     from importlib.metadata import PackageNotFoundError
 
     from kagura_memory.doctor import _check_litellm
@@ -366,13 +366,59 @@ def test_doctor_litellm_missing_and_blocked(monkeypatch):
     )
     assert _check_litellm().status == "info"
 
-    monkeypatch.setattr("kagura_memory.doctor.importlib_metadata.version", lambda _: "1.82.7")
+
+# Every PEP 440 spelling whose release starts 1.82.7 or 1.82.8 is blocked:
+# pre-, post-, dev- and local versions too. The ``ingest`` extra's
+# ``litellm>=1.50,<1.82.7`` pin excludes all of them as well.
+_LITELLM_BLOCKED = [
+    "1.82.7",
+    "1.82.8",
+    "1.82.7rc1",
+    "1.82.7.post1",
+    "1.82.7-1",  # PEP 440 implicit post-release: 1.82.7.post1
+    "1.82.7.dev0",
+    "1.82.7+local",
+    "1.82.8a1",
+    "1.82.8.0",
+    "1.82.07",
+    "v1.82.7",
+    "V1.82.8",
+    "0!1.82.7",  # the default epoch: the same release as 1.82.7
+    "1!1.82.8",
+    " 1.82.7 ",
+]
+_LITELLM_ALLOWED = ["1.82.0rc7", "1.82.6", "1.82.9", "1.50.0", "1.83.7", "1.8.27", "1.82"]
+
+
+@pytest.mark.parametrize("version", _LITELLM_BLOCKED)
+def test_doctor_litellm_blocks_compromised_releases(monkeypatch, version):
+    from kagura_memory.doctor import _check_litellm
+
+    monkeypatch.setattr("kagura_memory.doctor.importlib_metadata.version", lambda _: version)
     blocked = _check_litellm()
     assert blocked.status == "fail"
-    assert "blocked" in blocked.message
+    assert blocked.message == f"LiteLLM {version} is blocked by this SDK"
+    assert blocked.details == {"version": version}
 
-    monkeypatch.setattr("kagura_memory.doctor.importlib_metadata.version", lambda _: "1.82.9")
+
+@pytest.mark.parametrize("version", _LITELLM_ALLOWED)
+def test_doctor_litellm_passes_other_releases(monkeypatch, version):
+    from kagura_memory.doctor import _check_litellm
+
+    monkeypatch.setattr("kagura_memory.doctor.importlib_metadata.version", lambda _: version)
     assert _check_litellm().status == "pass"
+
+
+@pytest.mark.parametrize("version", _LITELLM_BLOCKED + _LITELLM_ALLOWED)
+def test_doctor_litellm_blocklist_matches_pep_440_release(monkeypatch, version):
+    # PEP 440 is the oracle: blocked exactly when the release segment starts
+    # (1, 82, 7) or (1, 82, 8), however the version is spelled.
+    pep440 = pytest.importorskip("packaging.version")
+    from kagura_memory.doctor import _check_litellm
+
+    release = (pep440.Version(version).release + (0, 0))[:3]
+    monkeypatch.setattr("kagura_memory.doctor.importlib_metadata.version", lambda _: version)
+    assert (_check_litellm().status == "fail") is (release in {(1, 82, 7), (1, 82, 8)})
 
 
 def test_doctor_reports_provider_key_presence_with_redaction(monkeypatch):
@@ -518,12 +564,6 @@ def test_run_doctor_includes_llm_section(monkeypatch):
         check.section == "llm" and check.details.get("env") == "OPENAI_API_KEY"
         for check in report.checks
     )
-
-
-def test_doctor_version_parser_ignores_extra_components():
-    from kagura_memory.doctor import _parse_version_prefix
-
-    assert _parse_version_prefix("1.2.3.4") == (1, 2, 3)
 
 
 def test_doctor_reports_missing_oauth_profile():
@@ -742,14 +782,24 @@ def test_doctor_legacy_type_hint_names_the_scope(tmp_path, scope, fix):
     assert fix in hint
 
 
-@pytest.mark.parametrize(
-    ("version", "expected_status"),
-    [
-        ("unknown", "info"),
-        ("0.16.0", "fail"),
-        ("0.25.0", "pass"),
-    ],
-)
+# (server version, verdict of the doctor's version check) with
+# MIN_SERVER_VERSION = 0.17.1. The agreement test below reuses it.
+_SERVER_VERSION_VERDICTS = [
+    ("unknown", "info"),
+    ("main-abc123", "info"),
+    ("0.17", "info"),
+    ("0.16.0", "fail"),
+    ("v0.16.0", "fail"),
+    ("0.16.9-beta", "fail"),
+    ("0.17.0-rc1", "fail"),
+    ("0.17.1-rc1", "fail"),
+    ("0.17.1", "pass"),
+    ("0.17.2-rc1", "pass"),
+    ("0.25.0", "pass"),
+]
+
+
+@pytest.mark.parametrize(("version", "expected_status"), _SERVER_VERSION_VERDICTS)
 def test_check_server_version_branches(monkeypatch, version, expected_status):
     from kagura_memory.doctor import _check_server
 
@@ -781,7 +831,36 @@ def test_check_server_version_branches(monkeypatch, version, expected_status):
 
     assert seen["profile"] == "dev"
     assert seen["mcp_url"] == "https://profile.example.com/mcp"
-    assert any(check.status == expected_status for check in checks)
+    assert [check.status for check in checks] == ["pass", expected_status]
+    assert checks[-1].details["version"] == version
+    assert ("minimum" in checks[-1].details) is (expected_status == "fail")
+
+
+@pytest.mark.parametrize(("version", "expected_status"), _SERVER_VERSION_VERDICTS)
+def test_check_server_agrees_with_check_server_version(
+    monkeypatch, caplog, version, expected_status
+):
+    """One string, one verdict: the doctor fails exactly when the client warns."""
+    import asyncio
+    import logging
+
+    from kagura_memory.client import KaguraClient
+    from kagura_memory.doctor import _check_server
+
+    async def fake_server_info(self):
+        return ServerInfo(name="memory-cloud", version=version)
+
+    monkeypatch.setattr(KaguraClient, "get_server_info", fake_server_info)
+    resolved = _StaticAuth(
+        api_key="kagura_test_key", mcp_url="https://api.example.com/mcp", source="env"
+    )
+
+    with caplog.at_level(logging.WARNING, logger="kagura_memory"):
+        checks = asyncio.run(_check_server(resolved))
+
+    warned = any("tested minimum" in record.getMessage() for record in caplog.records)
+    assert checks[-1].status == expected_status
+    assert warned is (expected_status == "fail")
 
 
 @pytest.mark.parametrize(

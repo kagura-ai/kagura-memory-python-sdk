@@ -28,6 +28,7 @@ from urllib.parse import quote, urlsplit
 import httpx
 
 from .._http import SDK_VERSION, _retry_after_seconds, extract_detail, validate_https_url
+from .._version import meets_minimum
 from ..exceptions import (
     KaguraAuthDeniedError,
     KaguraAuthError,
@@ -62,7 +63,6 @@ REFRESH_TOKEN_GRANT_TYPE = "refresh_token"
 # with ``fullmatch`` so a trailing newline cannot sneak past ``$``.
 _INVITE_TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{20,128}")
 _INVITE_TOKEN_RULE = "20-128 characters from A-Z, a-z, 0-9, '_' and '-'"
-_SEMVER_PREFIX_RE = re.compile(r"v?(\d+)\.(\d+)\.(\d+)")
 _DEFAULT_PORTS = {"http": 80, "https": 443}
 
 JOIN_RETURN_TO_MIN_SERVER_VERSION: tuple[int, int, int] = (0, 76, 0)
@@ -544,17 +544,15 @@ def invite_support(system_info: dict[str, Any] | None) -> InviteSupport:
         ``"hand_off"`` when the server version is at least
         :data:`JOIN_RETURN_TO_MIN_SERVER_VERSION` (memory-cloud v0.76.0), so
         one ``/join`` link carries the user on to ``/device``; otherwise
-        ``"two_step"`` (no info or no ``features`` object, or an older or
-        unparseable version).
+        ``"two_step"`` (no info or no ``features`` object, or an older,
+        pre-release-of-0.76.0 or unparseable version).
     """
     if system_info is None:
         return "two_step"
     features = system_info.get("features")
     if isinstance(features, dict) and features.get("beta_invites") is not True:
         return "disabled"
-    version = system_info.get("version")
-    parsed = _parse_version_prefix(version) if isinstance(version, str) else None
-    if parsed is not None and parsed >= JOIN_RETURN_TO_MIN_SERVER_VERSION:
+    if meets_minimum(system_info.get("version"), JOIN_RETURN_TO_MIN_SERVER_VERSION) is True:
         return "hand_off"
     return "two_step"
 
@@ -602,17 +600,6 @@ def _join_keeps_return_to(path: str) -> bool:
         and not path.startswith("//")
         and not any(ch == "\\" or ord(ch) <= 0x1F for ch in path)
     )
-
-
-def _parse_version_prefix(version: str) -> tuple[int, int, int] | None:
-    """``(major, minor, patch)`` from a ``v?MAJOR.MINOR.PATCH`` prefix; ``None`` otherwise.
-
-    Same shape as ``doctor._parse_version_prefix`` so the two can merge.
-    """
-    match = _SEMVER_PREFIX_RE.match(version)
-    if match is None:
-        return None
-    return (int(match[1]), int(match[2]), int(match[3]))
 
 
 def _url_origin(url: str) -> str | None:

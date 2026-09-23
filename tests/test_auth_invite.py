@@ -362,27 +362,20 @@ def test_hand_off_version_is_memory_cloud_0_76_0():
     assert device_flow.JOIN_RETURN_TO_MIN_SERVER_VERSION == (0, 76, 0)
 
 
+# The parsing rules themselves are tabled in tests/test_version.py.
 @pytest.mark.parametrize(
-    ("version", "parsed"),
-    [
-        ("0.76.0", (0, 76, 0)),
-        ("v0.76.0", (0, 76, 0)),
-        ("0.75.12", (0, 75, 12)),
-        ("0.76.0+build.7", (0, 76, 0)),
-        ("0.76", None),
-        ("main-abc123", None),
-    ],
+    "version",
+    [HAND_OFF, "v0.76.0", "0.76.0+build.7", "0.76.1", "0.76.1-rc1", "0.77.3", "v1.0.0"],
 )
-def test_parse_version_prefix(version: str, parsed: tuple[int, int, int] | None):
-    assert device_flow._parse_version_prefix(version) == parsed
-
-
-@pytest.mark.parametrize("version", [HAND_OFF, "v0.76.0", "0.76.1", "0.77.3", "v1.0.0"])
 def test_invite_support_hands_off_from_0_76_0(version: str):
     assert invite_support(_system_info(version)) == "hand_off"
 
 
-@pytest.mark.parametrize("version", [BEFORE_HAND_OFF, "0.75.9", "v0.75.1", "0.70.0", "0.9.99"])
+@pytest.mark.parametrize(
+    "version",
+    # A pre-release of 0.76.0 comes before it (SemVer §11, PEP 440).
+    [BEFORE_HAND_OFF, "0.75.9", "v0.75.1", "0.70.0", "0.9.99", "0.76.0-rc1", "0.76.0rc1"],
+)
 def test_invite_support_before_0_76_0_falls_back(version: str):
     assert invite_support(_system_info(version)) == "two_step"
 
