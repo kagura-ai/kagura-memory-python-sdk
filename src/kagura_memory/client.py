@@ -2699,8 +2699,8 @@ class KaguraClient:
                 accessible surfaces as ``HTTP 404``.
             KaguraResponseError: The 2xx body does not match
                 :class:`MemoryListResponse` (a server newer than the SDK), with
-                ``operation="KaguraClient.list_memories"``. SDK 0.38.1 and
-                earlier raised ``KaguraConnectionError`` here, as the other
+                ``operation="KaguraClient.list_memories"``. SDKs before 0.40.0
+                raised ``KaguraConnectionError`` here, as the other
                 REST-backed methods still do.
         """
         params: dict[str, Any] = {"limit": limit, "offset": offset}
