@@ -22,6 +22,7 @@ from .files_client import FilesClient
 from .ingest import FileIngestor
 from .memory_client import MemoryClient
 from .models import (
+    GUARDRAIL_FORMAT,
     Agent,
     AgentBinding,
     AgentBootstrapAgent,
@@ -190,6 +191,7 @@ __all__ = [
     "ToolTrigger",
     "GuardrailItem",
     "GuardrailSet",
+    "GUARDRAIL_FORMAT",
     "GuardrailDigest",
     "GuardrailDigestTarget",
     "ContextGuardrails",

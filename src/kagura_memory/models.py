@@ -156,13 +156,17 @@ class ContextGuardrails(BaseModel):
     export block's begin marker); it is NOT ``GuardrailSet.version``, which
     also covers the pinned list. The full set, with patterns, is
     :meth:`KaguraClient.load_guardrails`.
+
+    ``items``, ``total_available`` and ``truncated`` are required (the
+    server always sends them): a block without them reads as ``None`` —
+    unusable — never as a complete set.
     """
 
     model_config = ConfigDict(extra="ignore")
 
-    items: list[ContextGuardrailItem] = Field(default_factory=list)
-    total_available: int = 0
-    truncated: bool = False
+    items: list[ContextGuardrailItem]
+    total_available: int
+    truncated: bool
     tool_triggered_version: str | None = None
 
 
@@ -1287,12 +1291,15 @@ class ToolTrigger(BaseModel):
     needs context **editor** or above and a user credential (an agent-bound
     key is refused with ``tool_trigger_requires_user_credential``).
 
-    ``on`` / ``action`` are typed ``str`` and unknown keys are ignored so a
-    read never breaks on a value a newer server adds — a hook skips a trigger
-    whose ``on`` / ``action`` it does not know.
+    ``on`` / ``action`` are typed ``str`` and unknown keys are kept (in
+    ``model_extra``) so a read never breaks on a value or key a newer server
+    adds — a hook skips a trigger whose ``on`` / ``action`` it does not know.
+    On write an unknown key is forwarded like any other, so a misspelt one
+    (``mtach=...``) is refused by the server with ``tool_trigger_unknown_key``
+    rather than dropped into a broader guardrail than intended.
     """
 
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="allow")
 
     tool: str
     on: str = "pre"
@@ -1362,6 +1369,10 @@ class GuardrailItem(BaseModel):
         return _validate_or_none(ToolTrigger, value)
 
 
+GUARDRAIL_FORMAT = 1
+"""The newest ``GuardrailSet.format`` this SDK reads (memory-cloud ``GUARDRAIL_FORMAT``)."""
+
+
 class GuardrailSet(BaseModel):
     """Response of ``load_guardrails`` — MCP tool and ``POST /api/v1/memory/guardrails``.
 
@@ -1377,10 +1388,14 @@ class GuardrailSet(BaseModel):
     ``tool_triggered_truncated`` say which lane is incomplete (``truncated``
     is either-lane, ``total_available`` the sum of the per-lane totals).
     These fields are required, so a response without them fails to parse
-    instead of reading as complete. ``format`` is the shared cache/payload
-    format version; ``version`` is an opaque hash of the served set (equal
-    means unchanged). ``context_id`` / ``context_name`` are filled on the MCP
-    surface only.
+    instead of reading as complete. ``version`` is an opaque hash of the
+    served set (equal means unchanged). ``context_id`` / ``context_name`` are
+    filled on the MCP surface only.
+
+    ``format`` is the shared cache/payload format version. It bumps only when
+    an existing field changes meaning or is removed, so a consumer that sees
+    a ``format`` greater than :data:`GUARDRAIL_FORMAT` must treat the set as
+    absent (fail-open) rather than act on fields it would misread.
     """
 
     model_config = ConfigDict(extra="ignore")

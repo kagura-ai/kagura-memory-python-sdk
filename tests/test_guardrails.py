@@ -21,6 +21,7 @@ import pytest
 from click.testing import CliRunner
 
 from kagura_memory import (
+    GUARDRAIL_FORMAT,
     ContextGuardrails,
     ContextInfo,
     GuardrailDigest,
@@ -33,7 +34,7 @@ from kagura_memory import (
     ToolTrigger,
 )
 from kagura_memory.auth.credentials import reset_state_cache
-from kagura_memory.cli import _splice_guardrail_block, main
+from kagura_memory.cli import _splice_guardrail_block, _write_guardrail_block, main
 
 CTX = "11111111-2222-3333-4444-555555555555"
 MEM_A = "aaaaaaaa-0000-0000-0000-000000000001"
@@ -159,6 +160,8 @@ def test_guardrail_item_keeps_unknown_on_and_action_values():
     assert item.tool_trigger is not None
     assert item.tool_trigger.on == "post"
     assert item.tool_trigger.action == "warn"
+    # Unknown keys are kept (and ignored by a matcher), not dropped.
+    assert item.tool_trigger.model_extra == {"future_key": 1}
 
 
 @pytest.mark.parametrize(
@@ -183,6 +186,13 @@ def test_tool_trigger_defaults_match_server_normalization():
     assert trigger.on == "pre"
     assert trigger.action == "inform"
     assert trigger.match is None
+
+
+def test_guardrail_format_mirrors_server():
+    # memory-cloud utils/tool_trigger.py GUARDRAIL_FORMAT; a greater format on
+    # the wire means "treat the set as absent" (fail-open).
+    assert GUARDRAIL_FORMAT == 1
+    assert GuardrailSet.model_validate(guardrail_set_dict()).format == GUARDRAIL_FORMAT
 
 
 # ---------------------------------------------------------------------------
@@ -242,6 +252,15 @@ def test_context_info_guardrails_ignores_unknown_keys():
     info = ContextInfo.model_validate(_context_info_dict(guardrails=block))
     assert info.guardrails is not None
     assert info.guardrails.items[0].summary.startswith("gh pr merge")
+
+
+@pytest.mark.parametrize("missing", ["items", "total_available", "truncated"])
+def test_context_info_guardrails_block_without_counts_is_none_not_complete(missing):
+    # A block missing its counts must never read as a complete (untruncated) set.
+    block = {k: v for k, v in GUARDRAILS_BLOCK.items() if k != missing}
+    info = ContextInfo.model_validate(_context_info_dict(guardrails=block))
+    assert info.guardrails is None
+    assert info.context.id == CTX
 
 
 def test_context_info_malformed_guardrails_block_degrades_to_none():
@@ -355,6 +374,27 @@ async def test_remember_tool_trigger_omits_unset_match():
     await client.close()
     assert "match" not in trigger
     assert trigger == {"tool": "Edit", "on": "pre", "action": "inform"}
+
+
+@pytest.mark.parametrize(
+    "trigger",
+    [
+        ToolTrigger.model_validate({"tool": "Bash", "matches": r"rm\s+-rf", "action": "block"}),
+        ToolTrigger(tool="Bash", action="block", matches=r"rm\s+-rf"),  # type: ignore[call-arg]
+    ],
+    ids=["model_validate", "constructor"],
+)
+@pytest.mark.asyncio
+async def test_remember_tool_trigger_forwards_misspelt_key(trigger):
+    # A typo must reach the server (tool_trigger_unknown_key), never be dropped
+    # into an unscoped guardrail that fires on every Bash call.
+    client = _mcp_client()
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {"memory_id": "m1"}
+        await client.remember(context_id=CTX, summary="s" * 10, content="c", tool_trigger=trigger)
+        sent = mock.call_args[0][1]["details"]["tool_trigger"]
+    await client.close()
+    assert sent == {"tool": "Bash", "on": "pre", "action": "block", "matches": r"rm\s+-rf"}
 
 
 @pytest.mark.asyncio
@@ -722,6 +762,24 @@ def test_splice_empty_digest_removes_block_and_preceding_newline():
     assert _splice_guardrail_block(text, "") == "# Project\n"
 
 
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [
+        ("## Guardrails\n", "## Next section\nbody\n"),
+        ("## Guardrails\n", ""),
+        ("", "# Project\n"),
+        ("# P\n\n", "\n## After\n"),
+    ],
+    ids=["under-heading", "under-heading-at-eof", "file-start", "blank-lines-around"],
+)
+def test_splice_empty_digest_keeps_the_line_above_intact(before, after):
+    # Only a blank line separating the block goes with it; the newline ending
+    # the line above (e.g. the user's own heading) stays.
+    text = before + EXPORT_BLOCK + after
+    expected = (before[:-1] if before.endswith("\n\n") else before) + after
+    assert _splice_guardrail_block(text, "") == expected
+
+
 def test_splice_empty_digest_without_block_is_identity():
     assert _splice_guardrail_block("# Project\n", "") == "# Project\n"
 
@@ -752,6 +810,32 @@ def test_splice_rejects_malformed_fetched_block(block):
 def test_splice_refuses_ambiguous_file(text):
     with pytest.raises(ValueError, match="by hand"):
         _splice_guardrail_block(text, NEW_BLOCK)
+
+
+def test_write_block_keeps_crlf_line_endings(tmp_path):
+    out = tmp_path / "AGENTS.md"
+    out.write_bytes(b"# Title\r\n\r\nLine one\r\nLine two\r\n")
+
+    assert _write_guardrail_block(out, EXPORT_BLOCK) == "written"
+    assert out.read_bytes() == (
+        b"# Title\r\n\r\nLine one\r\nLine two\r\n\r\n" + EXPORT_BLOCK.replace("\n", "\r\n").encode()
+    )
+    # The CRLF file with this block is recognized as up to date...
+    assert _write_guardrail_block(out, EXPORT_BLOCK) == "unchanged"
+    # ...and a removal keeps CRLF too.
+    assert _write_guardrail_block(out, "") == "removed"
+    assert out.read_bytes() == b"# Title\r\n\r\nLine one\r\nLine two\r\n"
+
+
+def test_write_block_keeps_lf_line_endings(tmp_path):
+    existing = tmp_path / "AGENTS.md"
+    existing.write_bytes(b"# Title\n")
+    assert _write_guardrail_block(existing, EXPORT_BLOCK) == "written"
+    assert existing.read_bytes() == b"# Title\n\n" + EXPORT_BLOCK.encode()
+
+    created = tmp_path / "NEW.md"
+    assert _write_guardrail_block(created, EXPORT_BLOCK) == "written"
+    assert created.read_bytes() == EXPORT_BLOCK.encode()  # LF on every platform
 
 
 # ---------------------------------------------------------------------------
@@ -831,14 +915,43 @@ def test_cli_guardrails_digest_prints_block():
     result, client = _digest(CTX)
     assert result.exit_code == 0, result.output
     assert result.output == EXPORT_BLOCK
-    client.get_guardrail_digest.assert_awaited_once_with(CTX, target="export")
+    client.get_guardrail_digest.assert_awaited_once_with(
+        CTX, target="export", profile=None, tools=None
+    )
 
 
 def test_cli_guardrails_digest_instructions_target():
     result, client = _digest(CTX, "--target", "instructions", text="base text")
     assert result.exit_code == 0, result.output
     assert result.output == "base text\n"  # no trailing newline in the body → CLI adds one
-    client.get_guardrail_digest.assert_awaited_once_with(CTX, target="instructions")
+    client.get_guardrail_digest.assert_awaited_once_with(
+        CTX, target="instructions", profile=None, tools=None
+    )
+
+
+def test_cli_guardrails_digest_instructions_forwards_tool_view():
+    result, client = _digest(
+        CTX,
+        "--target",
+        "instructions",
+        "--profile",
+        "core",
+        "--tools",
+        "remember,recall",
+        text="base text",
+    )
+    assert result.exit_code == 0, result.output
+    client.get_guardrail_digest.assert_awaited_once_with(
+        CTX, target="instructions", profile="core", tools="remember,recall"
+    )
+
+
+@pytest.mark.parametrize("flag", ["--profile", "--tools"])
+def test_cli_guardrails_digest_tool_view_needs_instructions_target(flag):
+    result, client = _digest(CTX, flag, "core")
+    assert result.exit_code != 0
+    assert "--target instructions" in result.output
+    client.get_guardrail_digest.assert_not_called()
 
 
 def test_cli_guardrails_digest_server_error_is_a_clean_message():
@@ -912,6 +1025,15 @@ def test_cli_guardrails_digest_out_empty_set_removes_block(tmp_path):
     assert result.exit_code == 0, result.output
     assert json.loads(result.output)["status"] == "removed"
     assert out.read_text(encoding="utf-8") == "# Project\n"
+
+
+def test_cli_guardrails_digest_out_empty_set_keeps_heading_above_block(tmp_path):
+    out = tmp_path / "AGENTS.md"
+    out.write_text("## Guardrails\n" + EXPORT_BLOCK + "## Next section\nbody\n", encoding="utf-8")
+    result, _ = _digest(CTX, "--out", str(out), text="")
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["status"] == "removed"
+    assert out.read_text(encoding="utf-8") == "## Guardrails\n## Next section\nbody\n"
 
 
 def test_cli_guardrails_digest_out_empty_set_never_creates_file(tmp_path):

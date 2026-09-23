@@ -1218,8 +1218,8 @@ def _splice_guardrail_block(text: str, block: str) -> str:
 
     The block replaces an earlier one in place, or is appended after a blank
     line. An empty ``block`` (the context has no tool guardrails) removes an
-    earlier block and the newline before it, and never creates one — a file
-    never keeps a guardrail the server no longer serves.
+    earlier block and the blank line before it, and never creates one — a
+    file never keeps a guardrail the server no longer serves.
 
     Raises:
         ValueError: The fetched block does not have exactly one begin and one
@@ -1241,8 +1241,12 @@ def _splice_guardrail_block(text: str, block: str) -> str:
     if span:
         start, end = span.span()
         if not block:
-            # Drop the blank line that separated the block from the text above.
-            return text[: start - 1 if text[:start].endswith("\n") else start] + text[end:]
+            # Drop the blank line that separated the block from the text
+            # above. A lone newline ends the line above (the block may sit
+            # right under the user's own heading), so it stays.
+            if text[:start].endswith("\n\n"):
+                start -= 1
+            return text[:start] + text[end:]
         return text[:start] + block + "\n" + text[end:]
     if not block:
         return text
@@ -1260,19 +1264,25 @@ def _write_guardrail_block(path: Path, block: str) -> str:
     block, else ``"written"``. A symlink (``AGENTS.md`` -> ``CLAUDE.md``) is
     followed so the link survives, and an existing file is replaced
     atomically with its permission bits kept.
+
+    Line endings are the file's own, on every platform: a file with any CRLF
+    is written back with CRLF, anything else (and a new file) with LF, so a
+    write changes the block and not every line of the file.
     """
     target = Path(os.path.realpath(path))
     exists = target.exists()
-    text = target.read_text(encoding="utf-8") if exists else ""
+    raw = target.read_bytes().decode("utf-8") if exists else ""
+    newline = "\r\n" if "\r\n" in raw else "\n"
+    text = raw.replace("\r\n", "\n")
     new = _splice_guardrail_block(text, block)
     if new == text:
         return "unchanged"
     if not exists:
-        target.write_text(new, encoding="utf-8")
+        target.write_text(new, encoding="utf-8", newline=newline)
     else:
         fd, tmp = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.")
         try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
+            with os.fdopen(fd, "w", encoding="utf-8", newline=newline) as f:
                 f.write(new)
             shutil.copymode(target, tmp)
             os.replace(tmp, target)
@@ -1331,7 +1341,15 @@ def guardrails_load(context_id, cap):
     type=click.Path(dir_okay=False, path_type=Path),
     help="Write the export block into FILE (e.g. AGENTS.md) instead of printing it",
 )
-def guardrails_digest(context_id, target, out_path):
+@click.option(
+    "--profile",
+    help="With --target instructions: the MCP URL's ?profile= value (full | core)",
+)
+@click.option(
+    "--tools",
+    help="With --target instructions: the MCP URL's ?tools= allowlist",
+)
+def guardrails_digest(context_id, target, out_path, profile, tools):
     """
     Render the tool guardrails for clients without tool hooks.
 
@@ -1341,13 +1359,26 @@ def guardrails_digest(context_id, target, out_path):
     removes an earlier block. CONTEXT_ID defaults to context_id in
     .kagura.json.
 
+    The block is workspace memory, not repository content: point --out at
+    an untracked file, or keep a tracked one out of commits (git
+    update-index --skip-worktree AGENTS.md) — in a public repository a
+    committed block publishes the guardrail summaries.
+
+    --target instructions previews a bare MCP URL (the full tool view). For
+    a URL with ?profile= or ?tools=, repeat them with --profile / --tools:
+    they decide which tool the truncation note names.
+
     Examples:
       kagura guardrails digest CTX_UUID
       kagura guardrails digest CTX_UUID --out AGENTS.md
-      kagura guardrails digest CTX_UUID --target instructions
+      kagura guardrails digest CTX_UUID --target instructions --profile core
     """
     if out_path is not None and target != "export":
         raise click.UsageError("--out writes the export block; drop --target instructions")
+    if (profile is not None or tools is not None) and target != "instructions":
+        raise click.UsageError(
+            "--profile / --tools shape the instructions preview; add --target instructions"
+        )
     try:
         config = load_config()
         ctx_id = _require_context_id(context_id, config)
@@ -1355,7 +1386,9 @@ def guardrails_digest(context_id, target, out_path):
 
         async def _run() -> GuardrailDigest:
             async with client:
-                return await client.get_guardrail_digest(ctx_id, target=target)
+                return await client.get_guardrail_digest(
+                    ctx_id, target=target, profile=profile, tools=tools
+                )
 
         digest = asyncio.run(_run())
         if out_path is None:
