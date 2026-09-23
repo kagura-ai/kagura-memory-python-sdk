@@ -2255,8 +2255,11 @@ class KaguraClient:
             resource_id: Resource identifier for data ingestion.
             name: Context name, which the server requires. Defaults to
                 ``resource_id``, which always matches the server's
-                context-name pattern; only one longer than the 100-character
-                name limit needs a ``name`` of its own.
+                context-name pattern. A ``name`` of its own is needed when the
+                id is longer than the 100-character name limit, or when the
+                workspace already has a context of that name: the server then
+                refuses with ``validation_error`` ("Context '<name>' already
+                exists in this workspace.").
             summary: Deprecated and not sent (#273): the server's
                 ``setup_resource`` has no summary (memory-cloud through
                 v0.76.0), so it was always dropped. Passing it emits a

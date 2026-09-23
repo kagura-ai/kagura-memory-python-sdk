@@ -2313,7 +2313,10 @@ _SETUP_SUMMARY_IGNORED_NOTE = (
 @click.option(
     "--name",
     "-n",
-    help="Context name (default: the resource id; lowercase, hyphens, underscores, max 100)",
+    help=(
+        "Context name (default: the resource id; lowercase letters, digits, hyphens, "
+        "underscores; max 100). Needed when a context of that name already exists"
+    ),
 )
 @click.option(
     "--summary",

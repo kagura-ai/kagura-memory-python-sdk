@@ -432,7 +432,9 @@ async with ResourceClient.from_mcp_url(api_key="kagura_...", mcp_url="http://loc
 
 The server requires a context name: `setup_resource` (and `kagura resource setup`) uses
 `resource_id` unless you pass `context_name` (`--name`). A resource id always matches the
-context-name pattern, but one longer than the 100-character name limit needs a name of its own.
+context-name pattern, but it needs a name of its own when it is longer than the 100-character
+name limit, or when the workspace already has a context of that name (the server refuses with
+`validation_error`: "Context '<name>' already exists in this workspace.").
 `summary` is deprecated and no longer sent, because the server's `setup_resource` has none;
 set it afterwards with `KaguraClient.update_context` or
 `kagura context update <context_id> --summary ...` (context owner only).
@@ -676,6 +678,7 @@ kagura contexts
 kagura context list --name-contains auth --summary   # server v0.73.0+; --details, --stats
 
 # Resource tokens
+kagura resource setup -r products                   # context named after the resource; --name to override
 kagura resource tokens create -r products -d "Product sync"
 kagura resource ingest -r products -k TOKEN --doc-id SKU-001 -V 1 -p '{"name":"Widget"}'
 kagura resource ingest-batch -r products -k TOKEN -f events.json

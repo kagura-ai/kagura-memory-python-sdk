@@ -31,7 +31,10 @@ kagura resource tokens list|create|update|revoke
   is shown once and not stored — surface it to the user and remind them to save
   it now. Prefer `revoke` over leaving stale tokens active.
 - `setup` names the new context after the resource id unless `--name` is
-  given (a lowercase name, max 100 characters). `--summary` is ignored — the
+  given (lowercase letters, digits, hyphens and underscores; max 100
+  characters). Pass `--name` when the id is longer than that, or when the
+  server refuses with `Context '<name>' already exists in this workspace` — a
+  context of that name is already there. `--summary` is ignored — the
   server has none to set — so set one afterwards with
   `kagura context update <context_id> --summary ...` (context owner only).
 - **Creation is plan-gated**: `setup` and `tokens create` need the workspace

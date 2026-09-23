@@ -224,7 +224,9 @@ class ResourceClient(KaguraRestClient):
         Args:
             resource_id: Resource identifier for data ingestion.
             context_name: Context name, which the server requires. Defaults
-                to ``resource_id`` (see :meth:`KaguraClient.setup_resource`).
+                to ``resource_id``; pass one when the id is over 100
+                characters or already names a context in the workspace (see
+                :meth:`KaguraClient.setup_resource`).
             summary: Deprecated and not sent (#273): the server's
                 ``setup_resource`` has no summary, so it was always dropped.
                 Passing it emits a :class:`DeprecationWarning`. Set it
