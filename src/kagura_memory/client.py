@@ -566,6 +566,7 @@ class KaguraClient:
         from_: str | None = None,
         until: str | None = None,
         k: int = 20,
+        include_details: bool = False,
     ) -> dict[str, Any]:
         """List Time Memories whose scheduled window overlaps a range, soonest first.
 
@@ -582,10 +583,18 @@ class KaguraClient:
                 word; it is sent to the server as ``"from"``.)
             until: Upper bound as naive ISO. Omit for an open-ended future window.
             k: Maximum results (default 20, server max 100).
+            include_details: Return each item's full ``details`` object instead
+                of its ``trigger``. Details can be large. Sent only when
+                ``True``. Requires memory-cloud v0.73.0+ (#1599); an older
+                server ignores it and always returns ``details``.
 
         Returns:
             API response with ``results`` — ``type="time"`` memories whose window
-            overlaps the range, soonest first.
+            overlaps the range, soonest first. Since memory-cloud v0.73.0 each
+            item is ``{memory_id, summary, type, trigger}``, where ``trigger``
+            is the memory's ``details.trigger``. With ``include_details=True``
+            the item carries the full ``details`` object in place of
+            ``trigger`` (``details.trigger`` is inside it).
         """
         # `from` is a Python reserved word, so the public param is `from_` but
         # the MCP tool expects the key `"from"`.
@@ -594,6 +603,8 @@ class KaguraClient:
             arguments["from"] = from_
         if until is not None:
             arguments["until"] = until
+        if include_details:
+            arguments["include_details"] = True
         return await self._call_tool_checked("recall_upcoming", arguments)
 
     async def recall_nearby(
@@ -1192,14 +1203,65 @@ class KaguraClient:
         )
         return bool(result.get("deleted", True))
 
-    async def list_contexts(self) -> dict[str, Any]:
-        """
-        Call list_contexts MCP tool.
+    async def list_contexts(
+        self,
+        *,
+        name_contains: str | None = None,
+        include_summary: bool = False,
+        include_details: bool = False,
+        include_stats: bool = False,
+    ) -> dict[str, Any]:
+        """List the contexts you can access, most recently used first.
+
+        Calls the ``list_contexts`` MCP tool. Since memory-cloud v0.73.0
+        (#1600) this is a slim name → id directory by default: each item is
+        ``{id, name, is_private, is_locked, last_used_at}``. Summaries and the
+        embedding model are opt-in. For one context's full details call
+        :meth:`get_context_info`.
+
+        ``name_contains``, ``include_summary`` and ``include_details`` need
+        memory-cloud v0.73.0+. An older server ignores them: it returns every
+        context, and every item already carries ``summary`` and
+        ``embedding_model``. ``include_stats`` works on any server.
+
+        Args:
+            name_contains: Only contexts whose name or display name contains
+                this text (case-insensitive, max 100 characters). Omitted when
+                empty or unset.
+            include_summary: Add ``summary`` truncated to 300 characters; items
+                that were cut also carry ``summary_truncated: true``.
+            include_details: Add the full ``summary`` and ``embedding_model``
+                (the pre-v0.73.0 item shape). Wins over ``include_summary``.
+                Large on big workspaces, so combine it with ``name_contains``.
+            include_stats: Add ``memory_count`` per context.
 
         Returns:
-            API response with available contexts
+            The envelope ``{status, contexts, count, total, limit, can_create,
+            hint?}``:
+
+            - ``contexts``: the items described above.
+            - ``count``: contexts in the workspace. This is quota usage, so
+              ``name_contains`` does not change it.
+            - ``total``: contexts in this response. ``0`` on no match is still
+              a success.
+            - ``limit`` / ``can_create``: the plan's context maximum and whether
+              another context fits. Absent when the caller has no current
+              workspace.
+            - ``hint``: present only when the caller can see no context at all
+              (memory-cloud v0.75.0+, #1658). It says how to create a context
+              or get access. A ``name_contains`` that matches nothing does not
+              produce it.
         """
-        return await self._call_tool_checked("list_contexts", {})
+        arguments: dict[str, Any] = {}
+        if name_contains:
+            arguments["name_contains"] = name_contains
+        if include_summary:
+            arguments["include_summary"] = True
+        if include_details:
+            arguments["include_details"] = True
+        if include_stats:
+            arguments["include_stats"] = True
+        return await self._call_tool_checked("list_contexts", arguments)
 
     async def list_tags(
         self,
@@ -1360,6 +1422,8 @@ class KaguraClient:
         context_summary: str | None = None,
         delivery_mode: Literal["always", "on_recall", "on_trigger"] | None = None,
         details: dict[str, Any] | None = None,
+        *,
+        dismiss_supersede_candidate: bool = False,
     ) -> dict[str, Any]:
         """Update an existing memory in-place or upsert by external ID.
 
@@ -1391,14 +1455,35 @@ class KaguraClient:
                 current value with :meth:`reference` and re-send every key you
                 want to keep (notably ``location``, which otherwise drops off
                 :meth:`recall_nearby`). Omit to leave details unchanged.
+            dismiss_supersede_candidate: Reject this memory's current
+                ``supersede_candidate`` (the older near-duplicate that
+                :meth:`recall` / :meth:`reference` suggest it replaces), for two
+                memories that are deliberately separate. Nothing is deleted or
+                shadowed, and it can be the only change in the call. Requires
+                ``memory_id``. Sent only when ``True``. Requires memory-cloud
+                v0.65.0+ (#1509). To accept the suggestion instead, create a
+                ``supersedes`` edge.
 
         Returns:
-            API response with updated memory info.
+            API response with updated memory info. When a dismissal applied,
+            ``supersede_candidate_dismissed`` holds the rejected candidate's
+            memory_id; the key is absent when there was no live suggestion.
+
+        Raises:
+            ValueError: If neither or both of ``memory_id`` and ``external_id``
+                are given, or if ``dismiss_supersede_candidate`` is combined
+                with ``external_id`` (the server rejects that pair: an upsert
+                replaces the memory and its suggestion).
         """
         if not memory_id and not external_id:
             raise ValueError("Provide exactly one of memory_id or external_id")
         if memory_id and external_id:
             raise ValueError("Provide exactly one of memory_id or external_id")
+        if dismiss_supersede_candidate and external_id:
+            raise ValueError(
+                "dismiss_supersede_candidate requires memory_id (in-place mode); "
+                "an external_id upsert replaces the memory and its suggestion."
+            )
 
         arguments: dict[str, Any] = {"context_id": context_id}
         if memory_id is not None:
@@ -1421,6 +1506,8 @@ class KaguraClient:
             arguments["delivery_mode"] = delivery_mode
         if details is not None:
             arguments["details"] = details
+        if dismiss_supersede_candidate:
+            arguments["dismiss_supersede_candidate"] = True
         return await self._call_tool_checked("update_memory", arguments)
 
     async def forget(
