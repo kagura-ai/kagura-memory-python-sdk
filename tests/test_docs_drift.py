@@ -4,7 +4,8 @@ Docstrings, CLI help, skills and examples described server behaviour that
 changed between memory-cloud v0.53.0 and v0.76.0 — a fixed 30-day retention,
 an immutable embedding model, a ``results`` key on ``load_pinned``. Nothing
 raised, so nothing caught it. These tests pin the wording that is known to be
-wrong and the pass-through keys a caller has to know about.
+wrong and the pass-through key names a caller has to know about — key names,
+not wording, so a docstring can be reworded without breaking CI.
 """
 
 from __future__ import annotations
@@ -51,23 +52,19 @@ def test_no_stale_server_behaviour_in_docs(phrase: str) -> None:
     ("obj", "terms"),
     [
         (KaguraClient.load_pinned, ["memories", "truncated", "total_available"]),
-        (
-            KaguraClient.recall,
-            ["tags_normalize", "degraded", "degraded_reason", "tag_suggestions", "omitted"],
-        ),
+        (KaguraClient.recall, ["tags_normalize", "degraded", "degraded_reason", "tag_suggestions"]),
         (KaguraClient.forget, ["CLEANUP_DELETED_MEMORIES_RETENTION_DAYS", "degraded"]),
         (KaguraClient.remember, ["persistence", "lint"]),
-        (KaguraClient.update_memory, ["persistence", "lint", '``""`` clears', "``{}`` clears"]),
+        (KaguraClient.update_memory, ["persistence", "lint", '``""``', "``{}``"]),
         (KaguraClient.create_context, ["invalid_embedding_model", "get_context_info"]),
-        (KaguraClient.list_embedding_models, ["allowlist"]),
         (KaguraClient.update_context, ["plan_required", "public_contexts"]),
         (KaguraClient.setup_resource, ["plan_required", "``resources``"]),
-        (KaguraClient.merge_contexts, ["pending_embedding", "default context"]),
-        (KaguraClient.get_embedding_status, ["private"]),
+        (KaguraClient.merge_contexts, ["pending_embedding"]),
         (KaguraClient.get_agent_bootstrap, ["``trigger``", "include_details"]),
         (AgentsClient.bootstrap, ["``trigger``", "include_details"]),
         (KaguraClient.get_server_info, ["search_defaults", "model_extra"]),
-        (TagInfo, ["v0.73.0"]),
+        (KaguraClient.__init__, ["?profile=", "?tools=", "tools/list"]),
+        (TagInfo, ["sample_summary"]),
     ],
     ids=lambda v: getattr(v, "__qualname__", "terms"),
 )
@@ -86,7 +83,8 @@ def test_reranker_choices_match_documented_providers() -> None:
     doc = inspect.getdoc(KaguraClient.update_search_config) or ""
     for provider in choices:
         assert f'"{provider}"' in doc
-    assert "ollama" not in doc.lower()
+    # The retired provider *value*; Ollama as a self_hosted backend is fine.
+    assert '"ollama"' not in doc
 
 
 def test_resource_skill_warns_about_plan_gated_creation() -> None:

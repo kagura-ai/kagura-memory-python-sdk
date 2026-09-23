@@ -128,7 +128,13 @@ class KaguraClient:
                 resolution chain above runs.
             mcp_url: Explicit MCP URL. When omitted, derived from the
                 resolved credential source (OAuth profile, env, or
-                ``.kagura.json``).
+                ``.kagura.json``). It may carry memory-cloud's endpoint
+                query, which every MCP request sends: ``?profile=<name>`` /
+                ``?tools=a,b`` (v0.73.0+) only narrow what ``tools/list``
+                returns — ``tools/call`` never reads them, so every method
+                here keeps working — and ``?guardrails=off`` (v0.74.0+)
+                drops the ``guardrails`` block from :meth:`get_context_info`.
+                REST calls derive their base URL without the query (#258).
             timeout: Request timeout in seconds.
             profile: Named OAuth profile to load (overrides
                 ``KAGURA_PROFILE`` and the credentials file's
@@ -574,9 +580,8 @@ class KaguraClient:
         Returns:
             API response with ``results`` (ranked summaries), ``count``,
             ``related_tags`` (``[{tag, count}]``), ``confidence`` and the
-            context fields. Since memory-cloud v0.73.0 optional keys are
-            **omitted** when empty rather than sent as ``null``, so read them
-            with ``.get()``:
+            context fields. The optional keys below are absent when they do
+            not apply, so read them with ``.get()``:
 
             - ``degraded`` / ``degraded_reason`` (v0.66.0+): the semantic half
               of hybrid search was unavailable, so the results are
@@ -585,9 +590,12 @@ class KaguraClient:
             - ``tag_suggestions`` (v0.65.0+): ``{requested_tag: ["stored-tag
               (count)", ...]}`` when a tag filter matched nothing and similar
               stored tags exist. Advisory — the filter was not widened.
-            - ``explore_hints`` (with ``include_explore_hints``) and, per
-              result, ``context_summary``, ``superseded_by``, ``contradicts``
-              and ``supersede_candidate``.
+            - ``explore_hints``: present whenever ``include_explore_hints``
+              is set, possibly as an empty list.
+            - Per result, ``context_summary``, ``superseded_by``,
+              ``contradicts`` and ``supersede_candidate``: absent when empty
+              since memory-cloud v0.73.0; older servers send ``null`` /
+              ``[]``, so test them for truthiness.
 
         Raises:
             ValueError: If ``query`` is empty/whitespace; if neither
@@ -1836,11 +1844,13 @@ class KaguraClient:
             usage_guide: Updated LLM-oriented usage guidelines (max 2000 chars).
             resource_id: Updated resource identifier for external data ingestion.
             is_public: Updated public visibility (required for resource tokens).
-                Making a context public is plan-gated since memory-cloud
-                v0.68.0 (#1551): a plan without the ``public_contexts``
-                feature is refused with ``plan_required``. A context that is
-                already public keeps serving. Making one private is refused
-                with ``cannot_make_private`` while it has a ``resource_id``.
+                Making a context public is plan-gated (``plan_required``).
+                Since memory-cloud v0.68.0 (#1551) the gate is the plan's
+                ``public_contexts`` feature (XL only by default); earlier
+                servers gated it on plans with shared contexts. A context
+                that is already public keeps serving. Making one private is
+                refused with ``cannot_make_private`` while it has a
+                ``resource_id``.
             is_locked: Lock/unlock context. Locked contexts cannot be deleted.
 
         Returns:
@@ -1906,9 +1916,10 @@ class KaguraClient:
             not guaranteed by this SDK; server-side behavior may evolve.
 
             Creating a resource — and with it a public context and a token —
-            is plan-gated since memory-cloud v0.68.0 (#1551): a plan without
-            the ``resources`` feature is refused with ``plan_required``
-            (raised as :class:`KaguraError`). Existing resources keep serving.
+            is plan-gated (``plan_required``). Since memory-cloud v0.68.0
+            (#1551) the gate is the plan's ``resources`` feature (XL only by
+            default); earlier servers gated it on plans with shared contexts
+            and resource tokens. Existing resources keep serving.
         """
         arguments: dict[str, Any] = {
             "resource_id": resource_id,
@@ -2254,8 +2265,9 @@ class KaguraClient:
                 what a :meth:`recall` that omits ``use_rerank`` follows.
             reranker_provider: Reranker provider: ``"voyage"`` or
                 ``"cohere"`` (each needs its provider's API key), or
-                ``"self_hosted"`` — the deployment's keyless local reranker,
-                an OpenAI-compatible backend such as vLLM.
+                ``"self_hosted"`` (memory-cloud v0.42.0+) — the deployment's
+                keyless local reranker, an OpenAI-compatible backend such as
+                Ollama or vLLM.
             reranker_model: Reranker model name. May be omitted for
                 ``"self_hosted"`` (memory-cloud v0.69.0+).
 
