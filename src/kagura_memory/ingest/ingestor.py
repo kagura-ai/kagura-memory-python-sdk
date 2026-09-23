@@ -19,7 +19,7 @@ from typing import Any, Literal
 from urllib.parse import urlsplit
 
 from ..client import KaguraClient
-from ..exceptions import KaguraFetchError, KaguraIngestError, KaguraLLMError
+from ..exceptions import KaguraFetchError, KaguraIngestError, KaguraLLMError, KaguraQuotaError
 from ..files_client import FilesClient
 from ..logger import VerboseLogger, normalize_logger
 from ..models import CostBreakdown, FileObject, IngestErrorRecord, IngestResult
@@ -879,8 +879,14 @@ class FileIngestor:
         sem = asyncio.Semaphore(self._concurrency)
         results: list[str | None] = [None] * len(chunks)
         section_importance = max(0.0, min(1.0, importance - 0.2))
+        # #256: after a quota refusal every later write fails the same way
+        # until the quota resets, so sections not yet sent are skipped and
+        # reported once instead of each spending a round trip on it.
+        quota_error: KaguraQuotaError | None = None
+        unsent = 0
 
         async def write_one(idx: int, chunk_obj: Chunk) -> None:
+            nonlocal quota_error, unsent
             summary = section_summaries[idx]
             if summary is None:
                 # Section summary failed earlier; skip the write.
@@ -900,6 +906,9 @@ class FileIngestor:
             heading = chunk_obj.heading or f"section {idx + 1}"
 
             async with sem:
+                if quota_error is not None:
+                    unsent += 1
+                    return
                 try:
                     result = await self._client.remember(
                         context_id=context_id,
@@ -915,6 +924,8 @@ class FileIngestor:
                         linked_memory_ids=[overview_id],
                     )
                 except Exception as e:  # noqa: BLE001
+                    if isinstance(e, KaguraQuotaError):
+                        quota_error = e
                     errors.append(
                         IngestErrorRecord(
                             step="remember",
@@ -940,6 +951,19 @@ class FileIngestor:
                 )
 
         await asyncio.gather(*(write_one(i, c) for i, c in enumerate(chunks)))
+        if quota_error is not None and unsent:
+            reset = (
+                f" Resets at {quota_error.resets_at.isoformat()}."
+                if quota_error.resets_at is not None
+                else ""
+            )
+            errors.append(
+                IngestErrorRecord(
+                    step="remember",
+                    message=f"{unsent} remaining section(s) not written: quota exceeded.{reset}",
+                    exception_type=type(quota_error).__name__,
+                )
+            )
         return [r for r in results if r is not None]
 
 
