@@ -426,9 +426,13 @@ class KaguraClient:
             code = {404: "context_not_found", 422: "invalid_argument"}.get(e.response.status_code)
             if operation is not None and code is not None:
                 message = extract_detail(e.response) or f"HTTP {e.response.status_code}"
-                self._raise_for_mcp_error(
-                    {"status": "error", "error": code, "message": message}, operation
-                )
+                try:
+                    self._raise_for_mcp_error(
+                        {"status": "error", "error": code, "message": message}, operation
+                    )
+                except KaguraError as mapped:
+                    # Chained explicitly, as raise_for_kagura_status chains it.
+                    raise mapped from e
             raise_for_kagura_status(e)
         except httpx.RequestError as e:
             raise KaguraConnectionError(f"Connection failed: {_exc_message(e)}") from e

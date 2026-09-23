@@ -4953,9 +4953,24 @@ async def test_list_tags_with_tags_uses_a_context_name_the_route_sends():
     assert server.tool_calls() == []
 
 
+# memory-cloud rewraps every HTTPException / RequestValidationError into
+# {error, message, details} (api/main.py, #992); FastAPI's own {"detail": ...}
+# is kept as the shape of other deployments and older servers.
+_VALIDATION_ERRORS = [
+    {"loc": ["path", "context_id"], "msg": "Input should be a valid UUID", "type": "uuid_parsing"}
+]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"error": "HTTP-404", "message": "Context not found", "details": {}},
+        {"detail": "Context not found"},
+    ],
+)
 @pytest.mark.asyncio
-async def test_list_tags_with_tags_raises_not_found_on_a_rest_404_and_looks_no_name_up():
-    server = _TagsServer(rest_status=404, rest_body={"detail": "Context not found"})
+async def test_list_tags_with_tags_raises_not_found_on_a_rest_404_and_looks_no_name_up(body):
+    server = _TagsServer(rest_status=404, rest_body=body)
     client = _tags_client(server)
     try:
         with pytest.raises(KaguraNotFoundError) as exc:
@@ -4964,26 +4979,41 @@ async def test_list_tags_with_tags_raises_not_found_on_a_rest_404_and_looks_no_n
         await client.close()
 
     assert str(exc.value) == "list_tags: Context not found"
+    # Chained explicitly, like every other status the REST helper maps.
+    assert isinstance(exc.value.__cause__, httpx.HTTPStatusError)
     assert len(server.requests) == 1
 
 
 @pytest.mark.parametrize(
-    ("detail", "message"),
+    ("body", "message"),
     [
         (
-            "with_tags accepts at most 50 tags.",
+            {"error": "HTTP-422", "message": "with_tags accepts at most 50 tags.", "details": {}},
             "list_tags failed (invalid_argument): with_tags accepts at most 50 tags.",
         ),
         (
-            [{"loc": ["path", "context_id"], "msg": "Input should be a valid UUID"}],
+            {
+                "error": "VAL-001",
+                "message": "Request validation failed",
+                "details": {"errors": _VALIDATION_ERRORS},
+            },
+            "list_tags failed (invalid_argument): Request validation failed: "
+            "path.context_id: Input should be a valid UUID",
+        ),
+        (
+            {"detail": "with_tags accepts at most 50 tags."},
+            "list_tags failed (invalid_argument): with_tags accepts at most 50 tags.",
+        ),
+        (
+            {"detail": _VALIDATION_ERRORS},
             "list_tags failed (invalid_argument): path.context_id: Input should be a valid UUID",
         ),
     ],
 )
 @pytest.mark.asyncio
-async def test_list_tags_with_tags_raises_kagura_error_on_a_rest_422(detail, message):
+async def test_list_tags_with_tags_raises_kagura_error_on_a_rest_422(body, message):
     """A refused value is a KaguraError, as on MCP — not a KaguraConnectionError."""
-    server = _TagsServer(rest_status=422, rest_body={"detail": detail})
+    server = _TagsServer(rest_status=422, rest_body=body)
     client = _tags_client(server)
     try:
         with pytest.raises(KaguraError) as exc:
@@ -4993,6 +5023,7 @@ async def test_list_tags_with_tags_raises_kagura_error_on_a_rest_422(detail, mes
 
     assert not isinstance(exc.value, KaguraConnectionError)
     assert str(exc.value) == message
+    assert isinstance(exc.value.__cause__, httpx.HTTPStatusError)
 
 
 @pytest.mark.parametrize(
