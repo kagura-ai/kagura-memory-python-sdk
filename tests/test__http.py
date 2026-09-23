@@ -14,6 +14,9 @@ import pytest
 
 from kagura_memory._http import (
     extract_detail,
+    jsonrpc_error_body,
+    mcp_session_expired,
+    mcp_session_header,
     normalize_uuid,
     validate_https_url,
     validate_lat_lon,
@@ -169,6 +172,93 @@ def test_unicode_decode_error_returns_empty():
     resp = MagicMock(spec=httpx.Response)
     resp.json.side_effect = UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
     assert extract_detail(resp) == ""
+
+
+# ---------------------------------------------------------------------------
+# JSON-RPC error bodies (the MCP transport's 4xx shape, #252)
+# ---------------------------------------------------------------------------
+
+_SESSION_EXPIRED_BODY = {
+    "jsonrpc": "2.0",
+    "error": {
+        "code": -32603,
+        "message": "MCP session not found or expired. Please re-initialize your connection.",
+        "data": {"action": "Send a new 'initialize' request without Mcp-Session-Id header"},
+    },
+    "id": None,
+}
+
+
+def test_jsonrpc_error_message_is_the_detail():
+    """The MCP transport's 4xx carries a JSON-RPC ``error`` object, not ``detail``.
+
+    Without this a KaguraClient surfaced the session-expired 404 as a bare
+    ``Client error '404 Not Found'`` instead of the server's own message.
+    """
+    resp = _response_with_json(_SESSION_EXPIRED_BODY)
+    assert extract_detail(resp) == (
+        "MCP session not found or expired. Please re-initialize your connection."
+    )
+
+
+def test_jsonrpc_error_without_string_message_returns_empty():
+    resp = _response_with_json({"jsonrpc": "2.0", "error": {"code": -32600}, "id": None})
+    assert extract_detail(resp) == ""
+
+
+def test_jsonrpc_error_body_returns_the_envelope():
+    assert jsonrpc_error_body(_response_with_json(_SESSION_EXPIRED_BODY)) == _SESSION_EXPIRED_BODY
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"error": "invalid_token", "error_description": "expired"},  # the 401 shape
+        {"detail": "nope"},
+        ["not", "a", "dict"],
+    ],
+)
+def test_jsonrpc_error_body_rejects_other_shapes(payload: object):
+    assert jsonrpc_error_body(_response_with_json(payload)) is None
+
+
+def test_jsonrpc_error_body_non_json_returns_none():
+    assert jsonrpc_error_body(_response_with_bad_json()) is None
+
+
+def test_mcp_session_header():
+    assert mcp_session_header("sess-1") == {"mcp-session-id": "sess-1"}
+    assert mcp_session_header(None) == {}
+
+
+def test_mcp_session_expired_on_404_for_a_session_request():
+    resp = httpx.Response(404, json=_SESSION_EXPIRED_BODY)
+    assert mcp_session_expired(resp, "sess-1") is True
+
+
+def test_mcp_session_expired_on_plain_404():
+    """A 404 on a session-carrying request means "re-initialize" (MCP Streamable HTTP)."""
+    assert mcp_session_expired(httpx.Response(404, text="Not Found"), "sess-1") is True
+
+
+def test_mcp_session_not_expired_without_a_session_id():
+    """A request that carried no session cannot have lost one — never re-initialize for it."""
+    assert mcp_session_expired(httpx.Response(404, json=_SESSION_EXPIRED_BODY), None) is False
+
+
+@pytest.mark.parametrize("status", [200, 400, 401, 500])
+def test_mcp_session_not_expired_on_other_statuses(status: int):
+    assert mcp_session_expired(httpx.Response(status, json=_SESSION_EXPIRED_BODY), "s") is False
+
+
+def test_mcp_session_not_expired_on_modern_method_not_found():
+    """memory-cloud answers a modern (2026-07-28) unknown method with 404 + -32601 (#1544).
+
+    That path is stateless and ignores the session id, so re-initializing
+    would only mint an orphan session and replay the same 404.
+    """
+    body = {"jsonrpc": "2.0", "id": 5, "error": {"code": -32601, "message": "Method not found"}}
+    assert mcp_session_expired(httpx.Response(404, json=body), "sess-1") is False
 
 
 # ---------------------------------------------------------------------------

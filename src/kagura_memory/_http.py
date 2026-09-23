@@ -38,7 +38,7 @@ def base_url_from_mcp(mcp_url: str) -> str:
 def extract_detail(response: httpx.Response) -> str:
     """Return a useful server-supplied error string from an httpx response.
 
-    Handles four response shapes:
+    Handles five response shapes:
 
     - ``{"detail": "string"}`` — returned as-is (FastAPI HTTPException default).
     - ``{"detail": [{"loc": [...], "msg": "...", ...}, ...]}`` — FastAPI's
@@ -51,6 +51,9 @@ def extract_detail(response: httpx.Response) -> str:
       ``detail``). Returns ``message``; when ``details.errors`` carries a
       validation list it is appended so a 422 names the failing field instead
       of the generic "Request validation failed".
+    - ``{"jsonrpc": "2.0", "error": {"code": int, "message": "string"}, ...}`` —
+      the MCP transport's 4xx (see :func:`jsonrpc_error_body`). Returns
+      ``error.message``, e.g. the session-expired 404's re-initialize hint.
     - Anything else — non-JSON body, non-dict body, missing ``detail`` and
       ``message``, or values of unexpected type — returns an empty string so
       callers can fall back to ``response.text`` or just print the status.
@@ -76,7 +79,63 @@ def extract_detail(response: httpx.Response) -> str:
                 if formatted:
                     return f"{message}: {formatted}"
         return message
+    error = body.get("error")
+    if isinstance(error, dict):
+        rpc_message = error.get("message")
+        if isinstance(rpc_message, str):
+            return rpc_message
     return ""
+
+
+def jsonrpc_error_body(response: httpx.Response) -> dict[str, Any] | None:
+    """Return ``response``'s body when it is a JSON-RPC error envelope, else ``None``.
+
+    memory-cloud's MCP transport answers a request it rejects before dispatch
+    — an unknown session, a malformed envelope, an unsupported protocol
+    version — with a 4xx whose body is a JSON-RPC ``error`` object
+    (``-32603``, ``-32600``, ``-32601``, ``-32602``, ``-32022``; memory-cloud
+    #1541/#1544), not the REST ``detail`` envelope. The OAuth 401 body's
+    ``error`` is a string (``"invalid_token"``), so it is not matched.
+
+    Args:
+        response: Any MCP endpoint response.
+    """
+    try:
+        body = response.json()
+    except (ValueError, UnicodeDecodeError):
+        return None
+    if isinstance(body, dict) and isinstance(body.get("error"), dict):
+        return body
+    return None
+
+
+def mcp_session_header(session_id: str | None) -> dict[str, str]:
+    """Headers naming the MCP session ``session_id`` — none when there is no session yet."""
+    return {"mcp-session-id": session_id} if session_id else {}
+
+
+_JSONRPC_METHOD_NOT_FOUND = -32601
+
+
+def mcp_session_expired(response: httpx.Response, session_id: str | None) -> bool:
+    """Whether ``response`` says the MCP session a request carried is gone.
+
+    memory-cloud keeps legacy (``initialize``-handshake) sessions in process
+    memory and drops them after an idle hour and on every restart. A request
+    naming a session it no longer holds gets ``404`` before dispatch, and the
+    MCP Streamable HTTP transport then requires a new ``initialize``. The one
+    ``404`` that is not about the session is the stateless 2026-07-28
+    ``-32601`` Method-not-found reply (memory-cloud #1544): that path ignores
+    the session id, so re-initializing would only mint an orphan session.
+
+    Args:
+        response: The response to the request.
+        session_id: The ``mcp-session-id`` the request was sent with, if any.
+    """
+    if not session_id or response.status_code != 404:
+        return False
+    body = jsonrpc_error_body(response)
+    return body is None or body["error"].get("code") != _JSONRPC_METHOD_NOT_FOUND
 
 
 def sanitize_server_detail(detail: str | None) -> str | None:
