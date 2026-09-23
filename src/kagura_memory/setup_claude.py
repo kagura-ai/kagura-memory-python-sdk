@@ -15,6 +15,7 @@ import click
 
 from . import claude_code
 from ._http import mcp_url_has_tools_allowlist, mcp_url_with_query
+from .auth.credentials import CredentialsFile, OAuthCredentials
 from .claude_code import (
     MCP_API_KEY_ENV,
     MCP_PROXY_COMMAND,
@@ -1181,6 +1182,59 @@ def _write_kagura_config_oauth(project_dir: Path, mcp_url: str, context_id: str)
     return path
 
 
+def _load_profile(profile: str) -> tuple[CredentialsFile, OAuthCredentials]:
+    """The credentials file and the OAuth profile ``profile``; reads the file only.
+
+    Shared by ``setup claude`` and ``setup codex|hermes|openclaw`` (#260).
+
+    Raises:
+        click.ClickException: There is no such profile.
+    """
+    from .auth.credentials import load_credentials_file
+
+    cf = load_credentials_file()
+    creds = cf.get_profile(profile)
+    if creds is None:
+        raise click.ClickException(
+            f"No OAuth profile '{profile}' in ~/.kagura/credentials.json.\n"
+            f"  Run: kagura auth login --profile {profile}"
+        )
+    return cf, creds
+
+
+def _verify_profile(profile: str, creds: OAuthCredentials) -> dict[str, Any]:
+    """Check that ``profile`` works with a ``list_contexts`` call; return its result.
+
+    Auth and the URL come from the profile. ``KAGURA_API_KEY`` still ranks
+    above it (see :class:`KaguraClient`), so a note says when that key, not
+    the profile, is what gets checked.
+
+    Raises:
+        click.ClickException: Authentication or the connection failed.
+    """
+    click.echo("\nVerifying connection...")
+    if os.environ.get("KAGURA_API_KEY", "").strip():
+        click.echo(
+            f"  Note: KAGURA_API_KEY is set in this shell, so this check uses that key\n"
+            f"  rather than profile '{profile}'."
+        )
+    try:
+        contexts_response = asyncio.run(_test_connection(profile=profile))
+    except KaguraAuthError as e:
+        raise click.ClickException(
+            f"Authentication failed: {_exc_message(e)}\n"
+            f"  Your token may have expired — re-run: kagura auth login --profile {profile}"
+        ) from e
+    except KaguraConnectionError as e:
+        raise click.ClickException(f"Cannot connect to {creds.server}: {_exc_message(e)}") from e
+    except Exception as e:
+        raise click.ClickException(f"Connection failed: {_exc_message(e)}") from e
+
+    count = contexts_response.get("count", 0)
+    click.echo(f"  Connected as {creds.user_email or '<unknown>'} ({count} contexts available)")
+    return contexts_response
+
+
 def _run_setup_claude_oauth(
     *,
     profile: str,
@@ -1202,17 +1256,9 @@ def _run_setup_claude_oauth(
     writes the stdio entry so Claude Code launches ``kagura-mcp`` as the MCP
     server with an always-fresh bearer token.
     """
-    from .auth.credentials import load_credentials_file
-
     project = Path(project_dir).resolve()
 
-    cf = load_credentials_file()
-    creds = cf.get_profile(profile)
-    if creds is None:
-        raise click.ClickException(
-            f"No OAuth profile '{profile}' in ~/.kagura/credentials.json.\n"
-            f"  Run: kagura auth login --profile {profile}"
-        )
+    cf, creds = _load_profile(profile)
 
     # $PATH check is a warning, never a hard failure: kagura-mcp is a
     # console_script that resolves inside its own venv even when that venv is
@@ -1229,22 +1275,7 @@ def _run_setup_claude_oauth(
     entry = _stdio_entry(profile, guardrails=guardrails, tool_profile=tool_profile)
     plan = _plan_mcp_entry(project, scope, entry, non_interactive)
 
-    # Verify the profile works and list contexts (auth + URL come from profile)
-    click.echo("\nVerifying connection...")
-    try:
-        contexts_response = asyncio.run(_test_connection(profile=profile))
-    except KaguraAuthError as e:
-        raise click.ClickException(
-            f"Authentication failed: {_exc_message(e)}\n"
-            f"  Your token may have expired — re-run: kagura auth login --profile {profile}"
-        ) from e
-    except KaguraConnectionError as e:
-        raise click.ClickException(f"Cannot connect to {creds.server}: {_exc_message(e)}") from e
-    except Exception as e:
-        raise click.ClickException(f"Connection failed: {_exc_message(e)}") from e
-
-    count = contexts_response.get("count", 0)
-    click.echo(f"  Connected as {creds.user_email or '<unknown>'} ({count} contexts available)")
+    contexts_response = _verify_profile(profile, creds)
 
     resolved_context_id = _select_or_create_context(
         contexts_response,
