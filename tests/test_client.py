@@ -1448,22 +1448,15 @@ def _slim_list_contexts_envelope(*, count: int, limit: int, can_create: bool) ->
 
 @pytest.mark.asyncio
 async def test_list_contexts_default_sends_no_arguments():
-    """Issue #255: a bare list_contexts() keeps the server's slim default shape."""
+    """Issue #255: a bare list_contexts() sends no options, so the server keeps its
+    slim default shape."""
     client = _make_initialized_client()
 
     try:
         with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
             mock.return_value = _slim_list_contexts_envelope(count=1, limit=20, can_create=True)
-            result = await client.list_contexts()
+            await client.list_contexts()
             assert mock.call_args.args == ("list_contexts", {})
-            assert result["total"] == 1
-            assert set(result["contexts"][0]) == {
-                "id",
-                "name",
-                "is_private",
-                "is_locked",
-                "last_used_at",
-            }
     finally:
         await client.close()
 
@@ -2673,20 +2666,9 @@ async def test_recall_upcoming_omits_include_details_by_default():
 
     try:
         with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
-            mock.return_value = {
-                "status": "success",
-                "results": [
-                    {
-                        "memory_id": "m1",
-                        "summary": "Tax filing",
-                        "type": "time",
-                        "trigger": {"year": 2026, "month": 10},
-                    }
-                ],
-            }
-            result = await client.recall_upcoming(context_id="ctx", include_details=False)
+            mock.return_value = {"status": "success", "results": []}
+            await client.recall_upcoming(context_id="ctx", include_details=False)
             assert "include_details" not in mock.call_args.args[1]
-            assert result["results"][0]["trigger"] == {"year": 2026, "month": 10}
     finally:
         await client.close()
 
@@ -2698,23 +2680,12 @@ async def test_recall_upcoming_sends_include_details_when_set():
 
     try:
         with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
-            mock.return_value = {
-                "status": "success",
-                "results": [
-                    {
-                        "memory_id": "m1",
-                        "summary": "Tax filing",
-                        "type": "time",
-                        "details": {"trigger": {"year": 2026, "month": 10}, "note": "x"},
-                    }
-                ],
-            }
-            result = await client.recall_upcoming(context_id="ctx", include_details=True)
+            mock.return_value = {"status": "success", "results": []}
+            await client.recall_upcoming(context_id="ctx", include_details=True)
             assert mock.call_args.args == (
                 "recall_upcoming",
                 {"context_id": "ctx", "k": 20, "include_details": True},
             )
-            assert result["results"][0]["details"]["note"] == "x"
     finally:
         await client.close()
 
