@@ -515,10 +515,12 @@ async def fetch_system_info(
     """GET the public ``/api/v1/system/info`` and return the raw JSON object.
 
     Sent without credentials (there are none yet during login). The raw body
-    is returned rather than :class:`~kagura_memory.models.ServerInfo`
-    because ``ServerFeatures`` does not model ``beta_invites`` yet (swap to
-    ``ServerInfo`` once #257 adds it). Best-effort: any HTTP error, timeout
-    or non-object body yields ``None``.
+    is returned rather than :class:`~kagura_memory.models.ServerInfo`, even
+    though ``ServerFeatures`` now types ``beta_invites`` (#257): the model
+    fills a missing ``features`` block with all-``False`` defaults, which
+    would read as "invites off", while :func:`invite_support` must tell that
+    apart from an explicit ``beta_invites`` that is not ``true``.
+    Best-effort: any HTTP error, timeout or non-object body yields ``None``.
     """
     try:
         response = await client.get(f"{server.rstrip('/')}{_PATH_SYSTEM_INFO}", timeout=timeout)
