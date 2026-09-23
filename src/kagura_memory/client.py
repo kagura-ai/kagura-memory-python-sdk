@@ -6,12 +6,12 @@ import json
 import logging
 import math
 from datetime import datetime
-from typing import Any, Literal, TypeVar
+from typing import Any, Literal, Self, TypeVar
 
 import httpx
 from pydantic import BaseModel as _BaseModel
 
-from ._auth import _resolve_auth, _StaticAuth
+from ._auth import _OAuthAuth, _resolve_auth, _StaticAuth
 from ._http import (
     SDK_VERSION,
     _opt_int,
@@ -198,8 +198,25 @@ class KaguraClient:
                 ``KAGURA_PROFILE`` and the credentials file's
                 ``default_profile``).
         """
-        resolved = _resolve_auth(api_key=api_key, mcp_url=mcp_url, profile=profile)
+        self._init_from_auth(
+            _resolve_auth(api_key=api_key, mcp_url=mcp_url, profile=profile), timeout
+        )
 
+    @classmethod
+    def _from_resolved_auth(
+        cls, resolved: _StaticAuth | _OAuthAuth, *, timeout: float = 30.0
+    ) -> Self:
+        """Construct from a pre-resolved auth — internal helper.
+
+        For a caller that picks the credential itself, e.g. an OAuth profile
+        that ``KAGURA_API_KEY`` must not outrank (``kagura setup``, #260).
+        Mirrors the REST clients' ``_from_resolved_auth``.
+        """
+        client = cls.__new__(cls)
+        client._init_from_auth(resolved, timeout)
+        return client
+
+    def _init_from_auth(self, resolved: _StaticAuth | _OAuthAuth, timeout: float) -> None:
         stripped_url = resolved.mcp_url.rstrip("/")
         validate_https_url(stripped_url, label="MCP URL")
 

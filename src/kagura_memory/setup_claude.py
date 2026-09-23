@@ -14,6 +14,7 @@ from urllib.parse import parse_qsl, urlsplit, urlunsplit
 import click
 
 from . import claude_code
+from ._auth import _resolve_profile_auth
 from ._http import mcp_url_guardrails_off, mcp_url_has_tools_allowlist, mcp_url_with_query
 from .auth.credentials import CredentialsFile, OAuthCredentials
 from .claude_code import (
@@ -150,11 +151,14 @@ def _make_client(api_key: str | None, mcp_url: str | None, profile: str | None) 
     """Build a KaguraClient for either the API-key or OAuth-profile path.
 
     When ``profile`` is set, authentication and the MCP URL come from the
-    OAuth profile in ``~/.kagura/credentials.json``; ``api_key`` / ``mcp_url``
-    are ignored. Otherwise the static API-key path is used.
+    OAuth profile in ``~/.kagura/credentials.json`` alone; ``api_key`` /
+    ``mcp_url`` are ignored, and so is ``KAGURA_API_KEY``, which the SDK chain
+    otherwise ranks above a profile: the entry setup writes runs
+    ``kagura-mcp --profile``, which reads nothing else (#260). Otherwise the
+    static API-key path is used.
     """
     if profile is not None:
-        return KaguraClient(profile=profile)
+        return KaguraClient._from_resolved_auth(_resolve_profile_auth(profile))
     return KaguraClient(api_key=api_key, mcp_url=mcp_url)
 
 
@@ -1204,19 +1208,14 @@ def _load_profile(profile: str) -> tuple[CredentialsFile, OAuthCredentials]:
 def _verify_profile(profile: str, creds: OAuthCredentials) -> dict[str, Any]:
     """Check that ``profile`` works with a ``list_contexts`` call; return its result.
 
-    Auth and the URL come from the profile. ``KAGURA_API_KEY`` still ranks
-    above it (see :class:`KaguraClient`), so a note says when that key, not
-    the profile, is what gets checked.
+    Auth and the URL come from the profile alone, even when ``KAGURA_API_KEY``
+    is set (see :func:`_make_client`), so the contexts listed are the ones the
+    written ``kagura-mcp --profile`` entry can reach.
 
     Raises:
         click.ClickException: Authentication or the connection failed.
     """
     click.echo("\nVerifying connection...")
-    if os.environ.get("KAGURA_API_KEY", "").strip():
-        click.echo(
-            f"  Note: KAGURA_API_KEY is set in this shell, so this check uses that key\n"
-            f"  rather than profile '{profile}'."
-        )
     try:
         contexts_response = asyncio.run(_test_connection(profile=profile))
     except KaguraAuthError as e:
