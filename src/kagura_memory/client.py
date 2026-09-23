@@ -430,8 +430,10 @@ class KaguraClient:
                 :meth:`update_search_config`). ``True`` requests reranking,
                 which applies only when the context enables it (and the
                 workspace plan and deployment allow it). ``False`` disables
-                reranking for this call. Servers before v0.69.0 treat
-                an omitted value as ``False``, so ``None`` never reranks there.
+                reranking for this call. With ``context_ids``, only the first
+                listed context's config governs both ``None`` and ``True``.
+                Servers before v0.69.0 treat an omitted value as ``False``, so
+                ``None`` never reranks there.
             filters: Optional filters. Supported keys:
                 - ``type``: memory type (e.g., ``"code"``)
                 - ``tags``: list of tag strings (e.g., ``["python"]``)

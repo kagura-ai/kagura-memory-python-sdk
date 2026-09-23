@@ -168,6 +168,7 @@ async with KaguraClient(api_key="kagura_...", mcp_url="https://...") as client:
     # Reranking is tri-state (memory-cloud v0.69.0+). Omit use_rerank to follow the
     # context's search config (update_search_config); True requests it, applied only
     # when the context enables it; False skips it for this call, e.g. to save latency.
+    # With context_ids, the first listed context's config decides.
     # Servers before v0.69.0 rerank only on True.
     fast = await client.recall(context_id="dev", query="OAuth2", use_rerank=False)
 
