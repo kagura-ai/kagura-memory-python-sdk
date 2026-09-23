@@ -529,10 +529,20 @@ class _Hermes(_Harness):
         ]
 
 
+def _openclaw_env_path(var: str) -> Path | None:
+    """An OpenClaw path variable as OpenClaw reads it: trimmed, a leading ``~`` expanded."""
+    value = os.environ.get(var, "").strip()
+    return Path(value).expanduser() if value else None
+
+
+def openclaw_state_dir() -> Path:
+    """``$OPENCLAW_STATE_DIR``, else ``~/.openclaw``: OpenClaw's config, ``.env`` and workspace."""
+    return _openclaw_env_path("OPENCLAW_STATE_DIR") or Path.home() / ".openclaw"
+
+
 def openclaw_config_path() -> Path:
-    """``$OPENCLAW_CONFIG_PATH``, else ``~/.openclaw/openclaw.json``."""
-    env = os.environ.get("OPENCLAW_CONFIG_PATH")
-    return Path(env) if env else Path.home() / ".openclaw" / "openclaw.json"
+    """``$OPENCLAW_CONFIG_PATH``, else ``openclaw.json`` in :func:`openclaw_state_dir`."""
+    return _openclaw_env_path("OPENCLAW_CONFIG_PATH") or openclaw_state_dir() / "openclaw.json"
 
 
 class _OpenClaw(_Harness):
@@ -571,7 +581,7 @@ class _OpenClaw(_Harness):
             args = [a for arg in entry.args for a in ("--arg", arg)]
             return ["mcp", "add", name, "--command", entry.command, *args]
         assert entry.url is not None
-        # --no-probe: the key is not in ~/.openclaw/.env yet.
+        # --no-probe: the key is not in OpenClaw's .env yet.
         return [
             *("mcp", "add", name, "--url", entry.url, "--transport", "streamable-http"),
             *("--header", f"Authorization={entry.auth_header()}", "--no-probe"),
@@ -585,9 +595,10 @@ class _OpenClaw(_Harness):
         return json.dumps({"mcp": {"servers": {name: self.server(entry)}}}, indent=2)
 
     def key_note(self, entry: _Entry, *, ran: bool) -> str:
+        env_file = _path_label(openclaw_state_dir() / ".env")
         return (
-            f"Add `{entry.key_env}=<your-api-key>` to ~/.openclaw/.env with an editor: the\n"
-            f"  entry sends ${{{entry.key_env}}} (mcp.servers headers take no SecretRef),\n"
+            f"Add `{entry.key_env}=<your-api-key>` to {env_file} with an editor:\n"
+            f"  the entry sends ${{{entry.key_env}}} (mcp.servers headers take no SecretRef),\n"
             "  and setup never sees the key."
         )
 
@@ -595,8 +606,8 @@ class _OpenClaw(_Harness):
         return ["mcp", "doctor", name, "--probe"]
 
     def agents_md_path(self) -> Path:
-        # agents.defaults.workspace, which OpenClaw loads every session.
-        return Path.home() / ".openclaw" / "workspace" / "AGENTS.md"
+        # The default agents.defaults.workspace, which OpenClaw loads every session.
+        return openclaw_state_dir() / "workspace" / "AGENTS.md"
 
     def notes(self) -> list[str]:
         return [

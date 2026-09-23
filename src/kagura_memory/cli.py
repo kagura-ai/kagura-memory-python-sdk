@@ -1745,8 +1745,8 @@ _HARNESS_AGENTS_MD_HELP = {
     ),
     "openclaw": (
         "Write the context's tool guardrail export block into PATH (default "
-        "~/.openclaw/workspace/AGENTS.md, which OpenClaw loads every session). An "
-        "interactive run offers it. Only the marked block changes."
+        "workspace/AGENTS.md in $OPENCLAW_STATE_DIR, else ~/.openclaw, which OpenClaw loads "
+        "every session). An interactive run offers it. Only the marked block changes."
     ),
 }
 _HARNESS_KEY_ENV_HELP = {
@@ -1759,7 +1759,7 @@ _HARNESS_KEY_ENV_HELP = {
     ),
     "openclaw": (
         "With --url-form: the variable the Authorization header references, kept in "
-        "~/.openclaw/.env (default KAGURA_API_KEY)."
+        "OpenClaw's .env ($OPENCLAW_STATE_DIR, else ~/.openclaw; default KAGURA_API_KEY)."
     ),
 }
 
@@ -1911,17 +1911,18 @@ def setup_openclaw(**params):
 
     Adds the kagura-memory MCP server with `openclaw mcp add`, which
     probes it before saving; --force replaces an entry with
-    `openclaw mcp set`. Both write ~/.openclaw/openclaw.json
-    (OPENCLAW_CONFIG_PATH), which the Gateway hot-reloads. Without openclaw
-    on PATH, setup prints the mcp.servers block instead. The entry runs the
-    refresh-aware kagura-mcp proxy, by absolute path, on your
-    `kagura auth login` profile; a --url-form entry always sets transport
-    "streamable-http" (OpenClaw defaults a URL entry to SSE).
+    `openclaw mcp set`. Both write openclaw.json in $OPENCLAW_STATE_DIR
+    (else ~/.openclaw), or $OPENCLAW_CONFIG_PATH, which the Gateway
+    hot-reloads. Without openclaw on PATH, setup prints the mcp.servers
+    block instead. The entry runs the refresh-aware kagura-mcp proxy, by
+    absolute path, on your `kagura auth login` profile; a --url-form
+    entry always sets transport "streamable-http" (OpenClaw defaults a
+    URL entry to SSE).
 
     OpenClaw does not read MCP instructions: guardrails reach it through
     get_context_info (on by default) and, if you choose, an export block in
-    ~/.openclaw/workspace/AGENTS.md (--agents-md; an interactive run
-    offers it).
+    workspace/AGENTS.md in that state directory (--agents-md; an
+    interactive run offers it).
 
     \b
     Examples:
