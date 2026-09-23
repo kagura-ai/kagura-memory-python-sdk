@@ -57,9 +57,15 @@ class KaguraResponseError(KaguraError):
     shape the SDK does not know yet; upgrading ``kagura-memory`` is the
     likely fix. ``operation`` names the call whose response failed to
     parse — the MCP tool name, or ``<Client>.<method>`` on the REST
-    clients. The underlying ``pydantic.ValidationError`` is chained as
-    ``__cause__``; the message names the failing fields but never echoes
-    payload values.
+    clients — and prefixes the message.
+
+    The message describes the failing fields or the envelope shape, not
+    payload values. When a model rejected the payload, the
+    ``pydantic.ValidationError`` is chained as ``__cause__``, and *its*
+    text does include input values, so a logged traceback can show
+    payload contents. One deliberate exception:
+    ``WorkspaceClient.mint_member_key`` puts the one-time plaintext key in
+    its message, because the key was created and cannot be shown again.
     """
 
     def __init__(self, message: str, operation: str | None = None):

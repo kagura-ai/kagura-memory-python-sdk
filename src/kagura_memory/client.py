@@ -78,9 +78,14 @@ class KaguraClient:
     returning them as data (issue #180): a missing context/memory/report
     raises :class:`KaguraNotFoundError`, and any other domain error raises
     :class:`KaguraError`. Callers should use ``try/except`` rather than
-    inspecting ``result["status"]``. A success payload that does not match
-    the SDK's model (a server newer than the SDK) raises
-    :class:`KaguraResponseError` naming the tool (#250).
+    inspecting ``result["status"]``. On the tool methods that return a
+    model, a success payload that does not match it (a server newer than
+    the SDK) raises :class:`KaguraResponseError` naming the tool (#250).
+    The REST-backed methods (``get_server_info``, ``check_server_version``,
+    ``get_embedding_status``, ``get_memory_stats``, ``find_duplicates``,
+    ``list_memories``, ``list_embedding_models``) still raise
+    :class:`KaguraConnectionError` ("Invalid response format") on drift;
+    catch :class:`KaguraError` to cover both.
     """
 
     def __init__(
@@ -2100,11 +2105,14 @@ class KaguraClient:
         Each run's ``status`` is one of :data:`SleepRunStatus` —
         ``running``, ``completed``, ``degraded``, ``failed``, ``cancelled``
         or ``rolled_back`` — or a newer value passed through as-is.
-        ``degraded`` (server v0.43.0+) means the run finished, but some
-        judge-LLM calls failed (``llm_call_failures`` gives the count) or a
-        phase failed (``error_message`` names it); its changes were
-        applied and can be rolled back. ``failed`` means every judge-LLM
-        call failed.
+        ``degraded`` means the run finished, but some judge-LLM calls
+        failed (server v0.43.0+; ``llm_call_failures`` gives the count) or,
+        since server v0.46.0, a phase failed; its changes were applied and
+        can be rolled back. ``failed`` means the run errored — every
+        judge-LLM call failed or the run raised — or a later rollback of it
+        only partly succeeded. These summaries do not carry the reason:
+        :meth:`get_sleep_report` returns it as ``error_message``
+        (e.g. ``phase_failure: <phases>`` on a degraded run).
 
         Args:
             context_id: Context UUID.
@@ -2146,6 +2154,7 @@ class KaguraClient:
 
         Raises:
             KaguraNotFoundError: Report not found or not owned by caller.
+            KaguraResponseError: The report did not match the SDK's model.
             KaguraError: Other server-side error.
         """
         result = await self._call_tool_checked(

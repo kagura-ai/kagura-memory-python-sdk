@@ -543,8 +543,9 @@ class SleepReport(BaseModel):
 
     ``status`` is a ``str`` for forward compatibility; see
     :data:`SleepRunStatus` for the known values. ``degraded`` means the run
-    finished but some judge-LLM calls failed or a phase failed — its
-    merges/promotions still happened, so it stays rollbackable.
+    finished but some judge-LLM calls failed (server v0.43.0+) or a phase
+    failed (v0.46.0+) — its merges/promotions still happened, so it stays
+    rollbackable.
     ``llm_call_failures`` is the judge-LLM failure count behind a
     ``degraded``/``failed`` grade; ``None`` from servers older than v0.43.0.
     """
