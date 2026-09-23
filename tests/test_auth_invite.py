@@ -599,7 +599,7 @@ def test_login_invite_under_base_path_on_same_host_is_accepted(patched_default_p
 def _assert_two_step(result, browser) -> None:
     assert result.exit_code == 0, result.output
     output = result.output
-    assert "cannot carry an invite through the approval page yet" in output
+    assert "Accept your invite before you approve the code, in this order:" in output
     step1 = next(line for line in output.splitlines() if "1. " in line)
     step2 = next(line for line in output.splitlines() if "2. " in line)
     assert step1.rstrip().endswith(f"{WEB}/join/{SENTINEL}")
@@ -668,7 +668,10 @@ def test_login_invite_verification_uri_without_device_falls_back_to_given_link(
     result, _, _, browser = _invoke(["--invite", f"{given}?utm=1"], server, device=device)
     assert result.exit_code == 0, result.output
     assert "return_to" not in result.output
-    assert "cannot carry an invite through the approval page yet" in result.output
+    # The server has the hand-off; only the URI shape stopped it, so the
+    # lead-in must not claim the server cannot carry the invite.
+    assert "Accept your invite before you approve the code" in result.output
+    assert "cannot carry" not in result.output
     step1 = next(line for line in result.output.splitlines() if "1. " in line)
     step2 = next(line for line in result.output.splitlines() if "2. " in line)
     # /join cannot be placed next to /activate, so step 1 is the user's own link.

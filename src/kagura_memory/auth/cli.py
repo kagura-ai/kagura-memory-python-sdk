@@ -325,7 +325,9 @@ def _print_invite_prompt(
     base = invite_base_url(device.verification_uri)
     join_link = f"{base}/join/{invite.token}" if base is not None else invite.link
     minutes = max(1, round(device.expires_in / 60))
-    click.echo("  This server cannot carry an invite through the approval page yet. In this order:")
+    # Worded to stay true on a server that has the hand-off: here when the
+    # link could not be built, or before JOIN_RETURN_TO_MIN_SERVER_VERSION is set.
+    click.echo("  Accept your invite before you approve the code, in this order:")
     if join_link is not None:
         click.echo(f"    1. Open your invite link and sign up:   {join_link}")
     else:
