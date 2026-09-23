@@ -172,6 +172,7 @@ def test_scope_user_calls_claude_mcp_add_json(connection, fake_claude, tmp_path:
 
 
 def test_scope_user_api_key_entry_and_gitignore(connection, fake_claude, tmp_path: Path) -> None:
+    """The user-scope entry names $KAGURA_MCP_API_KEY: Claude Code fills it in when it connects."""
     result = run_setup(tmp_path, "--scope", "user", oauth=False)
 
     assert result.exit_code == 0, result.output
@@ -179,10 +180,52 @@ def test_scope_user_api_key_entry_and_gitignore(connection, fake_claude, tmp_pat
     assert json.loads(add[5]) == {
         "type": "http",
         "url": MCP_URL,
-        "headers": {"Authorization": f"Bearer {API_KEY}"},
+        "headers": {"Authorization": "Bearer ${KAGURA_MCP_API_KEY}"},
     }
+    assert "The entry sends the API key from $KAGURA_MCP_API_KEY" in result.output
+    assert "export KAGURA_MCP_API_KEY=<your-api-key>" in result.output
     assert "Add to .gitignore: .kagura.json" in result.output
     assert "Add to .gitignore: .mcp.json" not in result.output  # no .mcp.json written
+    # The project's own files still carry the key: the hooks' `kagura` CLI reads it there.
+    assert read_json(tmp_path / ".kagura.json")["api_key"] == API_KEY
+
+
+@pytest.mark.parametrize(
+    ("env_value", "expected"),
+    [
+        (None, "$KAGURA_MCP_API_KEY is not set in this shell."),
+        (API_KEY, "$KAGURA_MCP_API_KEY is already set to this key in this shell."),
+        ("kagura_other_key", "Warning: $KAGURA_MCP_API_KEY in this shell holds a different key"),
+    ],
+    ids=["unset", "same", "different"],
+)
+def test_scope_user_api_key_says_whether_this_shell_has_the_variable(
+    connection,
+    fake_claude,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    env_value: str | None,
+    expected: str,
+) -> None:
+    if env_value is None:
+        monkeypatch.delenv("KAGURA_MCP_API_KEY", raising=False)
+    else:
+        monkeypatch.setenv("KAGURA_MCP_API_KEY", env_value)
+
+    result = run_setup(tmp_path, "--scope", "user", oauth=False)
+
+    assert result.exit_code == 0, result.output
+    assert expected in result.output
+    assert API_KEY not in result.output and "kagura_other_key" not in result.output
+
+
+def test_scope_project_api_key_entry_is_unchanged(connection, tmp_path: Path) -> None:
+    """Project scope keeps the key in .mcp.json (a file, never a command line) and says nothing."""
+    result = run_setup(tmp_path, oauth=False)
+
+    assert result.exit_code == 0, result.output
+    assert mcp_entry(tmp_path)["headers"] == {"Authorization": f"Bearer {API_KEY}"}
+    assert "KAGURA_MCP_API_KEY" not in result.output
 
 
 @pytest.mark.parametrize("oauth", [True, False], ids=["oauth", "api-key"])
@@ -195,9 +238,12 @@ def test_scope_user_without_claude_prints_command_and_writes_nothing(
     assert result.exit_code == 1
     assert "claude mcp add-json --scope user kagura-memory" in result.output
     assert "not found on PATH" in result.output
-    assert API_KEY not in result.output  # the printed JSON carries a placeholder
+    assert API_KEY not in result.output
     if not oauth:
-        assert "<your-api-key>" in result.output
+        # The command is ready to run as printed: it names the variable, not a key.
+        assert '"Authorization": "Bearer ${KAGURA_MCP_API_KEY}"' in result.output
+        assert "Bearer <your-api-key>" not in result.output
+        assert "The entry sends the API key from $KAGURA_MCP_API_KEY" in result.output
     assert not claude_json_path().exists()
     assert not (tmp_path / ".kagura.json").exists()
     assert not (tmp_path / ".mcp.json").exists()
@@ -299,7 +345,7 @@ def test_scope_user_failed_restore_says_the_old_entry_is_gone(
     connection, fake_claude, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """Both adds fail: keep the first error, say the old entry is gone, print how to re-add it."""
-    old_entry = {"type": "http", "url": MCP_URL, "headers": {"Authorization": "Bearer old_key"}}
+    old_entry = {**STDIO_DEFAULT, "args": ["--profile", "work"]}
     write_claude_json({"mcpServers": {MCP_SERVER_NAME: old_entry}})
     errors = iter(["new entry rejected", "Invalid configuration"])
 
@@ -319,6 +365,37 @@ def test_scope_user_failed_restore_says_the_old_entry_is_gone(
     assert "`claude mcp add-json` failed: new entry rejected" in output
     assert "previous user-scope kagura-memory entry was removed and could not be restored" in output
     assert "Invalid configuration" in output
+    assert "claude mcp add-json --scope user kagura-memory" in output
+    assert '"args": ["--profile", "work"]' in output
+    assert API_KEY not in result.output
+
+
+def test_scope_user_old_entry_holding_a_key_is_not_restored_on_a_command_line(
+    connection, fake_claude, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Putting back an entry with a baked key would pass that key on ``claude``'s argv."""
+    old_entry = {"type": "http", "url": MCP_URL, "headers": {"Authorization": "Bearer old_key"}}
+    write_claude_json({"mcpServers": {MCP_SERVER_NAME: old_entry}})
+
+    def run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        fake_claude(argv, **kwargs)
+        if argv[1:3] == ["mcp", "add-json"]:
+            return subprocess.CompletedProcess(argv, 1, stdout="", stderr="new entry rejected")
+        return subprocess.CompletedProcess(argv, 0, stdout="[]", stderr="")
+
+    monkeypatch.setattr(claude_code.subprocess, "run", run)
+
+    result = run_setup(tmp_path, "--scope", "user", oauth=False)
+
+    assert result.exit_code == 1
+    assert [c[1] for c in fake_claude.mcp_calls()] == ["remove", "add-json"]  # no restore
+    assert not any("old_key" in arg for call in fake_claude.calls for arg in call)
+    output = " ".join(result.output.split())
+    assert "`claude mcp add-json` failed: new entry rejected" in output
+    assert (
+        "could not be restored (the entry holds an API key, which setup never passes on a "
+        "command line)" in output
+    )
     assert "claude mcp add-json --scope user kagura-memory" in output
     assert "Bearer <your-api-key>" in output
     assert "old_key" not in result.output and API_KEY not in result.output
@@ -366,6 +443,71 @@ def test_scope_user_add_json_failure_is_reported_without_the_key(
     assert result.exit_code == 1
     assert "`claude mcp add-json` failed: claude failed" in result.output
     assert API_KEY not in result.output
+
+
+_SENTINEL_KEY = "kagura_SENTINEL_never_on_argv_5d0c9e"
+_ENV_REF_ENTRY = {
+    "type": "http",
+    "url": MCP_URL,
+    "headers": {"Authorization": "Bearer ${KAGURA_MCP_API_KEY}"},
+}
+
+
+@pytest.mark.parametrize(
+    ("scenario", "existing", "code"),
+    [
+        ("add", None, 0),
+        ("add-fails", None, 1),
+        ("replace-baked", {**_ENV_REF_ENTRY, "headers": {"Authorization": "Bearer {key}"}}, 0),
+        ("restore-baked", {**_ENV_REF_ENTRY, "headers": {"Authorization": "Bearer {key}"}}, 1),
+        ("unchanged", _ENV_REF_ENTRY, 0),
+        ("no-claude", None, 1),
+        ("env-set", None, 0),
+    ],
+)
+def test_scope_user_api_key_never_reaches_argv_or_output(
+    connection,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    scenario: str,
+    existing: dict[str, Any] | None,
+    code: int,
+) -> None:
+    """The key is on no ``claude`` command line and in no output, whatever path setup takes.
+
+    The failing ``claude`` quotes its whole argv back, as a CLI error might.
+    """
+    if existing is not None:
+        entry = json.loads(json.dumps(existing).replace("{key}", _SENTINEL_KEY))
+        write_claude_json({"mcpServers": {MCP_SERVER_NAME: entry}})
+    if scenario == "env-set":
+        monkeypatch.setenv("KAGURA_MCP_API_KEY", _SENTINEL_KEY)
+    calls: list[tuple[list[str], dict[str, Any]]] = []
+
+    def run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append((argv, kwargs))
+        if argv[1:3] == ["mcp", "add-json"] and scenario in ("add-fails", "restore-baked"):
+            return subprocess.CompletedProcess(argv, 1, stdout="", stderr=f"rejected: {argv}")
+        return subprocess.CompletedProcess(argv, 0, stdout="[]", stderr="")
+
+    monkeypatch.setattr(claude_code.subprocess, "run", run)
+    if scenario != "no-claude":
+        monkeypatch.setattr(claude_code, "claude_executable", lambda: "/usr/bin/claude")
+
+    args = ["setup", "claude", "--project-dir", str(tmp_path), "--context-id", CTX, "-y"]
+    args += ["--api-key", _SENTINEL_KEY, "--mcp-url", MCP_URL, "--scope", "user"]
+    result = CliRunner().invoke(main, args)
+
+    assert result.exit_code == code, result.output
+    assert _SENTINEL_KEY not in result.output
+    for argv, kwargs in calls:
+        assert not any(_SENTINEL_KEY in arg for arg in argv), argv
+        assert _SENTINEL_KEY not in repr(kwargs)
+    adds = [argv[-1] for argv, _ in calls if argv[1:3] == ["mcp", "add-json"]]
+    if scenario in ("add", "replace-baked", "env-set"):
+        assert [json.loads(a) for a in adds] == [_ENV_REF_ENTRY]
+    if scenario == "unchanged":
+        assert adds == []
 
 
 # =============================================================================

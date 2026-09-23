@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 import re
 import shlex
 import subprocess
@@ -15,6 +16,7 @@ import click
 from . import claude_code
 from ._http import mcp_url_has_tools_allowlist, mcp_url_with_query
 from .claude_code import (
+    MCP_API_KEY_ENV,
     MCP_PROXY_COMMAND,
     MCP_SERVER_NAME,
     SCOPE_PRECEDENCE,
@@ -300,8 +302,14 @@ def _static_token_entry(api_key: str, url: str) -> dict[str, Any]:
 
     ``http`` is Claude Code's remote type; SDKs before #258 wrote ``url``,
     which Claude Code does not accept (the detector still recognises it).
+    At user scope ``api_key`` is :data:`_API_KEY_REF`, never the key itself.
     """
     return {"type": "http", "url": url, "headers": {"Authorization": f"Bearer {api_key}"}}
+
+
+#: What a user-scope API-key entry carries in place of the key (see
+#: :data:`~kagura_memory.claude_code.MCP_API_KEY_ENV`).
+_API_KEY_REF = f"${{{MCP_API_KEY_ENV}}}"
 
 
 def _stdio_entry(
@@ -398,9 +406,12 @@ def _claude_command(args: list[str], *, cwd: Path | None = None) -> str:
 
 
 def _redact_entry(entry: dict[str, Any]) -> dict[str, Any]:
-    """``entry`` with a baked API key replaced by a placeholder, for printing."""
+    """``entry`` with a baked API key replaced by a placeholder, for printing.
+
+    A ``${VAR}`` reference is kept: it is what the user should run.
+    """
     headers = entry.get("headers")
-    if not isinstance(headers, dict):
+    if not isinstance(headers, dict) or not claude_code.holds_credential(entry):
         return entry
     masked = {
         k: "Bearer <your-api-key>" if k.lower() == "authorization" else v
@@ -505,6 +516,8 @@ def _plan_mcp_entry(
         click.echo("\n  Add the user-scope entry yourself, then re-run this setup:")
         for args in commands:
             click.echo(f"    {_claude_command(args)}")
+        if entry.get("headers"):
+            _echo_api_key_env_note()
         raise click.ClickException(
             "The Claude Code CLI (`claude`) was not found on PATH. A user-scope entry lives "
             f"in {claude_json_label()}, which Claude Code owns, so setup writes it only "
@@ -541,6 +554,23 @@ def _run_claude_or_fail(args: list[str]) -> None:
         raise click.ClickException(f"`{name}` failed: {detail}")
 
 
+def _add_user_entry(entry: dict[str, Any]) -> None:
+    """Run ``claude mcp add-json --scope user`` for ``entry``.
+
+    The entry goes on ``claude``'s command line, which every local user can
+    read in the process list while it runs, so one that holds a credential is
+    never passed (:func:`~kagura_memory.claude_code.holds_credential`).
+
+    Raises:
+        click.ClickException: ``entry`` holds a credential, or ``claude`` failed.
+    """
+    if claude_code.holds_credential(entry):
+        raise click.ClickException(
+            "the entry holds an API key, which setup never passes on a command line"
+        )
+    _run_claude_or_fail(claude_code.mcp_add_json_args("user", entry))
+
+
 def _write_mcp_entry(project: Path, plan: _McpPlan) -> str:
     """Write the planned entry; return a line saying what was done."""
     if plan.scope == "project":
@@ -549,27 +579,58 @@ def _write_mcp_entry(project: Path, plan: _McpPlan) -> str:
     if plan.unchanged:
         return f"User-scope {MCP_SERVER_NAME} entry already up to date ({claude_json_label()})"
     if plan.replaces is None:
-        _run_claude_or_fail(claude_code.mcp_add_json_args("user", plan.entry))
+        _add_user_entry(plan.entry)
     else:
         _run_claude_or_fail(claude_code.mcp_remove_args("user"))
         try:
-            _run_claude_or_fail(claude_code.mcp_add_json_args("user", plan.entry))
+            _add_user_entry(plan.entry)
         except click.ClickException as failed:
             _restore_user_entry(plan.replaces, failed)
             raise
     return f"Added {MCP_SERVER_NAME} at user scope (claude mcp add-json --scope user)"
 
 
+def _echo_api_key_env_note(api_key: str | None = None) -> None:
+    """Say where a user-scope API-key entry gets the key; never prints it.
+
+    With ``api_key``, also say whether this shell already has it in
+    :data:`~kagura_memory.claude_code.MCP_API_KEY_ENV`.
+    """
+    var = MCP_API_KEY_ENV
+    click.echo(
+        f"  The entry sends the API key from ${var}, which Claude Code reads when it\n"
+        "  connects, so the key is neither in the entry nor on a command line. Set it in\n"
+        f"  the environment that starts Claude Code, e.g. `export {var}=<your-api-key>`\n"
+        "  in your shell profile. (--profile writes an entry that needs no key at all.)"
+    )
+    if api_key is None:
+        return
+    current = os.environ.get(var)
+    if not current:
+        click.echo(f"  ${var} is not set in this shell.")
+    elif current == api_key:
+        click.echo(f"  ${var} is already set to this key in this shell.")
+    else:
+        click.echo(
+            f"  Warning: ${var} in this shell holds a different key, which Claude Code\n"
+            "  started from here would send."
+        )
+
+
 def _restore_user_entry(old: dict[str, Any], failed: click.ClickException) -> None:
     """Put back the user-scope entry removed before a failed add, rather than leave none.
 
+    An entry that holds an API key is not put back: that would pass the key on
+    ``claude``'s command line.
+
     Raises:
-        click.ClickException: The restore failed too. The message keeps the
-            add's error and says the old entry is gone; the command to re-add
-            it is printed, with a baked API key replaced by a placeholder.
+        click.ClickException: The restore failed too, or was not attempted. The
+            message keeps the add's error and says the old entry is gone; the
+            command to re-add it is printed, with a baked API key replaced by a
+            placeholder.
     """
     try:
-        _run_claude_or_fail(claude_code.mcp_add_json_args("user", old))
+        _add_user_entry(old)
     except click.ClickException as e:
         click.echo(f"\n  Re-add the previous user-scope {MCP_SERVER_NAME} entry yourself:")
         click.echo(
@@ -968,7 +1029,8 @@ def run_setup_claude(
 
     * ``profile`` set → OAuth path: write the refresh-aware ``kagura-mcp``
       stdio entry bound to the named OAuth profile (no API key).
-    * ``profile`` unset → API-key path: write the static-token http entry.
+    * ``profile`` unset → API-key path: write the static-token http entry
+      (at user scope it names ``$KAGURA_MCP_API_KEY`` instead of the key).
 
     Both write the entry at ``scope`` (``project``: ``<project>/.mcp.json``;
     ``user``: through ``claude mcp add-json --scope user``), with
@@ -1016,8 +1078,12 @@ def run_setup_claude(
     upstream_url = mcp_url_with_query(
         resolved_mcp_url, guardrails=guardrails, tool_profile=tool_profile
     )
+    # A user-scope entry goes on `claude mcp add-json`'s command line, which other
+    # local users can read in the process list, so it names the variable Claude
+    # Code reads the key from instead of the key.
+    token = resolved_api_key if scope == "project" else _API_KEY_REF
     plan = _plan_mcp_entry(
-        project, scope, _static_token_entry(resolved_api_key, upstream_url), non_interactive
+        project, scope, _static_token_entry(token, upstream_url), non_interactive
     )
 
     # 4. Test connection
@@ -1073,6 +1139,8 @@ def run_setup_claude(
     click.echo(f"  Wrote {kagura_path.relative_to(project)}")
 
     click.echo(f"  {_write_mcp_entry(project, plan)}")
+    if scope == "user":
+        _echo_api_key_env_note(resolved_api_key)
     _echo_plan_notes(plan)
     _apply_extras(project, resolved_context_id, extras, non_interactive)
 

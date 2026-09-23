@@ -22,6 +22,7 @@ from .claude_code import (
     claude_json_label,
     detect_mcp_json_mode,
     find_kagura_mcp_entries,
+    unset_header_vars,
 )
 from .client import MIN_SERVER_VERSION, KaguraClient
 from .config import load_config
@@ -550,6 +551,20 @@ def _check_mcp(project_dir: Path) -> list[DoctorCheck]:
                     f'accept; {fix} to write it as "http"'
                 ),
                 details=details,
+            )
+        )
+    for name in unset_header_vars(entries[0].config) if entries else []:
+        # e.g. setup's user-scope API-key entry, which sends ${KAGURA_MCP_API_KEY}.
+        checks.append(
+            DoctorCheck(
+                section="mcp",
+                status="warn",
+                message=(
+                    f"The kagura-memory entry sends ${{{name}}} in a header, but {name} is not "
+                    "set here: set it in the environment that starts Claude Code, or the "
+                    "server rejects the request"
+                ),
+                details={**details, "env": name},
             )
         )
     for hidden in entries[1:]:

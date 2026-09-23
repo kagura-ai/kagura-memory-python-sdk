@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import ntpath
 import os
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -36,6 +37,15 @@ from typing import Any, Literal
 # written and the form that is detected can never drift apart.
 MCP_SERVER_NAME = "kagura-memory"
 MCP_PROXY_COMMAND = "kagura-mcp"
+
+#: The variable a user-scope API-key entry takes its key from. Claude Code
+#: expands ``${VAR}`` in an entry's headers from its own environment when it
+#: connects (checked against Claude Code 2.1.280 at user scope), so the key never
+#: goes on the ``claude mcp add-json`` command line, where every local user can
+#: read it in the process list, nor into ``~/.claude.json``. Not ``KAGURA_API_KEY``:
+#: the SDK ranks that above ``.kagura.json`` and OAuth profiles, so exporting it
+#: for Claude Code would change the credentials of every ``kagura`` command too.
+MCP_API_KEY_ENV = "KAGURA_MCP_API_KEY"
 
 # memory-cloud's Claude Code plugin (``.claude-plugin/plugin.json``), listed
 # by ``claude plugin list`` as ``kagura-memory@<marketplace>``.
@@ -59,6 +69,11 @@ _HTTP_TYPES = frozenset({"http", "streamable-http", "url"})
 _PROXY_NAMES = frozenset({MCP_PROXY_COMMAND, f"{MCP_PROXY_COMMAND}.exe"})
 
 _CLAUDE_TIMEOUT_SEC = 30
+
+# Claude Code's ``${VAR}`` / ``${VAR:-default}`` expansion in MCP config values.
+_ENV_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(:-[^}]*)?\}")
+# An Authorization value that is only a reference: ``${VAR}`` after an optional scheme.
+_AUTH_REF_ONLY = re.compile(r"(?:[A-Za-z][A-Za-z0-9-]*\s+)?\$\{[A-Za-z_][A-Za-z0-9_]*\}")
 
 
 def _read_json_safe(path: Path) -> dict[str, Any]:
@@ -145,6 +160,54 @@ def classify_mcp_entry(entry: object) -> McpMode:
             return "static-token"
         return "url"
     return "absent"
+
+
+def holds_credential(entry: object) -> bool:
+    """True when an ``Authorization`` header of ``entry`` holds a credential itself.
+
+    ``Bearer ${VAR}`` (a scheme, then one variable without a default) does not:
+    Claude Code fills it in when it connects. Anything else does, including a
+    ``${VAR:-default}``, whose default may be a key. Such an entry never goes on
+    a command line.
+
+    Args:
+        entry: A server entry.
+
+    Returns:
+        Whether printing or passing ``entry`` as it is would expose a credential.
+    """
+    headers = entry.get("headers") if isinstance(entry, dict) else None
+    if not isinstance(headers, dict):
+        return False
+    return any(
+        not (isinstance(value, str) and _AUTH_REF_ONLY.fullmatch(value.strip()))
+        for key, value in headers.items()
+        if isinstance(key, str) and key.lower() == "authorization"
+    )
+
+
+def unset_header_vars(entry: object) -> list[str]:
+    """The variables ``entry``'s headers reference without a default and that are unset here.
+
+    Claude Code sends such a reference as literal text, so the server rejects
+    the request. Only meaningful when this environment is the one Claude Code
+    starts from.
+
+    Args:
+        entry: A server entry.
+
+    Returns:
+        The variable names, in order of appearance, each once.
+    """
+    headers = entry.get("headers") if isinstance(entry, dict) else None
+    if not isinstance(headers, dict):
+        return []
+    names: list[str] = []
+    for value in headers.values():
+        for name, default in _ENV_REF.findall(value) if isinstance(value, str) else []:
+            if not default and not os.environ.get(name) and name not in names:
+                names.append(name)
+    return names
 
 
 @dataclass(frozen=True)

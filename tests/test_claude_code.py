@@ -26,8 +26,10 @@ from kagura_memory.claude_code import (
     detect_kagura_plugin,
     detect_mcp_json_mode,
     find_kagura_mcp_entries,
+    holds_credential,
     mcp_add_json_args,
     same_mcp_entry,
+    unset_header_vars,
 )
 
 # Bound at import, before the autouse fixture swaps it for a stub.
@@ -100,6 +102,50 @@ def test_same_mcp_entry_ignores_empty_values() -> None:
     assert same_mcp_entry({**_STDIO, "env": {}}, _STDIO)
     assert not same_mcp_entry({**_STDIO, "env": {"A": "1"}}, _STDIO)
     assert not same_mcp_entry({**_STDIO, "args": ["--profile", "work"]}, _STDIO)
+
+
+@pytest.mark.parametrize(
+    ("authorization", "holds"),
+    [
+        ("Bearer ${KAGURA_MCP_API_KEY}", False),
+        ("${TOKEN}", False),
+        ("  Bearer   ${TOKEN} ", False),
+        ("Bearer kagura_abc", True),
+        ("Bearer ${TOKEN:-kagura_abc}", True),  # the default may be a key
+        ("Bearer kagura_${SUFFIX}", True),
+        ("kagura_abc ${TOKEN}", True),
+        ("Bearer ${A} ${B}", True),
+        ("", True),
+        (123, True),
+    ],
+)
+def test_holds_credential(authorization: object, holds: bool) -> None:
+    entry = {"type": "http", "url": "https://h/mcp", "headers": {"authorization": authorization}}
+    assert holds_credential(entry) is holds
+
+
+def test_holds_credential_ignores_other_headers_and_entries() -> None:
+    assert not holds_credential(_STDIO)
+    assert not holds_credential({"type": "http", "headers": {"X-Trace": "abc"}})
+    assert not holds_credential("not-a-dict")
+
+
+def test_unset_header_vars(monkeypatch) -> None:
+    monkeypatch.delenv("KAGURA_MCP_API_KEY", raising=False)
+    monkeypatch.setenv("SET_ONE", "x")
+    monkeypatch.setenv("EMPTY_ONE", "")
+    entry = {
+        "headers": {
+            "Authorization": "Bearer ${KAGURA_MCP_API_KEY}",
+            "X-A": "${SET_ONE}/${EMPTY_ONE}/${WITH_DEFAULT:-d}/${KAGURA_MCP_API_KEY}",
+            "X-B": 7,
+        }
+    }
+    assert unset_header_vars(entry) == ["KAGURA_MCP_API_KEY", "EMPTY_ONE"]
+    assert unset_header_vars(_STDIO) == []
+
+    monkeypatch.setenv("KAGURA_MCP_API_KEY", "k")
+    assert unset_header_vars(entry) == ["EMPTY_ONE"]
 
 
 def test_legacy_type_flags_only_url() -> None:

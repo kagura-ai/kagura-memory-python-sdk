@@ -1526,7 +1526,9 @@ def _tool_profile_option(ctx, param, value: str | None) -> str | None:
         "Where the kagura-memory MCP entry goes. project: <project>/.mcp.json. "
         "user: every project on this machine, written with `claude mcp add-json "
         "--scope user` (needs the claude CLI); recommended with --profile when one "
-        "profile serves every project. A stronger scope's entry (local > project > "
+        "profile serves every project. With an API key, the user-scope entry sends "
+        "$KAGURA_MCP_API_KEY, which Claude Code reads when it connects: set it where "
+        "Claude Code starts. A stronger scope's entry (local > project > "
         "user) hides a weaker one: setup warns, and with -y refuses to write an "
         "entry that would be hidden."
     ),

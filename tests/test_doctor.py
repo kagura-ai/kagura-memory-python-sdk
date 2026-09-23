@@ -649,6 +649,32 @@ def test_doctor_legacy_hint_in_a_parent_mcp_json_names_its_directory(tmp_path):
     assert f"re-run `kagura setup claude --project-dir '{repo.resolve()}'`" in hint
 
 
+@pytest.mark.parametrize("env_set", [False, True], ids=["unset", "set"])
+def test_doctor_warns_when_the_entrys_key_variable_is_unset(monkeypatch, tmp_path, env_set):
+    """Setup's user-scope API-key entry sends ${KAGURA_MCP_API_KEY}; unset, it sends nothing."""
+    from kagura_memory.doctor import _check_mcp
+
+    if env_set:
+        monkeypatch.setenv("KAGURA_MCP_API_KEY", "kagura_secret_value")
+    else:
+        monkeypatch.delenv("KAGURA_MCP_API_KEY", raising=False)
+    entry = {**_BEARER_ENTRY, "headers": {"Authorization": "Bearer ${KAGURA_MCP_API_KEY}"}}
+    _write_claude_json({"mcpServers": {"kagura-memory": entry}})
+
+    checks = _check_mcp(tmp_path)
+
+    unset = [c for c in checks if "KAGURA_MCP_API_KEY is not set here" in c.message]
+    assert len(unset) == (0 if env_set else 1)
+    if unset:
+        assert unset[0].status == "warn"
+        assert unset[0].details == {
+            "scope": "user",
+            "source": claude_json_label(),
+            "env": ("KAGURA_MCP_API_KEY"),
+        }
+    assert not any("kagura_secret_value" in c.message for c in checks)
+
+
 def test_doctor_names_the_scope_of_an_unusable_entry(tmp_path):
     from kagura_memory.doctor import _check_mcp
 
