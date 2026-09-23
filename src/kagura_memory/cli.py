@@ -745,7 +745,8 @@ def reference(context_id, memory_id):
     "--dismiss-supersede-candidate",
     is_flag=True,
     default=False,
-    help="Reject this memory's supersede_candidate suggestion (needs --memory-id)",
+    help="Reject this memory's supersede_candidate suggestion (needs --memory-id; "
+    "server v0.65.0+, older servers drop it silently)",
 )
 def update_memory(
     context_id,
@@ -828,7 +829,9 @@ def context():
 
 @context.command(name="list")
 @click.option(
-    "--name-contains", help="Only contexts whose name contains this text (case-insensitive)"
+    "--name-contains",
+    help="Only contexts whose name or display name contains this text "
+    "(case-insensitive, max 100 chars)",
 )
 @click.option("--summary", is_flag=True, default=False, help="Add summaries (300-char preview)")
 @click.option(
@@ -993,7 +996,10 @@ def context_search_config(
 # Keep backward compat: kagura contexts → kagura context list
 @main.command()
 def contexts():
-    """List available contexts (alias for 'context list')."""
+    """List available contexts (short form of 'context list', without its options).
+
+    For --name-contains/--summary/--details/--stats use 'kagura context list'.
+    """
     _run_client_command(
         lambda client, _: client.list_contexts(),
         context_id=None,

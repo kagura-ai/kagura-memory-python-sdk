@@ -1221,8 +1221,10 @@ class KaguraClient:
 
         ``name_contains``, ``include_summary`` and ``include_details`` need
         memory-cloud v0.73.0+. An older server ignores them: it returns every
-        context, and every item already carries ``summary`` and
-        ``embedding_model``. ``include_stats`` works on any server.
+        context, every item already carries ``summary`` and
+        ``embedding_model``, and the envelope has no ``total`` (read
+        ``result.get("total")`` or use ``len(result["contexts"])``). ``hint``
+        needs v0.75.0+. ``include_stats`` works on any server.
 
         Args:
             name_contains: Only contexts whose name or display name contains
@@ -1241,16 +1243,22 @@ class KaguraClient:
 
             - ``contexts``: the items described above.
             - ``count``: contexts in the workspace. This is quota usage, so
-              ``name_contains`` does not change it.
-            - ``total``: contexts in this response. ``0`` on no match is still
-              a success.
+              ``name_contains`` does not change it. With no current workspace
+              it is the number of contexts the caller can see, still counted
+              before ``name_contains``.
+            - ``total``: contexts in this response (v0.73.0+). ``0`` on no
+              match is still a success.
             - ``limit`` / ``can_create``: the plan's context maximum and whether
               another context fits. Absent when the caller has no current
-              workspace.
+              workspace; ``0`` / ``False`` when the server could not read the
+              quota (so :meth:`create_context` then refuses with
+              :class:`KaguraQuotaError`).
             - ``hint``: present only when the caller can see no context at all
-              (memory-cloud v0.75.0+, #1658). It says how to create a context
-              or get access. A ``name_contains`` that matches nothing does not
-              produce it.
+              (memory-cloud v0.75.0+, #1658). With a workspace it says how to
+              create a context or get access; without one it says to create or
+              select a workspace in the web UI. A ``name_contains`` that
+              matches nothing does not produce it, and neither does a failed
+              access lookup (which also answers with an empty list).
         """
         arguments: dict[str, Any] = {}
         if name_contains:
@@ -1461,13 +1469,17 @@ class KaguraClient:
                 memories that are deliberately separate. Nothing is deleted or
                 shadowed, and it can be the only change in the call. Requires
                 ``memory_id``. Sent only when ``True``. Requires memory-cloud
-                v0.65.0+ (#1509). To accept the suggestion instead, create a
-                ``supersedes`` edge.
+                v0.65.0+ (#1504). An older server silently drops the flag: a
+                dismissal-only call then succeeds as an empty in-place update
+                that dismisses nothing and refreshes ``updated_at``. To accept
+                the suggestion instead, create a ``supersedes`` edge.
 
         Returns:
             API response with updated memory info. When a dismissal applied,
             ``supersede_candidate_dismissed`` holds the rejected candidate's
-            memory_id; the key is absent when there was no live suggestion.
+            memory_id. It is the only confirmation that a dismissal happened:
+            the key is absent both when there was no live suggestion and when
+            the server predates v0.65.0.
 
         Raises:
             ValueError: If neither or both of ``memory_id`` and ``external_id``
