@@ -448,8 +448,11 @@ refreshes tokens, so a short-lived OAuth `access_token` baked into
 stdio proxy, which owns `~/.kagura/credentials.json`, forwards every
 MCP request to the server, and injects an always-fresh bearer token —
 so the same `kagura auth login` credentials power both the CLI and
-Claude Code. Use the long-lived API-key path only for CI / service
-accounts, where a static token is preferable.
+Claude Code. When the server drops the MCP session (after an idle hour
+or a server restart), the proxy — like a long-lived `KaguraClient` —
+re-runs the `initialize` handshake and retries the request once, so
+Claude Code keeps working without a restart. Use the long-lived API-key
+path only for CI / service accounts, where a static token is preferable.
 
 Credential resolution order when `KaguraClient()` is called with no
 arguments: `KAGURA_API_KEY` env (CI / service accounts always win) →
