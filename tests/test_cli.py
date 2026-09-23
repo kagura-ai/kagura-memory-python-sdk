@@ -185,6 +185,39 @@ def test_context_list(mock_client_cls, mock_config):
     result = runner.invoke(main, ["context", "list"])
     assert result.exit_code == 0
     assert "c1" in result.output
+    # Issue #255: no flags → every option at its default, so the client omits them all.
+    mock_client.list_contexts.assert_awaited_once_with(
+        name_contains=None,
+        include_summary=False,
+        include_details=False,
+        include_stats=False,
+    )
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_context_list_forwards_filter_and_detail_flags(mock_client_cls, mock_config):
+    """Issue #255: context list maps --name-contains/--summary/--details/--stats."""
+    mock_config.return_value = {"api_key": "key", "mcp_url": "https://test.com/mcp"}
+
+    mock_client = AsyncMock()
+    mock_client.list_contexts.return_value = {"contexts": [], "count": 1, "total": 0}
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    mock_client_cls.return_value = mock_client
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        ["context", "list", "--name-contains", "auth", "--summary", "--details", "--stats"],
+    )
+    assert result.exit_code == 0, result.output
+    mock_client.list_contexts.assert_awaited_once_with(
+        name_contains="auth",
+        include_summary=True,
+        include_details=True,
+        include_stats=True,
+    )
 
 
 @patch("kagura_memory.cli.load_config")
@@ -305,6 +338,77 @@ def test_update_memory_rejects_both_ids():
     result = runner.invoke(main, ["update-memory", "-m", "mem-1", "--external-id", "ext-1"])
     assert result.exit_code != 0
     assert "only one" in result.output.lower()
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_update_memory_dismiss_supersede_candidate(mock_client_cls, mock_config):
+    """Issue #255: --dismiss-supersede-candidate forwards the flag (a dismissal-only call)."""
+    mock_config.return_value = {
+        "api_key": "key",
+        "mcp_url": "https://test.com/mcp",
+        "context_id": "ctx",
+    }
+
+    mock_client = AsyncMock()
+    mock_client.update_memory.return_value = {
+        "status": "success",
+        "supersede_candidate_dismissed": "mem-old",
+    }
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    mock_client_cls.return_value = mock_client
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["update-memory", "-m", "mem-1", "--dismiss-supersede-candidate"])
+    assert result.exit_code == 0, result.output
+    assert "mem-old" in result.output
+    kwargs = mock_client.update_memory.await_args.kwargs
+    assert kwargs["memory_id"] == "mem-1"
+    assert kwargs["dismiss_supersede_candidate"] is True
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_update_memory_dismiss_defaults_off(mock_client_cls, mock_config):
+    """Issue #255: without the flag the CLI passes False, which the client omits."""
+    mock_config.return_value = {
+        "api_key": "key",
+        "mcp_url": "https://test.com/mcp",
+        "context_id": "ctx",
+    }
+
+    mock_client = AsyncMock()
+    mock_client.update_memory.return_value = {"status": "success"}
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    mock_client_cls.return_value = mock_client
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["update-memory", "-m", "mem-1", "-s", "updated summary"])
+    assert result.exit_code == 0, result.output
+    assert mock_client.update_memory.await_args.kwargs["dismiss_supersede_candidate"] is False
+
+
+@patch("kagura_memory.cli.KaguraClient")
+def test_update_memory_dismiss_rejects_external_id(mock_client_cls):
+    """Issue #255: --dismiss-supersede-candidate needs --memory-id; with --external-id
+    the CLI fails before building a client."""
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        [
+            "update-memory",
+            "--external-id",
+            "ext-1",
+            "-s",
+            "summary text",
+            "--dismiss-supersede-candidate",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "--dismiss-supersede-candidate requires --memory-id" in result.output
+    mock_client_cls.assert_not_called()
 
 
 @patch("kagura_memory.cli.load_config")
