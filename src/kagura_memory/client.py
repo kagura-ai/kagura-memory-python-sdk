@@ -1,5 +1,6 @@
 """Low-level REST API client for Kagura Memory Cloud."""
 
+import asyncio
 import itertools
 import json
 import logging
@@ -140,6 +141,8 @@ class KaguraClient:
             )
 
         self._session_id: str | None = None
+        # Makes the ``initialize`` handshake single-flight (see _initialize_session).
+        self._session_lock = asyncio.Lock()
         self._request_id_counter = itertools.count(1)
         # Per-(client, context_id) cache for ingest steering: get_context_info
         # is fetched at most once per context for the client's lifetime. A
@@ -154,10 +157,20 @@ class KaguraClient:
         return next(self._request_id_counter)
 
     async def _initialize_session(self) -> None:
-        """Initialize MCP session if not already initialized."""
+        """Initialize MCP session if not already initialized.
+
+        Single-flight: calls that find no session at the same time (on first
+        use, or after all hitting one expired session) share one ``initialize``
+        instead of each opening, and orphaning, a session of its own.
+        """
         if self._session_id:
             return
+        async with self._session_lock:
+            if not self._session_id:  # nobody opened one while we waited
+                await self._open_session()
 
+    async def _open_session(self) -> None:
+        """Run the ``initialize`` handshake and keep the session id it returns."""
         body = {
             "jsonrpc": "2.0",
             "id": self._next_request_id(),
@@ -226,11 +239,14 @@ class KaguraClient:
     async def _post_in_session(self, body: dict[str, Any]) -> httpx.Response:
         """POST ``body`` in the MCP session, re-opening the session once if it expired.
 
-        memory-cloud drops sessions after an idle hour and on every restart, so
-        without this a long-lived client fails every call from then on. The
+        MCP Streamable HTTP answers a request naming a session the server no
+        longer holds with ``404`` and requires a new ``initialize``; without
+        this a long-lived client would fail every call from then on. The
         server rejects the request before dispatch, which makes the single
         retry safe even for a non-idempotent ``tools/call``. A second ``404``
-        is returned for the caller's ``raise_for_status`` to report.
+        is returned for the caller's ``raise_for_status`` to report. (As
+        deployed, memory-cloud v0.75.0 skips that session check and re-adopts
+        an unknown session id instead, so against it this never fires.)
 
         Args:
             body: The JSON-RPC request.
@@ -244,7 +260,9 @@ class KaguraClient:
         )
         if not mcp_session_expired(response, session_id):
             return response
-        # A concurrent call may already have re-opened it; keep that session.
+        # Forget the session only while it is still the stale one, so one that
+        # a concurrent call already re-opened is kept; concurrent calls that
+        # hit the same expired session then share one single-flight initialize.
         if self._session_id == session_id:
             self._session_id = None
         await self._initialize_session()
