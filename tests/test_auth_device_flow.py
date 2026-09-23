@@ -95,6 +95,79 @@ async def test_authorize_device_http_error_wraps_as_auth_error():
         await authorize_device(client, SERVER, scope="memory:read")
 
 
+# memory-cloud v0.76.0 (#1667): device/authorize over the per-IP limit.
+_RATE_LIMIT_DESCRIPTION = "Too many device authorization requests. Please try again later."
+_RATE_LIMIT_BODY = {"error": "invalid_request", "error_description": _RATE_LIMIT_DESCRIPTION}
+
+
+async def _authorize_against(response: httpx.Response) -> KaguraAuthError:
+    """Run authorize_device against a server answering ``response``; return the error."""
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return response
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(KaguraAuthError) as excinfo:
+            await authorize_device(client, SERVER, scope="memory:read")
+    [request] = requests
+    assert str(request.url) == f"{SERVER}/api/v1/oauth/device/authorize"
+    return excinfo.value
+
+
+@pytest.mark.asyncio
+async def test_authorize_device_429_says_retry_after_seconds():
+    error = await _authorize_against(
+        httpx.Response(
+            429,
+            json=_RATE_LIMIT_BODY,
+            headers={"Retry-After": "60", "Cache-Control": "no-store"},
+        )
+    )
+    message = str(error)
+    assert message.startswith("Too many sign-in attempts from this address (HTTP 429).")
+    assert "Retry after 60 seconds." in message
+    assert f"Server said: {_RATE_LIMIT_DESCRIPTION}" in message
+    # Not the generic failure, whose hint (check the client id) is wrong here.
+    assert "Device authorization failed" not in message
+    assert "registered" not in message
+
+
+@pytest.mark.asyncio
+async def test_authorize_device_429_uses_the_servers_retry_after():
+    error = await _authorize_against(
+        httpx.Response(429, json=_RATE_LIMIT_BODY, headers={"Retry-After": " 17 "})
+    )
+    assert "Retry after 17 seconds." in str(error)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "headers",
+    [
+        pytest.param({}, id="absent"),
+        pytest.param({"Retry-After": "soon"}, id="not-a-number"),
+        pytest.param({"Retry-After": "-5"}, id="negative"),
+        pytest.param({"Retry-After": "Wed, 23 Sep 2026 12:00:00 GMT"}, id="http-date"),
+    ],
+)
+async def test_authorize_device_429_without_usable_retry_after_defaults_to_60(headers):
+    error = await _authorize_against(httpx.Response(429, json=_RATE_LIMIT_BODY, headers=headers))
+    assert "Retry after 60 seconds." in str(error)
+
+
+@pytest.mark.asyncio
+async def test_authorize_device_429_without_error_description():
+    # A proxy's 429 page: no JSON body to quote, the message still stands alone.
+    error = await _authorize_against(
+        httpx.Response(429, text="<html>rate limited</html>", headers={"Retry-After": "30"})
+    )
+    assert str(error) == (
+        "Too many sign-in attempts from this address (HTTP 429). Retry after 30 seconds."
+    )
+
+
 @pytest.mark.asyncio
 async def test_authorize_device_network_error_wraps_as_connection_error():
     client = MagicMock()

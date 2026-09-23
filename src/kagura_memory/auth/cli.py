@@ -55,9 +55,17 @@ from .credentials import (
 from .device_flow import (
     DEFAULT_CLIENT_ID,
     DeviceAuthorizationResponse,
+    InviteRef,
+    InviteSupport,
     TokenResponse,
     authorize_device,
+    build_invite_link,
+    check_invite_origin,
+    fetch_system_info,
+    invite_base_url,
+    invite_support,
     make_oauth_client,
+    parse_invite,
     poll_for_token,
     refresh_access_token,
     revoke_token,
@@ -97,6 +105,22 @@ def auth():
 # ---------------------------------------------------------------------------
 
 
+def _parse_invite_option(
+    _ctx: click.Context, _param: click.Parameter, value: str | None
+) -> InviteRef | None:
+    """Click callback: validate ``--invite`` locally, before any network call.
+
+    A bad value is a usage error. The message never echoes the value — it
+    may be a (mistyped) invite token.
+    """
+    if value is None:
+        return None
+    try:
+        return parse_invite(value)
+    except ValueError as e:
+        raise click.BadParameter(str(e)) from e
+
+
 @auth.command(name="login")
 @click.option(
     "--profile",
@@ -124,12 +148,23 @@ def auth():
     is_flag=True,
     help="Don't try to open a browser — just print the URL and code.",
 )
+@click.option(
+    "--invite",
+    metavar="LINK_OR_TOKEN",
+    default=None,
+    callback=_parse_invite_option,
+    help=(
+        "Sign up with an invite: the https://<host>/join/<token> link you were "
+        "sent, or its bare token. Checked locally; never stored."
+    ),
+)
 def auth_login(
     profile: str,
     server: str | None,
     scope: str | None,
     read_only: bool,
     no_browser: bool,
+    invite: InviteRef | None,
 ) -> None:
     """Authenticate via OAuth2 device flow.
 
@@ -140,6 +175,7 @@ def auth_login(
       kagura auth login --scope "memory:read memory:write profile:read"  # custom
       kagura auth login --profile work
       kagura auth login --no-browser         # for SSH / headless
+      kagura auth login --invite https://<host>/join/<token>  # invite-only sign-up
 
     \b
     Memory scopes:
@@ -164,6 +200,7 @@ def auth_login(
                 profile=profile,
                 scope=resolved_scope,
                 open_browser=not no_browser,
+                invite=invite,
             )
         )
     except click.ClickException:
@@ -186,6 +223,7 @@ async def _run_login(
     profile: str,
     scope: str,
     open_browser: bool,
+    invite: InviteRef | None = None,
 ) -> None:
     async with make_oauth_client() as client:
         device = await authorize_device(
@@ -194,7 +232,12 @@ async def _run_login(
             client_id=DEFAULT_CLIENT_ID,
             scope=scope,
         )
-        _print_device_prompt(device, attempt_browser=open_browser)
+        if invite is None:
+            _print_device_prompt(device, attempt_browser=open_browser)
+        else:
+            _check_invite_origin(invite, device)
+            support = invite_support(await fetch_system_info(client, server))
+            _print_invite_prompt(device, invite, support, attempt_browser=open_browser)
         token = await poll_for_token(
             client,
             server,
@@ -222,14 +265,90 @@ def _print_device_prompt(device: DeviceAuthorizationResponse, *, attempt_browser
     click.echo("  Open this URL in your browser to approve:")
     click.echo(f"    {device.verification_uri_complete}")
     click.echo()
+    _open_browser_or_explain(device.verification_uri_complete, attempt_browser=attempt_browser)
 
+
+def _check_invite_origin(invite: InviteRef, device: DeviceAuthorizationResponse) -> None:
+    """Stop before polling when a full invite link is for another server."""
+    try:
+        check_invite_origin(invite, device.verification_uri)
+    except ValueError as e:
+        raise click.ClickException(
+            f"{e}\n  Log in to the invite's server instead: "
+            "kagura auth login --server <its API URL> --invite <link>"
+        ) from e
+
+
+def _print_invite_prompt(
+    device: DeviceAuthorizationResponse,
+    invite: InviteRef,
+    support: InviteSupport,
+    *,
+    attempt_browser: bool,
+) -> None:
+    """Print the ``--invite`` prompt: the code first, then the link(s) in order.
+
+    ``hand_off`` (memory-cloud v0.76.0+) prints one ``/join`` link whose
+    ``return_to`` lands on the approval page, always followed by the plain
+    ``verification_uri_complete`` (for an already-signed-in user, or a
+    ``/join`` that still ends on the dashboard). ``two_step`` (older servers,
+    or a failed ``/system/info`` probe) asks for the invite first, then the
+    approval page. ``disabled`` drops the invite. The token appears only
+    inside the printed ``/join`` link.
+    """
+    if support == "disabled":
+        click.echo()
+        click.echo("  Note: this server does not accept invites, so --invite has no effect.")
+        _print_device_prompt(device, attempt_browser=attempt_browser)
+        return
+
+    link = None
+    if support == "hand_off":
+        link = build_invite_link(
+            device.verification_uri, device.verification_uri_complete, invite.token
+        )
+
+    click.echo()
+    click.echo(f"! First copy your one-time code: {device.user_code}")
+    if link is not None:
+        click.echo("  Open this link to accept your invite and sign in:")
+        click.echo(f"    {link}")
+        click.echo("  After sign-up you land on the approval page with the code filled in.")
+        click.echo("  If you land on the dashboard instead, approve here:")
+        click.echo(f"    {device.verification_uri_complete}")
+        click.echo()
+        _open_browser_or_explain(link, attempt_browser=attempt_browser, what="the invite link")
+        return
+
+    # Two-step fallback. Both links come from verification_uri; when /join
+    # cannot be placed there, fall back to the link the user gave (never a
+    # guessed host), and with only a bare token, to no link at all.
+    base = invite_base_url(device.verification_uri)
+    join_link = f"{base}/join/{invite.token}" if base is not None else invite.link
+    minutes = max(1, round(device.expires_in / 60))
+    # Worded to stay true on a server that has the hand-off: here when the
+    # link could not be built, or when the /system/info probe failed.
+    click.echo("  Accept your invite before you approve the code, in this order:")
+    if join_link is not None:
+        click.echo(f"    1. Open your invite link and sign up:   {join_link}")
+    else:
+        click.echo("    1. Open the invite link you were sent and sign up.")
+    click.echo(f"    2. Then open this URL and approve:       {device.verification_uri_complete}")
+    click.echo(f"  Polling continues here until the code expires (in {minutes} min).")
+    click.echo()
+    if join_link is not None:
+        _open_browser_or_explain(join_link, attempt_browser=attempt_browser, what="step 1")
+
+
+def _open_browser_or_explain(url: str, *, attempt_browser: bool, what: str = "the URL") -> None:
+    """Open ``url`` unless ``--no-browser``; say so when that, or the opener, fails."""
     if not attempt_browser:
         click.echo("  (--no-browser: not opening a browser; polling will continue here.)")
         return
 
-    if not _try_open_browser(device.verification_uri_complete):
+    if not _try_open_browser(url):
         click.echo(
-            "  Could not auto-open the browser. Open the URL above manually. "
+            f"  Could not auto-open the browser. Open {what} above manually. "
             "Polling will continue here."
         )
 
