@@ -65,7 +65,10 @@ class ResourceClient(KaguraRestClient):
         KaguraAuthError: Authentication failed (401)
         KaguraNotFoundError: Resource not found (404)
         KaguraConnectionError: Connection or HTTP error
-        KaguraQuotaError: Quota exceeded (429)
+        KaguraQuotaError: Quota exceeded (429), or the active-token cap on
+            ``create_token`` (403 ``QUOTA-001``, server v0.75.0+)
+        KaguraFeatureNotAvailableError: The plan lacks the feature
+            (403 ``FEAT-001``, e.g. ``resources`` on ``create_token``)
     """
 
     def __init__(

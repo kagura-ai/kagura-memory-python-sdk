@@ -338,6 +338,47 @@ raw pydantic `ValidationError` or `KeyError`. Upgrading `kagura-memory` is the l
 `list_embedding_models` — still raise `KaguraConnectionError` on drift, so catch `KaguraError`
 to cover both.
 
+Plan and quota refusals raise typed errors, from the `KaguraClient` MCP tool methods and the
+REST clients alike. All three are `KaguraError` subclasses:
+
+- `KaguraQuotaError` — a quota or cap was reached: `remember` past the daily memory quota, a
+  tool call past the daily MCP call cap, `create_context` at the context cap, the
+  resource-token or member-seat cap, or the daily REST quota. The REST clients other than
+  `SecretClient` also raise it for any other 429, such as the per-minute rate limit.
+  `quota_type`, `limit`, `current`, `used_today` and `resets_at` carry the server's numbers
+  when it sends them. `create_context` checks the cap through `list_contexts` before it calls
+  the server, so that refusal has `quota_type`, `current` and `limit` but no `required_plan`.
+  `details` holds every field the server sent, including those without an attribute, such as
+  the embedding-spend cap's `cap_usd`.
+  `retry_after` is the number of seconds until the quota resets, taken from `Retry-After` or
+  derived from `resets_at`. It is `None` for a count cap, because waiting does not free one.
+  On `KaguraClient`, an HTTP-level 429 still raises `KaguraRateLimitError`. That includes the
+  daily MCP quota when the server's rate-limit middleware refuses the request before the tool
+  runs.
+- `KaguraFeatureNotAvailableError` — the workspace cannot use the feature. `gate` says why:
+  `"plan"` means an upgrade lifts it (`required_plan` / `required_plan_display`), while
+  `"allowlist"` and `"deployment"` have no upgrade path.
+- `KaguraPartialRollbackError` — `rollback_sleep_run` reversed only part of the run.
+  `.summary` is the `RollbackSummary` of what was reversed, with the failed steps in `errors`.
+  It is `None` when the server's summary could not be read.
+
+Against memory-cloud 0.75.0+ the SDK types a refusal by its `gate` descriptor
+([#1644](https://github.com/kagura-ai/memory-cloud/issues/1644)). Against older servers it
+falls back to the error code and the legacy fields. A `quota_exceeded` refusal that names no
+quota, such as the 1 MB memory-size guard, stays a plain `KaguraError`, because no plan lifts it
+and waiting does not help. `kagura` commands print the reset time and the required plan under
+the error message.
+
+```python
+from kagura_memory import KaguraFeatureNotAvailableError, KaguraQuotaError
+try:
+    await client.remember(context_id="dev", summary="...", content="...")
+except KaguraQuotaError as e:
+    print(e.quota_type, e.resets_at, e.retry_after)
+except KaguraFeatureNotAvailableError as e:
+    print(e.feature, e.required_plan_display)
+```
+
 More operations — tag-vocabulary discovery (`list_tags`), `merge_contexts`, context lifecycle (`create_context`/`update_context`/`delete_context`), workspace `get_usage`, `get_memory_stats`, `find_duplicates`, `get_embedding_status` — are runnable in [`examples/client_advanced.py`](examples/client_advanced.py); the [API Coverage](#api-coverage) table lists the full surface.
 
 ### ResourceClient — External Data Ingestion

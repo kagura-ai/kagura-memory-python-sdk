@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
+import io
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from rich.console import Console
 
 # Real PDF extraction depends on pymupdf (an optional extra:
 # `pip install kagura-memory[ingest-pdf]`). Without it, the orchestrator's
@@ -17,7 +21,13 @@ import pytest
 pytest.importorskip("pymupdf", reason="pymupdf not installed — install [ingest-pdf] extras")
 
 from kagura_memory.client import KaguraClient  # noqa: E402
+from kagura_memory.exceptions import (  # noqa: E402
+    KaguraError,
+    KaguraQuotaError,
+    KaguraRateLimitError,
+)
 from kagura_memory.ingest import FileIngestor  # noqa: E402
+from kagura_memory.ingest._render import render_result  # noqa: E402
 from kagura_memory.ingest.ingestor import _OVERVIEW_RESERVED, _SECTION_RESERVED  # noqa: E402
 from kagura_memory.ingest.providers.base import Provider  # noqa: E402
 
@@ -937,5 +947,180 @@ async def test_http_youtube_url_routed_when_allow_http_true() -> None:
     assert fake_fetch.await_args is not None
     assert fake_fetch.await_args.kwargs.get("connect_timeout") == 7.0
     assert result.source_uri == url
+
+    await client.close()
+
+
+def _five_section_markdown(tmp_path: Any) -> str:
+    doc = tmp_path / "five.md"
+    doc.write_text(
+        "\n\n".join(f"# Part {n}\n\nbody of part {n}" for n in range(1, 6)), encoding="utf-8"
+    )
+    return str(doc)
+
+
+def _quota_error() -> KaguraQuotaError:
+    return KaguraQuotaError(
+        "remember failed (quota_exceeded): Daily memory limit reached.",
+        quota_type="memories_per_day",
+        limit=5,
+        used_today=5,
+        resets_at=datetime(2099, 1, 2, tzinfo=UTC),
+    )
+
+
+@pytest.mark.asyncio
+async def test_quota_error_stops_section_writes(tmp_path: Any) -> None:
+    """#256: once remember() raises KaguraQuotaError, no further section is sent."""
+    client = _make_client()
+    ingestor = FileIngestor(client=client, text_provider=FakeProvider(), concurrency=1)
+
+    sent: list[dict[str, Any]] = []
+
+    async def remember(**kwargs: Any) -> dict[str, Any]:
+        sent.append(kwargs)
+        # Call 1 is the overview; section 2 of 5 is call 3.
+        if len(sent) == 3:
+            raise _quota_error()
+        return {"memory_id": f"mem-{len(sent)}"}
+
+    with patch.object(client, "remember", side_effect=remember):
+        result = await ingestor.ingest(_five_section_markdown(tmp_path), context_id="ctx-uuid")
+
+    sections = [c for c in sent if c["type"] == "document_section"]
+    assert [c["details"]["section_index"] for c in sections] == [0, 1]
+    assert result.overview_id == "mem-1"
+    assert result.section_ids == ["mem-2"]
+
+    remember_errors = [e for e in result.errors if e.step == "remember"]
+    assert [e.section_index for e in remember_errors] == [1, 2, 3, 4]
+    failed, *skipped = remember_errors
+    assert failed.exception_type == "KaguraQuotaError"
+    assert "Daily memory limit reached" in failed.message
+    # Each section never sent keeps its own record, so callers can retry it.
+    for record in skipped:
+        assert record.exception_type == "KaguraQuotaError"
+        assert "not written" in record.message
+        assert "quota exceeded" in record.message
+        assert "2099-01-02" in record.message
+
+    # ``kagura ingest`` counts every unwritten section as failed.
+    console = Console(file=io.StringIO(), width=200, record=True, force_terminal=False)
+    render_result(result, console)
+    assert "1 created, 4 failed" in console.export_text()
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_quota_error_stops_sections_waiting_for_a_slot(tmp_path: Any) -> None:
+    """With concurrency, sections still queued behind the semaphore are skipped too."""
+    client = _make_client()
+    ingestor = FileIngestor(client=client, text_provider=FakeProvider(), concurrency=2)
+
+    sent: list[dict[str, Any]] = []
+
+    async def remember(**kwargs: Any) -> dict[str, Any]:
+        sent.append(kwargs)
+        await asyncio.sleep(0)
+        if kwargs["type"] == "document_section":
+            raise _quota_error()
+        return {"memory_id": "mem-overview"}
+
+    with patch.object(client, "remember", side_effect=remember):
+        result = await ingestor.ingest(_five_section_markdown(tmp_path), context_id="ctx-uuid")
+
+    # The two sections already in flight hit the quota; the other three never go out.
+    assert len([c for c in sent if c["type"] == "document_section"]) == 2
+    assert result.section_ids == []
+    remember_errors = [e for e in result.errors if e.step == "remember"]
+    assert sorted(e.section_index for e in remember_errors) == [0, 1, 2, 3, 4]
+    assert len([e for e in remember_errors if "not written" in e.message]) == 3
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_error_stops_section_writes(tmp_path: Any) -> None:
+    """An HTTP 429 (KaguraRateLimitError — e.g. the daily MCP quota refused by the
+    server's middleware) stops the remaining writes the same way."""
+    client = _make_client()
+    ingestor = FileIngestor(client=client, text_provider=FakeProvider(), concurrency=1)
+
+    sent: list[dict[str, Any]] = []
+
+    async def remember(**kwargs: Any) -> dict[str, Any]:
+        sent.append(kwargs)
+        if len(sent) == 3:
+            raise KaguraRateLimitError("Rate limit exceeded (HTTP 429): quota", retry_after=86400)
+        return {"memory_id": f"mem-{len(sent)}"}
+
+    with patch.object(client, "remember", side_effect=remember):
+        result = await ingestor.ingest(_five_section_markdown(tmp_path), context_id="ctx-uuid")
+
+    assert len([c for c in sent if c["type"] == "document_section"]) == 2
+    skipped = [e for e in result.errors if "not written" in e.message]
+    assert [e.section_index for e in skipped] == [2, 3, 4]
+    assert all("rate limited" in e.message and "86400s" in e.message for e in skipped)
+    assert all(e.exception_type == "KaguraRateLimitError" for e in skipped)
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_daily_mcp_call_cap_envelope_stops_section_writes(tmp_path: Any) -> None:
+    """End to end: the server's in-band ``rate_limit_exceeded`` envelope is a
+    KaguraQuotaError, so the ingestor stops after it."""
+    client = _make_client()
+    ingestor = FileIngestor(client=client, text_provider=FakeProvider(), concurrency=1)
+
+    remembers: list[dict[str, Any]] = []
+
+    async def call_tool(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        if tool_name != "remember":
+            return {"status": "error", "error": "unavailable", "message": "offline"}
+        remembers.append(arguments)
+        if len(remembers) == 1:
+            return {"status": "success", "memory_id": "mem-overview"}
+        return {
+            "status": "error",
+            "error": "rate_limit_exceeded",
+            "message": "Daily MCP call limit reached (100/100). Resets at midnight UTC.",
+            "used_today": 100,
+            "daily_limit": 100,
+        }
+
+    with patch.object(client, "_call_tool", side_effect=call_tool):
+        result = await ingestor.ingest(_five_section_markdown(tmp_path), context_id="ctx-uuid")
+
+    assert len(remembers) == 2
+    assert result.overview_id == "mem-overview"
+    remember_errors = [e for e in result.errors if e.step == "remember"]
+    assert [e.section_index for e in remember_errors] == [0, 1, 2, 3, 4]
+    assert all(e.exception_type == "KaguraQuotaError" for e in remember_errors)
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_other_remember_errors_do_not_stop_section_writes(tmp_path: Any) -> None:
+    """Only a quota stops the run — a per-section failure (e.g. the 1 MB guard) does not."""
+    client = _make_client()
+    ingestor = FileIngestor(client=client, text_provider=FakeProvider(), concurrency=1)
+
+    sent: list[dict[str, Any]] = []
+
+    async def remember(**kwargs: Any) -> dict[str, Any]:
+        sent.append(kwargs)
+        if len(sent) == 3:
+            raise KaguraError("remember failed (quota_exceeded): Memory size exceeds 1MB.")
+        return {"memory_id": f"mem-{len(sent)}"}
+
+    with patch.object(client, "remember", side_effect=remember):
+        result = await ingestor.ingest(_five_section_markdown(tmp_path), context_id="ctx-uuid")
+
+    assert len([c for c in sent if c["type"] == "document_section"]) == 5
+    assert len(result.section_ids) == 4
+    assert len([e for e in result.errors if e.step == "remember"]) == 1
 
     await client.close()

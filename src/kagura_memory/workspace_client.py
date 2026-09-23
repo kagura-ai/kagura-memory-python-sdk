@@ -81,7 +81,11 @@ class WorkspaceClient(KaguraRestClient):
             Also returned for a workspace-scoped key used against a
             different workspace (uniform 404, memory-cloud #963) — a 404
             here does NOT prove the resource is absent.
-        KaguraQuotaError: Member quota or rate limit exceeded (429)
+        KaguraFeatureNotAvailableError: The plan lacks team invitations
+            (``FEAT-001``, server v0.75.0+; older servers answer a plain
+            403, raised as KaguraConnectionError)
+        KaguraQuotaError: Member seat cap (``quota_type="members"`` on
+            server v0.75.0+) or rate limit exceeded (429)
     """
 
     # -------------------------------------------------------------------

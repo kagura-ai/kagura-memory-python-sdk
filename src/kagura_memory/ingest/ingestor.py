@@ -7,7 +7,10 @@ Stitches together :class:`Fetcher`, :class:`Extractor`, the chunker, and
 
 The orchestrator is best-effort: per-section LLM or write failures are
 captured in :attr:`IngestResult.errors` and do NOT abort the run. Only
-fetch failures and overview-write failures are terminal.
+fetch failures and overview-write failures are terminal. One exception: a
+section write refused with :class:`KaguraQuotaError` or
+:class:`KaguraRateLimitError` stops the section writes not yet sent, since
+they would be refused the same way; each is still recorded in ``errors``.
 """
 
 from __future__ import annotations
@@ -19,7 +22,13 @@ from typing import Any, Literal
 from urllib.parse import urlsplit
 
 from ..client import KaguraClient
-from ..exceptions import KaguraFetchError, KaguraIngestError, KaguraLLMError
+from ..exceptions import (
+    KaguraFetchError,
+    KaguraIngestError,
+    KaguraLLMError,
+    KaguraQuotaError,
+    KaguraRateLimitError,
+)
 from ..files_client import FilesClient
 from ..logger import VerboseLogger, normalize_logger
 from ..models import CostBreakdown, FileObject, IngestErrorRecord, IngestResult
@@ -879,8 +888,14 @@ class FileIngestor:
         sem = asyncio.Semaphore(self._concurrency)
         results: list[str | None] = [None] * len(chunks)
         section_importance = max(0.0, min(1.0, importance - 0.2))
+        # #256: after a quota refusal or a 429 every later write fails the
+        # same way until the quota or the rate window resets, so sections not
+        # yet sent are skipped — each still recorded under its section_index —
+        # instead of each spending a round trip on it.
+        stop_error: KaguraQuotaError | KaguraRateLimitError | None = None
 
         async def write_one(idx: int, chunk_obj: Chunk) -> None:
+            nonlocal stop_error
             summary = section_summaries[idx]
             if summary is None:
                 # Section summary failed earlier; skip the write.
@@ -900,6 +915,16 @@ class FileIngestor:
             heading = chunk_obj.heading or f"section {idx + 1}"
 
             async with sem:
+                if stop_error is not None:
+                    errors.append(
+                        IngestErrorRecord(
+                            step="remember",
+                            section_index=idx,
+                            message=_unsent_section_message(stop_error),
+                            exception_type=type(stop_error).__name__,
+                        )
+                    )
+                    return
                 try:
                     result = await self._client.remember(
                         context_id=context_id,
@@ -915,6 +940,8 @@ class FileIngestor:
                         linked_memory_ids=[overview_id],
                     )
                 except Exception as e:  # noqa: BLE001
+                    if isinstance(e, (KaguraQuotaError, KaguraRateLimitError)):
+                        stop_error = e
                     errors.append(
                         IngestErrorRecord(
                             step="remember",
@@ -941,6 +968,17 @@ class FileIngestor:
 
         await asyncio.gather(*(write_one(i, c) for i, c in enumerate(chunks)))
         return [r for r in results if r is not None]
+
+
+def _unsent_section_message(stop: KaguraQuotaError | KaguraRateLimitError) -> str:
+    """Why a section write was skipped after ``stop`` refused an earlier one (#256)."""
+    reason = "quota exceeded" if isinstance(stop, KaguraQuotaError) else "rate limited"
+    message = f"not written: an earlier section write was refused ({reason})."
+    if isinstance(stop, KaguraQuotaError) and stop.resets_at is not None:
+        return f"{message} Resets at {stop.resets_at.isoformat()}."
+    if stop.retry_after is not None:
+        return f"{message} Retry after {stop.retry_after}s."
+    return message
 
 
 def _uri_path_lower(source_uri: str) -> str:
