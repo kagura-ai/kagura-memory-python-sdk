@@ -6,7 +6,7 @@ import sys
 from collections.abc import Awaitable, Callable
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, get_args
 
 import click
 
@@ -33,7 +33,13 @@ from .exceptions import (
 from .files_client import FilesClient
 from .logger import VerboseLogger
 from .memory_client import MemoryClient
-from .models import FileObject, GuardrailDigest, ResourceEventRequest
+from .models import (
+    FileObject,
+    GuardrailDigest,
+    MeasurementAggregate,
+    MeasurementPeriod,
+    ResourceEventRequest,
+)
 from .resource_client import ResourceClient
 from .setup_claude import run_setup_claude
 from .setup_harness import HarnessName, run_setup_harness
@@ -1421,6 +1427,110 @@ def guardrails_digest(context_id, target, out_path, profile, tools):
             ensure_ascii=False,
         )
     )
+
+
+# =============================================================================
+# Measurement lane — HOW-MUCH axis (issue #254, server v0.54.0+)
+# =============================================================================
+
+
+@main.group()
+def measure():
+    """Record and read numeric measurement series (never recalled as memories)."""
+    pass
+
+
+# ignore_unknown_options lets a negative VALUE such as -3.5 parse as the
+# positional instead of failing with "No such option: -3". The catch: click then
+# passes EVERY unknown '-' token through as a positional. After the three
+# positionals it is an extra argument, which click refuses, and in the VALUE
+# slot the float type refuses anything but a number — but in the CONTEXT_ID or
+# METRIC slot it would be accepted, so measure_record refuses those itself.
+@measure.command(name="record", context_settings={"ignore_unknown_options": True})
+@click.argument("context_id")
+@click.argument("metric")
+@click.argument("value", type=float)
+@click.option("--unit", default=None, help="Display unit, e.g. 'kg' (max 32 chars).")
+@click.option(
+    "--at",
+    "measured_at",
+    default=None,
+    help="ISO 8601 observation time (naive = UTC). Default: now.",
+)
+def measure_record(context_id, metric, value, unit, measured_at):
+    """Append one numeric observation to METRIC's series in a context.
+
+    Append-only: recording the same point twice stores two rows, and there is
+    no delete. Measurements are never embedded, never returned by recall, and
+    never merged or rewritten by Sleep consolidation; use `kagura remember` for
+    prose such as "hit goal weight".
+
+    \b
+    Examples:
+      kagura measure record <context-id> weight_kg 71.5 --unit kg
+      kagura measure record <context-id> pnl_usd -120 --at 2026-09-01T00:00:00Z
+    """
+    # A mistyped option (`ctx --weight 71.5`, `-c dev 71.5`) reaches here as a
+    # positional (see ignore_unknown_options above). Sending it would append a
+    # junk series the append-only lane cannot delete, so refuse it as the option
+    # it almost certainly is. No context id starts with '-', and the Python API
+    # still accepts such a metric name for the rare caller who means one.
+    for token in (context_id, metric):
+        if token.startswith("-"):
+            raise click.NoSuchOption(token, ctx=click.get_current_context())
+
+    async def _op(client: KaguraClient, _ctx: str) -> dict[str, Any]:
+        result = await client.record_measurement(
+            context_id=context_id, metric=metric, value=value, measured_at=measured_at, unit=unit
+        )
+        return result.model_dump(mode="json")
+
+    _run_client_command(_op, context_id=None, needs_context=False)
+
+
+@measure.command(name="series")
+@click.argument("context_id")
+@click.argument("metric")
+@click.option(
+    "--period",
+    type=click.Choice(get_args(MeasurementPeriod)),
+    default=None,
+    help="Bucket size (server default: day).",
+)
+@click.option(
+    "--agg",
+    type=click.Choice(get_args(MeasurementAggregate)),
+    default=None,
+    help="Per-bucket aggregate (server default: avg; 'last' = most recent value).",
+)
+@click.option(
+    "--start",
+    default=None,
+    help="ISO 8601 window start, inclusive (naive = UTC). Default: end minus 30 days.",
+)
+@click.option(
+    "--end",
+    default=None,
+    help="ISO 8601 window end, exclusive (naive = UTC). Default: now. Max window: 365 days.",
+)
+def measure_series(context_id, metric, period, agg, start, end):
+    """Read METRIC's series in a context, bucketed and aggregated.
+
+    Empty buckets are omitted, and buckets align to UTC boundaries.
+
+    \b
+    Examples:
+      kagura measure series <context-id> weight_kg --period week
+      kagura measure series <context-id> pnl_usd --agg sum --start 2026-01-01T00:00:00
+    """
+
+    async def _op(client: KaguraClient, _ctx: str) -> dict[str, Any]:
+        result = await client.recall_series(
+            context_id=context_id, metric=metric, period=period, agg=agg, start=start, end=end
+        )
+        return result.model_dump(mode="json")
+
+    _run_client_command(_op, context_id=None, needs_context=False)
 
 
 # =============================================================================

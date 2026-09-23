@@ -284,12 +284,28 @@ class MemoryStatsResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+class MemoryListItemLocation(BaseModel):
+    """WHERE-axis coordinates of a list item (server v0.54.0+, memory-cloud #1334).
+
+    Sourced from the server's generated ``location_lat`` / ``location_lon``
+    columns (i.e. ``details.location``). The optional ``label`` is not part of
+    the list projection — read it from ``details`` via ``reference()``.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    lat: float
+    lon: float
+
+
 class MemoryListItem(BaseModel):
     """A single memory row in a paginated ``list_memories`` response.
 
     Mirrors the server's ``MemoryListItem`` wire shape. ``created_at`` /
     ``updated_at`` arrive as ISO 8601 strings (``Z``-tagged) and are parsed
     into ``datetime``, consistent with the other list models in this module.
+    ``location`` is ``None`` for memories without a complete location, and
+    always ``None`` against servers older than v0.54.0 (which omit it).
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -301,6 +317,7 @@ class MemoryListItem(BaseModel):
     importance: float
     created_at: datetime
     updated_at: datetime
+    location: MemoryListItemLocation | None = None
 
 
 class MemoryListResponse(BaseModel):
@@ -311,6 +328,79 @@ class MemoryListResponse(BaseModel):
     memories: list[MemoryListItem] = Field(default_factory=list)
     total: int
     has_more: bool
+
+
+# ---------------------------------------------------------------------------
+# Measurement lane — HOW-MUCH axis (#254, server v0.54.0+, memory-cloud #1333)
+# ---------------------------------------------------------------------------
+
+
+MeasurementPeriod = Literal["day", "week", "month"]
+"""Valid ``recall_series`` bucket sizes (request side only).
+
+Mirrors the server's ``VALID_PERIODS``; the response echoes the period as a
+plain ``str`` so a server that grows the set does not break parsing."""
+
+MeasurementAggregate = Literal["avg", "min", "max", "sum", "count", "last"]
+"""Valid ``recall_series`` per-bucket aggregates (request side only).
+
+``"last"`` is the most recent value in the bucket by ``measured_at``. Mirrors
+the server's ``VALID_AGGS``; echoed back as a plain ``str``."""
+
+
+class MeasurementResult(BaseModel):
+    """One observation as stored by ``record_measurement``.
+
+    Measurements are a lane separate from memories: never embedded, never
+    returned by ``recall()``, never merged or rewritten by Sleep consolidation
+    (an operator-set retention window can purge old rows; see
+    ``KaguraClient.record_measurement``). ``measured_at`` is the
+    observation time the server stored (``Z``-tagged UTC; "now" when the call
+    omitted it). ``value`` is exact ``NUMERIC`` at rest and arrives as a float.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    status: str = "success"
+    measurement_id: str
+    metric: str
+    measured_at: datetime
+    value: float
+    unit: str | None = None
+
+
+class SeriesBucket(BaseModel):
+    """One non-empty time bucket of a ``recall_series`` result.
+
+    ``bucket`` is the UTC start of the period (buckets align to UTC
+    boundaries), ``value`` the aggregate over it, and ``count`` the number of
+    observations it holds. Empty buckets are omitted server-side.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    bucket: datetime
+    value: float
+    count: int
+
+
+class MeasurementSeries(BaseModel):
+    """A metric's series bucketed by ``period`` and aggregated by ``agg``.
+
+    ``count`` is the number of buckets in ``series`` (not observations — sum
+    ``SeriesBucket.count`` for that). ``period`` / ``agg`` echo what the
+    server applied, including its defaults, and are typed ``str`` for
+    forward compatibility.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    status: str = "success"
+    metric: str
+    period: str
+    agg: str
+    series: list[SeriesBucket] = Field(default_factory=list)
+    count: int
 
 
 # ---------------------------------------------------------------------------

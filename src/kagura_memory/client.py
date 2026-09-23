@@ -4,6 +4,8 @@ import asyncio
 import itertools
 import json
 import logging
+import math
+from datetime import datetime
 from typing import Any, Literal, TypeVar
 
 import httpx
@@ -20,6 +22,7 @@ from ._http import (
     parse_response,
     parse_response_list,
     raise_for_kagura_status,
+    validate_coordinate,
     validate_https_url,
     validate_lat_lon,
 )
@@ -43,6 +46,10 @@ from .models import (
     EmbeddingStatus,
     GuardrailSet,
     ListTagsResponse,
+    MeasurementAggregate,
+    MeasurementPeriod,
+    MeasurementResult,
+    MeasurementSeries,
     MemoryListResponse,
     MemoryStatsResponse,
     RollbackResult,
@@ -74,6 +81,56 @@ silently ignore unknown parameters."""
 
 _MIN_SERVER_VERSION_TUPLE = tuple(int(x) for x in MIN_SERVER_VERSION.split(".")[:3])
 
+# Measurement-lane column caps (memory-cloud #1333: ``measurements.metric`` is
+# VARCHAR(64), ``unit`` VARCHAR(32)). Checked locally only to spare a round-trip
+# that could return nothing but a validation_error — the server stays the
+# authority on every other rule (e.g. the 365-day series window).
+_METRIC_MAX_LEN = 64
+_UNIT_MAX_LEN = 32
+
+
+def _validate_metric(metric: object) -> None:
+    """Reject a series name the server would reject (non-empty, <= 64 chars).
+
+    Raises:
+        ValueError: If ``metric`` is not a non-empty string within the cap.
+    """
+    if not isinstance(metric, str) or not metric:
+        raise ValueError(f"metric must be a non-empty string, got {metric!r}")
+    if len(metric) > _METRIC_MAX_LEN:
+        raise ValueError(f"metric must be at most {_METRIC_MAX_LEN} characters, got {len(metric)}")
+
+
+def _validate_measurement_value(value: object) -> None:
+    """Reject a measurement value that is not a finite number.
+
+    A string is rejected rather than coerced (the parameter is typed
+    ``float``), and ``bool`` — an ``int`` subclass — is never a measurement.
+    NaN / infinity would poison every aggregate of the series.
+
+    Raises:
+        ValueError: If ``value`` is not a finite ``int`` / ``float``.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"value must be a number, got {type(value).__name__}")
+    try:
+        finite = math.isfinite(value)
+    except OverflowError:
+        # An int beyond float range makes isfinite() raise instead of False.
+        finite = False
+    if not finite:
+        raise ValueError("value must be finite (NaN and infinity are rejected)")
+
+
+def _iso_arg(value: str | datetime) -> str:
+    """Render a time argument for an MCP tool that takes ISO 8601 strings.
+
+    A ``datetime`` is serialized with :meth:`datetime.isoformat` — naive means
+    UTC to the server, aware keeps its offset (the server normalizes it). A
+    string passes through untouched for the server to parse.
+    """
+    return value.isoformat() if isinstance(value, datetime) else value
+
 
 class KaguraClient:
     """
@@ -98,11 +155,12 @@ class KaguraClient:
     inspecting ``result["status"]``. On the tool methods that return a
     model, a success payload that does not match it (a server newer than
     the SDK) raises :class:`KaguraResponseError` naming the tool (#250).
-    The REST-backed methods (``get_server_info``, ``check_server_version``,
-    ``get_embedding_status``, ``get_memory_stats``, ``find_duplicates``,
-    ``list_memories``, ``list_embedding_models``) still raise
-    :class:`KaguraConnectionError` ("Invalid response format") on drift;
-    catch :class:`KaguraError` to cover both.
+    :meth:`list_memories` does the same with
+    ``operation="KaguraClient.list_memories"``. The other REST-backed methods
+    (``get_server_info``, ``check_server_version``, ``get_embedding_status``,
+    ``get_memory_stats``, ``find_duplicates``, ``list_embedding_models``)
+    still raise :class:`KaguraConnectionError` ("Invalid response format") on
+    drift; catch :class:`KaguraError` to cover both.
     """
 
     def __init__(
@@ -299,6 +357,31 @@ class KaguraClient:
             self.mcp_url, json=body, headers=mcp_session_header(self._session_id)
         )
 
+    async def _rest_get_json(self, path: str, params: dict[str, Any] | None = None) -> Any:
+        """GET a REST endpoint and return its decoded JSON body.
+
+        Args:
+            path: URL path (appended to ``_base_url``).
+            params: Optional query parameters.
+
+        Raises:
+            KaguraAuthError / KaguraRateLimitError / KaguraConnectionError: A
+                non-2xx status (see :func:`raise_for_kagura_status`).
+            KaguraConnectionError: A network failure, or a 2xx body that is
+                not JSON.
+        """
+        url = f"{self._base_url}{path}"
+        try:
+            response = await self._client.get(url, params=params)
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPStatusError as e:
+            raise_for_kagura_status(e)
+        except httpx.RequestError as e:
+            raise KaguraConnectionError(f"Connection failed: {_exc_message(e)}") from e
+        except (ValueError, TypeError) as e:
+            raise KaguraConnectionError(f"Invalid response format: {_exc_message(e)}") from e
+
     async def _rest_get(
         self,
         path: str,
@@ -306,6 +389,13 @@ class KaguraClient:
         params: dict[str, Any] | None = None,
     ) -> _T:
         """GET a REST endpoint and parse into a Pydantic model.
+
+        Drift raises :class:`KaguraConnectionError` ("Invalid response
+        format"), not :class:`KaguraResponseError` — the contract #250 kept
+        for these methods (``kagura doctor`` catches it on
+        ``check_server_version``). A new REST method should instead call
+        :meth:`_rest_get_json` and :func:`parse_response`, as
+        :meth:`list_memories` does.
 
         Args:
             path: URL path (appended to ``_base_url``).
@@ -315,15 +405,9 @@ class KaguraClient:
         Returns:
             Validated model instance.
         """
-        url = f"{self._base_url}{path}"
+        data = await self._rest_get_json(path, params)
         try:
-            response = await self._client.get(url, params=params)
-            response.raise_for_status()
-            return model.model_validate(response.json())
-        except httpx.HTTPStatusError as e:
-            raise_for_kagura_status(e)
-        except httpx.RequestError as e:
-            raise KaguraConnectionError(f"Connection failed: {_exc_message(e)}") from e
+            return model.model_validate(data)
         except (ValueError, TypeError) as e:
             raise KaguraConnectionError(f"Invalid response format: {_exc_message(e)}") from e
 
@@ -731,6 +815,141 @@ class KaguraClient:
             "k": k,
         }
         return await self._call_tool_checked("recall_nearby", arguments)
+
+    async def record_measurement(
+        self,
+        context_id: str,
+        metric: str,
+        value: float,
+        *,
+        measured_at: str | datetime | None = None,
+        unit: str | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> MeasurementResult:
+        """Append one numeric observation to a metric's series (HOW-MUCH axis).
+
+        Calls the ``record_measurement`` MCP tool. Measurements are a lane
+        **separate from memories**: never embedded, never returned by
+        :meth:`recall`, never merged or rewritten by Sleep consolidation. The
+        lane is append-only — nothing is upserted, so recording the same point
+        twice stores two rows, and there is no delete tool. Store raw numbers
+        here (weight, revenue, reps) and prose such as "hit goal weight" with
+        :meth:`remember`. Read a series back with :meth:`recall_series`.
+
+        Requires memory-cloud server v0.54.0+ (#1333); older servers return
+        an MCP "tool not found". Retention: from server v0.55.0 (#1355) an
+        operator can set ``SLEEP_MEASUREMENT_RETENTION_DAYS`` > 0 (or a
+        per-context config row; default 0 = keep forever), and Sleep then
+        **hard-deletes** observations older than that window — ``kagura sleep
+        rollback`` / :meth:`rollback_sleep_run` cannot restore them.
+
+        Args:
+            context_id: Target context UUID (the series is scoped to it).
+            metric: Series name, e.g. ``"weight_kg"`` (1-64 chars). Reuse the
+                exact name to extend a series.
+            value: The observed value — a finite number. NaN, infinity,
+                ``bool`` and strings are rejected locally.
+            measured_at: Observation time as an ISO 8601 string or a
+                ``datetime``. Naive means **UTC** to the server, not local
+                time. Omit for "now"; pass it to backdate imports.
+            unit: Optional display unit, e.g. ``"kg"`` (1-32 chars).
+            details: Optional JSON metadata (device, source, notes).
+
+        Returns:
+            :class:`MeasurementResult` with the stored ``measurement_id``,
+            ``metric``, ``measured_at``, ``value`` and ``unit``.
+
+        Raises:
+            ValueError: If ``metric`` is empty or over 64 characters, ``value``
+                is not a finite number, or ``unit`` is empty or over 32
+                characters.
+            KaguraNotFoundError: Context not found (or a read-only agent
+                binding forbids writes to it).
+            KaguraResponseError: The success payload did not match
+                :class:`MeasurementResult` (``operation="record_measurement"``).
+            KaguraError: Other server-side error, e.g. a read-only viewer.
+        """
+        _validate_metric(metric)
+        _validate_measurement_value(value)
+        if unit is not None and (
+            not isinstance(unit, str) or not unit or len(unit) > _UNIT_MAX_LEN
+        ):
+            raise ValueError(
+                f"unit must be a non-empty string of at most {_UNIT_MAX_LEN} characters, "
+                f"got {unit!r}"
+            )
+
+        arguments: dict[str, Any] = {"context_id": context_id, "metric": metric, "value": value}
+        if measured_at is not None:
+            arguments["measured_at"] = _iso_arg(measured_at)
+        if unit is not None:
+            arguments["unit"] = unit
+        if details is not None:
+            arguments["details"] = details
+        result = await self._call_tool_checked("record_measurement", arguments)
+        return parse_response(MeasurementResult, result, operation="record_measurement")
+
+    async def recall_series(
+        self,
+        context_id: str,
+        metric: str,
+        *,
+        period: MeasurementPeriod | None = None,
+        agg: MeasurementAggregate | None = None,
+        start: str | datetime | None = None,
+        end: str | datetime | None = None,
+    ) -> MeasurementSeries:
+        """Read one metric's series, bucketed by period and aggregated per bucket.
+
+        Calls the ``recall_series`` MCP tool — a **deterministic query**, not
+        search, over the lane written by :meth:`record_measurement`. Empty
+        buckets are omitted. Buckets align to UTC boundaries, so a local day
+        may span two.
+
+        Requires memory-cloud server v0.54.0+ (#1333); older servers return
+        an MCP "tool not found".
+
+        Args:
+            context_id: Target context UUID.
+            metric: Series name as passed to :meth:`record_measurement`
+                (1-64 chars).
+            period: Bucket size — ``"day"``, ``"week"`` or ``"month"``. Omit
+                for the server default (``"day"``).
+            agg: Per-bucket aggregate — ``"avg"``, ``"min"``, ``"max"``,
+                ``"sum"``, ``"count"`` or ``"last"`` (the most recent value in
+                the bucket). Omit for the server default (``"avg"``).
+            start: Window start, inclusive, as an ISO 8601 string or a
+                ``datetime`` (naive = UTC). Omit for ``end`` minus 30 days.
+            end: Window end, exclusive (naive = UTC). Omit for "now". The
+                window may span at most 365 days — the server rejects wider
+                windows with a ``validation_error``.
+
+        Returns:
+            :class:`MeasurementSeries` with ``series`` (one
+            :class:`SeriesBucket` per non-empty bucket, oldest first) and
+            ``count`` (the number of buckets).
+
+        Raises:
+            ValueError: If ``metric`` is empty or over 64 characters.
+            KaguraNotFoundError: Context not found.
+            KaguraResponseError: The success payload did not match
+                :class:`MeasurementSeries` (``operation="recall_series"``).
+            KaguraError: Other server-side error, e.g. an inverted or
+                over-365-day window.
+        """
+        _validate_metric(metric)
+
+        arguments: dict[str, Any] = {"context_id": context_id, "metric": metric}
+        if period is not None:
+            arguments["period"] = period
+        if agg is not None:
+            arguments["agg"] = agg
+        if start is not None:
+            arguments["start"] = _iso_arg(start)
+        if end is not None:
+            arguments["end"] = _iso_arg(end)
+        result = await self._call_tool_checked("recall_series", arguments)
+        return parse_response(MeasurementSeries, result, operation="recall_series")
 
     async def load_pinned(
         self,
@@ -2408,8 +2627,13 @@ class KaguraClient:
         trigger_from: str | None = None,
         trigger_until: str | None = None,
         order_by: Literal["created_at", "trigger_from"] | None = None,
+        *,
+        lat_min: float | None = None,
+        lat_max: float | None = None,
+        lon_min: float | None = None,
+        lon_max: float | None = None,
     ) -> MemoryListResponse:
-        """List memories with optional substring, facet, and time-window filters.
+        """List memories with optional substring, facet, time-window and bbox filters.
 
         Ordering is newest-first by default; pass ``order_by="trigger_from"`` to
         sort Time Memories soonest-scheduled first.
@@ -2447,17 +2671,37 @@ class KaguraClient:
             order_by: Sort order — ``"created_at"`` (default, newest-first) or
                 ``"trigger_from"`` (soonest scheduled first). Omit to use the
                 server default.
+            lat_min: WHERE-axis bounding box — lower latitude bound in degrees
+                (-90 to 90). Keyword-only, like the other three bounds. Bounds
+                may be one-sided, and **any** bound restricts results to
+                memories with a complete ``details.location``. Requires
+                memory-cloud server v0.54.0+ (#1334); older servers ignore the
+                bbox silently and return an unfiltered page.
+            lat_max: Upper latitude bound (-90 to 90).
+            lon_min: Lower longitude bound (-180 to 180). ``lon_min > lon_max``
+                selects the antimeridian-crossing box (``lon >= lon_min OR
+                lon <= lon_max``) rather than an empty one.
+            lon_max: Upper longitude bound (-180 to 180).
 
         Returns:
             :class:`MemoryListResponse` with ``memories`` (ordered per
-            ``order_by``; newest-first by default), ``total`` (matching rows
-            across all pages), and ``has_more``.
+            ``order_by``; newest-first by default; each carrying ``location``
+            when it has one), ``total`` (matching rows across all pages), and
+            ``has_more``.
 
         Raises:
+            ValueError: If a bbox bound is non-numeric or out of range — checked
+                locally, as :meth:`recall_nearby` checks its point, since the
+                server would only 422 it.
             KaguraAuthError: Authentication failed.
-            KaguraConnectionError: Network failure or non-2xx response — e.g. a
-                ``context_id`` that does not exist or is not accessible
-                surfaces as ``HTTP 404``.
+            KaguraConnectionError: Network failure, non-JSON body or non-2xx
+                response — e.g. a ``context_id`` that does not exist or is not
+                accessible surfaces as ``HTTP 404``.
+            KaguraResponseError: The 2xx body does not match
+                :class:`MemoryListResponse` (a server newer than the SDK), with
+                ``operation="KaguraClient.list_memories"``. SDKs before 0.40.0
+                raised ``KaguraConnectionError`` here, as the other
+                REST-backed methods still do.
         """
         params: dict[str, Any] = {"limit": limit, "offset": offset}
         if context_id is not None:
@@ -2477,7 +2721,20 @@ class KaguraClient:
             params["trigger_until"] = trigger_until
         if order_by is not None:
             params["order_by"] = order_by
-        return await self._rest_get("/api/v1/memory/list", MemoryListResponse, params=params)
+        # `is not None`, not truthiness: 0.0 (equator / prime meridian) is a bound.
+        # Each bound is range-checked on its own; the pair ordering is not, since
+        # lon_min > lon_max is the valid antimeridian box.
+        for key, bound, max_abs in (
+            ("lat_min", lat_min, 90),
+            ("lat_max", lat_max, 90),
+            ("lon_min", lon_min, 180),
+            ("lon_max", lon_max, 180),
+        ):
+            if bound is not None:
+                validate_coordinate(key, bound, max_abs)
+                params[key] = bound
+        data = await self._rest_get_json("/api/v1/memory/list", params)
+        return parse_response(MemoryListResponse, data, operation="KaguraClient.list_memories")
 
     @staticmethod
     def _raise_for_mcp_error(result: dict[str, Any], operation: str) -> None:

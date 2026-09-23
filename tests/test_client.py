@@ -4,6 +4,7 @@ import asyncio
 import inspect
 import json
 import textwrap
+from datetime import UTC, datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -24,9 +25,13 @@ from kagura_memory import (
     KaguraNotFoundError,
     KaguraQuotaError,
     KaguraRateLimitError,
+    MeasurementResult,
+    MeasurementSeries,
+    MemoryListItemLocation,
     MemoryListResponse,
     MemoryStatsResponse,
     RollbackResult,
+    SeriesBucket,
     ServerFeatures,
     ServerInfo,
     SleepAction,
@@ -40,6 +45,8 @@ from tests.conftest import (
     agent_binding_dict,
     agent_dict,
     bootstrap_envelope_dict,
+    measurement_dict,
+    measurement_series_dict,
     sleep_report_detail_dict,
     sleep_report_summary_dict,
 )
@@ -2696,6 +2703,177 @@ async def test_list_memories_window_params_omitted_when_none():
         await client.close()
 
 
+# ---- WHERE-axis bbox (memory-cloud #1334, server v0.54.0+) — Issue #254 ----
+
+_BBOX_KEYS = ("lat_min", "lat_max", "lon_min", "lon_max")
+
+
+@pytest.mark.asyncio
+async def test_list_memories_bbox_all_bounds_forwarded():
+    """list_memories() forwards all four bbox bounds when set."""
+    client = _make_initialized_client()
+
+    try:
+        with patch.object(client._client, "get", new_callable=AsyncMock) as mock_get:
+            mock_get.return_value = _memory_list_response_mock()
+            await client.list_memories(
+                context_id="ctx-1", lat_min=35.0, lat_max=36.0, lon_min=139.0, lon_max=140.0
+            )
+            params = mock_get.call_args.kwargs["params"]
+            assert {k: params[k] for k in _BBOX_KEYS} == {
+                "lat_min": 35.0,
+                "lat_max": 36.0,
+                "lon_min": 139.0,
+                "lon_max": 140.0,
+            }
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_list_memories_bbox_one_sided_bound():
+    """A one-sided bound is forwarded alone — the other three stay off the wire."""
+    client = _make_initialized_client()
+
+    try:
+        with patch.object(client._client, "get", new_callable=AsyncMock) as mock_get:
+            mock_get.return_value = _memory_list_response_mock()
+            await client.list_memories(lat_min=35.0)
+            params = mock_get.call_args.kwargs["params"]
+            assert params["lat_min"] == 35.0
+            assert not {"lat_max", "lon_min", "lon_max"} & params.keys()
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_list_memories_bbox_zero_bound_is_forwarded():
+    """0.0 (the equator / prime meridian) is a real bound, not "unset"."""
+    client = _make_initialized_client()
+
+    try:
+        with patch.object(client._client, "get", new_callable=AsyncMock) as mock_get:
+            mock_get.return_value = _memory_list_response_mock()
+            await client.list_memories(lat_min=0.0, lon_max=0)
+            params = mock_get.call_args.kwargs["params"]
+            assert params["lat_min"] == 0.0
+            assert params["lon_max"] == 0
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_list_memories_bbox_antimeridian_box_passes_through():
+    """lon_min > lon_max is the server's antimeridian-crossing box, not an error."""
+    client = _make_initialized_client()
+
+    try:
+        with patch.object(client._client, "get", new_callable=AsyncMock) as mock_get:
+            mock_get.return_value = _memory_list_response_mock()
+            await client.list_memories(lon_min=170.0, lon_max=-170.0)
+            params = mock_get.call_args.kwargs["params"]
+            assert params["lon_min"] == 170.0
+            assert params["lon_max"] == -170.0
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_list_memories_bbox_range_edges_are_forwarded():
+    """±90 / ±180 are inside the range — the whole globe is a valid box."""
+    client = _make_initialized_client()
+
+    try:
+        with patch.object(client._client, "get", new_callable=AsyncMock) as mock_get:
+            mock_get.return_value = _memory_list_response_mock()
+            await client.list_memories(lat_min=-90, lat_max=90, lon_min=-180, lon_max=180.0)
+            params = mock_get.call_args.kwargs["params"]
+            assert {k: params[k] for k in _BBOX_KEYS} == {
+                "lat_min": -90,
+                "lat_max": 90,
+                "lon_min": -180,
+                "lon_max": 180.0,
+            }
+    finally:
+        await client.close()
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"lat_min": -90.5}, "lat_min must be between -90 and 90"),
+        ({"lat_max": 91}, "lat_max must be between -90 and 90"),
+        ({"lon_min": -181.0}, "lon_min must be between -180 and 180"),
+        ({"lon_max": 180.1}, "lon_max must be between -180 and 180"),
+        ({"lat_min": float("nan")}, "lat_min must be between"),
+        ({"lon_max": "140"}, "lon_max must be a number"),
+        ({"lat_max": True}, "lat_max must be a number"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_list_memories_bbox_bad_bound_rejected_locally(kwargs, match):
+    """A bound the server would 422 raises ValueError before any request, like recall_nearby."""
+    client = _make_initialized_client()
+
+    try:
+        with patch.object(client._client, "get", new_callable=AsyncMock) as mock_get:
+            with pytest.raises(ValueError, match=match):
+                await client.list_memories(**kwargs)
+            mock_get.assert_not_awaited()
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_list_memories_bbox_omitted_when_none():
+    """No bbox bound is sent when none is set (existing calls are unchanged)."""
+    client = _make_initialized_client()
+
+    try:
+        with patch.object(client._client, "get", new_callable=AsyncMock) as mock_get:
+            mock_get.return_value = _memory_list_response_mock()
+            await client.list_memories(context_id="ctx-1")
+            params = mock_get.call_args.kwargs["params"]
+            assert not set(_BBOX_KEYS) & params.keys()
+    finally:
+        await client.close()
+
+
+def test_list_memories_bbox_bounds_are_keyword_only():
+    """The bbox bounds are keyword-only so they can never shift a positional caller."""
+    import inspect
+
+    params = inspect.signature(KaguraClient.list_memories).parameters
+    for key in _BBOX_KEYS:
+        assert params[key].kind is inspect.Parameter.KEYWORD_ONLY, key
+        assert params[key].default is None
+
+
+@pytest.mark.asyncio
+async def test_list_memories_parses_item_location():
+    """MemoryListItem.location carries the server's lat/lon; absent/None stays None."""
+    client = _make_initialized_client()
+
+    mock_response = _memory_list_response_mock()
+    base = mock_response.json.return_value["memories"][0]
+    mock_response.json.return_value["memories"] = [
+        {**base, "id": "with-loc", "location": {"lat": 35.68, "lon": 139.76}},
+        {**base, "id": "null-loc", "location": None},
+        {**base, "id": "no-loc"},
+    ]
+    try:
+        with patch.object(client._client, "get", new_callable=AsyncMock) as mock_get:
+            mock_get.return_value = mock_response
+            result = await client.list_memories(lat_min=35.0)
+            with_loc, null_loc, no_loc = result.memories
+            assert isinstance(with_loc.location, MemoryListItemLocation)
+            assert (with_loc.location.lat, with_loc.location.lon) == (35.68, 139.76)
+            assert null_loc.location is None
+            assert no_loc.location is None
+    finally:
+        await client.close()
+
+
 # ============================================================================
 # recall_upcoming (Time Memory, MCP)
 # ============================================================================
@@ -2860,6 +3038,307 @@ async def test_recall_nearby_accepts_boundary_coordinates():
             await client.recall_nearby(context_id="ctx", lat=90.0, lon=180.0)
             await client.recall_nearby(context_id="ctx", lat=-90.0, lon=-180.0)
             assert mock.await_count == 2
+    finally:
+        await client.close()
+
+
+# ============================================================================
+# Measurement lane — HOW-MUCH axis (memory-cloud #1333, server v0.54.0+) — #254
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_record_measurement_minimal_omits_optional_args():
+    """record_measurement() sends only context_id/metric/value when the rest is None."""
+    client = _make_initialized_client()
+
+    try:
+        with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+            mock.return_value = measurement_dict(unit=None)
+            result = await client.record_measurement("ctx", "weight_kg", 71.5)
+            name, args = mock.call_args.args
+            assert name == "record_measurement"
+            assert args == {"context_id": "ctx", "metric": "weight_kg", "value": 71.5}
+            assert isinstance(result, MeasurementResult)
+            assert result.measurement_id == "cccccccc-dddd-eeee-ffff-000000000000"
+            assert result.metric == "weight_kg"
+            assert result.value == 71.5
+            assert result.unit is None
+            assert result.measured_at == datetime(2026, 9, 1, 7, 30, tzinfo=UTC)
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_record_measurement_passes_all_args():
+    """record_measurement() forwards measured_at (str as-is), unit and details."""
+    client = _make_initialized_client()
+
+    try:
+        with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+            mock.return_value = measurement_dict()
+            result = await client.record_measurement(
+                "ctx",
+                "weight_kg",
+                71.5,
+                measured_at="2026-09-01T07:30:00Z",
+                unit="kg",
+                details={"device": "scale-1"},
+            )
+            args = mock.call_args.args[1]
+            assert args == {
+                "context_id": "ctx",
+                "metric": "weight_kg",
+                "value": 71.5,
+                "measured_at": "2026-09-01T07:30:00Z",
+                "unit": "kg",
+                "details": {"device": "scale-1"},
+            }
+            assert result.unit == "kg"
+    finally:
+        await client.close()
+
+
+@pytest.mark.parametrize(
+    ("measured_at", "wire"),
+    [
+        # Naive = UTC on the server; sent without an offset.
+        (datetime(2026, 9, 1, 7, 30), "2026-09-01T07:30:00"),
+        # Aware keeps its offset; the server normalizes it to UTC.
+        (
+            datetime(2026, 9, 1, 16, 30, tzinfo=timezone(timedelta(hours=9))),
+            "2026-09-01T16:30:00+09:00",
+        ),
+    ],
+    ids=["naive", "aware"],
+)
+@pytest.mark.asyncio
+async def test_record_measurement_serializes_datetime(measured_at, wire):
+    """A datetime measured_at is sent as an ISO 8601 string (the tool takes strings)."""
+    client = _make_initialized_client()
+
+    try:
+        with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+            mock.return_value = measurement_dict()
+            await client.record_measurement("ctx", "weight_kg", 71.5, measured_at=measured_at)
+            assert mock.call_args.args[1]["measured_at"] == wire
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_record_measurement_accepts_int_value():
+    """An int is a number — no float() coercion needed."""
+    client = _make_initialized_client()
+
+    try:
+        with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+            mock.return_value = measurement_dict(metric="reps", value=12.0, unit=None)
+            await client.record_measurement("ctx", "reps", 12)
+            assert mock.call_args.args[1]["value"] == 12
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_record_measurement_accepts_boundary_lengths():
+    """A 64-char metric and a 32-char unit are the server's limits, not over them."""
+    client = _make_initialized_client()
+
+    try:
+        with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+            mock.return_value = measurement_dict()
+            await client.record_measurement("ctx", "m" * 64, 1.0, unit="u" * 32)
+            args = mock.call_args.args[1]
+            assert len(args["metric"]) == 64
+            assert len(args["unit"]) == 32
+    finally:
+        await client.close()
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"metric": ""}, "metric"),
+        ({"metric": "m" * 65}, "metric"),
+        ({"metric": 42}, "metric"),
+        ({"value": float("nan")}, "finite"),
+        ({"value": float("inf")}, "finite"),
+        ({"value": float("-inf")}, "finite"),
+        # A JSON-sized int beyond float range makes isfinite() overflow.
+        ({"value": 10**400}, "finite"),
+        # bool is an int subclass, but True is never a measurement.
+        ({"value": True}, "number"),
+        # Strings are rejected, not coerced — the parameter is typed float.
+        ({"value": "71.5"}, "number"),
+        ({"value": None}, "number"),
+        ({"unit": ""}, "unit"),
+        ({"unit": "u" * 33}, "unit"),
+    ],
+    ids=[
+        "empty-metric",
+        "long-metric",
+        "non-str-metric",
+        "nan",
+        "inf",
+        "neg-inf",
+        "overflow-int",
+        "bool",
+        "str-value",
+        "none-value",
+        "empty-unit",
+        "long-unit",
+    ],
+)
+@pytest.mark.asyncio
+async def test_record_measurement_rejects_invalid_args(kwargs, match):
+    """Invalid metric/value/unit fail locally, before any round-trip."""
+    client = _make_initialized_client()
+    call = {"context_id": "ctx", "metric": "weight_kg", "value": 71.5, **kwargs}
+
+    try:
+        with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+            with pytest.raises(ValueError, match=match):
+                await client.record_measurement(**call)
+            mock.assert_not_awaited()
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_recall_series_minimal_omits_optional_args():
+    """recall_series() sends only context_id/metric when the rest is None (server defaults)."""
+    client = _make_initialized_client()
+
+    try:
+        with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+            mock.return_value = measurement_series_dict(period="day")
+            result = await client.recall_series("ctx", "weight_kg")
+            name, args = mock.call_args.args
+            assert name == "recall_series"
+            assert args == {"context_id": "ctx", "metric": "weight_kg"}
+            assert isinstance(result, MeasurementSeries)
+            assert result.metric == "weight_kg"
+            assert result.period == "day"
+            assert result.agg == "avg"
+            assert result.count == 2
+            first = result.series[0]
+            assert isinstance(first, SeriesBucket)
+            assert first.bucket == datetime(2026, 8, 24, tzinfo=UTC)
+            assert (first.value, first.count) == (72.0, 3)
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_recall_series_passes_all_args():
+    """recall_series() forwards period/agg and serializes datetime window bounds."""
+    client = _make_initialized_client()
+
+    try:
+        with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+            mock.return_value = measurement_series_dict(agg="max")
+            await client.recall_series(
+                "ctx",
+                "weight_kg",
+                period="week",
+                agg="max",
+                start=datetime(2026, 8, 1),
+                end="2026-09-01T00:00:00Z",
+            )
+            assert mock.call_args.args[1] == {
+                "context_id": "ctx",
+                "metric": "weight_kg",
+                "period": "week",
+                "agg": "max",
+                "start": "2026-08-01T00:00:00",
+                "end": "2026-09-01T00:00:00Z",
+            }
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_recall_series_empty_series():
+    """An empty window is a valid, empty result — not an error."""
+    client = _make_initialized_client()
+
+    try:
+        with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+            mock.return_value = measurement_series_dict(series=[], count=0)
+            result = await client.recall_series("ctx", "weight_kg")
+            assert result.series == []
+            assert result.count == 0
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_recall_series_tolerates_unknown_period_agg_and_extra_fields():
+    """period/agg are Literal on input only; the response model stays forward-tolerant."""
+    client = _make_initialized_client()
+
+    try:
+        with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+            mock.return_value = measurement_series_dict(
+                period="quarter", agg="p95", window={"days": 90}
+            )
+            result = await client.recall_series("ctx", "weight_kg")
+            assert result.period == "quarter"
+            assert result.agg == "p95"
+    finally:
+        await client.close()
+
+
+@pytest.mark.parametrize("metric", ["", "m" * 65, None], ids=["empty", "long", "none"])
+@pytest.mark.asyncio
+async def test_recall_series_rejects_invalid_metric(metric):
+    """recall_series() validates metric the same way record_measurement() does."""
+    client = _make_initialized_client()
+
+    try:
+        with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+            with pytest.raises(ValueError, match="metric"):
+                await client.recall_series("ctx", metric)
+            mock.assert_not_awaited()
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_record_measurement_surfaces_server_validation_error():
+    """A server validation_error (e.g. a non-object details) raises KaguraError."""
+    client = _make_initialized_client()
+
+    try:
+        with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+            mock.return_value = {
+                "status": "error",
+                "error": "validation_error",
+                "message": "'details' must be an object when provided",
+            }
+            with pytest.raises(KaguraError, match="validation_error"):
+                await client.record_measurement("ctx", "weight_kg", 71.5)
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_recall_series_surfaces_window_too_wide():
+    """The 365-day window cap is the server's to enforce; its error surfaces as KaguraError."""
+    client = _make_initialized_client()
+
+    try:
+        with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+            mock.return_value = {
+                "status": "error",
+                "error": "validation_error",
+                "message": "Window too wide: maximum lookback is 365 days",
+            }
+            with pytest.raises(KaguraError, match="Window too wide"):
+                await client.recall_series(
+                    "ctx", "weight_kg", start="2024-01-01T00:00:00", end="2026-01-01T00:00:00"
+                )
     finally:
         await client.close()
 
@@ -3100,6 +3579,8 @@ _ERROR_TRANSLATING_METHODS = [
     ("recall", lambda c: c.recall(context_id="c", query="q")),
     ("recall_upcoming", lambda c: c.recall_upcoming(context_id="c")),
     ("recall_nearby", lambda c: c.recall_nearby(context_id="c", lat=0.0, lon=0.0)),
+    ("record_measurement", lambda c: c.record_measurement("c", "m", 1.0)),
+    ("recall_series", lambda c: c.recall_series("c", "m")),
     ("load_pinned", lambda c: c.load_pinned(context_id="c")),
     ("list_contexts", lambda c: c.list_contexts()),
     ("explore", lambda c: c.explore(context_id="c", memory_id="m")),

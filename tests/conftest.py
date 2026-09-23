@@ -243,6 +243,47 @@ def _isolate_claude_code(tmp_path_factory, monkeypatch):
     monkeypatch.setattr("kagura_memory.claude_code.claude_executable", lambda: None)
 
 
+def measurement_dict(**overrides) -> dict:
+    """Build a server-shaped ``record_measurement`` success envelope for tests.
+
+    Mirrors ``handle_record_measurement`` in
+    ``memory-cloud/backend/src/mcp_server/tools/measurement.py`` (v0.54.0,
+    #1333) so client and CLI tests share one wire fixture.
+    """
+    row = {
+        "status": "success",
+        "measurement_id": "cccccccc-dddd-eeee-ffff-000000000000",
+        "metric": "weight_kg",
+        "measured_at": "2026-09-01T07:30:00Z",
+        "value": 71.5,
+        "unit": "kg",
+    }
+    row.update(overrides)
+    return row
+
+
+def measurement_series_dict(**overrides) -> dict:
+    """Build a server-shaped ``recall_series`` success envelope for tests.
+
+    Mirrors ``handle_recall_series`` (v0.54.0, #1333): ``count`` is the
+    number of (non-empty) buckets, each bucket's ``count`` the number of
+    observations in it.
+    """
+    row = {
+        "status": "success",
+        "metric": "weight_kg",
+        "period": "week",
+        "agg": "avg",
+        "series": [
+            {"bucket": "2026-08-24T00:00:00Z", "value": 72.0, "count": 3},
+            {"bucket": "2026-08-31T00:00:00Z", "value": 71.25, "count": 2},
+        ],
+        "count": 2,
+    }
+    row.update(overrides)
+    return row
+
+
 @pytest.fixture
 def isolated_kagura_credentials(tmp_path, monkeypatch):
     """Isolate a test from real ``~/.kagura/credentials.json`` and env.
