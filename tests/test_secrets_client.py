@@ -15,7 +15,9 @@ from kagura_memory._auth import _OAuthAuth
 from kagura_memory.exceptions import (
     KaguraAuthError,
     KaguraConnectionError,
+    KaguraError,
     KaguraNotFoundError,
+    KaguraQuotaError,
     KaguraSecretError,
 )
 from kagura_memory.secrets import crypto
@@ -547,3 +549,65 @@ async def test_429_stays_generic_connection_error():
         with pytest.raises(KaguraConnectionError, match="HTTP 429: slow down"):
             await client.list_secrets()
     await client.close()
+
+
+async def _list_secrets_against_429(body: dict, headers: dict[str, str] | None = None):
+    client = SecretClient(api_key="kagura_test")
+    resp = httpx.Response(
+        429,
+        json=body,
+        headers=headers,
+        request=httpx.Request("GET", "https://x/api/v1/config/secrets"),
+    )
+    try:
+        with patch.object(
+            client._client,
+            "request",
+            AsyncMock(
+                side_effect=httpx.HTTPStatusError("429", request=resp.request, response=resp)
+            ),
+        ):
+            await client.list_secrets()
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_429_daily_rest_quota_is_a_quota_error():
+    """#256: a quota refusal is typed before the 429 hook, on SecretClient too.
+
+    The daily REST quota (rate-limit middleware) used to surface here as
+    ``KaguraConnectionError("HTTP 429: ...")``; the #229 generic mapping now
+    covers only the 429s that are not quota refusals.
+    """
+    body = {
+        "error": "QUOTA-001",
+        "message": "Daily REST quota exceeded: 1001/1000. Resets at midnight UTC.",
+        "details": {"gate": "quota", "quota_type": "api_rest_daily", "retry_after": 86400},
+    }
+    with pytest.raises(KaguraQuotaError, match="Daily REST quota exceeded") as exc:
+        await _list_secrets_against_429(body, {"Retry-After": "86400"})
+    assert exc.value.quota_type == "api_rest_daily"
+    assert exc.value.retry_after == 86400
+    assert not isinstance(exc.value, KaguraConnectionError)
+
+
+@pytest.mark.asyncio
+async def test_429_untyped_quota_001_is_a_plain_kagura_error():
+    """No gate, no known quota_type, no retry window: not a quota, not a connection error."""
+    body = {"error": "QUOTA-001", "message": "Quota exceeded", "details": {"quota_type": None}}
+    with pytest.raises(KaguraError, match="Quota exceeded") as exc:
+        await _list_secrets_against_429(body)
+    assert type(exc.value) is KaguraError
+
+
+@pytest.mark.asyncio
+async def test_429_per_minute_rate_limit_keeps_the_generic_mapping():
+    """``RATE-001`` is not a gate refusal, so the #229 generic 429 mapping still applies."""
+    body = {
+        "error": "RATE-001",
+        "message": "Rate limit exceeded: 61/60 requests per minute",
+        "details": {"retry_after": 60, "limit": 60, "remaining": 0},
+    }
+    with pytest.raises(KaguraConnectionError, match="HTTP 429"):
+        await _list_secrets_against_429(body, {"Retry-After": "60"})

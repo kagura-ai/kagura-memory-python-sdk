@@ -26,7 +26,13 @@ from .auth.cli import auth as _auth_group
 from .client import KaguraClient
 from .config import load_config
 from .doctor import run_doctor
-from .exceptions import KaguraError, _exc_message
+from .exceptions import (
+    KaguraError,
+    KaguraFeatureNotAvailableError,
+    KaguraPartialRollbackError,
+    KaguraQuotaError,
+    _exc_message,
+)
 from .files_client import FilesClient
 from .logger import VerboseLogger
 from .memory_client import MemoryClient
@@ -171,6 +177,25 @@ def _require_context_id(context_id: str | None, config: dict[str, Any]) -> str:
     return ctx_id
 
 
+def _cli_error_message(e: BaseException, message: str | None = None) -> str:
+    """The ``Error:`` text for a failed command — the message plus gate details (#256).
+
+    A quota refusal adds when it resets, and a quota or feature gate the
+    plan that lifts it (``display (key)`` when the server sent both), so the
+    operator does not have to dig them out of the prose. ``message``
+    replaces the first line when a command words the failure itself.
+    """
+    lines = [_exc_message(e) if message is None else message]
+    if isinstance(e, KaguraQuotaError) and e.resets_at is not None:
+        lines.append(f"  Resets at: {e.resets_at.isoformat()}")
+    if isinstance(e, (KaguraQuotaError, KaguraFeatureNotAvailableError)):
+        key, display = e.required_plan, e.required_plan_display
+        plan = f"{display} ({key})" if display and key and display != key else display or key
+        if plan:
+            lines.append(f"  Required plan: {plan}")
+    return "\n".join(lines)
+
+
 def _run_client_command(
     operation: Callable[[KaguraClient, str], Awaitable[dict[str, Any]]],
     context_id: str | None,
@@ -206,7 +231,7 @@ def _run_client_command(
     except click.ClickException:
         raise
     except Exception as e:
-        raise click.ClickException(_exc_message(e)) from e
+        raise click.ClickException(_cli_error_message(e)) from e
 
 
 def _force_utf8_io() -> None:
@@ -738,7 +763,7 @@ def ingest_file(
         # ClickException's __str__ already prefixes "Error: " when printed,
         # so wrapping the message with another "Error: " would render as
         # "Error: Error: <msg>". Pass the raw exception message instead.
-        raise click.ClickException(_exc_message(e)) from e
+        raise click.ClickException(_cli_error_message(e)) from e
 
 
 @main.command()
@@ -1223,7 +1248,8 @@ def sleep_rollback(context_id, report_id, yes):
     """Roll back a completed (or degraded) Sleep Maintenance run.
 
     Reverses edge creation, memory merges, importance updates, scope
-    promotions, and archives.
+    promotions, and archives. If some steps fail, the summary of what was
+    reversed is still printed and the command exits non-zero.
     """
     # Bundled inline (not via ``_run_client_command``) so a "no" answer to
     # ``click.confirm(..., abort=True)`` propagates as ``click.Abort`` and
@@ -1251,8 +1277,18 @@ def sleep_rollback(context_id, report_id, yes):
         click.echo(json.dumps(result, indent=2, ensure_ascii=False))
     except (click.Abort, click.ClickException):
         raise
-    except Exception as e:
+    except KaguraPartialRollbackError as e:
+        # #256: the steps that succeeded stay reversed — show them, so the
+        # operator can decide whether to retry, before failing the command.
+        partial = {
+            "report_id": e.report_id,
+            "error": "partial_rollback",
+            "rollback_summary": e.summary.model_dump(mode="json") if e.summary else None,
+        }
+        click.echo(json.dumps(partial, indent=2, ensure_ascii=False))
         raise click.ClickException(_exc_message(e)) from e
+    except Exception as e:
+        raise click.ClickException(_cli_error_message(e)) from e
 
 
 # =============================================================================
@@ -1461,7 +1497,7 @@ def guardrails_digest(context_id, target, out_path, profile, tools):
     except click.ClickException:
         raise
     except Exception as e:
-        raise click.ClickException(_exc_message(e)) from e
+        raise click.ClickException(_cli_error_message(e)) from e
     click.echo(
         json.dumps(
             {
@@ -1729,7 +1765,7 @@ def _run_resource_command(
     except click.ClickException:
         raise
     except Exception as e:
-        raise click.ClickException(_exc_message(e)) from e
+        raise click.ClickException(_cli_error_message(e)) from e
 
 
 @main.group()
@@ -2376,7 +2412,7 @@ def _run_files_command(
     except click.ClickException:
         raise
     except Exception as e:
-        raise click.ClickException(_exc_message(e)) from e
+        raise click.ClickException(_cli_error_message(e)) from e
 
 
 @main.group()
@@ -2548,9 +2584,12 @@ def files_upload(
             # The upload already succeeded — surface the file_id so the user
             # knows the file_object exists and does not re-upload a duplicate.
             raise click.ClickException(
-                f"File uploaded (file_id={file_obj.id}), but creating the linked "
-                f"memory failed: {_exc_message(e)}. The file_object is stored; "
-                f"retry the memory write separately or reference it by file_id."
+                _cli_error_message(
+                    e,
+                    f"File uploaded (file_id={file_obj.id}), but creating the linked "
+                    f"memory failed: {_exc_message(e)}. The file_object is stored; "
+                    f"retry the memory write separately or reference it by file_id.",
+                )
             ) from e
         return json.dumps(
             {"file": file_obj.model_dump(mode="json"), "memory": memory},
@@ -2685,7 +2724,7 @@ def _run_workspace_command(
     except (click.ClickException, click.Abort):
         raise
     except Exception as e:
-        raise click.ClickException(_exc_message(e)) from e
+        raise click.ClickException(_cli_error_message(e)) from e
 
 
 _WORKSPACE_OPT_HELP = "Workspace UUID (default: the credential source's workspace)"

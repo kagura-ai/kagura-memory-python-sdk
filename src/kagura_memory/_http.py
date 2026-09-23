@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import re
 import uuid
+from collections.abc import Mapping
+from datetime import UTC, datetime, time, timedelta
 from importlib.metadata import version as _pkg_version
 from typing import Any, NoReturn, TypeVar
 from urllib.parse import parse_qsl, unquote_plus, urlencode, urlsplit, urlunsplit
@@ -14,6 +16,9 @@ from pydantic import BaseModel, ValidationError
 from .exceptions import (
     KaguraAuthError,
     KaguraConnectionError,
+    KaguraError,
+    KaguraFeatureNotAvailableError,
+    KaguraQuotaError,
     KaguraRateLimitError,
     KaguraResponseError,
     _exc_message,
@@ -271,6 +276,176 @@ def _retry_after_seconds(response: httpx.Response) -> int | None:
         return None
     raw = raw.strip()
     return int(raw) if raw.isdigit() else None
+
+
+# Gate refusals (#256): memory-cloud v0.75.0+ (#1644) stamps every plan or
+# quota refusal with a ``gate`` descriptor — REST in ``details``, MCP as
+# top-level envelope fields. Older servers send only the error code and the
+# legacy fields, so the code is the fallback.
+_FEATURE_GATES = frozenset({"plan", "allowlist", "deployment"})
+_FEATURE_CODES = frozenset({"plan_required", "feature_not_available", "FEAT-001"})
+_QUOTA_CODES = frozenset({"quota_exceeded", "QUOTA-001"})
+# The daily MCP call cap every non-read-only tool checks in-band. It carries
+# no ``gate`` and names its counts ``used_today`` / ``daily_limit``; the cap
+# counts calls per UTC day.
+_MCP_DAILY_CAP_CODE = "rate_limit_exceeded"
+# Each names exactly one cap, so the code alone makes it a quota refusal.
+_SINGLE_CAP_QUOTA_CODES = frozenset({"QUOTA-002", "CONNECTOR-001", _MCP_DAILY_CAP_CODE})
+# Envelope keys that frame an MCP refusal rather than describe it.
+_ENVELOPE_KEYS = frozenset({"status", "error", "message"})
+# memory-cloud's frozen ``quota_type`` vocabulary (``QUOTA_TYPES``). A quota
+# refusal naming one is a tier quota even from a server without ``gate``.
+_TIER_QUOTA_TYPES = frozenset(
+    {
+        "contexts",
+        "members",
+        "workspace_limit_reached",
+        "memories_per_day",
+        "memory_analysis",
+        "sleep_enabled_contexts",
+        "storage_bytes",
+        "agents",
+        "resource_tokens",
+        "connectors",
+        "embedding_spend_daily",
+        "embedding_spend_monthly",
+        "api_mcp_daily",
+        "api_rest_daily",
+        "api_public_daily",
+    }
+)
+
+
+def error_envelope(response: httpx.Response) -> tuple[str, str, dict[str, Any]] | None:
+    """Return ``(error, message, details)`` of memory-cloud's canonical REST error body.
+
+    ``None`` when the body is not ``{"error": <str>, ...}`` — non-JSON, the
+    FastAPI ``{"detail": ...}`` shape, or the JSON-RPC ``error`` object. A
+    missing ``message`` reads as ``""`` and missing ``details`` as ``{}``.
+    """
+    try:
+        body = response.json()
+    except (ValueError, UnicodeDecodeError):
+        return None
+    if not isinstance(body, dict) or not isinstance(body.get("error"), str):
+        return None
+    message = body.get("message")
+    details = body.get("details")
+    return (
+        body["error"],
+        message if isinstance(message, str) else "",
+        details if isinstance(details, dict) else {},
+    )
+
+
+def gate_error(
+    code: str,
+    message: str,
+    fields: Mapping[str, Any],
+    *,
+    retry_after: int | None = None,
+) -> KaguraError | None:
+    """Build the typed exception for a plan or quota refusal (#256).
+
+    Branches on ``gate`` first (memory-cloud v0.75.0+): ``"quota"`` is a
+    quota, ``"plan"`` / ``"allowlist"`` / ``"deployment"`` a feature gate —
+    whatever the error code. Without a ``gate`` (an older server, or a kind
+    this SDK does not know) the code decides: ``plan_required``,
+    ``feature_not_available`` and ``FEAT-001`` are feature gates;
+    ``quota_exceeded`` and ``QUOTA-001`` are quotas only when they name a
+    known ``quota_type`` or a retry window, because the same code also
+    covers limits no plan lifts, such as the 1 MB memory-size guard. MCP
+    ``rate_limit_exceeded`` (the daily MCP call cap) is the
+    ``api_mcp_daily`` quota, resetting at the next UTC midnight.
+
+    Malformed detail fields are dropped rather than raised, so drift never
+    hides the refusal itself.
+
+    Args:
+        code: The error code — MCP ``error`` or REST ``error``.
+        message: Message for the exception.
+        fields: Where the descriptor lives: the MCP envelope itself, or
+            the REST ``details``.
+        retry_after: The retry window the response named (REST
+            ``Retry-After``). When ``None``, MCP's ``retry_after_seconds``
+            (the resource events-per-hour ceiling) is read from ``fields``.
+
+    Returns:
+        :class:`KaguraQuotaError` or :class:`KaguraFeatureNotAvailableError`,
+        each carrying every descriptor field as ``details``; a plain
+        :class:`KaguraError` for a quota code that is neither a tier quota
+        nor a retry window; ``None`` when ``code`` is not a plan or quota
+        refusal.
+    """
+    details = {k: v for k, v in fields.items() if k not in _ENVELOPE_KEYS}
+    if code == _MCP_DAILY_CAP_CODE:
+        # Fill in the canonical names the envelope leaves implicit; whatever
+        # the server does send wins.
+        midnight = datetime.combine(datetime.now(UTC).date() + timedelta(days=1), time(), UTC)
+        fields = {
+            "quota_type": "api_mcp_daily",
+            "current": fields.get("used_today"),
+            "limit": fields.get("daily_limit"),
+            "resets_at": midnight.isoformat(),
+            **fields,
+        }
+    if retry_after is None:
+        retry_after = _opt_int(fields.get("retry_after_seconds"))
+    gate = _opt_str(fields.get("gate"))
+    if gate == "quota":
+        return _quota_error(message, fields, retry_after, details)
+    if gate in _FEATURE_GATES or code in _FEATURE_CODES:
+        return KaguraFeatureNotAvailableError(message, **_plan_fields(fields), details=details)
+    if code in _SINGLE_CAP_QUOTA_CODES:
+        return _quota_error(message, fields, retry_after, details)
+    if code in _QUOTA_CODES:
+        if _opt_str(fields.get("quota_type")) in _TIER_QUOTA_TYPES or retry_after is not None:
+            return _quota_error(message, fields, retry_after, details)
+        return KaguraError(message)
+    return None
+
+
+def _quota_error(
+    message: str,
+    fields: Mapping[str, Any],
+    retry_after: int | None,
+    details: dict[str, Any],
+) -> KaguraQuotaError:
+    return KaguraQuotaError(
+        message,
+        retry_after,
+        quota_type=_opt_str(fields.get("quota_type")),
+        limit=_opt_int(fields.get("limit")),
+        current=_opt_int(fields.get("current")),
+        used_today=_opt_int(fields.get("used_today")),
+        resets_at=_opt_datetime(fields.get("resets_at")),
+        **_plan_fields(fields),
+        details=details,
+    )
+
+
+def _plan_fields(fields: Mapping[str, Any]) -> dict[str, str | None]:
+    """The descriptor keys a quota and a feature gate share."""
+    keys = ("gate", "feature", "required_plan", "required_plan_display", "current_plan")
+    return {key: _opt_str(fields.get(key)) for key in keys}
+
+
+def _opt_str(value: object) -> str | None:
+    return value if isinstance(value, str) else None
+
+
+def _opt_int(value: object) -> int | None:
+    # bool is a subclass of int, but True is never a count.
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _opt_datetime(value: object) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
 
 
 def raise_for_kagura_status(e: httpx.HTTPStatusError) -> NoReturn:

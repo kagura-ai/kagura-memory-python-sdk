@@ -41,8 +41,12 @@ class SecretClient(KaguraRestClient):
     All methods may raise:
         KaguraAuthError: Authentication failed (401).
         KaguraNotFoundError: Resource not found (404).
+        KaguraQuotaError: The workspace's daily REST quota is used up (429
+            ``QUOTA-001``; ``retry_after`` from the ``Retry-After`` header).
         KaguraConnectionError: Other HTTP/network errors (incl. the 400 the
-            server returns when a put's grant set is inconsistent).
+            server returns when a put's grant set is inconsistent, and a
+            429 that is not a quota refusal, such as the per-minute rate
+            limit).
     """
 
     # ---- KaguraRestClient hooks -----------------------------------------
@@ -68,7 +72,9 @@ class SecretClient(KaguraRestClient):
 
     def _error_429(self, e: httpx.HTTPStatusError) -> KaguraError:
         # Historical mapping preserved (#229 is zero-behavior-change): the
-        # secret surface has always rendered 429 through the generic branch.
+        # secret surface renders 429 through the generic branch. A quota
+        # refusal never reaches this hook — ``_gate_error`` types it first,
+        # as on every REST client (#256).
         return self._generic_error(e)
 
     # -- pubkey registry -----------------------------------------------------

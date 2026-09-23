@@ -1425,6 +1425,183 @@ def test_sleep_history_drift_is_a_clean_error_naming_the_operation(monkeypatch):
     assert "Traceback" not in result.output
 
 
+# ----------------------------------------------------------------------------
+# Typed gate / partial-rollback errors (#256)
+# ----------------------------------------------------------------------------
+
+_ROLLBACK_SUMMARY = {
+    "edges_deleted": 3,
+    "merges_reversed": 1,
+    "merges_unreversible": 0,
+    "importance_restored": 4,
+    "promotions_reversed": 1,
+    "importance_kept": 1,
+    "promotions_kept": 5,
+    "archives_restored": 0,
+    "errors": [],
+}
+
+
+@pytest.fixture
+def rollback_mcp(monkeypatch):
+    """Real KaguraClient from config; the test sets ``_call_tool``'s return value."""
+    from kagura_memory.client import KaguraClient
+
+    monkeypatch.setattr(
+        "kagura_memory.cli.load_config",
+        lambda: {"api_key": "key", "mcp_url": "https://test.com/mcp"},
+    )
+    mock = AsyncMock()
+    monkeypatch.setattr(KaguraClient, "_call_tool", mock)
+    return mock
+
+
+def test_sleep_rollback_shows_the_unreversible_and_kept_counters(rollback_mcp):
+    rollback_mcp.return_value = {
+        "status": "success",
+        "report_id": "rid-9",
+        "rollback_summary": _ROLLBACK_SUMMARY,
+    }
+    result = CliRunner().invoke(main, ["sleep", "rollback", "ctx-1", "rid-9", "-y"])
+    assert result.exit_code == 0, result.output
+    assert '"merges_unreversible": 0' in result.output
+    assert '"importance_kept": 1' in result.output
+    assert '"promotions_kept": 5' in result.output
+
+
+def test_sleep_rollback_partial_prints_what_was_reversed(rollback_mcp):
+    """A partial rollback exits non-zero but still shows the per-category summary."""
+    rollback_mcp.return_value = {
+        "status": "error",
+        "error": "partial_rollback",
+        "message": "Rollback completed with 1 error(s).",
+        "report_id": "rid-9",
+        "rollback_summary": {
+            **_ROLLBACK_SUMMARY,
+            "merges_unreversible": 1,
+            "errors": ["shadow merge m-1 → m-2 not reversed"],
+        },
+    }
+    result = CliRunner().invoke(main, ["sleep", "rollback", "ctx-1", "rid-9", "-y"])
+    assert result.exit_code != 0
+    assert '"error": "partial_rollback"' in result.output
+    assert '"merges_reversed": 1' in result.output
+    assert '"merges_unreversible": 1' in result.output
+    assert "shadow merge m-1 → m-2 not reversed" in result.output
+    assert "Error: rollback_sleep_run failed (partial_rollback)" in result.output
+
+
+def test_sleep_rollback_partial_with_an_unreadable_summary(rollback_mcp):
+    """Summary drift still reports the partial rollback, with a null summary."""
+    rollback_mcp.return_value = {
+        "status": "error",
+        "error": "partial_rollback",
+        "message": "Rollback completed with 1 error(s).",
+        "report_id": "rid-9",
+        "rollback_summary": {"edges_deleted": "three"},
+    }
+    result = CliRunner().invoke(main, ["sleep", "rollback", "ctx-1", "rid-9", "-y"])
+    assert result.exit_code != 0
+    assert '"rollback_summary": null' in result.output
+    assert "(partial_rollback)" in result.output
+    assert "rollback_summary could not be read" in result.output
+    assert "Traceback" not in result.output
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_quota_error_shows_reset_time_and_required_plan(mock_client_cls, mock_config):
+    from datetime import UTC, datetime
+
+    from kagura_memory.exceptions import KaguraQuotaError
+
+    mock_config.return_value = {
+        "api_key": "key",
+        "mcp_url": "https://test.com/mcp",
+        "context_id": "ctx-1",
+    }
+    mock_client = AsyncMock()
+    mock_client.remember.side_effect = KaguraQuotaError(
+        "remember failed (quota_exceeded): Daily memory limit reached.",
+        quota_type="memories_per_day",
+        resets_at=datetime(2099, 1, 2, tzinfo=UTC),
+        required_plan="pro",
+        required_plan_display="L",
+    )
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    mock_client_cls.return_value = mock_client
+
+    result = CliRunner().invoke(main, ["remember", "-s", "s", "--content", "c"])
+    assert result.exit_code != 0
+    assert "Error: remember failed (quota_exceeded): Daily memory limit reached." in result.output
+    assert "Resets at: 2099-01-02T00:00:00+00:00" in result.output
+    assert "Required plan: L (pro)" in result.output
+
+
+def test_feature_error_shows_required_plan(monkeypatch):
+    from kagura_memory import KaguraFeatureNotAvailableError
+
+    client = AsyncMock()
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=None)
+    client.create_token.side_effect = KaguraFeatureNotAvailableError(
+        "Feature 'resources' not available on M plan.", feature="resources", required_plan="promax"
+    )
+    monkeypatch.setattr("kagura_memory.cli._get_resource_client", lambda: client)
+
+    result = CliRunner().invoke(main, ["resource", "tokens", "create", "-r", "products"])
+    assert result.exit_code != 0
+    assert "Feature 'resources' not available on M plan." in result.output
+    assert "Required plan: promax" in result.output
+    assert "Resets at" not in result.output
+
+
+def test_guardrails_digest_quota_error_shows_the_gate_lines():
+    """The REST guardrails digest renders the gate lines like the shared runners."""
+    from kagura_memory.exceptions import KaguraQuotaError
+
+    config = {"api_key": "key", "mcp_url": "https://test.com/mcp", "context_id": "ctx-1"}
+    client = AsyncMock()
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=None)
+    client.get_guardrail_digest.side_effect = KaguraQuotaError(
+        "Daily MCP quota exceeded.", 86400, quota_type="api_mcp_daily", required_plan="pro"
+    )
+    with (
+        patch("kagura_memory.cli.load_config", return_value=config),
+        patch("kagura_memory.cli.MemoryClient") as mock_cls,
+    ):
+        mock_cls._from_resolved_auth.return_value = client
+        result = CliRunner().invoke(main, ["guardrails", "digest", "ctx-1"])
+    assert result.exit_code == 1
+    assert "Error: Daily MCP quota exceeded." in result.output
+    assert "Required plan: pro" in result.output
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_plain_errors_render_without_gate_lines(mock_client_cls, mock_config):
+    from kagura_memory.exceptions import KaguraError
+
+    mock_config.return_value = {
+        "api_key": "key",
+        "mcp_url": "https://test.com/mcp",
+        "context_id": "ctx-1",
+    }
+    mock_client = AsyncMock()
+    mock_client.remember.side_effect = KaguraError("remember failed (validation_error): bad")
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    mock_client_cls.return_value = mock_client
+
+    result = CliRunner().invoke(main, ["remember", "-s", "s", "--content", "c"])
+    assert result.exit_code != 0
+    assert "Error: remember failed (validation_error): bad" in result.output
+    assert "Required plan" not in result.output
+    assert "Resets at" not in result.output
+
+
 def test_resource_indexer_status_shows_quota_deferred_run(monkeypatch):
     """`memories_per_day_exceeded` (server v0.68.0+, #1549) renders instead of erroring."""
     import httpx
