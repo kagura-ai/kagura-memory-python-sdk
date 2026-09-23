@@ -1778,7 +1778,10 @@ def _harness_command(harness: HarnessName):
                 "--name",
                 default=MCP_SERVER_NAME,
                 show_default=True,
-                help="MCP server name in the harness config",
+                help=(
+                    "MCP server name in the harness config: 1-64 letters, digits, '-' or '_', "
+                    "starting with a letter or digit"
+                ),
             ),
             click.option(
                 "--context-id",

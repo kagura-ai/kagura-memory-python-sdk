@@ -308,6 +308,19 @@ class TestCodex:
         assert "mcp remove" not in result.output
         assert recorder.mutating() == []
 
+    def test_name_may_start_with_a_digit(self, on_path, recorder):
+        on_path("codex")
+        result = run("codex", "--profile", "default", "--name", "9lives", "-y")
+        assert result.exit_code == 0, result.output
+        assert recorder.mutating()[0][1:4] == ["mcp", "add", "9lives"]
+
+    def test_url_form_mcp_url_is_trimmed(self, on_path, recorder):
+        on_path("codex")
+        result = run("codex", "--url-form", "--mcp-url", f"  {MCP_URL}\n", "-y")
+        assert result.exit_code == 0, result.output
+        [argv] = recorder.mutating()
+        assert argv[argv.index("--url") + 1] == MCP_URL
+
     def test_static_header_entry_is_described_not_echoed(self, env, on_path):
         on_path("codex")
         codex_config(env).write_text(
@@ -758,8 +771,46 @@ class TestSharedFlags:
         result = run(harness, "--url-form", "--mcp-url", "http://example.com/mcp", "-y")
         assert result.exit_code == 2
 
+    @pytest.mark.parametrize(
+        "url", ["HTTP://example.com/mcp", " http://example.com/mcp", "hTtP://example.com/mcp"]
+    )
+    def test_plain_http_mcp_url_in_any_spelling_is_refused(self, harness, on_path, recorder, url):
+        on_path(harness)
+        result = run(harness, "--url-form", "--mcp-url", url, "-y")
+        assert result.exit_code == 2
+        assert "must use HTTPS" in result.output
+        assert recorder.calls == []
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "--help",
+            "memory.kagura-ai.com/mcp",
+            "ftp://memory.kagura-ai.com/mcp",
+            "https://",
+            "https://[::1/mcp",
+        ],
+    )
+    def test_mcp_url_that_is_no_https_url_is_refused(self, harness, on_path, recorder, url):
+        # It goes on the harness argv after --url, where "--help" would read as an option.
+        on_path(harness)
+        result = run(harness, "--url-form", f"--mcp-url={url}", "-y")
+        assert result.exit_code == 2
+        assert "use an https:// URL" in result.output
+        assert recorder.calls == []
+
     def test_bad_name(self, harness):
         assert run(harness, "--profile", "default", "--name", "a.b", "-y").exit_code == 2
+
+    @pytest.mark.parametrize("name", ["--help", "-h", "-", "_kagura", "-kagura"])
+    def test_name_must_start_with_a_letter_or_digit(self, harness, on_path, recorder, name):
+        # The name is a positional in every harness argv: `codex mcp add --help …`
+        # prints the help, exits 0 and configures nothing (#274).
+        on_path(harness)
+        result = run(harness, "--profile", "default", f"--name={name}", "-y")
+        assert result.exit_code == 2
+        assert "starting with a letter or digit" in result.output
+        assert recorder.calls == []
 
     @pytest.mark.parametrize("flags", [["-y"], []], ids=["-y", "no-tty"])
     def test_agents_md_without_prompts_needs_a_context(self, harness, flags):

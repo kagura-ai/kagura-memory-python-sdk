@@ -84,7 +84,9 @@ HarnessName = Literal["codex", "hermes", "openclaw"]
 DEFAULT_KEY_ENV = "KAGURA_API_KEY"
 
 # Codex, Hermes and OpenClaw all accept these; a dot would nest a TOML table.
-_SERVER_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+# The name is a positional in every harness argv, so it starts with a letter or
+# digit: `codex mcp add --help …` prints the help and exits 0 with nothing saved.
+_SERVER_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 # OpenClaw substitutes only upper-case ${VAR} names.
 _ENV_NAME_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
@@ -759,7 +761,10 @@ def _check_flags(
 ) -> None:
     """Reject flag combinations that cannot work before anything is read (exit 2)."""
     if not _SERVER_NAME_RE.fullmatch(name):
-        raise click.BadParameter("use 1-64 letters, digits, '-' or '_'", param_hint="'--name'")
+        raise click.BadParameter(
+            "use 1-64 letters, digits, '-' or '_', starting with a letter or digit",
+            param_hint="'--name'",
+        )
     if not url_form:
         if mcp_url is not None or api_key_env is not None:
             raise click.UsageError("--mcp-url and --api-key-env go with --url-form.")
@@ -778,6 +783,16 @@ def _check_flags(
             validate_https_url(mcp_url, label="MCP URL")
         except ValueError as e:
             raise click.BadParameter(str(e), param_hint="'--mcp-url'") from None
+        # It follows --url on the harness argv, where "--help" would read as an option.
+        try:
+            parts = urlsplit(mcp_url)
+        except ValueError:  # e.g. an unclosed IPv6 bracket
+            parts = None
+        if parts is None or parts.scheme.lower() not in ("http", "https") or not parts.netloc:
+            raise click.BadParameter(
+                "use an https:// URL, e.g. https://memory.kagura-ai.com/mcp/w/<workspace-id>",
+                param_hint="'--mcp-url'",
+            )
     if api_key_env is not None:
         if h.names_key_env:
             raise click.UsageError(
@@ -995,6 +1010,9 @@ def run_setup_harness(
     """
     h = HARNESSES[harness]()
     interactive = not non_interactive and _stdin_is_tty()
+    # The entry gets the URL the HTTPS check passed, not one with padding a
+    # harness might keep.
+    mcp_url = mcp_url.strip() if mcp_url is not None else None
     _check_flags(
         h,
         profile=profile,
