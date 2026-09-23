@@ -3861,6 +3861,30 @@ async def test_rest_get_auth_error():
     await client.close()
 
 
+@pytest.mark.parametrize("status", [404, 422])
+@pytest.mark.parametrize("method", ["get_embedding_status", "list_memories"])
+@pytest.mark.asyncio
+async def test_rest_get_keeps_404_and_422_as_connection_errors_without_an_operation(method, status):
+    """Only a caller that names an MCP operation (list_tags, #273) remaps 404/422."""
+    client = _make_initialized_client()
+    response = httpx.Response(
+        status,
+        json={"error": f"HTTP-{status}", "message": "Not here", "details": {}},
+        request=httpx.Request("GET", "https://test.com/api/v1/x"),
+    )
+    args = ("ctx-1",) if method == "list_memories" else ()
+    try:
+        with patch.object(client._client, "get", new_callable=AsyncMock) as mock_get:
+            mock_get.return_value = response
+            with pytest.raises(KaguraConnectionError) as exc:
+                await getattr(client, method)(*args)
+    finally:
+        await client.close()
+
+    assert not isinstance(exc.value, KaguraNotFoundError)
+    assert str(exc.value) == f"HTTP {status}: Not here"
+
+
 @pytest.mark.asyncio
 async def test_rest_get_connection_error():
     """_rest_get should raise KaguraConnectionError on network failure."""
