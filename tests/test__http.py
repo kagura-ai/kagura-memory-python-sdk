@@ -23,6 +23,7 @@ from kagura_memory._http import (
     mcp_url_with_query,
     mcp_url_without_query_param,
     normalize_guardrails,
+    normalize_url,
     normalize_uuid,
     validate_https_url,
     validate_lat_lon,
@@ -384,6 +385,20 @@ def test_plain_http_in_any_spelling_rejected(url: str):
 def test_scheme_case_and_surrounding_whitespace_do_not_matter(url: str):
     """HTTPS in any case passes, and so does loopback HTTP in any case."""
     validate_https_url(url)  # must not raise
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("  https://h.example/mcp\n", "https://h.example/mcp"),
+        ("\x00\x1fhttps://h.example/mcp　", "https://h.example/mcp"),
+        ("ht\ttps://h.exa\nmple/m\rcp", "https://h.example/mcp"),
+        # Only what a parser drops: case and inner spaces stay.
+        ("HTTPS://H.example/a b", "HTTPS://H.example/a b"),
+    ],
+)
+def test_normalize_url_drops_what_a_parser_drops(url: str, expected: str):
+    assert normalize_url(url) == expected
 
 
 def test_reject_message_shows_the_url_as_a_parser_reads_it():

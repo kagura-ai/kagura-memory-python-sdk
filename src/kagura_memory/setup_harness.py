@@ -69,6 +69,7 @@ from ._http import (
     mcp_url_guardrails_off,
     mcp_url_with_query,
     mcp_url_without_query_param,
+    normalize_url,
     normalize_uuid,
     validate_https_url,
 )
@@ -1131,9 +1132,9 @@ def run_setup_harness(
     """
     h = HARNESSES[harness]()
     interactive = not non_interactive and _stdin_is_tty()
-    # The entry gets the URL the HTTPS check passed, not one with padding a
-    # harness might keep.
-    mcp_url = mcp_url.strip() if mcp_url is not None else None
+    # The entry gets the URL the HTTPS check passed, not one with padding or
+    # control characters a harness might keep.
+    mcp_url = normalize_url(mcp_url) if mcp_url is not None else None
     _check_flags(
         h,
         profile=profile,

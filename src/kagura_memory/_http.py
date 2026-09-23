@@ -700,14 +700,28 @@ def validate_lat_lon(lat: object, lon: object) -> None:
     validate_coordinate("lon", lon, 180)
 
 
+def normalize_url(url: str) -> str:
+    """Return ``url`` as a URL parser reads it, before it reads the scheme.
+
+    Surrounding whitespace and C0 controls go, and so does any tab or newline
+    inside it. Nothing else changes: the scheme and host keep their case.
+
+    Args:
+        url: A URL as the user gave it.
+
+    Returns:
+        The URL :func:`validate_https_url` checks.
+    """
+    return _URL_IGNORED_RE.sub("", url)
+
+
 def validate_https_url(url: str, *, label: str = "URL") -> None:
     """Enforce HTTPS except for localhost development.
 
-    The URL is checked as a parser reads it: surrounding whitespace and
-    control characters and any tab or newline dropped, the scheme and host in
-    any case. ``" HTTP://evil.com"`` is plain HTTP to ``evil.com`` for httpx
-    once a caller strips it, and for every harness that reads the URL from its
-    config (#274).
+    The URL is checked as a parser reads it (:func:`normalize_url`), the
+    scheme and host in any case. ``" HTTP://evil.com"`` is plain HTTP to
+    ``evil.com`` for httpx once a caller strips it, and for every harness
+    that reads the URL from its config (#274).
 
     Args:
         url: URL to validate.
@@ -716,7 +730,7 @@ def validate_https_url(url: str, *, label: str = "URL") -> None:
     Raises:
         ValueError: If URL uses HTTP and is not a loopback host.
     """
-    candidate = _URL_IGNORED_RE.sub("", url)
+    candidate = normalize_url(url)
     if _PLAIN_HTTP_RE.match(candidate) and not _LOCALHOST_HTTP_RE.match(candidate):
         raise ValueError(
             f"{label} must use HTTPS for security (got: {candidate}). "

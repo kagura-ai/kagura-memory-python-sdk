@@ -315,9 +315,19 @@ class TestCodex:
         assert result.exit_code == 0, result.output
         assert recorder.mutating()[0][1:4] == ["mcp", "add", "9lives"]
 
-    def test_url_form_mcp_url_is_trimmed(self, on_path, recorder):
+    @pytest.mark.parametrize(
+        "given",
+        [
+            f"  {MCP_URL}\n",
+            # What the HTTPS check drops, the entry does not keep either.
+            f"\x01{MCP_URL}\x1f",
+            MCP_URL.replace("https", "ht\ttps").replace("/mcp", "/m\ncp"),
+        ],
+        ids=["whitespace", "c0-controls", "tab-and-newline"],
+    )
+    def test_url_form_mcp_url_is_the_url_the_https_check_read(self, on_path, recorder, given):
         on_path("codex")
-        result = run("codex", "--url-form", "--mcp-url", f"  {MCP_URL}\n", "-y")
+        result = run("codex", "--url-form", "--mcp-url", given, "-y")
         assert result.exit_code == 0, result.output
         [argv] = recorder.mutating()
         assert argv[argv.index("--url") + 1] == MCP_URL
