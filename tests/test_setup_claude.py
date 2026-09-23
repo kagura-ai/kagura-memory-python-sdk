@@ -11,6 +11,7 @@ from click.testing import CliRunner
 from kagura_memory.cli import main
 from kagura_memory.setup_claude import (
     KAGURA_HOOK_MARKER,
+    POSTTOOLUSE_HOOK_COMMAND,
     _auto_match_context,
     _check_gitignore,
     _install_hooks,
@@ -320,13 +321,10 @@ class TestInstallHooks:
         """Updating an existing Kagura hook should also update the matcher."""
         claude_dir = project_dir / ".claude"
         claude_dir.mkdir()
-        # Start with a kagura hook that has no matcher
+        # Start with an SDK-written kagura hook that has no matcher
+        sdk_hook = POSTTOOLUSE_HOOK_COMMAND.format(context_id="ctx-0")
         existing = {
-            "hooks": {
-                "PostToolUse": [
-                    {"hooks": [{"type": "command", "command": "kagura remember -s test"}]}
-                ]
-            }
+            "hooks": {"PostToolUse": [{"hooks": [{"type": "command", "command": sdk_hook}]}]}
         }
         (claude_dir / "settings.json").write_text(json.dumps(existing))
 

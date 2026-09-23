@@ -67,20 +67,6 @@ class TestWriteMcpJsonStdio:
         # No secret is written in the stdio form.
         assert "headers" not in server
 
-    def test_guardrails_and_tool_profile_in_args(self, project_dir: Path) -> None:
-        """#258: the proxy builds the query at run time; the entry copies no URL."""
-        path = _write_mcp_json_stdio(project_dir, "default", guardrails="off", tool_profile="core")
-        server = json.loads(path.read_text())["mcpServers"][MCP_SERVER_NAME]
-        assert server["args"] == [
-            "--profile",
-            "default",
-            "--guardrails",
-            "off",
-            "--tool-profile",
-            "core",
-        ]
-        assert "--server" not in server["args"]
-
     def test_named_profile_in_args(self, project_dir: Path) -> None:
         path = _write_mcp_json_stdio(project_dir, "work")
         server = json.loads(path.read_text())["mcpServers"][MCP_SERVER_NAME]

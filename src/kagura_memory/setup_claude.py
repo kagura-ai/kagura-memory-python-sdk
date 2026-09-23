@@ -13,7 +13,7 @@ from urllib.parse import parse_qsl, urlsplit, urlunsplit
 import click
 
 from . import claude_code
-from ._http import mcp_url_with_query
+from ._http import mcp_url_has_tools_allowlist, mcp_url_with_query
 from .claude_code import (
     MCP_PROXY_COMMAND,
     MCP_SERVER_NAME,
@@ -21,6 +21,8 @@ from .claude_code import (
     McpEntry,
     McpScope,
     _read_json_safe,
+    classify_mcp_entry,
+    claude_json_label,
     find_kagura_mcp_entries,
     same_mcp_entry,
 )
@@ -339,13 +341,7 @@ def _write_mcp_json(project_dir: Path, api_key: str, mcp_url: str) -> Path:
     return _write_project_mcp_entry(project_dir, _static_token_entry(api_key, mcp_url))
 
 
-def _write_mcp_json_stdio(
-    project_dir: Path,
-    profile: str,
-    *,
-    guardrails: str | None = None,
-    tool_profile: str | None = None,
-) -> Path:
+def _write_mcp_json_stdio(project_dir: Path, profile: str) -> Path:
     """Write .mcp.json pointing Claude Code at the ``kagura-mcp`` stdio proxy.
 
     The refresh-aware proxy (issue #101) owns ``~/.kagura/credentials.json``
@@ -353,8 +349,7 @@ def _write_mcp_json_stdio(
     static-token form written by :func:`_write_mcp_json` — this entry contains
     **no secret** and never goes stale after the access token's ``expires_at``.
     """
-    entry = _stdio_entry(profile, guardrails=guardrails, tool_profile=tool_profile)
-    return _write_project_mcp_entry(project_dir, entry)
+    return _write_project_mcp_entry(project_dir, _stdio_entry(profile))
 
 
 def _kagura_mcp_on_path() -> bool:
@@ -383,10 +378,21 @@ class _McpPlan:
     replaces: dict[str, Any] | None = None
     #: The user-scope entry already matches; nothing to write.
     unchanged: bool = False
+    #: ``--guardrails`` / ``--tool-profile`` the replaced same-scope entry had
+    #: and this run leaves out, e.g. ``["--guardrails off"]``.
+    dropped: list[str] = field(default_factory=list)
 
 
-def _claude_command(args: list[str]) -> str:
-    return shlex.join(["claude", *args])
+def _claude_command(args: list[str], *, cwd: Path | None = None) -> str:
+    """``claude <args>`` as a POSIX shell line, to print for the user.
+
+    ``claude mcp`` resolves local and project scope from the directory it
+    runs in, so ``cwd`` adds a ``cd`` when it is not the current directory.
+    """
+    command = shlex.join(["claude", *args])
+    if cwd is not None and cwd != Path.cwd().resolve():
+        command = f"cd {shlex.quote(str(cwd))} && {command}"
+    return command
 
 
 def _redact_entry(entry: dict[str, Any]) -> dict[str, Any]:
@@ -399,6 +405,41 @@ def _redact_entry(entry: dict[str, Any]) -> dict[str, Any]:
         for k, v in headers.items()
     }
     return {**entry, "headers": masked}
+
+
+_QUERY_FLAGS = (("--guardrails", "guardrails"), ("--tool-profile", "profile"))
+
+
+def _query_flags(entry: dict[str, Any]) -> dict[str, str]:
+    """The ``--guardrails`` / ``--tool-profile`` values an entry puts on the upstream URL.
+
+    Read from the ``kagura-mcp`` args of a stdio entry, or from the url's
+    query (first value, as the server reads it) of an http one.
+    """
+    found: dict[str, str] = {}
+    if classify_mcp_entry(entry) == "stdio":
+        args = entry.get("args")
+        argv = [a for a in args if isinstance(a, str)] if isinstance(args, list) else []
+        for flag, _ in _QUERY_FLAGS:
+            for i, arg in enumerate(argv):
+                if arg == flag and i + 1 < len(argv):
+                    found[flag] = argv[i + 1]
+                elif arg.startswith(f"{flag}="):
+                    found[flag] = arg.partition("=")[2]
+        return found
+    url = entry.get("url")
+    params = parse_qsl(urlsplit(url).query) if isinstance(url, str) else []
+    for flag, key in _QUERY_FLAGS:
+        value = next((v for k, v in params if k == key), None)
+        if value is not None:
+            found[flag] = value
+    return found
+
+
+def _dropped_query_flags(old: dict[str, Any], new: dict[str, Any]) -> list[str]:
+    """``--guardrails`` / ``--tool-profile`` settings ``old`` has and ``new`` leaves out."""
+    kept = _query_flags(new)
+    return [f"{flag} {value}" for flag, value in _query_flags(old).items() if flag not in kept]
 
 
 def _plan_mcp_entry(
@@ -426,8 +467,12 @@ def _plan_mcp_entry(
             f"  so in this project a {scope}-scope entry would be hidden by:"
         )
         for e in stronger:
+            # Local and project scope resolve from the directory claude runs in.
+            remove = claude_code.mcp_remove_args(e.scope)
             click.echo(f"    {e.scope} scope ({e.source}) — remove it with:")
-            click.echo(f"      {_claude_command(claude_code.mcp_remove_args(e.scope))}")
+            click.echo(
+                f"      {_claude_command(remove, cwd=None if e.scope == 'user' else project)}"
+            )
         if non_interactive:
             raise click.ClickException(
                 f"Nothing was written: the {stronger[0].scope}-scope {MCP_SERVER_NAME} entry "
@@ -437,10 +482,12 @@ def _plan_mcp_entry(
             raise click.ClickException("Setup cancelled; nothing was written.")
 
     plan = _McpPlan(scope, entry, hidden=[e for e in entries if rank(e.scope) > rank(scope)])
+    current = next((e for e in entries if e.scope == scope), None)
+    if current is not None:
+        plan.dropped = _dropped_query_flags(current.config, entry)
     if scope != "user":
         return plan
 
-    current = next((e for e in entries if e.scope == "user"), None)
     if current is not None and same_mcp_entry(current.config, entry):
         plan.unchanged = True
         return plan
@@ -454,17 +501,16 @@ def _plan_mcp_entry(
             click.echo(f"    {_claude_command(args)}")
         raise click.ClickException(
             "The Claude Code CLI (`claude`) was not found on PATH. A user-scope entry lives "
-            "in ~/.claude.json, which Claude Code owns, so setup writes it only through "
-            "`claude mcp add-json`. Nothing was written."
+            f"in {claude_json_label()}, which Claude Code owns, so setup writes it only "
+            "through `claude mcp add-json`. Nothing was written."
         )
-    if (
-        plan.replaces is not None
-        and not non_interactive
-        and not click.confirm(
-            f"Replace the existing user-scope {MCP_SERVER_NAME} entry (~/.claude.json)?",
-            default=True,
-        )
-    ):
+    if plan.replaces is None:
+        return plan
+    question = f"Replace the existing user-scope {MCP_SERVER_NAME} entry ({claude_json_label()})?"
+    if non_interactive:
+        # -y takes the prompt's default; say so, since the old entry is removed.
+        click.echo(f"\n  {question} yes (-y)")
+    elif not click.confirm(question, default=True):
         raise click.ClickException("Setup cancelled; nothing was written.")
     return plan
 
@@ -495,25 +541,53 @@ def _write_mcp_entry(project: Path, plan: _McpPlan) -> str:
         path = _write_project_mcp_entry(project, plan.entry)
         return f"Wrote {path.relative_to(project)}"
     if plan.unchanged:
-        return f"User-scope {MCP_SERVER_NAME} entry already up to date (~/.claude.json)"
+        return f"User-scope {MCP_SERVER_NAME} entry already up to date ({claude_json_label()})"
     if plan.replaces is None:
         _run_claude_or_fail(claude_code.mcp_add_json_args("user", plan.entry))
     else:
         _run_claude_or_fail(claude_code.mcp_remove_args("user"))
         try:
             _run_claude_or_fail(claude_code.mcp_add_json_args("user", plan.entry))
-        except click.ClickException:
-            # Put the removed entry back rather than leave none at all.
-            _run_claude_or_fail(claude_code.mcp_add_json_args("user", plan.replaces))
+        except click.ClickException as failed:
+            _restore_user_entry(plan.replaces, failed)
             raise
     return f"Added {MCP_SERVER_NAME} at user scope (claude mcp add-json --scope user)"
 
 
-def _echo_hidden(plan: _McpPlan) -> None:
+def _restore_user_entry(old: dict[str, Any], failed: click.ClickException) -> None:
+    """Put back the user-scope entry removed before a failed add, rather than leave none.
+
+    Raises:
+        click.ClickException: The restore failed too. The message keeps the
+            add's error and says the old entry is gone; the command to re-add
+            it is printed, with a baked API key replaced by a placeholder.
+    """
+    try:
+        _run_claude_or_fail(claude_code.mcp_add_json_args("user", old))
+    except click.ClickException as e:
+        click.echo(f"\n  Re-add the previous user-scope {MCP_SERVER_NAME} entry yourself:")
+        click.echo(
+            f"    {_claude_command(claude_code.mcp_add_json_args('user', _redact_entry(old)))}"
+        )
+        raise click.ClickException(
+            f"{failed.message}\nThe previous user-scope {MCP_SERVER_NAME} entry was removed "
+            f"and could not be restored ({e.message}); the command above re-adds it."
+        ) from None
+
+
+def _echo_plan_notes(plan: _McpPlan) -> None:
+    """After the write: the weaker entries the new one hides, and the settings it dropped."""
     for e in plan.hidden:
         click.echo(
             f"  Note: in this project it hides the {MCP_SERVER_NAME} entry in {e.scope} "
             f"scope ({e.source}); editing that entry has no effect here."
+        )
+    if plan.dropped:
+        them = "them" if len(plan.dropped) > 1 else "it"
+        click.echo(
+            f"  Note: the previous {plan.scope}-scope entry also had "
+            f"{' and '.join(plan.dropped)}, which this run left out; re-run with {them} "
+            f"to keep {them}."
         )
 
 
@@ -529,6 +603,8 @@ class _Extras:
     session_hook: bool = True
     sync_hook: bool = True
     commands: bool = True
+    #: Items turned off whose removal the user declined: still on disk, as they were.
+    kept: list[str] = field(default_factory=list)
 
     def summary(self) -> list[str]:
         lines = []
@@ -538,6 +614,7 @@ class _Extras:
             lines.append("  - Sync .claude/memory/ writes to Kagura")
         if self.commands:
             lines.append("  - /kagura-recall and /kagura-remember available as skills")
+        lines += [f"  - Kept as it was (removal declined): the SDK's {item}" for item in self.kept]
         return lines
 
 
@@ -552,33 +629,43 @@ def _resolve_extras(
     """Decide which hooks and commands to install; return them and the plugin id, if any.
 
     ``None`` means the flag was not given (on by default). When the
-    memory-cloud ``kagura-memory`` plugin is installed and neither
-    ``--[no-]session-hook`` nor ``--[no-]commands`` was given, an interactive
-    run offers to skip the overlapping ones; ``-y`` installs them as before and
-    names the flags. The sync hook has no plugin counterpart and is never
+    memory-cloud ``kagura-memory`` plugin is installed, an interactive run asks
+    about each of the two that were not given: skip ``/kagura-recall`` and
+    ``/kagura-remember``, which duplicate the plugin's ``:recall`` and
+    ``:remember`` (default yes), and skip the SessionStart recall hook (default
+    no: the plugin recalls nothing automatically, its SessionStart hook only
+    announces active guardrails). ``-y`` installs them as before and names the
+    flag for the commands. The sync hook has no plugin counterpart and is never
     offered. Detection never fails setup.
     """
     plugin_id = claude_code.detect_kagura_plugin(project)
-    if plugin_id is not None and session_hook is None and commands is None:
-        if non_interactive:
+    if plugin_id is not None and non_interactive:
+        if commands is None:
             click.echo(
-                f"\n  Detected the {plugin_id} plugin: installing the SDK's SessionStart hook "
-                "and /kagura-recall, /kagura-remember anyway; pass --no-session-hook "
+                f"\n  Detected the {plugin_id} plugin: installing /kagura-recall and "
+                "/kagura-remember anyway, which duplicate its :recall and :remember; pass "
                 "--no-commands to skip them."
             )
-        else:
+    elif plugin_id is not None and (commands is None or session_hook is None):
+        click.echo(f"\n  Detected the {plugin_id} Claude Code plugin.")
+        if commands is None:
             click.echo(
-                f"\n  Detected the {plugin_id} Claude Code plugin. With the SDK's\n"
-                "  SessionStart recall hook, every session starts with two Kagura injections,\n"
-                "  and /kagura-recall, /kagura-remember duplicate the plugin's commands\n"
-                "  (resolving the context and profile differently)."
+                "  /kagura-recall and /kagura-remember duplicate its /kagura-memory:recall and\n"
+                "  :remember (resolving the context and profile differently)."
             )
-            if click.confirm(
-                "Skip the SDK's SessionStart recall hook and /kagura-recall, /kagura-remember? "
-                "The plugin provides /kagura-memory:session-start, :recall and :remember.",
-                default=True,
-            ):
-                session_hook = commands = False
+            commands = not click.confirm(
+                "Skip the SDK's /kagura-recall and /kagura-remember?", default=True
+            )
+        if session_hook is None:
+            click.echo(
+                "  The SDK's SessionStart hook recalls trusted project memories in every\n"
+                "  session. The plugin has no automatic recall: its SessionStart hook only\n"
+                "  announces active tool guardrails, and /kagura-memory:session-start is a\n"
+                "  command you run yourself."
+            )
+            session_hook = not click.confirm(
+                "Skip the SDK's SessionStart recall hook anyway?", default=False
+            )
     extras = _Extras(
         session_hook=session_hook is not False, sync_hook=sync_hook, commands=commands is not False
     )
@@ -607,23 +694,27 @@ def _echo_plugin_notes(
             "  guardrail digest. 'off' also removes the guardrails block from get_context_info,\n"
             "  so set it only once the hooks deliver guardrails."
         )
-    click.echo("  Plugin settings (/plugin > kagura-memory > Configure; the API key is yours):")
+    click.echo("  Plugin settings (/plugin > kagura-memory > Configure):")
     click.echo(f"    server_url  {_plugin_server_url(upstream_url)}")
-    click.echo(f"    context_id  {context_id}")
-
-
-def _is_kagura_hook(hook: dict[str, Any]) -> bool:
-    """Check if a hook entry is Kagura-managed."""
-    cmd = hook.get("command", "")
-    return KAGURA_HOOK_MARKER in cmd
+    click.echo(
+        f"    context_id  {context_id}\n"
+        "                The plugin has ONE guardrail context for every project: use this\n"
+        "                one only if it holds the guardrails you want everywhere."
+    )
+    click.echo(
+        "    api_key     Enter it yourself: a user API key (kagura_...). The plugin's hooks\n"
+        "                authenticate only with one, even when this setup uses --profile."
+    )
 
 
 def _sdk_prefix(template: str) -> str:
     """The fixed start of an SDK-written hook command or command file.
 
-    Everything before the context id. Removal matches on it rather than the
-    loose :data:`KAGURA_HOOK_MARKER`, so a user's own ``kagura ...`` hook or a
-    hand-written command file is never removed.
+    Everything before the context id; unchanged since the SDK first wrote
+    them (#49), so it matches every SDK-written version. Hook install and
+    removal, and command-file removal, match on it rather than the loose
+    :data:`KAGURA_HOOK_MARKER`, so a user's own ``kagura ...`` hook is never
+    replaced or removed, nor a hand-written command file removed.
     """
     return template.split("{context_id}", 1)[0]
 
@@ -645,7 +736,7 @@ def _install_hooks(
             "type": "command",
             "command": SESSIONSTART_HOOK_COMMAND.format(context_id=context_id),
         }
-        _upsert_hook_entry(session_start_list, kagura_session_hook)
+        _upsert_hook_entry(session_start_list, kagura_session_hook, SESSIONSTART_HOOK_COMMAND)
 
     if sync:
         post_tool_list = hooks.setdefault("PostToolUse", [])
@@ -653,7 +744,9 @@ def _install_hooks(
             "type": "command",
             "command": POSTTOOLUSE_HOOK_COMMAND.format(context_id=context_id),
         }
-        _upsert_hook_entry(post_tool_list, kagura_post_hook, matcher="Write|Edit")
+        _upsert_hook_entry(
+            post_tool_list, kagura_post_hook, POSTTOOLUSE_HOOK_COMMAND, matcher="Write|Edit"
+        )
 
     _write_json(path, existing)
     return path
@@ -662,13 +755,19 @@ def _install_hooks(
 def _upsert_hook_entry(
     hook_list: list[dict[str, Any]],
     new_hook: dict[str, Any],
+    template: str,
     matcher: str | None = None,
 ) -> None:
-    """Insert or update a Kagura hook in a hook event list."""
+    """Insert the SDK hook written from ``template``, or update the one already there.
+
+    The existing hook is found by :func:`_sdk_prefix`, the same test removal
+    uses, so a user's own ``kagura ...`` hook is left alone.
+    """
+    prefix = _sdk_prefix(template)
     for entry in hook_list:
         entry_hooks = entry.get("hooks", [])
         for i, h in enumerate(entry_hooks):
-            if _is_kagura_hook(h):
+            if isinstance(h, dict) and str(h.get("command", "")).startswith(prefix):
                 entry_hooks[i] = new_hook
                 if matcher:
                     entry["matcher"] = matcher
@@ -712,11 +811,15 @@ def _remove_sdk_hook(settings: dict[str, Any], event: str, template: str) -> boo
     return removed
 
 
-def _remove_disabled_hooks(project: Path, extras: _Extras, non_interactive: bool) -> None:
-    """Remove the SDK hooks ``extras`` turns off, asking first unless ``-y``."""
+def _remove_disabled_hooks(project: Path, extras: _Extras, non_interactive: bool) -> list[str]:
+    """Remove the SDK hooks ``extras`` turns off, asking first unless ``-y``.
+
+    Returns:
+        The hooks the user chose to keep (empty unless removal was declined).
+    """
     path = project / ".claude" / "settings.json"
     if not path.exists():
-        return
+        return []
     settings = _read_json_safe(path)
     targets = [
         (
@@ -733,12 +836,14 @@ def _remove_disabled_hooks(project: Path, extras: _Extras, non_interactive: bool
         if not enabled and _remove_sdk_hook(settings, event, template)
     ]
     if not removed:
-        return
+        return []
     what = " and ".join(removed)
     where = path.relative_to(project)
     if non_interactive or click.confirm(f"Remove the SDK's {what} from {where}?", default=True):
         _write_json(path, settings)
         click.echo(f"  Removed the {what} from {where}")
+        return []
+    return removed
 
 
 _SKILL_FILES = (("kagura-recall.md", SKILL_RECALL), ("kagura-remember.md", SKILL_REMEMBER))
@@ -758,8 +863,13 @@ def _install_skills(project_dir: Path, context_id: str) -> list[Path]:
     return paths
 
 
-def _remove_sdk_skills(project: Path, non_interactive: bool) -> None:
-    """Remove the SDK-written command files, asking first unless ``-y``."""
+def _remove_sdk_skills(project: Path, non_interactive: bool) -> list[str]:
+    """Remove the SDK-written command files, asking first unless ``-y``.
+
+    Returns:
+        The command files the user chose to keep (empty unless removal was
+        declined).
+    """
     commands_dir = project / ".claude" / "commands"
     paths = []
     for filename, template in _SKILL_FILES:
@@ -770,7 +880,7 @@ def _remove_sdk_skills(project: Path, non_interactive: bool) -> None:
         except (OSError, ValueError):
             continue
     if not paths:
-        return
+        return []
     names = ", ".join(f"/{p.stem}" for p in paths)
     if non_interactive or click.confirm(
         f"Remove the SDK's {names} command files (.claude/commands/)?", default=True
@@ -778,22 +888,27 @@ def _remove_sdk_skills(project: Path, non_interactive: bool) -> None:
         for path in paths:
             path.unlink()
             click.echo(f"  Removed {path.relative_to(project)}")
+        return []
+    return [f"{names} command files"]
 
 
 def _apply_extras(project: Path, context_id: str, extras: _Extras, non_interactive: bool) -> None:
-    """Install the enabled hooks and commands and remove the disabled SDK-written ones."""
+    """Install the enabled hooks and commands and remove the disabled SDK-written ones.
+
+    Items whose removal the user declines are recorded in ``extras.kept``.
+    """
     if extras.session_hook or extras.sync_hook:
         hooks_path = _install_hooks(
             project, context_id, session=extras.session_hook, sync=extras.sync_hook
         )
         click.echo(f"  Wrote {hooks_path.relative_to(project)}")
-    _remove_disabled_hooks(project, extras, non_interactive)
+    extras.kept += _remove_disabled_hooks(project, extras, non_interactive)
 
     if extras.commands:
         for p in _install_skills(project, context_id):
             click.echo(f"  Wrote {p.relative_to(project)}")
     else:
-        _remove_sdk_skills(project, non_interactive)
+        extras.kept += _remove_sdk_skills(project, non_interactive)
 
 
 def _check_gitignore(
@@ -805,6 +920,15 @@ def _check_gitignore(
     except FileNotFoundError:
         return list(secret_files)
     return [f for f in secret_files if f not in content]
+
+
+def _warn_tools_allowlist(mcp_url: str, tool_profile: str | None) -> None:
+    """Warn that ``--tool-profile`` has no effect on a URL with a ``?tools=`` allowlist."""
+    if tool_profile is not None and mcp_url_has_tools_allowlist(mcp_url):
+        click.echo(
+            "\n  Warning: the MCP URL has a ?tools= allowlist, which the server applies\n"
+            f"  instead of --tool-profile {tool_profile}."
+        )
 
 
 def _validate_context_id(context_id: str) -> None:
@@ -882,6 +1006,7 @@ def run_setup_claude(
     resolved_mcp_url = _prompt_mcp_url(resolved_mcp_url, non_interactive)
 
     # 3. Where the entry goes — settled before any request or write
+    _warn_tools_allowlist(resolved_mcp_url, tool_profile)
     upstream_url = mcp_url_with_query(
         resolved_mcp_url, guardrails=guardrails, tool_profile=tool_profile
     )
@@ -942,7 +1067,7 @@ def run_setup_claude(
     click.echo(f"  Wrote {kagura_path.relative_to(project)}")
 
     click.echo(f"  {_write_mcp_entry(project, plan)}")
-    _echo_hidden(plan)
+    _echo_plan_notes(plan)
     _apply_extras(project, resolved_context_id, extras, non_interactive)
 
     if plugin_id is not None:
@@ -1026,6 +1151,7 @@ def _run_setup_claude_oauth(
             "  installed (pip install kagura-memory)."
         )
 
+    _warn_tools_allowlist(creds.mcp_url, tool_profile)
     entry = _stdio_entry(profile, guardrails=guardrails, tool_profile=tool_profile)
     plan = _plan_mcp_entry(project, scope, entry, non_interactive)
 
@@ -1074,7 +1200,7 @@ def _run_setup_claude_oauth(
 
     server_command = shlex.join([MCP_PROXY_COMMAND, *entry["args"]])
     click.echo(f"  {_write_mcp_entry(project, plan)} (stdio: {server_command})")
-    _echo_hidden(plan)
+    _echo_plan_notes(plan)
     _apply_extras(project, resolved_context_id, extras, non_interactive)
 
     # The installed hooks shell out to `kagura recall` / `kagura remember`,
