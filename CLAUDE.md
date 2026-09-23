@@ -11,6 +11,8 @@ Python SDK for Kagura Memory Cloud. Seven clients:
 - `AgentsClient` — REST client for the agent control plane: bootstrap (`POST /api/v1/agents/{agent_id}/bootstrap`) + registry/binding CRUD (owner/admin; server v0.49.0+)
 - `MemoryClient` — REST client for tool guardrails: `load_guardrails` (`POST /api/v1/memory/guardrails`) + the `AGENTS.md` digest (`GET /api/v1/memory/guardrails/digest`) for API-key-only hooks and scripts (server v0.74.0+)
 
+Checked against memory-cloud up to **v0.76.0** (production). `MIN_SERVER_VERSION` stays **0.17.1** and is advisory; newer surfaces carry their own server floor (README compatibility table).
+
 ## Development Workflow
 
 See `.claude/rules/development-workflow.md` for full flow (auto-loaded).
@@ -32,6 +34,7 @@ uv run pyright src/              # Type check
 
 - Context management: `create_context`, `update_context` (with `resource_id`, `is_public`)
 - Search tuning: `update_search_config` (semantic/bm25 weights, reranking). `recall(use_rerank=...)` is tri-state (server v0.69.0+, #251): `None` (default) omits the arg so the context's `search_config.use_rerank` applies (with `context_ids`, the first context's), `True` requests reranking (context must enable it), `False` is SENT to skip it; CLI `kagura recall --rerank/--no-rerank`
+- **Server info + docs realign** (v0.39.0, #257): `get_server_info().features` types every v0.76.0 `/api/v1/system/info` flag (`neural_memory`, `research_tools`, `plan_page`, `byok`, `cost_display`, `managed_connectors`, `managed_llm`, `referrals`, `beta_invites`, `reranking`) as `bool = False` (`False` = not reported) with `extra="allow"` (newer flags → `features.model_extra`); `ServerInfo.search_defaults` = reranker defaults for new contexts (server v0.69.0+). Docstrings track the server: `load_pinned` → `memories` (never `results`); forget retention is per deployment (`CLEANUP_DELETED_MEMORIES_RETENTION_DAYS`, v0.66.0+) and `forget(query=...)` is refused while recall is `degraded`; recall `degraded`/`degraded_reason`, `tag_suggestions`, `filters.tags_normalize`, empty optional keys omitted (v0.73.0+); `merge_contexts` counts rows + `pending_embedding`; public contexts/resources/tokens plan-gated (v0.68.0+); reranker providers are `voyage|cohere|self_hosted` only
 - Resource ingestion: `setup_resource`, `ingest_event`, `ingest_events`
 - Resource stats/schema: `get_resource_impact`, `get_resource_schema`
 - **File uploads**: `FilesClient.upload/download_url/delete/list` with R2 sha256 binding (server v0.15.1+); optional `binding_context_id` binds a file to an owning context for ACL + nullable `FileObject.context_id` (server v0.41.0+). Against v0.41.0 the file-id endpoints require `workspace_id` on the query, so `download_url`/`delete` take a **required** `context_id` and the PUT sends the checksum header only when the presign signed it (#226)
