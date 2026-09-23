@@ -23,6 +23,7 @@ import pytest
 from click.testing import CliRunner
 
 from kagura_memory import setup_harness
+from kagura_memory._auth import _OAuthAuth, _resolve_profile_auth
 from kagura_memory.auth.credentials import CredentialsFile, save_credentials_file
 from kagura_memory.cli import main
 from kagura_memory.exceptions import KaguraNotFoundError
@@ -61,6 +62,8 @@ class Recorder:
         self.detect_out: dict[str, str] = {}
         #: Return code per argv[1:3] joined, e.g. {"mcp add": 1}.
         self.returncodes: dict[str, int] = {}
+        #: False: `hermes mcp add` exits 0 without saving (a cancelled overwrite).
+        self.hermes_saves = True
 
     def __call__(self, argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         self.calls.append((list(argv), kwargs))
@@ -70,6 +73,9 @@ class Recorder:
             out = self.detect_out.get(cli)
             return subprocess.CompletedProcess(argv, 0 if out else 1, out or "", "")
         code = self.returncodes.get(sub, 0)
+        if cli == "hermes" and sub == "mcp add" and code == 0 and self.hermes_saves:
+            transport = argv[argv.index("--url" if "--url" in argv else "--command") + 1]
+            self.detect_out[cli] = f"  {argv[3]}    {transport}   all\n"
         return subprocess.CompletedProcess(argv, code, "", "boom" if code else "")
 
     def argvs(self) -> list[list[str]]:
@@ -146,10 +152,12 @@ def digest(monkeypatch):
     class Fake:
         text = EXPORT_BLOCK
         error: Exception | None = None
+        #: (profile name, or the static key's source; context id)
         calls: list[tuple[str | None, str]] = []
 
-    async def fetch(profile, context_id):
-        Fake.calls.append((profile, context_id))
+    async def fetch(auth, context_id):
+        who = auth.oauth._state.profile_name if isinstance(auth, _OAuthAuth) else auth.source
+        Fake.calls.append((who, context_id))
         if Fake.error is not None:
             raise Fake.error
         return GuardrailDigest(
@@ -181,10 +189,11 @@ def codex_config(home: Path) -> Path:
     return path
 
 
-def turn_on_codex_hooks(home: Path) -> None:
+def turn_on_codex_hooks(home: Path, **settings: Any) -> None:
     data = home / ".codex" / "plugins" / "data" / "kagura-memory-kagura-memory-cloud"
     data.mkdir(parents=True)
-    (data / "config.json").write_text(json.dumps({"context_id": CTX}), encoding="utf-8")
+    body = json.dumps({"context_id": CTX, **settings})
+    (data / "config.json").write_text(body, encoding="utf-8")
 
 
 # =============================================================================
@@ -209,6 +218,25 @@ class TestCodex:
         [argv] = recorder.mutating()
         assert argv[argv.index("--") + 1 :] == [PROXY, "--profile", "work", "--guardrails", CTX]
         assert "editor list you control" in result.output
+        assert f"guardrail digest of context\n  {CTX} in the MCP" in result.output
+        assert (
+            f"KAGURA_PROFILE=work kagura guardrails digest {CTX} --target instructions"
+            in result.output
+        )
+
+    def test_url_form_preview_runs_on_the_entry_key(self, on_path, recorder):
+        on_path("codex")
+        result = run(
+            "codex",
+            *("--url-form", "--mcp-url", MCP_URL, "--api-key-env", "KAGURA_CODEX_KEY"),
+            *("--context-id", CTX, "-y"),
+        )
+        assert result.exit_code == 0, result.output
+        assert (
+            'KAGURA_API_KEY="${KAGURA_CODEX_KEY}" '
+            f"KAGURA_MCP_URL='{MCP_URL}?guardrails={CTX}' "
+            f"kagura guardrails digest {CTX} --target instructions"
+        ) in result.output
 
     def test_explicit_guardrails_wins_over_context_id(self, on_path, recorder):
         on_path("codex")
@@ -319,13 +347,54 @@ class TestCodex:
         assert "re-run with --url-form" in result.output
         assert recorder.mutating()[0][-3:] == [PROXY, "--profile", "default"]
 
-    def test_stdio_with_hooks_on_asks_and_can_be_declined(self, env, on_path, recorder):
+    def test_stdio_with_hooks_on_asks_and_can_be_declined(self, env, on_path, recorder, tty):
         on_path("codex")
         turn_on_codex_hooks(env)
         result = run("codex", "--profile", "default", input="n\n")
         assert result.exit_code == 1
         assert "Write the stdio entry anyway?" in result.output
         assert recorder.mutating() == []
+
+    def test_stdio_with_hooks_on_without_a_terminal_keeps_stdio(self, env, on_path, recorder):
+        on_path("codex")
+        turn_on_codex_hooks(env)
+        result = run("codex", "--profile", "default")  # no -y, stdin at EOF
+        assert result.exit_code == 0, result.output
+        assert "re-run with --url-form" in result.output
+        assert "Write the stdio entry anyway?" not in result.output
+        assert recorder.mutating()[0][-3:] == [PROXY, "--profile", "default"]
+
+    def test_hooks_question_is_skipped_when_the_existing_entry_stops_setup(
+        self, env, on_path, recorder, tty
+    ):
+        on_path("codex")
+        turn_on_codex_hooks(env)
+        codex_config(env).write_text(
+            '[mcp_servers.kagura-memory]\nurl = "https://x/mcp"\nbearer_token_env_var = "K"\n',
+            encoding="utf-8",
+        )
+        result = run("codex", "--profile", "default")
+        assert result.exit_code == 1
+        assert "guardrail hooks read their credential" in result.output
+        assert "Write the stdio entry anyway?" not in result.output
+        assert "re-run with --force" in result.output
+
+    def test_hooks_reading_another_table_leave_this_entry_alone(self, env, on_path, recorder):
+        on_path("codex")
+        turn_on_codex_hooks(env, mcp_server="kagura-work")
+        result = run("codex", "--url-form", "--mcp-url", MCP_URL, "--context-id", CTX, "-y")
+        assert result.exit_code == 0, result.output
+        [argv] = recorder.mutating()
+        assert argv[argv.index("--url") + 1] == f"{MCP_URL}?guardrails={CTX}"
+        stdio = run("codex", "--profile", "default", "--force", "-y")
+        assert "turned on here" not in stdio.output
+
+    def test_hooks_named_table_is_the_one_warned_about(self, env, on_path, recorder):
+        on_path("codex")
+        turn_on_codex_hooks(env, mcp_server="kagura-work")
+        result = run("codex", "--profile", "default", "--name", "kagura-work", "-y")
+        assert result.exit_code == 0, result.output
+        assert "turned on here for the kagura-work entry" in result.output
 
     def test_without_codex_prints_the_table_and_edits_nothing(self, env, recorder):
         result = run("codex", "--profile", "default", "--context-id", CTX, "-y")
@@ -400,13 +469,34 @@ class TestHermes:
         on_path("hermes")
         # -y alone suffices even with a terminal; without -y, no terminal suffices.
         monkeypatch.setattr(setup_harness, "_stdin_is_tty", lambda: bool(flags))
-        result = run("hermes", "--profile", "default", *flags, input="n\n")
+        # No input: a prompt would hit EOF and abort (an agent's shell, CI, </dev/null).
+        result = run("hermes", "--profile", "default", "--context-id", CTX, *flags)
         assert result.exit_code == 0, result.output
+        assert "Aborted" not in result.output
+        assert "Write the guardrail export block there?" not in result.output
         assert recorder.mutating() == []
         assert "~/.hermes/config.yaml" in result.output
         assert "mcp_servers:\n      kagura-memory:" in result.output
         assert f'command: "{PROXY}"' in result.output
         assert 'args: ["--profile", "default"]' in result.output
+        assert "Re-run with --agents-md --context-id <id>" in result.output
+
+    def test_cancelled_add_saves_nothing_and_skips_the_export(self, on_path, recorder, tty):
+        on_path("hermes")
+        recorder.hermes_saves = False
+        result = run("hermes", "--profile", "default", "--context-id", CTX, "--agents-md")
+        assert result.exit_code == 1
+        assert "cancelled or failed there, so nothing was saved" in result.output
+        assert "skipped the AGENTS.md export" in result.output
+        assert not Path("AGENTS.md").exists()
+
+    def test_kept_url_entry_is_not_reported_as_the_new_one(self, on_path, recorder, tty):
+        on_path("hermes")
+        recorder.hermes_saves = False
+        recorder.detect_out["hermes"] = "  kagura-memory    https://x/mcp   all\n"
+        result = run("hermes", "--profile", "default", "--force", input="n\n")
+        assert result.exit_code == 1
+        assert "shows no new kagura-memory entry" in result.output
 
     def test_printed_url_block_references_the_hermes_variable(self, recorder):
         result = run("hermes", "--url-form", "--mcp-url", MCP_URL, "-y")
@@ -467,10 +557,11 @@ class TestHermes:
 
     def test_offer_uses_the_context_prompt(self, on_path, tty, digest):
         on_path("hermes")
-        # Accept the export, then pick context 2 ("ops") from the list.
-        result = run("hermes", "--profile", "default", input="y\n2\n")
+        # Accept the export; Enter alone picks nothing; then context 2 ("ops").
+        result = run("hermes", "--profile", "default", input="y\n\n2\n")
         assert result.exit_code == 0, result.output
         assert digest.calls == [("default", OTHER_CTX)]
+        assert "Create new context" not in result.output
 
     def test_no_offer_with_y(self, digest):
         result = run("hermes", "--profile", "default", "--context-id", CTX, "-y")
@@ -597,6 +688,14 @@ class TestOpenClaw:
     def test_guardrails_off_is_a_usage_error(self):
         assert run("openclaw", "--profile", "default", "--guardrails", "off", "-y").exit_code == 2
 
+    def test_without_a_terminal_adds_and_skips_the_offer(self, on_path, recorder):
+        on_path("openclaw")
+        result = run("openclaw", "--profile", "default", "--context-id", CTX)  # stdin at EOF
+        assert result.exit_code == 0, result.output
+        assert "Aborted" not in result.output
+        assert recorder.mutating()[0][1:3] == ["mcp", "add"]
+        assert "~/.openclaw/workspace/AGENTS.md,\n  which OpenClaw loads" in result.output
+
     def test_guardrails_context_warns_and_picks_the_export_context(
         self, on_path, recorder, env, digest
     ):
@@ -647,8 +746,9 @@ class TestSharedFlags:
     def test_bad_name(self, harness):
         assert run(harness, "--profile", "default", "--name", "a.b", "-y").exit_code == 2
 
-    def test_agents_md_with_y_needs_a_context(self, harness):
-        result = run(harness, "--profile", "default", "--agents-md", "-y")
+    @pytest.mark.parametrize("flags", [["-y"], []], ids=["-y", "no-tty"])
+    def test_agents_md_without_prompts_needs_a_context(self, harness, flags):
+        result = run(harness, "--profile", "default", "--agents-md", *flags)
         assert result.exit_code == 2
         assert "--context-id" in result.output
 
@@ -797,7 +897,9 @@ class TestExport:
         path = tmp_path / "AGENTS.md"
         result = run(*self.args(path))
         assert result.exit_code == 1
-        assert "not visible to this credential" in result.output
+        assert "not visible to this credential on\n  https://memory.kagura-ai.com" in (
+            result.output
+        )
         assert "The MCP entry is set up" in result.output
         assert not path.exists()
 
@@ -992,7 +1094,16 @@ def test_unknown_context_name_fails_before_writing(on_path, recorder):
     result = run("codex", "--profile", "default", "--context-id", "nope", "-y")
     assert result.exit_code == 1
     assert "No context 'nope'" in result.output
+    assert "Using context: nope" not in result.output
     assert recorder.mutating() == []
+
+
+def test_context_prompt_with_no_visible_context(on_path, connection, tty):
+    on_path("openclaw")
+    connection.return_value = {"count": 0, "contexts": []}
+    result = run("openclaw", "--profile", "default", "--agents-md")
+    assert result.exit_code == 1
+    assert "can see no context" in result.output
 
 
 @pytest.mark.parametrize("harness", ["hermes", "openclaw"])
@@ -1052,10 +1163,15 @@ def test_export_action_for_each_file_state(tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("flags", "expected"),
-    [([], "offered when setup runs"), (["-y"], "not offered with -y")],
+    ("flags", "terminal", "expected"),
+    [
+        ([], True, "offered when setup runs"),
+        (["-y"], True, "not offered with -y"),
+        ([], False, "not offered without a terminal"),
+    ],
 )
-def test_dry_run_mentions_the_export_offer(flags, expected):
+def test_dry_run_mentions_the_export_offer(flags, terminal, expected, monkeypatch):
+    monkeypatch.setattr(setup_harness, "_stdin_is_tty", lambda: terminal)
     result = run("openclaw", "--profile", "default", "--dry-run", *flags)
     assert result.exit_code == 0, result.output
     assert "~/.openclaw/workspace/AGENTS.md" in result.output
@@ -1131,7 +1247,7 @@ def test_harness_command_that_cannot_start_is_reported(on_path, monkeypatch):
     assert "Permission denied" in result.output
 
 
-def test_interactive_export_without_profile_or_context_is_a_usage_error(digest):
+def test_interactive_export_without_profile_or_context_is_a_usage_error(digest, tty):
     result = run("openclaw", "--url-form", "--mcp-url", MCP_URL, "--agents-md", input="\n")
     assert result.exit_code == 2
     assert "The AGENTS.md export needs --context-id" in result.output
@@ -1144,8 +1260,103 @@ def test_url_form_without_profile_exports_with_the_default_credential(on_path, d
     args = ("--url-form", "--mcp-url", MCP_URL, "--context-id", CTX, "--agents-md", str(path))
     result = run("codex", *args, "-y")
     assert result.exit_code == 0, result.output
-    assert digest.calls == [(None, CTX)]
-    assert f"kagura guardrails digest {CTX} --out" in result.output
+    # The CLI chain: here, the credentials file's default profile.
+    assert digest.calls == [("default", CTX)]
+    assert f"\n    kagura guardrails digest {CTX} --out" in result.output
+
+
+@pytest.mark.parametrize("key", [True, False], ids=["KAGURA_API_KEY", "oauth-default"])
+def test_url_form_export_credential_for_another_server_writes_nothing(
+    on_path, recorder, digest, tmp_path, monkeypatch, key
+):
+    if key:
+        monkeypatch.setenv("KAGURA_API_KEY", API_KEY)  # KAGURA_MCP_URL unset: the cloud host
+    on_path("openclaw")
+    path = tmp_path / "AGENTS.md"
+    self_hosted = "https://kagura.example.com/mcp/w/ws-1"
+    args = ("--url-form", "--mcp-url", self_hosted, "--context-id", CTX, "--agents-md", str(path))
+    result = run("openclaw", *args, "-y")
+    assert result.exit_code == 1
+    assert "Nothing was written" in result.output
+    assert "https://memory.kagura-ai.com" in result.output
+    assert "https://kagura.example.com" in result.output
+    assert API_KEY not in result.output
+    assert recorder.mutating() == []
+    assert digest.calls == []
+
+
+def test_url_form_profile_on_another_server_is_a_usage_error(recorder):
+    self_hosted = "https://kagura.example.com/mcp/w/ws-1"
+    result = run("codex", "--profile", "default", "--url-form", "--mcp-url", self_hosted, "-y")
+    assert result.exit_code == 2
+    assert "must be on the same server" in result.output
+    assert recorder.calls == []
+
+
+def test_url_form_profile_on_the_same_server_lists_its_contexts(on_path, recorder, connection):
+    on_path("codex")
+    result = run("codex", "--profile", "default", "--url-form", "--mcp-url", MCP_URL, "-y")
+    assert result.exit_code == 0, result.output
+    connection.assert_called_once()
+
+
+def test_profile_wins_over_kagura_api_key(on_path, digest, tmp_path, monkeypatch):
+    """The entry's kagura-mcp uses the profile alone, so the export does too."""
+    monkeypatch.setenv("KAGURA_API_KEY", API_KEY)
+    on_path("openclaw")
+    path = tmp_path / "AGENTS.md"
+    args = ("--profile", "work", "--context-id", CTX, "--agents-md", str(path), "-y")
+    result = run("openclaw", *args)
+    assert result.exit_code == 0, result.output
+    assert digest.calls == [("work", CTX)]
+    assert "KAGURA_API_KEY is set" not in result.output
+    assert (
+        f"env -u KAGURA_API_KEY KAGURA_PROFILE=work kagura guardrails digest {CTX} --out"
+        in result.output
+    )
+
+
+@pytest.mark.asyncio
+async def test_profile_check_client_ignores_kagura_api_key(monkeypatch):
+    from kagura_memory.auth.credentials import KaguraOAuth
+    from kagura_memory.setup_claude import _make_client
+
+    monkeypatch.setenv("KAGURA_API_KEY", API_KEY)
+    async with _make_client(None, None, "work") as client:
+        assert isinstance(client._client.auth, KaguraOAuth)
+        assert "Authorization" not in client._client.headers
+        assert client.mcp_url == "https://memory.kagura-ai.com/mcp"
+
+
+def test_profile_auth_for_a_missing_profile():
+    from kagura_memory.exceptions import KaguraAuthError
+
+    with pytest.raises(KaguraAuthError, match="kagura auth login --profile ghost"):
+        _resolve_profile_auth("ghost")
+
+
+@pytest.mark.parametrize("url_form", [False, True], ids=["stdio", "url-form"])
+def test_dry_run_with_a_context_name_shows_a_placeholder(on_path, recorder, connection, url_form):
+    on_path("codex")
+    form = ["--url-form", "--mcp-url", MCP_URL] if url_form else []
+    result = run("codex", "--profile", "default", *form, "--context-id", "proj", "--dry-run")
+    assert result.exit_code == 0, result.output
+    connection.assert_not_called()
+    placeholder = "<UUID of context proj>"
+    assert "--guardrails proj" not in result.output
+    assert "guardrails=proj" not in result.output
+    if url_form:
+        assert f'url = "{MCP_URL}?guardrails={placeholder}"' in result.output
+    else:
+        assert f"--guardrails '{placeholder}'" in result.output
+        assert f'args = ["--profile", "default", "--guardrails", "{placeholder}"]' in result.output
+
+
+def test_dry_run_with_a_context_uuid_shows_it(on_path):
+    on_path("codex")
+    result = run("codex", "--profile", "default", "--context-id", CTX.upper(), "--dry-run")
+    assert result.exit_code == 0, result.output
+    assert f"--guardrails {CTX}" in result.output
 
 
 def test_unexpected_error_becomes_setup_failed(monkeypatch):
@@ -1166,9 +1377,33 @@ def test_codex_hooks_message_names_codex_home(tmp_path, monkeypatch, on_path):
     (data / "config.json").write_text("{}", encoding="utf-8")
     result = run("codex", "--profile", "default", "-y")
     assert result.exit_code == 0, result.output
-    assert f"a config.json under {codex_home / 'plugins' / 'data'}/kagura-memory-*/" in (
-        result.output
-    )
+    assert f"{codex_home / 'plugins' / 'data'}/kagura-memory-*/" in result.output
+
+
+@pytest.mark.parametrize(
+    ("body", "on"),
+    [
+        (b"{}", True),
+        (b'{"mcp_server": null}', True),
+        (b'{"mcp_server": "kagura-memory"}', True),
+        (b'{"mcp_server": "other"}', False),
+        (b'{"mcp_server": ""}', False),
+        (b"[]", False),
+        (b"not json", False),
+        (b"\xff\xfe", False),
+        (b'{"x": "' + b"a" * (64 * 1024) + b'"}', False),
+    ],
+)
+def test_codex_hooks_follow_the_mcp_server_setting(env, body, on):
+    data = env / ".codex" / "plugins" / "data" / "kagura-memory-x"
+    data.mkdir(parents=True)
+    (data / "config.json").write_bytes(body)
+    assert setup_harness.codex_hooks_enabled("kagura-memory") is on
+
+
+def test_codex_hooks_config_that_is_a_directory_is_ignored(env):
+    (env / ".codex" / "plugins" / "data" / "kagura-memory-x" / "config.json").mkdir(parents=True)
+    assert setup_harness.codex_hooks_enabled("kagura-memory") is False
 
 
 def test_codex_url_form_block_without_codex():
@@ -1202,7 +1437,7 @@ def test_lookups_use_path_and_stdin(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_fetch_digest_uses_the_profile(monkeypatch):
+async def test_fetch_digest_uses_the_given_credential(monkeypatch):
     class Client:
         async def __aenter__(self):
             return self
@@ -1215,11 +1450,12 @@ async def test_fetch_digest_uses_the_profile(monkeypatch):
 
     seen = []
 
-    def from_mcp_url(**kwargs):
-        seen.append(kwargs)
+    def from_resolved_auth(auth):
+        seen.append(auth)
         return Client()
 
-    monkeypatch.setattr(setup_harness.MemoryClient, "from_mcp_url", from_mcp_url)
-    digest = await REAL_FETCH_DIGEST("work", CTX)
+    monkeypatch.setattr(setup_harness.MemoryClient, "_from_resolved_auth", from_resolved_auth)
+    auth = _resolve_profile_auth("work")
+    digest = await REAL_FETCH_DIGEST(auth, CTX)
     assert digest.text == EXPORT_BLOCK
-    assert seen == [{"profile": "work"}]
+    assert seen == [auth]

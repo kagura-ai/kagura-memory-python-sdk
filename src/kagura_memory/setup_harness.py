@@ -28,6 +28,14 @@ Rules the three commands share:
   entry holds none, and the URL form names the variable the key is read
   from. An existing entry is read only to say what kind it is; nothing read
   from it is echoed.
+* **Prompts need a terminal.** Setup asks only with a terminal on stdin and
+  without ``-y``; otherwise (an agent's shell, CI, ``</dev/null``) it runs
+  as ``-y`` does and never stops at a prompt.
+* **The entry's credential, on the entry's server.** The profile check, the
+  context lookup and the export use the named profile alone, never
+  ``KAGURA_API_KEY``, since the stdio entry's ``kagura-mcp`` uses nothing
+  else. A URL form entry's context and export must come from a credential
+  on its own server: a context id belongs to one deployment.
 * **Guardrails.** Codex reads the MCP ``instructions``, so it gets the
   ``--guardrails`` lane. Hermes and OpenClaw do not: they rely on the
   ``guardrails`` block of ``get_context_info``, which ``--guardrails off``
@@ -49,18 +57,25 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, ClassVar, Literal
-from urllib.parse import parse_qsl, urlsplit
+from urllib.parse import quote_plus, urlsplit, urlunsplit
 
 import click
 
+from ._auth import _SOURCE_LABEL, _OAuthAuth, _resolve_auth, _resolve_profile_auth, _StaticAuth
 from ._guardrail_export import has_guardrail_block, write_guardrail_block
-from ._http import mcp_url_with_query, normalize_uuid, validate_https_url
+from ._http import (
+    base_url_from_mcp,
+    mcp_url_guardrails_off,
+    mcp_url_with_query,
+    normalize_uuid,
+    validate_https_url,
+)
 from .auth.credentials import CredentialsFile
 from .claude_code import MCP_PROXY_COMMAND, _path_label, _runs_proxy, holds_credential
-from .exceptions import KaguraNotFoundError, _exc_message
+from .exceptions import KaguraAuthError, KaguraNotFoundError, _exc_message
 from .memory_client import MemoryClient
 from .models import GuardrailDigest
-from .setup_claude import _load_profile, _select_or_create_context, _stdio_entry, _verify_profile
+from .setup_claude import _load_profile, _stdio_entry, _verify_profile
 
 HarnessName = Literal["codex", "hermes", "openclaw"]
 
@@ -166,7 +181,7 @@ def _classify(entry: dict[str, Any]) -> _Existing:
     if entry.get("bearer_token_env_var") or authorization("env_http_headers"):
         return _Existing(_ENV_BEARER, url_credential=True)
     if authorization("headers"):
-        static = holds_credential({"headers": entry["headers"]})
+        static = holds_credential(entry)
         kind = "URL with a static Authorization header" if static else _ENV_BEARER
         return _Existing(kind, url_credential=True)
     if authorization("http_headers"):
@@ -207,6 +222,10 @@ class _Harness(ABC):
     reads_instructions: ClassVar[bool] = False
     #: How much of a context file the harness loads, and in which unit.
     agents_md_cap: ClassVar[tuple[int, str] | None] = None
+    #: :meth:`detect` reads the config file, so it works without the CLI.
+    detects_from_config: ClassVar[bool] = False
+    #: The harness names the URL form's key variable itself (no ``--api-key-env``).
+    names_key_env: ClassVar[bool] = False
 
     @abstractmethod
     def config_path(self) -> Path:
@@ -248,20 +267,65 @@ class _Harness(ABC):
         """Harness-specific lines for the end of the run."""
         return []
 
+    def export_notes(self, path: Path) -> list[str]:
+        """Harness-specific lines after the AGENTS.md export wrote ``path``."""
+        return []
+
+    def plugin_hooks_on(self, name: str) -> bool:
+        """True when a plugin's hooks read their credential from the ``name`` entry."""
+        return False
+
+    def warn_stdio_entry(
+        self, name: str, existing: _Existing | None, hooks_on: bool, *, ask: bool
+    ) -> None:
+        """Say what a stdio entry costs here; ``ask`` lets the user stop (ClickException)."""
+
+    def saved(self, name: str, exe: str, entry: _Entry) -> bool:
+        """After the add command exited 0: whether ``entry`` is now saved as ``name``."""
+        return True
+
 
 def codex_home() -> Path:
     """``$CODEX_HOME``, else ``~/.codex``."""
     return Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
 
 
-def codex_hooks_enabled() -> bool:
-    """True when the memory-cloud ``kagura-memory`` Codex plugin's hooks are turned on.
+#: The ``[mcp_servers.<name>]`` table the Codex plugin's hooks read when their
+#: config.json names none (memory-cloud ``_codex_adapter.DEFAULT_MCP_SERVER``).
+CODEX_HOOKS_DEFAULT_SERVER = "kagura-memory"
+# The hooks treat a larger config.json as unreadable.
+_CODEX_HOOKS_CONFIG_CAP = 64 * 1024
+
+
+def codex_hooks_enabled(name: str) -> bool:
+    """True when the memory-cloud ``kagura-memory`` Codex plugin's hooks read the ``name`` entry.
 
     Turning them on writes ``config.json`` into the plugin's data directory
-    (memory-cloud ``docs/getting-started.md``); without it they do nothing.
+    (memory-cloud ``docs/getting-started.md``); its ``mcp_server`` names the
+    ``[mcp_servers.<name>]`` table they take their credential from
+    (:data:`CODEX_HOOKS_DEFAULT_SERVER` when absent). A file the hooks cannot
+    use (unreadable, over 64 KiB, not a JSON object) leaves them idle, as it
+    does in the hooks themselves. Nothing read from it is echoed.
+
+    Args:
+        name: The MCP server name setup writes.
+
+    Returns:
+        Whether some config.json turns the hooks on for ``name``.
     """
-    data = codex_home() / "plugins" / "data"
-    return any(p.is_file() for p in data.glob("kagura-memory-*/config.json"))
+    for path in (codex_home() / "plugins" / "data").glob("kagura-memory-*/config.json"):
+        try:
+            with path.open("rb") as f:
+                raw = f.read(_CODEX_HOOKS_CONFIG_CAP + 1)
+            settings = json.loads(raw) if len(raw) <= _CODEX_HOOKS_CONFIG_CAP else None
+        except (OSError, ValueError):
+            continue
+        if not isinstance(settings, dict):
+            continue
+        server = settings.get("mcp_server")
+        if (CODEX_HOOKS_DEFAULT_SERVER if server is None else server) == name:
+            return True
+    return False
 
 
 class _Codex(_Harness):
@@ -270,6 +334,7 @@ class _Codex(_Harness):
     cli = "codex"
     reads_instructions = True
     agents_md_cap = (32 * 1024, "bytes")
+    detects_from_config = True
 
     def config_path(self) -> Path:
         return codex_home() / "config.toml"
@@ -326,6 +391,14 @@ class _Codex(_Harness):
     def notes(self) -> list[str]:
         return ["Restart Codex (or start a new session) to load the entry."]
 
+    def plugin_hooks_on(self, name: str) -> bool:
+        return codex_hooks_enabled(name)
+
+    def warn_stdio_entry(
+        self, name: str, existing: _Existing | None, hooks_on: bool, *, ask: bool
+    ) -> None:
+        _codex_hook_warning(name, existing, hooks_on, ask=ask)
+
 
 def hermes_home() -> Path:
     """Where Hermes keeps ``config.yaml`` and ``.env`` for the active Hermes profile.
@@ -376,6 +449,7 @@ class _Hermes(_Harness):
     title = "Hermes Agent"
     cli = "hermes"
     interactive_add = True
+    names_key_env = True
 
     def config_path(self) -> Path:
         return hermes_home() / "config.yaml"
@@ -392,6 +466,13 @@ class _Hermes(_Harness):
                 is_url = parts[1].startswith(("http://", "https://"))
                 return _Existing("URL" if is_url else "stdio")
         return None
+
+    def saved(self, name: str, exe: str, entry: _Entry) -> bool:
+        # `hermes mcp add` exits 0 when the user cancels an overwrite, declines
+        # to save after a failed probe, or hits a validation error; only the
+        # list tells. A same-form entry that was kept looks the same, though.
+        found = self.detect(name, exe)
+        return found is not None and found.kind == ("stdio" if entry.command else "URL")
 
     def add_args(self, name: str, entry: _Entry) -> list[str]:
         if entry.command is not None:
@@ -434,6 +515,13 @@ class _Hermes(_Harness):
 
     def agents_md_path(self) -> Path:
         return hermes_context_file(Path.cwd())
+
+    def export_notes(self, path: Path) -> list[str]:
+        return [
+            "Hermes scans context files for prompt injection and skips a file it flags;\n"
+            f"  if it reports {path.name} as blocked, delete the block between the\n"
+            "  kagura-memory:guardrails markers."
+        ]
 
 
 def openclaw_config_path() -> Path:
@@ -535,23 +623,69 @@ def _export_action(path: Path) -> str:
     return "replace the block in" if has_guardrail_block(text) else "append the block to"
 
 
-async def _fetch_digest(profile: str | None, context_id: str) -> GuardrailDigest:
-    async with MemoryClient.from_mcp_url(profile=profile) as client:
+def _deployment(mcp_url: str) -> str:
+    """The server an MCP URL belongs to: its REST base URL, scheme and host lower-cased."""
+    parts = urlsplit(base_url_from_mcp(mcp_url))
+    return urlunsplit(parts._replace(scheme=parts.scheme.lower(), netloc=parts.netloc.lower()))
+
+
+def _export_auth(profile: str | None, entry_url: str | None) -> _StaticAuth | _OAuthAuth:
+    """The credential the AGENTS.md export fetches with; reads the credentials only.
+
+    With ``--profile``, that profile alone, never ``KAGURA_API_KEY``: the
+    stdio entry's ``kagura-mcp`` uses nothing else. Without it (``--url-form``
+    only), the CLI's usual chain, as ``kagura guardrails digest`` uses. A URL
+    form entry's server must be the credential's own: a context id belongs to
+    one deployment, and setup never sends a credential to another server.
+
+    Raises:
+        click.ClickException: There is no credential, or it is for another server.
+    """
+    try:
+        if profile is not None:
+            auth: _StaticAuth | _OAuthAuth = _resolve_profile_auth(profile)
+        else:
+            auth = _resolve_auth(api_key=None, mcp_url=None, profile=None)
+    except KaguraAuthError as e:
+        raise click.ClickException(
+            f"The AGENTS.md export has no credential: {_exc_message(e)}"
+        ) from e
+    if entry_url is not None and _deployment(auth.mcp_url) != _deployment(entry_url):
+        source = _SOURCE_LABEL["oauth" if isinstance(auth, _OAuthAuth) else auth.source]
+        raise click.ClickException(
+            f"Nothing was written: the AGENTS.md export would use the {source} credential,\n"
+            f"  which is for {_deployment(auth.mcp_url)}, but --mcp-url is on "
+            f"{_deployment(entry_url)}.\n"
+            "  Pass --profile with a login on that server, or set KAGURA_MCP_URL to it for\n"
+            "  KAGURA_API_KEY."
+        )
+    return auth
+
+
+async def _fetch_digest(auth: _StaticAuth | _OAuthAuth, context_id: str) -> GuardrailDigest:
+    async with MemoryClient._from_resolved_auth(auth) as client:
         return await client.get_guardrail_digest(context_id)
 
 
-def _refresh_command(
-    context_id: str, path: Path, profile: str | None, cf: CredentialsFile | None
-) -> str:
-    """``kagura guardrails digest … --out …``, naming the profile when it is not the default."""
-    command = shlex.join(["kagura", "guardrails", "digest", context_id, "--out", str(path)])
-    if profile is not None and cf is not None and profile != cf.default_profile:
-        command = f"KAGURA_PROFILE={shlex.quote(profile)} {command}"
+def _kagura_command(args: list[str], profile: str | None, cf: CredentialsFile | None) -> str:
+    """``kagura <args>``, to re-run later on the credential setup used.
+
+    Without a profile that is the CLI's usual chain. With one, it names the
+    profile when it is not the default, and unsets ``KAGURA_API_KEY`` when it
+    is set here: the CLI ranks that key above every profile.
+    """
+    command = shlex.join(["kagura", *args])
+    if profile is None or cf is None:
+        return command
+    if os.environ.get("KAGURA_API_KEY", "").strip():
+        return f"env -u KAGURA_API_KEY KAGURA_PROFILE={shlex.quote(profile)} {command}"
+    if profile != cf.default_profile:
+        return f"KAGURA_PROFILE={shlex.quote(profile)} {command}"
     return command
 
 
 def _write_export(
-    h: _Harness, path: Path, context_id: str, profile: str | None, cf: CredentialsFile | None
+    h: _Harness, path: Path, context_id: str, auth: _StaticAuth | _OAuthAuth, refresh: str
 ) -> None:
     """Fetch the export block and splice it into ``path``, replacing only the marked block.
 
@@ -562,15 +696,15 @@ def _write_export(
     label = _path_label(path)
     failed = "The MCP entry is set up, but the AGENTS.md export failed"
     try:
-        digest = asyncio.run(_fetch_digest(profile, context_id))
+        digest = asyncio.run(_fetch_digest(auth, context_id))
     except KaguraNotFoundError as e:
         raise click.ClickException(
-            f"{failed}: context {context_id} is not visible to this credential (404),\n"
-            f"  or the server is older than v0.74.0. Nothing was written to {label}."
+            f"{failed}: context {context_id} is not visible to this credential on\n"
+            f"  {_deployment(auth.mcp_url)} (404), or the server is older than v0.74.0.\n"
+            f"  Nothing was written to {label}."
         ) from e
     except Exception as e:
         raise click.ClickException(f"{failed}: {_exc_message(e)}") from e
-    refresh = _refresh_command(context_id, path, profile, cf)
     if not digest.text.strip():
         click.echo(
             f"\n  Context {context_id} has no tool guardrails this credential can see (none\n"
@@ -599,12 +733,8 @@ def _write_export(
                 f"  Warning: {label} is {size} {unit}; {h.title} reads only the first {cap}."
             )
     click.echo(f"  The block is a snapshot; refresh it with:\n    {refresh}")
-    if h.key == "hermes":
-        click.echo(
-            "  Hermes scans context files for prompt injection and skips a file it flags;\n"
-            f"  if it reports {path.name} as blocked, delete the block between the\n"
-            "  kagura-memory:guardrails markers."
-        )
+    for note in h.export_notes(path):
+        click.echo(f"  {note}")
 
 
 # =============================================================================
@@ -623,7 +753,7 @@ def _check_flags(
     url_form: bool,
     mcp_url: str | None,
     api_key_env: str | None,
-    non_interactive: bool,
+    interactive: bool,
 ) -> None:
     """Reject flag combinations that cannot work before anything is read (exit 2)."""
     if not _SERVER_NAME_RE.fullmatch(name):
@@ -647,9 +777,10 @@ def _check_flags(
         except ValueError as e:
             raise click.BadParameter(str(e), param_hint="'--mcp-url'") from None
     if api_key_env is not None:
-        if h.key == "hermes":
+        if h.names_key_env:
             raise click.UsageError(
-                f"Hermes names the variable itself ({hermes_key_env(name)}); drop --api-key-env."
+                f"{h.title} names the variable itself ({h.key_env(name, None)}); "
+                "drop --api-key-env."
             )
         if not _ENV_NAME_RE.fullmatch(api_key_env):
             raise click.BadParameter(
@@ -662,8 +793,11 @@ def _check_flags(
             "guardrails block of get_context_info, which --guardrails off removes."
         )
     has_context = context_id is not None or guardrails not in (None, "off")
-    if agents_md is not None and non_interactive and not has_context:
-        raise click.UsageError("--agents-md with -y needs --context-id.")
+    if agents_md is not None and not interactive and not has_context:
+        raise click.UsageError(
+            "--agents-md needs --context-id with -y or without a terminal: setup cannot "
+            "ask which context."
+        )
     if url_form and profile is None and context_id is not None:
         try:
             normalize_uuid(context_id, label="--context-id")
@@ -674,7 +808,21 @@ def _check_flags(
             ) from None
 
 
-def _codex_hook_warning(existing: _Existing | None, hooks_on: bool, *, ask: bool) -> None:
+def _check_same_server(profile: str, profile_url: str, mcp_url: str) -> None:
+    """With ``--url-form``, the profile only lists contexts and fetches the export,
+    so it must be on the entry's server (exit 2 otherwise)."""
+    ours, theirs = _deployment(profile_url), _deployment(mcp_url)
+    if ours != theirs:
+        raise click.UsageError(
+            f"--profile {profile} is for {ours}, but --mcp-url is on {theirs}. With "
+            "--url-form the profile only lists contexts and fetches the AGENTS.md export, "
+            "so it must be on the same server: drop --profile, or log in to that server."
+        )
+
+
+def _codex_hook_warning(
+    name: str, existing: _Existing | None, hooks_on: bool, *, ask: bool
+) -> None:
     """Say that a stdio entry leaves the Codex plugin's guardrail hooks without a credential.
 
     Raises:
@@ -691,8 +839,8 @@ def _codex_hook_warning(existing: _Existing | None, hooks_on: bool, *, ask: bool
         return
     data = _path_label(codex_home() / "plugins" / "data")
     click.echo(
-        f"  They are turned on here (a config.json under {data}/kagura-memory-*/):\n"
-        "  to keep them, re-run with --url-form."
+        f"  They are turned on here for the {name} entry (a config.json under\n"
+        f"  {data}/kagura-memory-*/): to keep them, re-run with --url-form."
     )
     if ask and not click.confirm("Write the stdio entry anyway?", default=False):
         raise click.ClickException("Setup cancelled; nothing was written.")
@@ -700,10 +848,7 @@ def _codex_hook_warning(existing: _Existing | None, hooks_on: bool, *, ask: bool
 
 def _warn_guardrails_off_url(h: _Harness, url: str) -> None:
     """Warn when a Hermes/OpenClaw URL already carries ``?guardrails=off``."""
-    values = [
-        v for k, v in parse_qsl(urlsplit(url).query, keep_blank_values=True) if k == "guardrails"
-    ]
-    if values and values[0].strip().lower() == "off":
+    if mcp_url_guardrails_off(url):
         click.echo(
             f"\n  Warning: --mcp-url has ?guardrails=off, which removes the guardrails block\n"
             f"  from get_context_info: {h.title} then gets no guardrails from Kagura."
@@ -711,43 +856,61 @@ def _warn_guardrails_off_url(h: _Harness, url: str) -> None:
 
 
 def _resolve_context(
-    chosen: str | None,
-    contexts: dict[str, Any] | None,
-    mcp_url: str | None,
-    profile: str | None,
-    non_interactive: bool,
+    chosen: str | None, contexts: dict[str, Any] | None, *, interactive: bool
 ) -> str:
-    """The context UUID for a guardrails lane or the export: ``chosen`` (an id or a name)
-    looked up in ``contexts``, or picked at the context prompt.
+    """The context UUID for a guardrails lane or the export.
+
+    ``chosen`` (an id or a name) is looked up in ``contexts``, the profile's
+    list; without one, an interactive run picks from that list. It never
+    creates a context: a new one has no guardrails to deliver.
 
     Raises:
-        click.UsageError: No context was given and none can be listed.
-        click.ClickException: The context is not a UUID (an unknown name).
+        click.UsageError: No context was given, and setup cannot list or ask.
+        click.ClickException: The context is not a UUID (an unknown name), or
+            the profile can see none to pick.
     """
-    if contexts is not None:
-        chosen = _select_or_create_context(
-            contexts,
-            None,
-            mcp_url,
-            chosen,
-            Path.cwd(),
-            non_interactive,
-            no_auto_context=True,
-            profile=profile,
-        )
-    elif chosen is None:
-        raise click.UsageError("The AGENTS.md export needs --context-id.")
+    listed = [
+        c for c in (contexts or {}).get("contexts", []) if isinstance(c, dict) and c.get("id")
+    ]
+    if chosen is None:
+        if contexts is None or not interactive:
+            raise click.UsageError("The AGENTS.md export needs --context-id.")
+        if not listed:
+            raise click.ClickException("The profile can see no context to export from.")
+        click.echo("\nWhich context's tool guardrails go into the file?")
+        for i, ctx in enumerate(listed, 1):
+            click.echo(f"  {i}. {ctx.get('name', '?')} ({str(ctx['id'])[:8]}...)")
+        choice = click.prompt("Context", type=click.IntRange(1, len(listed)))
+        chosen = str(listed[choice - 1]["id"])
+    else:
+        match = next((c for c in listed if chosen in (c["id"], c.get("name"))), None)
+        if match is not None:
+            chosen = str(match["id"])
+            click.echo(f"  Using context: {match.get('name', '?')} ({chosen[:8]}...)")
     try:
         return normalize_uuid(chosen, label="context_id")
     except ValueError:
         raise click.ClickException(f"No context {chosen!r} (by id or name).") from None
 
 
-def _print_reason(h: _Harness, exe: str | None, non_interactive: bool) -> str | None:
+def _dry_run_context(chosen: str | None) -> str | None:
+    """``chosen`` as ``--dry-run`` shows it: a UUID, or a placeholder for a context
+    name, which only the real run looks up (a dry run makes no network call)."""
+    if chosen is None:
+        return None
+    try:
+        return normalize_uuid(chosen, label="context_id")
+    except ValueError:
+        return f"<UUID of context {chosen}>"
+
+
+def _print_reason(
+    h: _Harness, exe: str | None, non_interactive: bool, interactive: bool
+) -> str | None:
     """Why setup prints the block instead of running the harness command, or None."""
     if exe is None:
         return f"`{h.cli}` is not on PATH"
-    if h.interactive_add and (non_interactive or not _stdin_is_tty()):
+    if h.interactive_add and not interactive:
         why = "-y was given" if non_interactive else "stdin is not a terminal"
         return f"`{h.cli} mcp add` is interactive and {why}"
     return None
@@ -787,6 +950,19 @@ def _echo_block(block: str) -> None:
         click.echo(f"    {line}")
 
 
+def _preview_command(
+    context_id: str, entry: _Entry, profile: str | None, cf: CredentialsFile | None
+) -> str:
+    """``kagura guardrails digest <ctx> --target instructions`` on the entry's own credential."""
+    args = ["guardrails", "digest", context_id, "--target", "instructions"]
+    if entry.url is None:
+        return _kagura_command(args, profile, cf)
+    # The URL form: the key in the entry's variable, on the entry's server.
+    env = [] if entry.key_env == DEFAULT_KEY_ENV else [f'KAGURA_API_KEY="${{{entry.key_env}}}"']
+    env.append(f"KAGURA_MCP_URL={shlex.quote(entry.url)}")
+    return " ".join([*env, shlex.join(["kagura", *args])])
+
+
 def run_setup_harness(
     harness: HarnessName,
     *,
@@ -806,7 +982,9 @@ def run_setup_harness(
 
     ``guardrails`` must already be normalized (``off`` or a canonical UUID).
     ``agents_md`` is None without ``--agents-md`` and ``""`` for the
-    harness's default file. See the module docstring for the rules.
+    harness's default file. Setup prompts only with a terminal on stdin and
+    without ``-y``; otherwise it behaves as ``-y`` does. See the module
+    docstring for the rules.
 
     Raises:
         click.UsageError: A flag combination that cannot work (exit 2).
@@ -814,6 +992,7 @@ def run_setup_harness(
             entry without ``force``, or a failed check or harness command.
     """
     h = HARNESSES[harness]()
+    interactive = not non_interactive and _stdin_is_tty()
     _check_flags(
         h,
         profile=profile,
@@ -824,12 +1003,16 @@ def run_setup_harness(
         url_form=url_form,
         mcp_url=mcp_url,
         api_key_env=api_key_env,
-        non_interactive=non_interactive,
+        interactive=interactive,
     )
     cf, creds = _load_profile(profile) if profile is not None else (None, None)
+    if url_form and creds is not None:
+        assert profile is not None and mcp_url is not None
+        _check_same_server(profile, creds.mcp_url, mcp_url)
     proxy = None if url_form else _proxy_path()
     exe = _harness_executable(h.cli)
     where = _path_label(h.config_path())
+    ask = interactive and not dry_run
     if dry_run:
         click.echo("Dry run: nothing is written, run or fetched.")
     click.echo(f"\nSetting up Kagura Memory for {h.title} ({where})")
@@ -838,13 +1021,14 @@ def run_setup_harness(
     existing = h.detect(name, exe)
     if existing is not None:
         click.echo(f"  Existing {name} entry: {existing.kind}")
-    elif exe is None and h.key != "codex":
+    elif exe is None and not h.detects_from_config:
         click.echo(f"  `{h.cli}` is not on PATH, so setup cannot look for a {name} entry.")
     else:
         click.echo(f"  No {name} entry yet.")
-    hooks_on = h.key == "codex" and codex_hooks_enabled()
-    if h.key == "codex" and not url_form:
-        _codex_hook_warning(existing, hooks_on, ask=not (non_interactive or dry_run))
+    hooks_on = h.plugin_hooks_on(name)
+    if not url_form:
+        # No question when the existing-entry stop below ends the run anyway.
+        h.warn_stdio_entry(name, existing, hooks_on, ask=ask and (existing is None or force))
     if existing is not None and not force:
         stop = f"a {name} entry already exists ({existing.kind}); re-run with --force to replace it"
         if not dry_run:
@@ -882,9 +1066,11 @@ def run_setup_harness(
     # Without a profile, setup can only use a context it was given.
     can_pick = contexts is not None or export_context is not None
     export_path = None
+    offered = False
     if agents_md is not None:
         export_path = Path(agents_md).expanduser() if agents_md else h.agents_md_path()
-    elif not h.reads_instructions and not (non_interactive or dry_run) and can_pick:
+    elif not h.reads_instructions and ask and can_pick:
+        offered = True
         path = h.agents_md_path()
         click.echo(
             f"\n  {h.title} does not read MCP instructions. A snapshot of a context's tool\n"
@@ -893,14 +1079,18 @@ def run_setup_harness(
         if click.confirm("Write the guardrail export block there?", default=False):
             export_path = path
 
-    # 4. The context, when a guardrails lane or the export needs one
-    if (lane_from_context or export_path is not None) and not dry_run:
-        profile_url = creds.mcp_url if creds is not None else None
-        export_context = _resolve_context(
-            export_context, contexts, profile_url, profile, non_interactive
-        )
+    # 4. The context, when a guardrails lane or the export needs one, and the
+    # export's credential: both settled before anything is written.
+    if lane_from_context or export_path is not None:
+        if dry_run:
+            export_context = _dry_run_context(export_context)
+        else:
+            export_context = _resolve_context(export_context, contexts, interactive=interactive)
     if lane_from_context:
         guardrails = export_context
+    export_auth = None
+    if export_path is not None:
+        export_auth = _export_auth(profile, mcp_url if url_form else None)
 
     # 5. The entry
     if proxy is not None:
@@ -911,11 +1101,15 @@ def run_setup_harness(
     else:
         assert mcp_url is not None
         url = mcp_url_with_query(mcp_url, guardrails=guardrails)
+        if guardrails is not None and guardrails.startswith("<"):
+            # A dry run's placeholder for a context name (a UUID or "off" never
+            # starts with "<"), shown as it is rather than URL-encoded.
+            url = url.replace(f"guardrails={quote_plus(guardrails)}", f"guardrails={guardrails}")
         entry = _Entry(url=url, key_env=h.key_env(name, api_key_env))
         if not h.reads_instructions:
             _warn_guardrails_off_url(h, url)
     commands = h.replace_args(name, entry) if existing is not None else [h.add_args(name, entry)]
-    reason = _print_reason(h, exe, non_interactive)
+    reason = _print_reason(h, exe, non_interactive, interactive)
 
     click.echo("")
     if reason is None:
@@ -934,7 +1128,7 @@ def run_setup_harness(
         click.echo("")
         _echo_block(h.block(name, entry))
     if dry_run:
-        _echo_dry_run_export(h, export_path, export_context, non_interactive)
+        _echo_dry_run_export(h, export_path, export_context, non_interactive, interactive)
         return
 
     # 6. Write through the harness
@@ -949,34 +1143,54 @@ def run_setup_harness(
                         f"\nThe previous {name} entry was removed; re-run setup to add one."
                     )
                 raise
-        if h.interactive_add:
-            click.echo(
-                f"  `{h.cli} mcp add` finished: once confirmed there, the entry is in {where}."
+        if not h.saved(name, exe, entry):
+            skipped = " and skipped the AGENTS.md export" if export_path is not None else ""
+            raise click.ClickException(
+                f"`{h.cli} mcp list` shows no new {name} entry: `{h.cli} mcp add` was\n"
+                f"  cancelled or failed there, so nothing was saved{skipped}."
             )
-        else:
-            click.echo(f"  Done: {h.cli} wrote {name} to {where}.")
+        click.echo(f"  Done: {h.cli} wrote {name} to {where}.")
 
     # 7. What the user does next
     click.echo("")
     if entry.url is not None:
         click.echo(f"  {h.key_note(entry, ran=reason is None)}")
     if h.reads_instructions and guardrails not in (None, "off"):
+        assert guardrails is not None
         click.echo(
-            f"  Codex gets context {guardrails}'s tool guardrail digest in the MCP\n"
-            "  instructions when it connects. Use a context whose editor list you control:\n"
-            "  every editor's guardrail summaries reach the model."
+            "  Codex should get the tool guardrail digest of context\n"
+            f"  {guardrails} in the MCP instructions when it connects.\n"
+            "  The server sends only its base text instead when the entry's credential\n"
+            "  cannot read that context, the context has no guardrails, or the deployment\n"
+            "  turns the digest off. Preview what it sends:\n"
+            f"    {_preview_command(guardrails, entry, profile, cf)}\n"
+            "  Use a context whose editor list you control: every editor's guardrail\n"
+            "  summaries reach the model."
         )
     for note in h.notes():
         click.echo(f"  {note}")
     click.echo(f"  Check it with: {shlex.join([h.cli, *h.verify_args(name)])}")
+    if export_path is None and not h.reads_instructions and not offered:
+        click.echo(
+            "  Re-run with --agents-md --context-id <id> to put a snapshot of a context's\n"
+            f"  tool guardrails into {_path_label(h.agents_md_path())},\n"
+            f"  which {h.title} loads every session."
+        )
 
     if export_path is not None:
-        assert export_context is not None
-        _write_export(h, export_path, export_context, profile, cf)
+        assert export_context is not None and export_auth is not None
+        refresh = _kagura_command(
+            ["guardrails", "digest", export_context, "--out", str(export_path)], profile, cf
+        )
+        _write_export(h, export_path, export_context, export_auth, refresh)
 
 
 def _echo_dry_run_export(
-    h: _Harness, path: Path | None, context_id: str | None, non_interactive: bool
+    h: _Harness,
+    path: Path | None,
+    context_id: str | None,
+    non_interactive: bool,
+    interactive: bool,
 ) -> None:
     """The AGENTS.md line of ``--dry-run``: the path and what would happen to it."""
     if path is not None:
@@ -986,7 +1200,10 @@ def _echo_dry_run_export(
             f"(the guardrail block for context {context})"
         )
     elif not h.reads_instructions:
-        when = "not offered with -y" if non_interactive else "offered when setup runs"
+        if interactive:
+            when = "offered when setup runs"
+        else:
+            when = "not offered with -y" if non_interactive else "not offered without a terminal"
         click.echo(
             f"\n  AGENTS.md: {_path_label(h.agents_md_path())} ({when}; --agents-md writes it)"
         )
