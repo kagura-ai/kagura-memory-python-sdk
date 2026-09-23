@@ -57,6 +57,7 @@ REFRESH_TOKEN_GRANT_TYPE = "refresh_token"
 _INVITE_TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{20,128}")
 _INVITE_TOKEN_RULE = "20-128 characters from A-Z, a-z, 0-9, '_' and '-'"
 _SEMVER_PREFIX_RE = re.compile(r"v?(\d+)\.(\d+)\.(\d+)")
+_DEFAULT_PORTS = {"http": 80, "https": 443}
 
 JOIN_RETURN_TO_MIN_SERVER_VERSION: tuple[int, int, int] | None = None
 """First memory-cloud release whose ``/join/<token>`` honours ``return_to``.
@@ -549,17 +550,23 @@ def _check_invite_token(token: str) -> None:
 
 
 def _url_origin(url: str) -> str | None:
-    """``scheme://host[:port]`` of an http(s) URL, lower-cased; ``None`` otherwise."""
+    """``scheme://host[:port]`` of an http(s) URL, lower-cased; ``None`` otherwise.
+
+    The scheme's default port is dropped, as browsers do, so
+    ``https://host:443`` and ``https://host`` are the same origin.
+    """
     parts = urlsplit(url)
     try:
         host, port = parts.hostname, parts.port
     except ValueError:  # a non-numeric or out-of-range port
         return None
-    if parts.scheme not in ("http", "https") or not host:
+    if parts.scheme not in _DEFAULT_PORTS or not host:
         return None
     if ":" in host:  # IPv6 literal — hostname drops the brackets
         host = f"[{host}]"
-    return f"{parts.scheme}://{host}" + (f":{port}" if port is not None else "")
+    if port is None or port == _DEFAULT_PORTS[parts.scheme]:
+        return f"{parts.scheme}://{host}"
+    return f"{parts.scheme}://{host}:{port}"
 
 
 def _safe_json_object(response: httpx.Response, endpoint: str) -> dict[str, Any]:

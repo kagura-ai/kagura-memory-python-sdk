@@ -173,6 +173,9 @@ def _invoke(
         (f"HTTPS://App.Example.com/join/{SENTINEL}", WEB),  # origin is case-normalised
         (f"http://localhost:3000/join/{SENTINEL}", "http://localhost:3000"),
         (f"http://[::1]:3000/join/{SENTINEL}", "http://[::1]:3000"),
+        (f"https://app.example.com:443/join/{SENTINEL}", WEB),  # default port dropped
+        (f"http://localhost:80/join/{SENTINEL}", "http://localhost"),
+        (f"https://app.example.com:80/join/{SENTINEL}", "https://app.example.com:80"),
         (SENTINEL, None),
         (f"  {SENTINEL}  ", None),
     ],
@@ -283,6 +286,11 @@ def test_build_invite_link_tolerates_trailing_slash_on_device():
     assert link.startswith(f"{WEB}/join/{SENTINEL}?")
 
 
+def test_build_invite_link_treats_the_default_port_as_the_same_origin():
+    link = build_invite_link(f"{WEB}:443/device", DEVICE_URI_COMPLETE, SENTINEL)
+    assert link == f"{WEB}/join/{SENTINEL}?return_to=%2Fdevice%3Fuser_code%3DABCD-1234"
+
+
 def test_build_invite_link_allows_localhost_http():
     link = build_invite_link(
         "http://localhost:3000/device",
@@ -319,6 +327,9 @@ def test_check_invite_origin_passes_bare_tokens_and_same_origin_links():
     check_invite_origin(parse_invite(SENTINEL), "https://anything.example.net/device")
     check_invite_origin(parse_invite(f"{WEB}/app/join/{SENTINEL}"), DEVICE_URI)
     check_invite_origin(parse_invite(f"https://APP.example.com/join/{SENTINEL}"), DEVICE_URI)
+    # A spelled-out default port is the same origin, as in a browser.
+    check_invite_origin(parse_invite(f"{WEB}:443/join/{SENTINEL}"), DEVICE_URI)
+    check_invite_origin(parse_invite(f"{WEB}/join/{SENTINEL}"), f"{WEB}:443/device")
 
 
 @pytest.mark.parametrize(
