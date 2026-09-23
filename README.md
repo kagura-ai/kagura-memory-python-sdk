@@ -570,6 +570,7 @@ kagura auth login --read-only                        # read-only scope
 kagura auth login --scope "memory:read profile:read" # custom scope set
 kagura auth login --no-browser                       # SSH / headless
 kagura auth login --profile work                     # named profile for a second workspace
+kagura auth login --invite https://<host>/join/<token> # invite-only sign-up (link or bare token)
 
 kagura auth status                                   # show profile, server, expiry, scope
 kagura auth list                                     # list all stored profiles (default marked *)
@@ -580,6 +581,22 @@ kagura auth token                                    # raw access_token to stdou
 kagura auth logout                                   # revoke + delete profile
 kagura auth logout --all --yes                       # remove every profile
 ```
+
+**Invite-only servers.** When a deployment admits new accounts only by
+invite link (`/join/<token>`), pass that link — or its bare token — to
+`kagura auth login --invite`. The token is checked locally against the
+server's pattern before any network call, is never sent to the API, and is
+never written to `credentials.json` or included in an error message. The CLI
+builds the `/join` link on the web app's host (taken from the device flow's
+`verification_uri`, not from `--server`, since the API can live on another
+origin) and refuses a full link for a different server. It then reads the
+public `/api/v1/system/info`: when `features.beta_invites` is `false` it says
+invites have no effect and shows the normal prompt. Otherwise it prints two
+steps in order — open the invite link and sign up, then open the approval URL —
+and opens only the first in the browser (`--no-browser` just prints both). A
+single link that signs you up and lands on the approval page with the code
+filled in is built in but switched off until memory-cloud ships the `/join`
+`return_to` hand-off (memory-cloud#1655).
 
 Two integration paths:
 
