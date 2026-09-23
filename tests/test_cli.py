@@ -1,5 +1,6 @@
 """Tests for CLI commands."""
 
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -9,6 +10,8 @@ from kagura_memory.auth.credentials import reset_state_cache
 from kagura_memory.cli import _parse_tags, main
 from tests.conftest import (
     indexer_status_dict,
+    measurement_dict,
+    measurement_series_dict,
     sleep_report_detail_dict,
     sleep_report_summary_dict,
 )
@@ -1628,6 +1631,179 @@ def test_resource_indexer_status_shows_quota_deferred_run(monkeypatch):
     result = CliRunner().invoke(main, ["resource", "indexer-status", "-r", "products"])
     assert result.exit_code == 0, result.output
     assert '"skipped_reason": "memories_per_day_exceeded"' in result.output
+
+
+# ============================================================================
+# Measurement lane CLI — `kagura measure` (Issue #254)
+# ============================================================================
+
+
+def _measure_mock_client(mock_client_cls, mock_config):
+    """Wire a KaguraClient mock whose measurement methods return real models."""
+    from kagura_memory import MeasurementResult, MeasurementSeries
+
+    mock_config.return_value = {"api_key": "key", "mcp_url": "https://test.com/mcp"}
+    mock_client = AsyncMock()
+    mock_client.record_measurement.return_value = MeasurementResult.model_validate(
+        measurement_dict()
+    )
+    mock_client.recall_series.return_value = MeasurementSeries.model_validate(
+        measurement_series_dict()
+    )
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    mock_client_cls.return_value = mock_client
+    return mock_client
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_measure_record(mock_client_cls, mock_config):
+    """`kagura measure record` forwards unit/--at and echoes the result JSON."""
+    mock_client = _measure_mock_client(mock_client_cls, mock_config)
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "measure",
+            "record",
+            "ctx-1",
+            "weight_kg",
+            "71.5",
+            "--unit",
+            "kg",
+            "--at",
+            "2026-09-01T07:30:00Z",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    mock_client.record_measurement.assert_awaited_once_with(
+        context_id="ctx-1",
+        metric="weight_kg",
+        value=71.5,
+        measured_at="2026-09-01T07:30:00Z",
+        unit="kg",
+    )
+    payload = json.loads(result.output)
+    assert payload["measurement_id"] == "cccccccc-dddd-eeee-ffff-000000000000"
+    assert payload["value"] == 71.5
+    assert payload["unit"] == "kg"
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_measure_record_omits_unset_options(mock_client_cls, mock_config):
+    """Without --unit/--at, None is passed so the client omits them from the wire."""
+    mock_client = _measure_mock_client(mock_client_cls, mock_config)
+
+    result = CliRunner().invoke(main, ["measure", "record", "ctx-1", "reps", "12"])
+    assert result.exit_code == 0, result.output
+    mock_client.record_measurement.assert_awaited_once_with(
+        context_id="ctx-1", metric="reps", value=12.0, measured_at=None, unit=None
+    )
+
+
+@pytest.mark.parametrize("raw", ["-3.5", "-1e3"])
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_measure_record_accepts_negative_value(mock_client_cls, mock_config, raw):
+    """A negative value is a value, not an unknown option (P&L, temperature deltas)."""
+    mock_client = _measure_mock_client(mock_client_cls, mock_config)
+
+    result = CliRunner().invoke(main, ["measure", "record", "ctx-1", "pnl", raw, "--unit", "USD"])
+    assert result.exit_code == 0, result.output
+    assert mock_client.record_measurement.await_args.kwargs["value"] == float(raw)
+    assert mock_client.record_measurement.await_args.kwargs["unit"] == "USD"
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_measure_record_rejects_unknown_option(mock_client_cls, mock_config):
+    """Tolerating negative numbers must not swallow a mistyped option."""
+    mock_client = _measure_mock_client(mock_client_cls, mock_config)
+
+    result = CliRunner().invoke(main, ["measure", "record", "ctx-1", "m", "1", "--unti", "kg"])
+    assert result.exit_code != 0
+    mock_client.record_measurement.assert_not_awaited()
+
+
+def test_measure_record_rejects_non_numeric_value():
+    """A non-numeric value is a click usage error, before any client is built."""
+    result = CliRunner().invoke(main, ["measure", "record", "ctx-1", "m", "heavy"])
+    assert result.exit_code == 2
+    assert "not a valid float" in result.output
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_measure_record_surfaces_client_error(mock_client_cls, mock_config):
+    """Client-side validation errors (e.g. NaN) surface as a clean CLI error."""
+    mock_client = _measure_mock_client(mock_client_cls, mock_config)
+    mock_client.record_measurement.side_effect = ValueError("value must be finite")
+
+    result = CliRunner().invoke(main, ["measure", "record", "ctx-1", "m", "nan"])
+    assert result.exit_code == 1
+    assert "Error: value must be finite" in result.output
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_measure_series(mock_client_cls, mock_config):
+    """`kagura measure series` forwards every filter and echoes the series JSON."""
+    mock_client = _measure_mock_client(mock_client_cls, mock_config)
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "measure",
+            "series",
+            "ctx-1",
+            "weight_kg",
+            "--period",
+            "week",
+            "--agg",
+            "last",
+            "--start",
+            "2026-08-01T00:00:00",
+            "--end",
+            "2026-09-01T00:00:00",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    mock_client.recall_series.assert_awaited_once_with(
+        context_id="ctx-1",
+        metric="weight_kg",
+        period="week",
+        agg="last",
+        start="2026-08-01T00:00:00",
+        end="2026-09-01T00:00:00",
+    )
+    payload = json.loads(result.output)
+    assert payload["count"] == 2
+    assert payload["series"][0] == {"bucket": "2026-08-24T00:00:00Z", "value": 72.0, "count": 3}
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_measure_series_defaults_defer_to_server(mock_client_cls, mock_config):
+    """With no options, None is passed so the server defaults (day/avg/30d) apply."""
+    mock_client = _measure_mock_client(mock_client_cls, mock_config)
+
+    result = CliRunner().invoke(main, ["measure", "series", "ctx-1", "weight_kg"])
+    assert result.exit_code == 0, result.output
+    mock_client.recall_series.assert_awaited_once_with(
+        context_id="ctx-1", metric="weight_kg", period=None, agg=None, start=None, end=None
+    )
+
+
+@pytest.mark.parametrize(
+    ("option", "value"), [("--period", "year"), ("--agg", "median")], ids=["period", "agg"]
+)
+def test_measure_series_rejects_unknown_choice(option, value):
+    """--period/--agg are closed choices, rejected before any round-trip."""
+    result = CliRunner().invoke(main, ["measure", "series", "ctx-1", "m", option, value])
+    assert result.exit_code == 2
+    assert "Invalid value" in result.output
 
 
 @patch("kagura_memory.cli.load_config")

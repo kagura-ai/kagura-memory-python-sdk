@@ -11,7 +11,7 @@ import tempfile
 from collections.abc import Awaitable, Callable
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, get_args
 
 import click
 
@@ -36,7 +36,13 @@ from .exceptions import (
 from .files_client import FilesClient
 from .logger import VerboseLogger
 from .memory_client import MemoryClient
-from .models import FileObject, GuardrailDigest, ResourceEventRequest
+from .models import (
+    FileObject,
+    GuardrailDigest,
+    MeasurementAggregate,
+    MeasurementPeriod,
+    ResourceEventRequest,
+)
 from .resource_client import ResourceClient
 from .setup_claude import run_setup_claude
 from .workspace_client import WorkspaceClient
@@ -1512,6 +1518,98 @@ def guardrails_digest(context_id, target, out_path, profile, tools):
             ensure_ascii=False,
         )
     )
+
+
+# =============================================================================
+# Measurement lane — HOW-MUCH axis (issue #254, server v0.54.0+)
+# =============================================================================
+
+
+@main.group()
+def measure():
+    """Record and read numeric measurement series (never recalled as memories)."""
+    pass
+
+
+# ignore_unknown_options lets a negative VALUE such as -3.5 parse as the
+# positional instead of failing with "No such option: -3". A genuinely unknown
+# option is still rejected: it lands as an extra positional, which click refuses.
+@measure.command(name="record", context_settings={"ignore_unknown_options": True})
+@click.argument("context_id")
+@click.argument("metric")
+@click.argument("value", type=float)
+@click.option("--unit", default=None, help="Display unit, e.g. 'kg' (max 32 chars).")
+@click.option(
+    "--at",
+    "measured_at",
+    default=None,
+    help="ISO 8601 observation time (naive = UTC). Default: now.",
+)
+def measure_record(context_id, metric, value, unit, measured_at):
+    """Append one numeric observation to METRIC's series in a context.
+
+    Append-only: recording the same point twice stores two rows. Measurements
+    are never embedded, never returned by recall, and never touched by Sleep;
+    use `kagura remember` for prose such as "hit goal weight".
+
+    \b
+    Examples:
+      kagura measure record <context-id> weight_kg 71.5 --unit kg
+      kagura measure record <context-id> pnl_usd -120 --at 2026-09-01T00:00:00Z
+    """
+
+    async def _op(client: KaguraClient, _ctx: str) -> dict[str, Any]:
+        result = await client.record_measurement(
+            context_id=context_id, metric=metric, value=value, measured_at=measured_at, unit=unit
+        )
+        return result.model_dump(mode="json")
+
+    _run_client_command(_op, context_id=None, needs_context=False)
+
+
+@measure.command(name="series")
+@click.argument("context_id")
+@click.argument("metric")
+@click.option(
+    "--period",
+    type=click.Choice(get_args(MeasurementPeriod)),
+    default=None,
+    help="Bucket size (server default: day).",
+)
+@click.option(
+    "--agg",
+    type=click.Choice(get_args(MeasurementAggregate)),
+    default=None,
+    help="Per-bucket aggregate (server default: avg; 'last' = most recent value).",
+)
+@click.option(
+    "--start",
+    default=None,
+    help="ISO 8601 window start, inclusive (naive = UTC). Default: end minus 30 days.",
+)
+@click.option(
+    "--end",
+    default=None,
+    help="ISO 8601 window end, exclusive (naive = UTC). Default: now. Max window: 365 days.",
+)
+def measure_series(context_id, metric, period, agg, start, end):
+    """Read METRIC's series in a context, bucketed and aggregated.
+
+    Empty buckets are omitted, and buckets align to UTC boundaries.
+
+    \b
+    Examples:
+      kagura measure series <context-id> weight_kg --period week
+      kagura measure series <context-id> pnl_usd --agg sum --start 2026-01-01T00:00:00
+    """
+
+    async def _op(client: KaguraClient, _ctx: str) -> dict[str, Any]:
+        result = await client.recall_series(
+            context_id=context_id, metric=metric, period=period, agg=agg, start=start, end=end
+        )
+        return result.model_dump(mode="json")
+
+    _run_client_command(_op, context_id=None, needs_context=False)
 
 
 # =============================================================================
