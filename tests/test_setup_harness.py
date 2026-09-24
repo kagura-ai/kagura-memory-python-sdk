@@ -29,6 +29,7 @@ from click.testing import CliRunner
 
 from kagura_memory import setup_harness
 from kagura_memory._auth import _OAuthAuth, _resolve_profile_auth
+from kagura_memory.auth import credentials
 from kagura_memory.auth.credentials import CredentialsFile, save_credentials_file
 from kagura_memory.cli import main
 from kagura_memory.exceptions import KaguraNotFoundError
@@ -294,6 +295,18 @@ class TestCodex:
             f"KAGURA_PROFILE=work kagura guardrails digest {CTX} --target instructions"
             in result.output
         )
+
+    def test_the_preview_names_a_kagura_json_it_cannot_parse(self, env, on_path, recorder):
+        # Setup runs on the profile alone, but the preview's kagura command
+        # loads ~/.kagura.json (no ./.kagura.json here) before anything else.
+        (env / ".kagura.json").write_bytes(b"\xff{")
+        on_path("codex")
+        result = run("codex", "--profile", "work", "--context-id", CTX, "-y")
+        assert result.exit_code == 0, result.output
+        assert (
+            "The preview fails until ~/.kagura.json (not UTF-8 JSON) is fixed or removed: "
+            "every kagura command reads it first."
+        ) in flat(result.output)
 
     def test_url_form_preview_runs_on_the_entry_key(self, on_path, recorder):
         on_path("codex")
@@ -1304,7 +1317,7 @@ class TestOAuthCodex:
         assert result.exit_code == 0, result.output
         out = flat(result.output)
         assert f"can read): kagura guardrails digest {CTX} --target instructions" in out
-        assert "no credential on" not in out and "KAGURA_MCP_URL" not in out
+        assert "usual credential is not on" not in out and "KAGURA_MCP_URL" not in out
 
     @pytest.mark.parametrize("chain", ["api-key", "profile", "none"])
     def test_without_profile_no_preview_runs_on_another_server(
@@ -1379,17 +1392,39 @@ class TestOAuthCodex:
         assert f"KAGURA_PROFILE=default kagura guardrails digest {CTX} --target instructions" in out
         assert "kagura auth login" not in out
 
-    @pytest.mark.parametrize("config", ["malformed", "unreadable"])
+    @pytest.mark.parametrize(
+        "config",
+        [
+            "{not json",
+            None,
+            "[]",
+            "null",
+            '"x"',
+            "1",
+            '{"api_key": 123}',
+            '{"api_key": "k", "mcp_url": 5}',
+        ],
+        ids=[
+            "malformed",
+            "unreadable",
+            "list",
+            "null",
+            "string",
+            "number",
+            "api-key-not-string",
+            "mcp-url-not-string",
+        ],
+    )
     def test_an_unusable_kagura_json_leaves_the_written_entry_done(
         self, on_path, recorder, tty, config
     ):
         # No profile and no key: the usual chain reaches ./.kagura.json, and
         # only after the add has written the entry.
         save_credentials_file(CredentialsFile())
-        if config == "malformed":
-            Path(".kagura.json").write_text("{not json", encoding="utf-8")
-        else:
+        if config is None:
             Path(".kagura.json").mkdir()
+        else:
+            Path(".kagura.json").write_text(config, encoding="utf-8")
         on_path("codex")
         result = run("codex", *OAUTH, "--context-id", CTX)
         assert result.exit_code == 0, result.output
@@ -1399,6 +1434,33 @@ class TestOAuthCodex:
         assert "usual credential is not on https://memory.kagura-ai.com, and no profile is" in out
         assert f"KAGURA_PROFILE=NAME kagura guardrails digest {CTX} --target instructions" in out
         assert "Check it with: codex mcp get kagura-memory" in out
+        # Every kagura command reads .kagura.json first: a file it cannot read
+        # or parse fails the preview too. One that parses does not, on a profile.
+        broken = f"The preview fails until {Path('.kagura.json').absolute()}"
+        if config in ("{not json", None):
+            why = "not UTF-8 JSON" if config else "Is a directory"
+            assert f"{broken} ({why}) is fixed or removed:" in out
+            assert "{not json" not in out
+        else:
+            assert "The preview fails until" not in out
+
+    def test_a_profile_with_an_unusable_url_is_left_out(self, on_path, recorder, tty):
+        # The default profile (the usual chain) has an mcp_url that is not a
+        # string; "work" is on the entry's server.
+        path = credentials.DEFAULT_CREDENTIALS_PATH
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["profiles"]["default"]["mcp_url"] = 5
+        path.write_text(json.dumps(data), encoding="utf-8")
+        on_path("codex")
+        result = run("codex", *OAUTH, "--context-id", CTX)
+        assert result.exit_code == 0, result.output
+        out = flat(result.output)
+        assert "Done: codex wrote kagura-memory" in out
+        assert (
+            "The kagura CLI's usual credential is not on https://memory.kagura-ai.com; "
+            "preview it on a profile there (work)"
+        ) in out
+        assert f"KAGURA_PROFILE=work kagura guardrails digest {CTX} --target instructions" in out
 
     @pytest.mark.parametrize("context", [[], ["--context-id", CTX]], ids=["no-context", "context"])
     def test_hooks_on_neither_turn_guardrails_off_nor_stay_silent(

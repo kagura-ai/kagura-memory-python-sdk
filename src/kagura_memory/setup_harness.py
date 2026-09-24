@@ -90,6 +90,7 @@ from ._version import meets_minimum
 from .auth.credentials import CredentialsFile, load_credentials_file
 from .auth.device_flow import fetch_system_info, make_oauth_client
 from .claude_code import MCP_PROXY_COMMAND, _path_label, _runs_proxy, holds_credential
+from .config import load_config
 from .exceptions import KaguraAuthError, KaguraNotFoundError, _exc_message
 from .memory_client import MemoryClient
 from .models import GuardrailDigest
@@ -1046,25 +1047,60 @@ def _on_profile(profile: str, command: str) -> str:
     return f"KAGURA_PROFILE={shlex.quote(profile)} {command}"
 
 
+def _on_server(mcp_url: str, server: str) -> bool:
+    """True when the stored ``mcp_url`` is on ``server``; False when it is not a URL at all."""
+    try:
+        return _deployment(mcp_url) == server
+    except Exception:  # noqa: BLE001 - a hand-edited file can hold any JSON value
+        return False
+
+
 def _cli_chain_on(mcp_url: str) -> bool:
     """True when the kagura CLI's usual chain has a credential on ``mcp_url``'s server.
 
     Reads the credentials only, as :func:`_export_auth` does. It runs after
-    the entry is written, so a ``.kagura.json`` it cannot read or parse
-    counts as no credential rather than failing setup.
+    the entry is written, so a chain it cannot resolve for any reason (no
+    credential, a ``.kagura.json`` it cannot read or parse, or one that is
+    not a config object) counts as no credential rather than failing setup.
     """
     try:
         auth = _resolve_auth(api_key=None, mcp_url=None, profile=None)
-    except (KaguraAuthError, OSError, ValueError):
+    except Exception:  # noqa: BLE001 - after the write, any failure means no credential
         return False
-    return _deployment(auth.mcp_url) == _deployment(mcp_url)
+    return _on_server(auth.mcp_url, _deployment(mcp_url))
 
 
 def _profiles_on(mcp_url: str) -> list[str]:
-    """The stored OAuth profiles on ``mcp_url``'s server, by name; reads the file only."""
+    """The stored OAuth profiles on ``mcp_url``'s server, by name; reads the file only.
+
+    Like :func:`_cli_chain_on`, it runs after the write: a profile whose URL
+    it cannot read is left out, and a file it cannot read holds none.
+    """
     server = _deployment(mcp_url)
-    profiles = load_credentials_file().profiles
-    return sorted(name for name, creds in profiles.items() if _deployment(creds.mcp_url) == server)
+    try:
+        profiles = load_credentials_file().profiles
+    except Exception:  # noqa: BLE001 - after the write, an unusable file has no profile
+        return []
+    return sorted(name for name, creds in profiles.items() if _on_server(creds.mcp_url, server))
+
+
+def _broken_config() -> str | None:
+    """The ``.kagura.json`` every kagura command loads first, when it cannot be read or parsed.
+
+    Returns:
+        Its path and why, never its contents; None when it loads or there is none.
+    """
+    try:
+        load_config()
+        return None
+    except OSError as e:
+        why = e.strerror or type(e).__name__
+    except ValueError:
+        why = "not UTF-8 JSON"
+    except Exception as e:  # noqa: BLE001 - runs after the write: named, never raised
+        why = type(e).__name__
+    local = Path(".kagura.json")
+    return f"{_path_label(local.absolute()) if local.exists() else '~/.kagura.json'} ({why})"
 
 
 def _write_export(
@@ -1728,13 +1764,20 @@ def run_setup_harness(
             )
         else:
             preview = "Preview what it sends:"
+        fails = ""
+        broken = _broken_config()
+        if broken is not None:
+            fails = "\n  " + _wrap(
+                f"The preview fails until {broken} is fixed or removed: every kagura command "
+                "reads it first."
+            )
         click.echo(
             "  Codex should get the tool guardrail digest of context\n"
             f"  {guardrails} in the MCP instructions when it connects.\n"
             "  The server sends only its base text instead when the entry's credential\n"
             "  cannot read that context, the context has no guardrails, or the deployment\n"
             f"  turns the digest off. {preview}\n"
-            f"    {command}\n"
+            f"    {command}{fails}\n"
             "  Use a context whose editor list you control: every editor's guardrail\n"
             "  summaries reach the model."
         )
