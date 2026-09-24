@@ -28,6 +28,7 @@ _STALE_PHRASES = [
     "only ``recall.related_tags`` does",  # recall stopped sending sample_summary in v0.73.0
     'pinned["results"]',  # load_pinned returns ``memories``
     "`--server` override: decline it",  # plugin 0.77.0 reads kagura-mcp's --guardrails
+    "memory-cloud#1669 proposes",  # memory-cloud v0.77.0 shipped it
 ]
 
 

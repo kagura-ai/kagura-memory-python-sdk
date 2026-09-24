@@ -4824,9 +4824,10 @@ async def test_list_tags_arg_validation(kwargs, match):
 # ----------------------------------------------------------------------------
 # list_tags with_tags drill-down over REST (#273)
 #
-# MCP list_tags has no with_tags through memory-cloud v0.76.0 (memory-cloud
+# MCP list_tags has no with_tags before memory-cloud v0.77.0 (memory-cloud
 # #1669) and silently returned the unfiltered vocabulary, so a drill-down goes
-# to GET /api/v1/contexts/{id}/tags, which has had it since v0.17.2.
+# to GET /api/v1/contexts/{id}/tags on every server; the route has had it
+# since v0.17.2.
 # ----------------------------------------------------------------------------
 
 _TAGS_CTX = "c1"
@@ -4834,7 +4835,10 @@ _TAGS_PATH = f"/api/v1/contexts/{_TAGS_CTX}/tags"
 
 
 def _rest_tags_body(context_id: str = _TAGS_CTX, **overrides) -> dict:
-    """What the REST tags route returns: no ``status``/``context_name``, plus ``sample_summary``."""
+    """What the REST tags route returns: no ``status``, plus ``sample_summary``.
+
+    No ``context_name`` either: the route sends it only from memory-cloud v0.77.0.
+    """
     body = {
         "context_id": context_id,
         "tags": [
@@ -4944,7 +4948,7 @@ async def test_list_tags_with_tags_passes_limit_min_count_sort_and_omits_empty_p
 
 @pytest.mark.asyncio
 async def test_list_tags_with_tags_returns_the_mcp_shape_naming_the_context_via_list_tags():
-    """The route sends no context_name: one list_tags limit=1 call supplies it."""
+    """Before v0.77.0 the route sends no context_name: one list_tags limit=1 call supplies it."""
     from kagura_memory import ListTagsResponse
 
     server = _TagsServer()
@@ -5029,7 +5033,7 @@ async def test_list_tags_with_tags_keys_the_name_cache_on_the_canonical_id():
 
 @pytest.mark.asyncio
 async def test_list_tags_with_tags_uses_a_context_name_the_route_sends():
-    """memory-cloud#1669 may add context_name to the route; then no lookup is needed."""
+    """memory-cloud v0.77.0 (#1669) sends context_name on the route: no lookup is needed."""
     server = _TagsServer(rest_body=_rest_tags_body(context_name="from-rest"))
     client = _tags_client(server)
     try:

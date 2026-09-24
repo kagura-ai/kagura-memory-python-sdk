@@ -908,8 +908,8 @@ class ContextTagsResponse(BaseModel):
 
     ``list_tags`` reshapes it into :class:`ListTagsResponse`. Not exported;
     it carries the server model's name, which a drift error reports.
-    Unlike the MCP tool, the route sends no ``context_name`` (through
-    memory-cloud v0.76.0; memory-cloud#1669 proposes adding it) and adds a
+    Unlike the MCP tool, the route sends no ``context_name`` before
+    memory-cloud v0.77.0 (memory-cloud#1669), and it adds a
     ``sample_summary`` per tag, which :class:`TagInfo` drops.
     """
 

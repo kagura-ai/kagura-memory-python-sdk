@@ -271,8 +271,9 @@ class KaguraClient:
         # :meth:`_get_context_info_cached`.
         self._context_info_cache: dict[str, ContextInfo | None] = {}
         # Context id (lower case) → name, for the list_tags drill-down, whose
-        # REST route sends no name (#273). Never stale: no server API renames
-        # a context (update_context cannot change ``name``).
+        # REST route sends no name before memory-cloud v0.77.0 (#273). Never
+        # stale: no server API renames a context (update_context cannot
+        # change ``name``).
         self._context_names: dict[str, str] = {}
 
     def _next_request_id(self) -> int:
@@ -1703,14 +1704,16 @@ class KaguraClient:
         not bumped to match — floors are tracked per surface.
 
         A ``with_tags`` drill-down is sent to the REST route
-        ``GET /api/v1/contexts/{id}/tags`` rather than MCP: the MCP tool has
-        no ``with_tags`` (through memory-cloud v0.76.0, memory-cloud#1669) and
-        silently returned the unfiltered vocabulary (#273). The result has
-        the same shape. The route sends no ``context_name``, so the client
-        looks it up once per context with a ``list_tags(limit=1)`` MCP call
-        and keeps it; a call without ``with_tags`` fills the same cache. The
-        route takes API keys and OAuth profiles alike (OAuth needs the
-        ``memory:read`` scope, which every ``kagura auth login`` grant has).
+        ``GET /api/v1/contexts/{id}/tags`` rather than MCP, on every server:
+        the MCP tool gained ``with_tags`` only in memory-cloud v0.77.0
+        (memory-cloud#1669), and before that it silently returned the
+        unfiltered vocabulary (#273). The result has the same shape. From
+        v0.77.0 the route also sends ``context_name``, so a drill-down is one
+        request there; against an older server the client looks the name up
+        once per context with a ``list_tags(limit=1)`` MCP call and keeps it
+        (a call without ``with_tags`` fills the same cache). The route takes
+        API keys and OAuth profiles alike (OAuth needs the ``memory:read``
+        scope, which every ``kagura auth login`` grant has).
 
         Args:
             context_id: Context ID to list tags from.
@@ -1780,7 +1783,10 @@ class KaguraClient:
         if prefix:
             query["prefix"] = prefix
         if drill_down:
-            # MCP list_tags has no with_tags (#273): the same query, over REST.
+            # The same query, over REST: MCP list_tags ignores with_tags
+            # before memory-cloud v0.77.0 (#273). Send it over MCP, and drop
+            # _list_tags_via_rest, ContextTagsResponse and _context_names,
+            # once MIN_SERVER_VERSION >= 0.77.0.
             return await self._list_tags_via_rest(context_id, {**query, "with_tags": drill_down})
         result = await self._call_tool_checked("list_tags", {"context_id": context_id, **query})
         return self._remember_context_name(
@@ -1792,8 +1798,9 @@ class KaguraClient:
     ) -> ListTagsResponse:
         """The ``list_tags`` drill-down over ``GET /api/v1/contexts/{id}/tags`` (#273).
 
-        Reshaped to what the MCP tool returns: the route sends no
-        ``context_name``, which :meth:`_context_name_for` supplies.
+        Reshaped to what the MCP tool returns. The route sends
+        ``context_name`` from memory-cloud v0.77.0; for an older server
+        :meth:`_context_name_for` supplies it.
         """
         # Quoted, so a caller's id cannot add segments to the request path.
         path = f"/api/v1/contexts/{quote(context_id, safe='')}/tags"
