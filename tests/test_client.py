@@ -4,6 +4,7 @@ import asyncio
 import inspect
 import json
 import textwrap
+import warnings
 from datetime import UTC, datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -1447,8 +1448,8 @@ async def test_create_context():
 
 
 @pytest.mark.asyncio
-async def test_create_context_with_resource_id():
-    """create_context() should pass resource_id when provided."""
+async def test_create_context_resource_id_is_deprecated_and_not_sent():
+    """#273: the server's create_context never read resource_id, so it is not sent."""
     client = _make_initialized_client()
 
     with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
@@ -1456,10 +1457,31 @@ async def test_create_context_with_resource_id():
             {"status": "success", "contexts": [], "count": 0, "limit": 20, "can_create": True},
             {"id": "uuid-1", "name": "res-ctx"},
         ]
-        await client.create_context(name="res-ctx", resource_id="my-resource")
+        with pytest.warns(DeprecationWarning, match=r"resource_id.*update_context") as record:
+            await client.create_context(name="res-ctx", resource_id="my-resource")
         # Second call is create_context tool
-        args = mock.call_args_list[1][0][1]
-        assert args["resource_id"] == "my-resource"
+        assert mock.call_args_list[1][0] == (
+            "create_context",
+            {"name": "res-ctx", "is_private": True},
+        )
+    # Attributed to the caller's line, not the SDK's.
+    assert record[0].filename == __file__
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_create_context_without_resource_id_does_not_warn():
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.side_effect = [
+            {"status": "success", "contexts": [], "count": 0, "limit": 20, "can_create": True},
+            {"id": "uuid-1", "name": "ctx"},
+        ]
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            await client.create_context(name="ctx")
 
     await client.close()
 
@@ -1706,7 +1728,7 @@ async def test_update_context_with_resource_id_and_is_public():
 
 @pytest.mark.asyncio
 async def test_setup_resource_basic():
-    """Optional fields must be omitted when None so the server applies its own defaults."""
+    """#273: the server requires name, so it defaults to resource_id; description is omitted."""
     client = _make_initialized_client()
 
     with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
@@ -1717,15 +1739,13 @@ async def test_setup_resource_basic():
             "token": "kagura_resource_xyz",
             "token_id": 1,
         }
-        result = await client.setup_resource(resource_id="products")
-        tool_name = mock.call_args[0][0]
-        args = mock.call_args[0][1]
-        assert tool_name == "setup_resource"
-        assert args["resource_id"] == "products"
-        assert args["quota_events_per_hour"] == 1000
-        assert "name" not in args
-        assert "summary" not in args
-        assert "description" not in args
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            result = await client.setup_resource(resource_id="products")
+        assert mock.call_args[0] == (
+            "setup_resource",
+            {"resource_id": "products", "name": "products", "quota_events_per_hour": 1000},
+        )
         assert result["token"] == "kagura_resource_xyz"
 
     await client.close()
@@ -1733,24 +1753,38 @@ async def test_setup_resource_basic():
 
 @pytest.mark.asyncio
 async def test_setup_resource_with_all_args():
-    """setup_resource() should forward all optional args when provided."""
+    """setup_resource() forwards an explicit name, description and quota."""
     client = _make_initialized_client()
 
     with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
         mock.return_value = {}
         await client.setup_resource(
             resource_id="products",
-            name="Product Catalog",
-            summary="All product data",
+            name="product-catalog",
             description="Catalog ingestion token",
             quota_events_per_hour=5000,
         )
-        args = mock.call_args[0][1]
-        assert args["resource_id"] == "products"
-        assert args["name"] == "Product Catalog"
-        assert args["summary"] == "All product data"
-        assert args["description"] == "Catalog ingestion token"
-        assert args["quota_events_per_hour"] == 5000
+        assert mock.call_args[0][1] == {
+            "resource_id": "products",
+            "name": "product-catalog",
+            "description": "Catalog ingestion token",
+            "quota_events_per_hour": 5000,
+        }
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_setup_resource_summary_is_deprecated_and_not_sent():
+    """#273: the server's setup_resource has no summary, so it is not sent."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {}
+        with pytest.warns(DeprecationWarning, match=r"summary.*update_context") as record:
+            await client.setup_resource(resource_id="products", summary="All product data")
+        assert "summary" not in mock.call_args[0][1]
+    assert record[0].filename == __file__
 
     await client.close()
 
@@ -3888,6 +3922,30 @@ async def test_rest_get_auth_error():
     await client.close()
 
 
+@pytest.mark.parametrize("status", [404, 422])
+@pytest.mark.parametrize("method", ["get_embedding_status", "list_memories"])
+@pytest.mark.asyncio
+async def test_rest_get_keeps_404_and_422_as_connection_errors_without_an_operation(method, status):
+    """Only a caller that names an MCP operation (list_tags, #273) remaps 404/422."""
+    client = _make_initialized_client()
+    response = httpx.Response(
+        status,
+        json={"error": f"HTTP-{status}", "message": "Not here", "details": {}},
+        request=httpx.Request("GET", "https://test.com/api/v1/x"),
+    )
+    args = ("ctx-1",) if method == "list_memories" else ()
+    try:
+        with patch.object(client._client, "get", new_callable=AsyncMock) as mock_get:
+            mock_get.return_value = response
+            with pytest.raises(KaguraConnectionError) as exc:
+                await getattr(client, method)(*args)
+    finally:
+        await client.close()
+
+    assert not isinstance(exc.value, KaguraNotFoundError)
+    assert str(exc.value) == f"HTTP {status}: Not here"
+
+
 @pytest.mark.asyncio
 async def test_rest_get_connection_error():
     """_rest_get should raise KaguraConnectionError on network failure."""
@@ -4666,47 +4724,27 @@ async def test_list_tags_passes_all_params():
     await client.close()
 
 
+@pytest.mark.parametrize("with_tags", [None, [], ["  ", ""]])
 @pytest.mark.asyncio
-async def test_list_tags_passes_with_tags():
-    """Issue #244: with_tags reaches the server so faceted drill-down is possible."""
+async def test_list_tags_stays_on_mcp_without_a_drill_down(with_tags):
+    """No with_tags, an empty list, or only blank values: MCP list_tags, no with_tags.
+
+    An empty drill-down is a no-op server-side (``tags @> '{}'``), and blank
+    values are dropped before it is judged empty (#273).
+    """
     client = _make_initialized_client()
 
-    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+    with (
+        patch.object(client, "_call_tool", new_callable=AsyncMock) as mock,
+        patch.object(client._client, "get", new_callable=AsyncMock) as mock_get,
+    ):
         mock.return_value = _list_tags_envelope()
-        await client.list_tags(
-            context_id="ctx-1",
-            prefix="when:",
-            with_tags=["client:acme.co.jp", "kind:invoice"],
+        await client.list_tags(context_id="ctx-1", with_tags=with_tags)
+        assert mock.call_args[0] == (
+            "list_tags",
+            {"context_id": "ctx-1", "limit": 50, "min_count": 1, "sort": "count"},
         )
-        args = mock.call_args[0][1]
-        assert args["with_tags"] == ["client:acme.co.jp", "kind:invoice"]
-        assert args["prefix"] == "when:"
-
-    await client.close()
-
-
-@pytest.mark.asyncio
-async def test_list_tags_omits_with_tags_when_none():
-    """Issue #244: with_tags is omitted when unset, leaving existing calls byte-identical."""
-    client = _make_initialized_client()
-
-    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
-        mock.return_value = _list_tags_envelope()
-        await client.list_tags(context_id="ctx-1")
-        assert "with_tags" not in mock.call_args[0][1]
-
-    await client.close()
-
-
-@pytest.mark.asyncio
-async def test_list_tags_omits_empty_with_tags():
-    """Issue #244: an empty with_tags list is not a drill-down — omit rather than send []."""
-    client = _make_initialized_client()
-
-    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
-        mock.return_value = _list_tags_envelope()
-        await client.list_tags(context_id="ctx-1", with_tags=[])
-        assert "with_tags" not in mock.call_args[0][1]
+        mock_get.assert_not_called()
 
     await client.close()
 
@@ -4778,6 +4816,511 @@ async def test_list_tags_arg_validation(kwargs, match):
             await client.list_tags(context_id="ctx-1", **kwargs)
     finally:
         await client.close()
+
+
+# ----------------------------------------------------------------------------
+# list_tags with_tags drill-down over REST (#273)
+#
+# MCP list_tags has no with_tags through memory-cloud v0.76.0 (memory-cloud
+# #1669) and silently returned the unfiltered vocabulary, so a drill-down goes
+# to GET /api/v1/contexts/{id}/tags, which has had it since v0.17.2.
+# ----------------------------------------------------------------------------
+
+_TAGS_CTX = "c1"
+_TAGS_PATH = f"/api/v1/contexts/{_TAGS_CTX}/tags"
+
+
+def _rest_tags_body(context_id: str = _TAGS_CTX, **overrides) -> dict:
+    """What the REST tags route returns: no ``status``/``context_name``, plus ``sample_summary``."""
+    body = {
+        "context_id": context_id,
+        "tags": [
+            {
+                "tag": "when:2026-09",
+                "count": 2,
+                "sample_summary": None,
+                "last_used_at": "2026-09-01T00:00:00Z",
+            }
+        ],
+        "total": 1,
+    }
+    body.update(overrides)
+    return body
+
+
+class _TagsServer:
+    """MCP ``list_tags`` and the REST tags route behind one ``httpx.MockTransport``."""
+
+    def __init__(self, *, rest_body=None, rest_status: int = 200, mcp_result=None) -> None:
+        self.rest_body = rest_body if rest_body is not None else _rest_tags_body()
+        self.rest_status = rest_status
+        self.mcp_result = (
+            mcp_result
+            if mcp_result is not None
+            else _list_tags_envelope(context_id=_TAGS_CTX, context_name="demo")
+        )
+        self.requests: list[httpx.Request] = []
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        if request.method == "GET":
+            return httpx.Response(self.rest_status, json=self.rest_body)
+        body = json.loads(request.content)
+        if body["method"] == "initialize":
+            result: dict = {"serverInfo": {}}
+        else:
+            result = {"content": [{"type": "text", "text": json.dumps(self.mcp_result)}]}
+        return httpx.Response(
+            200,
+            json={"jsonrpc": "2.0", "id": body["id"], "result": result},
+            headers={"mcp-session-id": "sess-1"},
+        )
+
+    def gets(self) -> list[httpx.Request]:
+        return [r for r in self.requests if r.method == "GET"]
+
+    def tool_calls(self) -> list[dict]:
+        bodies = [json.loads(r.content) for r in self.requests if r.method == "POST"]
+        return [b["params"] for b in bodies if b["method"] == "tools/call"]
+
+
+def _tags_client(server: _TagsServer, mcp_url: str = "https://test.com/mcp") -> KaguraClient:
+    client = KaguraClient(api_key="test-key", mcp_url=mcp_url)
+    client._client = httpx.AsyncClient(
+        transport=httpx.MockTransport(server.handler),
+        headers={"Authorization": "Bearer test-key"},
+    )
+    return client
+
+
+@pytest.mark.asyncio
+async def test_list_tags_with_tags_goes_to_the_rest_route_as_repeated_keys():
+    """The drill-down is a GET with one trimmed with_tags key per tag; MCP never sees it."""
+    server = _TagsServer()
+    client = _tags_client(server)
+    try:
+        await client.list_tags(
+            context_id=_TAGS_CTX,
+            prefix="when:",
+            with_tags=["client:acme.co.jp", " kind:invoice ", "  "],
+        )
+    finally:
+        await client.close()
+
+    rest = server.gets()[0]
+    assert server.requests[0] is rest  # REST first, so its errors are what a caller sees
+    assert f"{rest.url.scheme}://{rest.url.host}{rest.url.path}" == f"https://test.com{_TAGS_PATH}"
+    # Repeated keys, never comma-joined: the server reads "a,b" as ONE tag.
+    assert rest.url.params.get_list("with_tags") == ["client:acme.co.jp", "kind:invoice"]
+    assert rest.url.params["limit"] == "50"
+    assert rest.url.params["min_count"] == "1"
+    assert rest.url.params["sort"] == "count"
+    assert rest.url.params["prefix"] == "when:"
+    assert rest.headers["authorization"] == "Bearer test-key"
+    for call in server.tool_calls():
+        assert "with_tags" not in call["arguments"]
+
+
+@pytest.mark.asyncio
+async def test_list_tags_with_tags_passes_limit_min_count_sort_and_omits_empty_prefix():
+    server = _TagsServer()
+    client = _tags_client(server)
+    try:
+        await client.list_tags(
+            context_id=_TAGS_CTX, limit=7, min_count=3, sort="alpha", with_tags=["a"]
+        )
+    finally:
+        await client.close()
+
+    params = server.gets()[0].url.params
+    assert params["limit"] == "7"
+    assert params["min_count"] == "3"
+    assert params["sort"] == "alpha"
+    assert "prefix" not in params
+
+
+@pytest.mark.asyncio
+async def test_list_tags_with_tags_returns_the_mcp_shape_naming_the_context_via_list_tags():
+    """The route sends no context_name: one list_tags limit=1 call supplies it."""
+    from kagura_memory import ListTagsResponse
+
+    server = _TagsServer()
+    client = _tags_client(server)
+    try:
+        result = await client.list_tags(context_id=_TAGS_CTX, with_tags=["client:acme"])
+    finally:
+        await client.close()
+
+    assert isinstance(result, ListTagsResponse)
+    assert result.context_id == _TAGS_CTX
+    assert result.context_name == "demo"
+    assert result.total == 1
+    assert [(t.tag, t.count) for t in result.tags] == [("when:2026-09", 2)]
+    assert result.tags[0].last_used_at == datetime(2026, 9, 1, tzinfo=UTC)
+    assert server.tool_calls() == [
+        {"name": "list_tags", "arguments": {"context_id": _TAGS_CTX, "limit": 1}}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_list_tags_with_tags_maps_a_missing_last_used_at_to_none():
+    server = _TagsServer(rest_body=_rest_tags_body(tags=[{"tag": "a", "count": 1}]))
+    client = _tags_client(server)
+    try:
+        result = await client.list_tags(context_id=_TAGS_CTX, with_tags=["b"])
+    finally:
+        await client.close()
+    assert [(t.tag, t.count, t.last_used_at) for t in result.tags] == [("a", 1, None)]
+
+
+@pytest.mark.asyncio
+async def test_list_tags_with_tags_reuses_the_name_a_plain_call_returned():
+    server = _TagsServer()
+    client = _tags_client(server)
+    try:
+        await client.list_tags(context_id=_TAGS_CTX)
+        result = await client.list_tags(context_id=_TAGS_CTX, with_tags=["client:acme"])
+    finally:
+        await client.close()
+
+    assert result.context_name == "demo"
+    assert len(server.tool_calls()) == 1  # the plain call only
+
+
+@pytest.mark.asyncio
+async def test_list_tags_with_tags_looks_a_name_up_once_per_client():
+    server = _TagsServer()
+    client = _tags_client(server)
+    other = _tags_client(server)
+    try:
+        await client.list_tags(context_id=_TAGS_CTX, with_tags=["a"])
+        await client.list_tags(context_id=_TAGS_CTX, with_tags=["b"])
+        assert len(server.tool_calls()) == 1
+        # The cache belongs to the client, not the process.
+        await other.list_tags(context_id=_TAGS_CTX, with_tags=["a"])
+        assert len(server.tool_calls()) == 2
+    finally:
+        await client.close()
+        await other.close()
+
+
+@pytest.mark.asyncio
+async def test_list_tags_with_tags_keys_the_name_cache_on_the_canonical_id():
+    """A caller may spell the UUID in upper case; both routes answer in lower case."""
+    ctx = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    server = _TagsServer(
+        rest_body=_rest_tags_body(context_id=ctx),
+        mcp_result=_list_tags_envelope(context_id=ctx, context_name="demo"),
+    )
+    client = _tags_client(server)
+    try:
+        await client.list_tags(context_id=ctx.upper())
+        result = await client.list_tags(context_id=ctx.upper(), with_tags=["a"])
+    finally:
+        await client.close()
+
+    assert result.context_id == ctx
+    assert result.context_name == "demo"
+    assert len(server.tool_calls()) == 1
+
+
+@pytest.mark.asyncio
+async def test_list_tags_with_tags_uses_a_context_name_the_route_sends():
+    """memory-cloud#1669 may add context_name to the route; then no lookup is needed."""
+    server = _TagsServer(rest_body=_rest_tags_body(context_name="from-rest"))
+    client = _tags_client(server)
+    try:
+        result = await client.list_tags(context_id=_TAGS_CTX, with_tags=["a"])
+    finally:
+        await client.close()
+
+    assert result.context_name == "from-rest"
+    assert server.tool_calls() == []
+
+
+# memory-cloud rewraps every HTTPException / RequestValidationError into
+# {error, message, details} (api/main.py, #992); FastAPI's own {"detail": ...}
+# is kept as the shape of other deployments and older servers.
+_VALIDATION_ERRORS = [
+    {"loc": ["path", "context_id"], "msg": "Input should be a valid UUID", "type": "uuid_parsing"}
+]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"error": "HTTP-404", "message": "Context not found", "details": {}},
+        {"detail": "Context not found"},
+    ],
+)
+@pytest.mark.asyncio
+async def test_list_tags_with_tags_raises_not_found_on_a_rest_404_and_looks_no_name_up(body):
+    server = _TagsServer(rest_status=404, rest_body=body)
+    client = _tags_client(server)
+    try:
+        with pytest.raises(KaguraNotFoundError) as exc:
+            await client.list_tags(context_id=_TAGS_CTX, with_tags=["a"])
+    finally:
+        await client.close()
+
+    assert str(exc.value) == "list_tags: Context not found"
+    # Chained explicitly, like every other status the REST helper maps.
+    assert isinstance(exc.value.__cause__, httpx.HTTPStatusError)
+    assert len(server.requests) == 1
+
+
+@pytest.mark.parametrize(
+    ("body", "message"),
+    [
+        (
+            {"error": "HTTP-422", "message": "with_tags accepts at most 50 tags.", "details": {}},
+            "list_tags failed (invalid_argument): with_tags accepts at most 50 tags.",
+        ),
+        (
+            {
+                "error": "VAL-001",
+                "message": "Request validation failed",
+                "details": {"errors": _VALIDATION_ERRORS},
+            },
+            "list_tags failed (invalid_argument): Request validation failed: "
+            "path.context_id: Input should be a valid UUID",
+        ),
+        (
+            {"detail": "with_tags accepts at most 50 tags."},
+            "list_tags failed (invalid_argument): with_tags accepts at most 50 tags.",
+        ),
+        (
+            {"detail": _VALIDATION_ERRORS},
+            "list_tags failed (invalid_argument): path.context_id: Input should be a valid UUID",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_list_tags_with_tags_raises_kagura_error_on_a_rest_422(body, message):
+    """A refused value is a KaguraError, as on MCP — not a KaguraConnectionError."""
+    server = _TagsServer(rest_status=422, rest_body=body)
+    client = _tags_client(server)
+    try:
+        with pytest.raises(KaguraError) as exc:
+            await client.list_tags(context_id=_TAGS_CTX, with_tags=["a"])
+    finally:
+        await client.close()
+
+    assert not isinstance(exc.value, KaguraConnectionError)
+    assert str(exc.value) == message
+    assert isinstance(exc.value.__cause__, httpx.HTTPStatusError)
+
+
+@pytest.mark.parametrize(
+    ("status", "error_class", "message"),
+    [
+        (404, KaguraNotFoundError, "list_tags: HTTP 404"),
+        (422, KaguraError, "list_tags failed (invalid_argument): HTTP 422"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_list_tags_with_tags_names_the_status_when_the_body_has_no_detail(
+    status, error_class, message
+):
+    server = _TagsServer(rest_status=status, rest_body={"unexpected": "shape"})
+    client = _tags_client(server)
+    try:
+        with pytest.raises(error_class) as exc:
+            await client.list_tags(context_id=_TAGS_CTX, with_tags=["a"])
+    finally:
+        await client.close()
+    assert str(exc.value) == message
+
+
+@pytest.mark.parametrize(
+    ("status", "error_class"),
+    [(401, KaguraAuthError), (429, KaguraRateLimitError), (500, KaguraConnectionError)],
+)
+@pytest.mark.asyncio
+async def test_list_tags_with_tags_keeps_the_standard_status_mapping(status, error_class):
+    server = _TagsServer(rest_status=status, rest_body={"detail": "no"})
+    client = _tags_client(server)
+    try:
+        with pytest.raises(error_class):
+            await client.list_tags(context_id=_TAGS_CTX, with_tags=["a"])
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_list_tags_with_tags_raises_not_found_when_the_name_lookup_cannot_see_it():
+    server = _TagsServer(
+        mcp_result={
+            "status": "error",
+            "error": "context_not_found",
+            "message": "Context not found or you don't have access to it.",
+        }
+    )
+    client = _tags_client(server)
+    try:
+        with pytest.raises(KaguraNotFoundError, match="list_tags"):
+            await client.list_tags(context_id=_TAGS_CTX, with_tags=["a"])
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_list_tags_with_tags_raises_response_error_when_the_lookup_has_no_name():
+    from kagura_memory import KaguraResponseError
+
+    server = _TagsServer(
+        mcp_result={"status": "success", "context_id": _TAGS_CTX, "tags": [], "total": 0}
+    )
+    client = _tags_client(server)
+    try:
+        with pytest.raises(KaguraResponseError, match="context_name") as exc:
+            await client.list_tags(context_id=_TAGS_CTX, with_tags=["a"])
+    finally:
+        await client.close()
+    assert exc.value.operation == "list_tags"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"context_id": _TAGS_CTX, "total": 0},
+        {"context_id": _TAGS_CTX, "tags": []},
+        {"tags": [], "total": 0},
+        {"context_id": _TAGS_CTX, "tags": [{"tag": "a"}], "total": 1},
+        ["not", "an", "object"],
+    ],
+)
+@pytest.mark.asyncio
+async def test_list_tags_with_tags_raises_response_error_on_a_malformed_rest_body(body):
+    """Drift is a KaguraResponseError naming list_tags, reported before any name lookup."""
+    from kagura_memory import KaguraResponseError
+
+    server = _TagsServer(rest_body=body)
+    client = _tags_client(server)
+    try:
+        with pytest.raises(KaguraResponseError) as exc:
+            await client.list_tags(context_id=_TAGS_CTX, with_tags=["a"])
+    finally:
+        await client.close()
+
+    assert exc.value.operation == "list_tags"
+    # Names the (unexported) model after the server's, never a private name.
+    assert str(exc.value).startswith(
+        "list_tags: unexpected server response for ContextTagsResponse ("
+    )
+    assert server.tool_calls() == []
+
+
+@pytest.mark.parametrize(
+    ("with_tags", "match"),
+    [
+        ([f"t{i}" for i in range(51)], r"with_tags accepts at most 50 tags, got 51"),
+        (["ok", "x" * 201], r"each with_tags value must be at most 200 characters, got 201"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_list_tags_rejects_an_oversized_drill_down_before_any_request(with_tags, match):
+    server = _TagsServer()
+    client = _tags_client(server)
+    try:
+        with pytest.raises(ValueError, match=match):
+            await client.list_tags(context_id=_TAGS_CTX, with_tags=with_tags)
+    finally:
+        await client.close()
+    assert server.requests == []
+
+
+@pytest.mark.asyncio
+async def test_list_tags_rejects_a_bare_string_with_tags():
+    """A str would be iterated into one-character tags — a silently wrong drill-down."""
+    server = _TagsServer()
+    client = _tags_client(server)
+    try:
+        with pytest.raises(TypeError, match="with_tags must be a list"):
+            await client.list_tags(context_id=_TAGS_CTX, with_tags="client:acme")  # type: ignore[arg-type]
+    finally:
+        await client.close()
+    assert server.requests == []
+
+
+@pytest.mark.parametrize(
+    ("with_tags", "type_name"),
+    [([1], "int"), (["ok", None], "NoneType"), (("ok", b"raw"), "bytes")],
+)
+@pytest.mark.asyncio
+async def test_list_tags_rejects_a_non_str_with_tags_item(with_tags, type_name):
+    """A TypeError naming the item's type, not an AttributeError from .strip()."""
+    server = _TagsServer()
+    client = _tags_client(server)
+    try:
+        with pytest.raises(TypeError, match=f"with_tags items must be str, got {type_name}$"):
+            await client.list_tags(context_id=_TAGS_CTX, with_tags=with_tags)
+    finally:
+        await client.close()
+    assert server.requests == []
+
+
+@pytest.mark.asyncio
+async def test_list_tags_accepts_any_iterable_of_str_with_tags():
+    """A tuple or a one-shot generator is read once, then normalized like a list."""
+    server = _TagsServer()
+    client = _tags_client(server)
+    try:
+        await client.list_tags(context_id=_TAGS_CTX, with_tags=(t for t in [" a ", "b"]))  # type: ignore[arg-type]
+    finally:
+        await client.close()
+    assert server.gets()[0].url.params.get_list("with_tags") == ["a", "b"]
+
+
+@pytest.mark.asyncio
+async def test_list_tags_drops_blank_values_before_the_50_tag_cap():
+    server = _TagsServer()
+    client = _tags_client(server)
+    try:
+        await client.list_tags(
+            context_id=_TAGS_CTX, with_tags=[f"t{i}" for i in range(50)] + ["  "] * 10
+        )
+    finally:
+        await client.close()
+    assert len(server.gets()[0].url.params.get_list("with_tags")) == 50
+
+
+@pytest.mark.asyncio
+async def test_list_tags_with_tags_counts_the_200_cap_in_characters():
+    """The server's len() counts code points, as Python's does — not UTF-8 bytes."""
+    server = _TagsServer()
+    client = _tags_client(server)
+    try:
+        await client.list_tags(context_id=_TAGS_CTX, with_tags=["🏷" * 200])
+    finally:
+        await client.close()
+    assert server.gets()[0].url.params["with_tags"] == "🏷" * 200
+
+
+@pytest.mark.asyncio
+async def test_list_tags_with_tags_uses_the_rest_base_of_a_workspace_scoped_mcp_url():
+    server = _TagsServer()
+    client = _tags_client(server, mcp_url="https://test.com/mcp/w/ws-1?profile=core")
+    try:
+        await client.list_tags(context_id=_TAGS_CTX, with_tags=["a"])
+    finally:
+        await client.close()
+
+    assert str(server.requests[0].url).startswith(f"https://test.com{_TAGS_PATH}?")
+    # The name lookup is an MCP call and keeps the MCP URL as given.
+    assert str(server.requests[1].url) == "https://test.com/mcp/w/ws-1?profile=core"
+
+
+@pytest.mark.asyncio
+async def test_list_tags_with_tags_encodes_the_context_id_into_one_path_segment():
+    server = _TagsServer(rest_status=404, rest_body={"detail": "Not Found"})
+    client = _tags_client(server)
+    try:
+        with pytest.raises(KaguraNotFoundError):
+            await client.list_tags(context_id="a/../b", with_tags=["a"])
+    finally:
+        await client.close()
+    assert server.requests[0].url.raw_path.startswith(b"/api/v1/contexts/a%2F..%2Fb/tags?")
 
 
 # ============================================================================

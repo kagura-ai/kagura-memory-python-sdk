@@ -5,8 +5,10 @@ import itertools
 import json
 import logging
 import math
+import warnings
 from datetime import datetime
 from typing import Any, Literal, Self, TypeVar
+from urllib.parse import quote
 
 import httpx
 from pydantic import BaseModel as _BaseModel
@@ -16,6 +18,7 @@ from ._http import (
     SDK_VERSION,
     _opt_int,
     base_url_from_mcp,
+    extract_detail,
     gate_error,
     mcp_session_expired,
     mcp_session_header,
@@ -41,6 +44,7 @@ from .models import (
     AgentBootstrapComponentName,
     AgentBootstrapResponse,
     ContextInfo,
+    ContextTagsResponse,
     DuplicatesResponse,
     Edge,
     EmbeddingModelsResponse,
@@ -91,6 +95,13 @@ _MIN_SERVER_VERSION_TUPLE: tuple[int, int, int] = _min_server_version
 # authority on every other rule (e.g. the 365-day series window).
 _METRIC_MAX_LEN = 64
 _UNIT_MAX_LEN = 32
+
+# Shared by KaguraClient.setup_resource and ResourceClient.setup_resource (#273).
+_SETUP_SUMMARY_DEPRECATED = (
+    "setup_resource(summary=...) is deprecated and ignored: the server's setup_resource "
+    "has no summary, so it is not sent. Set it afterwards with "
+    "update_context(context_id, summary=...) on the returned context_id."
+)
 
 
 def _validate_metric(metric: object) -> None:
@@ -259,6 +270,10 @@ class KaguraClient:
         # re-fetching on every section summarization. See
         # :meth:`_get_context_info_cached`.
         self._context_info_cache: dict[str, ContextInfo | None] = {}
+        # Context id (lower case) → name, for the list_tags drill-down, whose
+        # REST route sends no name (#273). Never stale: no server API renames
+        # a context (update_context cannot change ``name``).
+        self._context_names: dict[str, str] = {}
 
     def _next_request_id(self) -> int:
         """Get next JSON-RPC request ID (concurrency-safe via itertools.count)."""
@@ -378,16 +393,31 @@ class KaguraClient:
             self.mcp_url, json=body, headers=mcp_session_header(self._session_id)
         )
 
-    async def _rest_get_json(self, path: str, params: dict[str, Any] | None = None) -> Any:
+    async def _rest_get_json(
+        self,
+        path: str,
+        params: dict[str, Any] | None = None,
+        *,
+        operation: str | None = None,
+    ) -> Any:
         """GET a REST endpoint and return its decoded JSON body.
 
         Args:
             path: URL path (appended to ``_base_url``).
-            params: Optional query parameters.
+            params: Optional query parameters. A list value is sent as one
+                repeated key per item (``?k=a&k=b``), which is how FastAPI
+                reads a ``list[str]`` query.
+            operation: The MCP tool this call stands in for. When set, a
+                ``404`` and a ``422`` raise what that tool's
+                ``context_not_found`` and ``invalid_argument`` errors raise
+                (:meth:`_raise_for_mcp_error`), so a method moved from MCP to
+                REST keeps its exceptions (#273).
 
         Raises:
             KaguraAuthError / KaguraRateLimitError / KaguraConnectionError: A
                 non-2xx status (see :func:`raise_for_kagura_status`).
+            KaguraNotFoundError / KaguraError: A ``404`` / ``422`` when
+                ``operation`` is set.
             KaguraConnectionError: A network failure, or a 2xx body that is
                 not JSON.
         """
@@ -397,6 +427,16 @@ class KaguraClient:
             response.raise_for_status()
             return response.json()
         except httpx.HTTPStatusError as e:
+            code = {404: "context_not_found", 422: "invalid_argument"}.get(e.response.status_code)
+            if operation is not None and code is not None:
+                message = extract_detail(e.response) or f"HTTP {e.response.status_code}"
+                try:
+                    self._raise_for_mcp_error(
+                        {"status": "error", "error": code, "message": message}, operation
+                    )
+                except KaguraError as mapped:
+                    # Chained explicitly, as raise_for_kagura_status chains it.
+                    raise mapped from e
             raise_for_kagura_status(e)
         except httpx.RequestError as e:
             raise KaguraConnectionError(f"Connection failed: {_exc_message(e)}") from e
@@ -1662,6 +1702,16 @@ class KaguraClient:
         needs v0.17.2+. As elsewhere in this client, ``MIN_SERVER_VERSION`` is
         not bumped to match — floors are tracked per surface.
 
+        A ``with_tags`` drill-down is sent to the REST route
+        ``GET /api/v1/contexts/{id}/tags`` rather than MCP: the MCP tool has
+        no ``with_tags`` (through memory-cloud v0.76.0, memory-cloud#1669) and
+        silently returned the unfiltered vocabulary (#273). The result has
+        the same shape. The route sends no ``context_name``, so the client
+        looks it up once per context with a ``list_tags(limit=1)`` MCP call
+        and keeps it; a call without ``with_tags`` fills the same cache. The
+        route takes API keys and OAuth profiles alike (OAuth needs the
+        ``memory:read`` scope, which every ``kagura auth login`` grant has).
+
         Args:
             context_id: Context ID to list tags from.
             limit: Maximum tags to return (1-500, default 50).
@@ -1683,17 +1733,24 @@ class KaguraClient:
                         ctx, query=..., filters={"tags": [...], "tags_match": "all"}
                     )
 
-                Requires memory-cloud server v0.17.2+ (#830). Omitted when
-                empty or unset.
+                Requires memory-cloud server v0.17.2+ (#830). Values are
+                trimmed and blank ones dropped, as the server does; at most 50
+                may remain, each at most 200 characters. An empty result is no
+                drill-down and stays on MCP.
 
         Returns:
             :class:`ListTagsResponse` with ``context_id``, ``context_name``,
             ``tags`` (list of :class:`TagInfo`), and ``total`` count.
 
         Raises:
-            ValueError: If ``limit``, ``min_count``, or ``prefix`` are out of range.
+            ValueError: If ``limit``, ``min_count``, ``prefix`` or
+                ``with_tags`` are out of range, before any request.
+            TypeError: If ``with_tags`` is a ``str`` rather than a list, or
+                holds an item that is not a ``str``.
             KaguraNotFoundError: Context not found or caller lacks access.
             KaguraError: Other server-side error.
+            KaguraResponseError: A response that does not match
+                :class:`ListTagsResponse` (``operation="list_tags"``).
         """
         if not 1 <= limit <= 500:
             raise ValueError(f"limit must be between 1 and 500, got {limit}")
@@ -1701,21 +1758,76 @@ class KaguraClient:
             raise ValueError(f"min_count must be between 1 and 10000, got {min_count}")
         if len(prefix) > 200:
             raise ValueError(f"prefix must be at most 200 characters, got {len(prefix)}")
+        # A str would be iterated into one-character tags: a wrong drill-down
+        # the server would happily run.
+        if isinstance(with_tags, str):
+            raise TypeError("with_tags must be a list of tags, not a str")
+        tags = list(with_tags or ())
+        for tag in tags:
+            if not isinstance(tag, str):
+                raise TypeError(f"with_tags items must be str, got {type(tag).__name__}")
+        # Normalized as the server normalizes it, so the caps below judge the
+        # list the server would. An empty drill-down matches everything
+        # (``tags @> '{}'``), so it is the same as none.
+        drill_down = [s for t in tags if (s := t.strip())]
+        if len(drill_down) > 50:
+            raise ValueError(f"with_tags accepts at most 50 tags, got {len(drill_down)}")
+        longest = max(map(len, drill_down), default=0)
+        if longest > 200:
+            raise ValueError(f"each with_tags value must be at most 200 characters, got {longest}")
 
-        arguments: dict[str, Any] = {
-            "context_id": context_id,
-            "limit": limit,
-            "min_count": min_count,
-            "sort": sort,
-        }
+        query: dict[str, Any] = {"limit": limit, "min_count": min_count, "sort": sort}
         if prefix:
-            arguments["prefix"] = prefix
-        # An empty list is not a drill-down; omit rather than send [] so the
-        # server keeps its unfiltered behaviour.
-        if with_tags:
-            arguments["with_tags"] = with_tags
-        result = await self._call_tool_checked("list_tags", arguments)
-        return parse_response(ListTagsResponse, result, operation="list_tags")
+            query["prefix"] = prefix
+        if drill_down:
+            # MCP list_tags has no with_tags (#273): the same query, over REST.
+            return await self._list_tags_via_rest(context_id, {**query, "with_tags": drill_down})
+        result = await self._call_tool_checked("list_tags", {"context_id": context_id, **query})
+        return self._remember_context_name(
+            parse_response(ListTagsResponse, result, operation="list_tags")
+        )
+
+    async def _list_tags_via_rest(
+        self, context_id: str, params: dict[str, Any]
+    ) -> ListTagsResponse:
+        """The ``list_tags`` drill-down over ``GET /api/v1/contexts/{id}/tags`` (#273).
+
+        Reshaped to what the MCP tool returns: the route sends no
+        ``context_name``, which :meth:`_context_name_for` supplies.
+        """
+        # Quoted, so a caller's id cannot add segments to the request path.
+        path = f"/api/v1/contexts/{quote(context_id, safe='')}/tags"
+        data = await self._rest_get_json(path, params, operation="list_tags")
+        body = parse_response(ContextTagsResponse, data, operation="list_tags")
+        # Only after the REST call, so its error is the one a caller sees.
+        context_name = body.context_name or await self._context_name_for(body.context_id)
+        return self._remember_context_name(
+            ListTagsResponse(
+                context_id=body.context_id,
+                context_name=context_name,
+                tags=body.tags,
+                total=body.total,
+            )
+        )
+
+    async def _context_name_for(self, context_id: str) -> str:
+        """A context's name, from the cache or from one ``list_tags`` MCP call.
+
+        ``list_tags`` runs the same access check as the REST tags route (both
+        call the server's ``ContextService.aggregate_tags``), is exempt from
+        the MCP rate limit, and with ``limit=1`` carries one tag.
+        """
+        cached = self._context_names.get(context_id.lower())
+        if cached is not None:
+            return cached
+        result = await self._call_tool_checked("list_tags", {"context_id": context_id, "limit": 1})
+        response = parse_response(ListTagsResponse, result, operation="list_tags")
+        return self._remember_context_name(response).context_name
+
+    def _remember_context_name(self, response: ListTagsResponse) -> ListTagsResponse:
+        """Cache the name a ``list_tags`` result carries, and return the result."""
+        self._context_names[response.context_id.lower()] = response.context_name
+        return response
 
     async def get_tool_definitions(self) -> list[dict[str, Any]]:
         """
@@ -1992,7 +2104,12 @@ class KaguraClient:
             description: Context description.
             summary: LLM-oriented summary (200-500 chars).
             usage_guide: LLM-oriented memory usage guidelines.
-            resource_id: Resource identifier for external data ingestion.
+            resource_id: Deprecated and not sent (#273): the server's
+                ``create_context`` does not read it (memory-cloud through
+                v0.76.0), so it was always dropped. Passing it emits a
+                :class:`DeprecationWarning`. Set it afterwards with
+                :meth:`update_context` (owner only), or create a resource
+                context with :meth:`setup_resource`.
             is_private: Privacy flag (default: True).
             embedding_model: Embedding model for this context. It is fixed at
                 creation — no SDK call changes it — but since memory-cloud
@@ -2014,6 +2131,15 @@ class KaguraClient:
             KaguraFeatureNotAvailableError: The plan does not allow a
                 shared context (``is_private=False``; server v0.75.0+).
         """
+        if resource_id is not None:
+            warnings.warn(
+                "create_context(resource_id=...) is deprecated and ignored: the server's "
+                "create_context does not read resource_id, so it is not sent. Set it "
+                "afterwards with update_context(context_id, resource_id=...), or use "
+                "setup_resource().",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         # Pre-check quota
         contexts = await self.list_contexts()
         count = contexts.get("count")
@@ -2046,8 +2172,6 @@ class KaguraClient:
             arguments["summary"] = summary
         if usage_guide is not None:
             arguments["usage_guide"] = usage_guide
-        if resource_id is not None:
-            arguments["resource_id"] = resource_id
         if embedding_model is not None:
             arguments["embedding_model"] = embedding_model
         return await self._call_tool_checked("create_context", arguments)
@@ -2133,8 +2257,19 @@ class KaguraClient:
 
         Args:
             resource_id: Resource identifier for data ingestion.
-            name: Context name (defaults to ``resource_id`` server-side).
-            summary: Context summary.
+            name: Context name, which the server requires. Defaults to
+                ``resource_id``, which always matches the server's
+                context-name pattern. A ``name`` of its own is needed when the
+                id is longer than the 100-character name limit, or when the
+                workspace already has a context of that name: the server then
+                refuses with ``validation_error`` ("Context '<name>' already
+                exists in this workspace.").
+            summary: Deprecated and not sent (#273): the server's
+                ``setup_resource`` has no summary (memory-cloud through
+                v0.76.0), so it was always dropped. Passing it emits a
+                :class:`DeprecationWarning`. Set it afterwards with
+                :meth:`update_context` on the returned ``context_id`` (owner
+                only).
             description: Token description.
             quota_events_per_hour: Token quota (1-10000).
 
@@ -2161,14 +2296,15 @@ class KaguraClient:
             default); earlier servers gated it on plans with shared contexts
             and resource tokens. Existing resources keep serving.
         """
+        if summary is not None:
+            warnings.warn(_SETUP_SUMMARY_DEPRECATED, DeprecationWarning, stacklevel=2)
         arguments: dict[str, Any] = {
             "resource_id": resource_id,
+            # Required by the server: without it every call was refused with
+            # missing_fields (#273).
+            "name": resource_id if name is None else name,
             "quota_events_per_hour": quota_events_per_hour,
         }
-        if name is not None:
-            arguments["name"] = name
-        if summary is not None:
-            arguments["summary"] = summary
         if description is not None:
             arguments["description"] = description
         return await self._call_tool_checked("setup_resource", arguments)

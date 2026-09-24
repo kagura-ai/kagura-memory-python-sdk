@@ -925,12 +925,8 @@ def test_resource_schema_not_registered(mock_rc_cls, mock_config):
     assert "No schema registered" in result.output
 
 
-@patch("kagura_memory.cli.load_config")
-@patch("kagura_memory.cli.ResourceClient")
-def test_resource_setup(mock_rc_cls, mock_config):
-    """resource setup should call setup_resource."""
-    mock_config.return_value = {"api_key": "key", "mcp_url": "https://test.com/mcp"}
-
+def _setup_resource_client(mock_rc_cls) -> AsyncMock:
+    """Route ``kagura resource setup`` to a ResourceClient mock that returns a token."""
     mock_rc = AsyncMock()
     mock_rc.setup_resource.return_value = MagicMock(
         model_dump_json=lambda indent=None: '{"token": "kagura_resource_abc", "id": 1}'
@@ -939,11 +935,62 @@ def test_resource_setup(mock_rc_cls, mock_config):
     mock_rc.__aexit__ = AsyncMock(return_value=None)
     mock_rc_cls.from_mcp_url.return_value = mock_rc
     mock_rc_cls._from_resolved_auth.return_value = mock_rc
+    return mock_rc
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.ResourceClient")
+def test_resource_setup(mock_rc_cls, mock_config):
+    """resource setup names the context after the resource unless --name is given (#273)."""
+    mock_config.return_value = {"api_key": "key", "mcp_url": "https://test.com/mcp"}
+    mock_rc = _setup_resource_client(mock_rc_cls)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["resource", "setup", "-r", "products"])
+    assert result.exit_code == 0, result.output
+    assert "kagura_resource_abc" in result.output
+    assert result.stderr == ""
+    mock_rc.setup_resource.assert_called_once_with(
+        resource_id="products", context_name=None, description=None, quota_events_per_hour=1000
+    )
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.ResourceClient")
+def test_resource_setup_name(mock_rc_cls, mock_config):
+    """--name sets the context name the server requires (#273)."""
+    mock_config.return_value = {"api_key": "key", "mcp_url": "https://test.com/mcp"}
+    mock_rc = _setup_resource_client(mock_rc_cls)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main, ["resource", "setup", "-r", "products", "--name", "product-catalog", "-q", "50"]
+    )
+    assert result.exit_code == 0, result.output
+    mock_rc.setup_resource.assert_called_once_with(
+        resource_id="products",
+        context_name="product-catalog",
+        description=None,
+        quota_events_per_hour=50,
+    )
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.ResourceClient")
+def test_resource_setup_summary_is_ignored_with_a_note(mock_rc_cls, mock_config):
+    """--summary is still accepted, but not sent; stderr names `kagura context update` (#273)."""
+    from kagura_memory.cli import _SETUP_SUMMARY_IGNORED_NOTE
+
+    mock_config.return_value = {"api_key": "key", "mcp_url": "https://test.com/mcp"}
+    mock_rc = _setup_resource_client(mock_rc_cls)
 
     runner = CliRunner()
     result = runner.invoke(main, ["resource", "setup", "-r", "products", "-s", "catalog"])
-    assert result.exit_code == 0
-    assert "kagura_resource_abc" in result.output
+    assert result.exit_code == 0, result.output
+    assert result.stderr.strip() == _SETUP_SUMMARY_IGNORED_NOTE
+    assert "kagura context update <context_id> --summary" in _SETUP_SUMMARY_IGNORED_NOTE
+    assert "kagura_resource_abc" in result.stdout
+    assert "summary" not in mock_rc.setup_resource.call_args.kwargs
 
 
 @patch("kagura_memory.cli.load_config")

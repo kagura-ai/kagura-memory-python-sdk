@@ -2298,24 +2298,49 @@ def resource_schema(resource_id, schema_version):
     _run_resource_command(op)
 
 
+# Printed to stderr when ``resource setup`` is given ``--summary``. The flag is
+# still accepted so existing scripts keep working, but the server's
+# ``setup_resource`` has no summary and never had one, so it is not sent (#273).
+_SETUP_SUMMARY_IGNORED_NOTE = (
+    "Note: --summary is ignored, since the server's setup_resource has no summary. "
+    "Set it after setup with `kagura context update <context_id> --summary ...` "
+    "(context owner only)."
+)
+
+
 @resource.command(name="setup")
 @click.option("--resource-id", "-r", required=True, help="Resource identifier")
-@click.option("--summary", "-s", help="Context summary")
+@click.option(
+    "--name",
+    "-n",
+    help=(
+        "Context name (default: the resource id; lowercase letters, digits, hyphens, "
+        "underscores; max 100). Needed when a context of that name already exists"
+    ),
+)
+@click.option(
+    "--summary",
+    "-s",
+    help="Deprecated and ignored by the server; use `kagura context update` after setup",
+)
 @click.option("--description", "-d", help="Token description")
 @click.option("--quota", "-q", type=click.IntRange(1, 10000), default=1000, help="Events/hour")
-def resource_setup(resource_id, summary, description, quota):
+def resource_setup(resource_id, name, summary, description, quota):
     """
     One-shot resource setup: create context + set resource_id + create token.
 
     Examples:
-      kagura resource setup -r products -s "Product catalog"
+      kagura resource setup -r products
+      kagura resource setup -r products -n product-catalog
       kagura resource setup -r slack-messages -d "Slack sync" -q 5000
     """
+    if summary is not None:
+        click.echo(_SETUP_SUMMARY_IGNORED_NOTE, err=True)
 
     async def op(client: ResourceClient) -> str:
         token = await client.setup_resource(
             resource_id=resource_id,
-            summary=summary,
+            context_name=name,
             description=description,
             quota_events_per_hour=quota,
         )

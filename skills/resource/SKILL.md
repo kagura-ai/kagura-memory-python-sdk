@@ -18,7 +18,7 @@ Drive the `kagura resource` command group. Thin wrapper around the installed
 ## Run (choose by intent)
 
 ```bash
-kagura resource setup ...                       # provision a resource binding
+kagura resource setup -r <id> [--name <ctx>]    # provision a resource binding
 kagura resource import <file>                   # bulk-import events
 kagura resource stats                           # resource impact / usage
 kagura resource schema                          # inferred event schema
@@ -30,6 +30,13 @@ kagura resource tokens list|create|update|revoke
 - Relay the CLI output. **Resource tokens are secrets:** when one is created it
   is shown once and not stored — surface it to the user and remind them to save
   it now. Prefer `revoke` over leaving stale tokens active.
+- `setup` names the new context after the resource id unless `--name` is
+  given (lowercase letters, digits, hyphens and underscores; max 100
+  characters). Pass `--name` when the id is longer than that, or when the
+  server refuses with `Context '<name>' already exists in this workspace` — a
+  context of that name is already there. `--summary` is ignored — the
+  server has none to set — so set one afterwards with
+  `kagura context update <context_id> --summary ...` (context owner only).
 - **Creation is plan-gated**: `setup` and `tokens create` need the workspace
   plan's `resources` feature, and making a context public needs
   `public_contexts` (memory-cloud v0.68.0+, XL only by default; earlier servers
