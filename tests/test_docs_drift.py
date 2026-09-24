@@ -64,7 +64,7 @@ def test_no_stale_server_behaviour_in_docs(phrase: str) -> None:
         (KaguraClient.merge_contexts, ["pending_embedding"]),
         (KaguraClient.get_agent_bootstrap, ["``trigger``", "include_details"]),
         (AgentsClient.bootstrap, ["``trigger``", "include_details"]),
-        (KaguraClient.get_server_info, ["search_defaults", "model_extra"]),
+        (KaguraClient.get_server_info, ["search_defaults", "model_extra", "terms_version"]),
         (KaguraClient.__init__, ["?profile=", "?tools=", "tools/list"]),
         (TagInfo, ["sample_summary"]),
     ],

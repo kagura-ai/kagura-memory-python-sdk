@@ -3689,7 +3689,8 @@ async def test_get_server_info():
     await client.close()
 
 
-# The ``features`` block memory-cloud v0.76.0 sends (backend/src/api/routes/system.py).
+# The ``features`` block memory-cloud v0.76.0 sends, unchanged in v0.77.0
+# (backend/src/api/routes/system.py).
 # ``extra="allow"`` keeps an untyped flag in ``model_extra`` and ``model_dump()``,
 # so the tests below also assert ``model_extra`` / ``model_fields`` to prove each
 # flag is a typed field.
@@ -3741,6 +3742,36 @@ async def test_get_server_info_exposes_v076_features_and_search_defaults():
     assert result.features.model_dump() == _V076_FEATURES
     assert result.search_defaults == _V076_SEARCH_DEFAULTS
     await client.close()
+
+
+@pytest.mark.parametrize(
+    ("sent", "expected"),
+    [
+        ({"version": "0.77.0", "terms_version": "2026-09"}, "2026-09"),
+        ({"version": "0.77.0", "terms_version": None}, None),
+        ({"version": "0.76.0"}, None),
+    ],
+    ids=["set", "null", "absent"],
+)
+@pytest.mark.asyncio
+async def test_get_server_info_reads_terms_version(sent: dict, expected: str | None):
+    """memory-cloud v0.77.0 sends ``terms_version`` (#1665), null when acceptance is off.
+
+    A server before v0.77.0 omits the key. Both read as ``None``.
+    """
+    client = _make_initialized_client()
+    payload = {"name": "Kagura Memory Cloud", **sent, "features": _V076_FEATURES}
+
+    try:
+        with patch.object(client._client, "get", new_callable=AsyncMock) as mock_get:
+            mock_get.return_value = _server_info_response(payload)
+            result = await client.get_server_info()
+    finally:
+        await client.close()
+
+    assert result.terms_version == expected
+    # A top-level key, not a feature flag.
+    assert result.features.model_extra == {}
 
 
 def test_server_features_keeps_unknown_future_flags():

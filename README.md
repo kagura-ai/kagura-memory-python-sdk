@@ -1010,7 +1010,7 @@ point at that server too (`KAGURA_MCP_URL` for `KAGURA_API_KEY`).
 | Context (create/update/list/delete/get_context_info) | `KaguraClient` | MCP | API Key |
 | Workspace (get_usage) | `KaguraClient` | MCP | API Key |
 | Search config (update_search_config) | `KaguraClient` | MCP | API Key |
-| Server info (get_server_info — version, deployment feature flags, `search_defaults`) | `KaguraClient` | REST | None (public endpoint) |
+| Server info (get_server_info — version, deployment feature flags, `search_defaults`, `terms_version`) | `KaguraClient` | REST | None (public endpoint) |
 | Embedding status (get_embedding_status) | `KaguraClient` | REST | API Key |
 | Memory stats (get_memory_stats) | `KaguraClient` | REST | API Key |
 | Duplicate detection (find_duplicates) | `KaguraClient` | REST | API Key |

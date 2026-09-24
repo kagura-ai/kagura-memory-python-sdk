@@ -2680,9 +2680,12 @@ class KaguraClient:
         Returns:
             ServerInfo with the version string, the deployment's feature
             flags (:class:`~kagura_memory.models.ServerFeatures` — flags newer
-            than this SDK land in ``features.model_extra``) and, on
-            memory-cloud v0.69.0+, ``search_defaults`` — the reranker
-            settings new contexts start with.
+            than this SDK land in ``features.model_extra``),
+            ``search_defaults`` (memory-cloud v0.69.0+) — the reranker
+            settings new contexts start with — and ``terms_version``
+            (v0.77.0+): the terms-of-service version, ``None`` when the
+            deployment does not record acceptance. Accepting the terms is a
+            web sign-in step that never gates API or MCP calls.
         """
         return await self._rest_get("/api/v1/system/info", ServerInfo)
 
