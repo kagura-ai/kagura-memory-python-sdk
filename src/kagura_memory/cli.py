@@ -1721,12 +1721,14 @@ _HARNESS_GUARDRAILS_HELP = {
     "hermes": (
         "Never written: Hermes does not read MCP instructions. 'off' is refused (it would "
         "remove the get_context_info guardrails block, Hermes's only guardrail lane); a "
-        "context UUID only picks the AGENTS.md export's context."
+        "context UUID only picks the AGENTS.md export's context. A ?guardrails= context in "
+        "--mcp-url is dropped too."
     ),
     "openclaw": (
         "Never written: OpenClaw does not read MCP instructions. 'off' is refused (it would "
         "remove the get_context_info guardrails block, OpenClaw's only guardrail lane); a "
-        "context UUID only picks the AGENTS.md export's context."
+        "context UUID only picks the AGENTS.md export's context. A ?guardrails= context in "
+        "--mcp-url is dropped too."
     ),
 }
 _HARNESS_AGENTS_MD_HELP = {
@@ -1742,9 +1744,10 @@ _HARNESS_AGENTS_MD_HELP = {
         "marked block changes."
     ),
     "openclaw": (
-        "Write the context's tool guardrail export block into PATH (default "
-        "~/.openclaw/workspace/AGENTS.md, which OpenClaw loads every session). An "
-        "interactive run offers it. Only the marked block changes."
+        "Write the context's tool guardrail export block into PATH (default AGENTS.md in "
+        "the workspace OpenClaw loads every session: $OPENCLAW_WORKSPACE_DIR, else workspace/ "
+        "in $OPENCLAW_STATE_DIR or ~/.openclaw). An interactive run offers it. Only the "
+        "marked block changes."
     ),
 }
 _HARNESS_KEY_ENV_HELP = {
@@ -1757,7 +1760,7 @@ _HARNESS_KEY_ENV_HELP = {
     ),
     "openclaw": (
         "With --url-form: the variable the Authorization header references, kept in "
-        "~/.openclaw/.env (default KAGURA_API_KEY)."
+        "OpenClaw's .env ($OPENCLAW_STATE_DIR, else ~/.openclaw; default KAGURA_API_KEY)."
     ),
 }
 
@@ -1778,7 +1781,10 @@ def _harness_command(harness: HarnessName):
                 "--name",
                 default=MCP_SERVER_NAME,
                 show_default=True,
-                help="MCP server name in the harness config",
+                help=(
+                    "MCP server name in the harness config: 1-64 letters, digits, '-' or '_', "
+                    "starting with a letter or digit"
+                ),
             ),
             click.option(
                 "--context-id",
@@ -1850,11 +1856,12 @@ def setup_codex(**params):
     Set up Kagura Memory for OpenAI Codex (CLI and IDE extension).
 
     Adds the kagura-memory MCP server with `codex mcp add`, which writes
-    ~/.codex/config.toml ($CODEX_HOME); --force replaces an entry with
-    `codex mcp remove` first. The entry runs the refresh-aware kagura-mcp
-    proxy, by absolute path, on your `kagura auth login` profile: no API
-    key, and Codex never signs in to Kagura itself. Without codex on PATH,
-    setup prints the [mcp_servers] table to add instead.
+    ~/.codex/config.toml ($CODEX_HOME); with --force the same command
+    replaces an entry of the same name. The entry runs the refresh-aware
+    kagura-mcp proxy, by absolute path, on your `kagura auth login`
+    profile: no API key, and Codex never signs in to Kagura itself.
+    Without codex on PATH, setup prints the [mcp_servers] table to add
+    instead.
 
     Codex reads the server's MCP instructions, so --context-id (or
     --guardrails CONTEXT_ID) puts that context's tool guardrail digest in
@@ -1880,9 +1887,10 @@ def setup_hermes(**params):
     asks which tools to enable, and asks before replacing an entry. With
     -y, without a terminal or without hermes on PATH, setup prints the
     mcp_servers block and the config.yaml to add it to ($HERMES_HOME, or
-    the active Hermes profile's) and changes nothing. The entry runs the
-    refresh-aware kagura-mcp proxy, by absolute path, on your
-    `kagura auth login` profile.
+    the active Hermes profile's) and changes nothing; when that file
+    already has an mcp_servers key, only the entry to put under it. The
+    entry runs the refresh-aware kagura-mcp proxy, by absolute path, on
+    your `kagura auth login` profile.
 
     Hermes does not read MCP instructions: guardrails reach it through
     get_context_info (on by default) and, if you choose, an AGENTS.md
@@ -1905,16 +1913,18 @@ def setup_openclaw(**params):
 
     Adds the kagura-memory MCP server with `openclaw mcp add`, which
     probes it before saving; --force replaces an entry with
-    `openclaw mcp set`. Both write ~/.openclaw/openclaw.json
-    (OPENCLAW_CONFIG_PATH), which the Gateway hot-reloads. Without openclaw
-    on PATH, setup prints the mcp.servers block instead. The entry runs the
-    refresh-aware kagura-mcp proxy, by absolute path, on your
-    `kagura auth login` profile; a --url-form entry always sets transport
-    "streamable-http" (OpenClaw defaults a URL entry to SSE).
+    `openclaw mcp set`. Both write openclaw.json in $OPENCLAW_STATE_DIR
+    (else ~/.openclaw), or $OPENCLAW_CONFIG_PATH, which the Gateway
+    hot-reloads. Without openclaw on PATH, setup prints the mcp.servers
+    block instead. The entry runs the refresh-aware kagura-mcp proxy, by
+    absolute path, on your `kagura auth login` profile; a --url-form
+    entry always sets transport "streamable-http" (OpenClaw defaults a
+    URL entry to SSE).
 
     OpenClaw does not read MCP instructions: guardrails reach it through
     get_context_info (on by default) and, if you choose, an export block in
-    ~/.openclaw/workspace/AGENTS.md (--agents-md; an interactive run
+    AGENTS.md in its default workspace, $OPENCLAW_WORKSPACE_DIR or else
+    workspace/ in that state directory (--agents-md; an interactive run
     offers it).
 
     \b

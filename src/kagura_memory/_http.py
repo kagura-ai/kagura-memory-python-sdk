@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 import uuid
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from datetime import UTC, datetime, time, timedelta
 from importlib.metadata import version as _pkg_version
 from typing import Any, NoReturn, TypeVar
@@ -79,12 +79,39 @@ def mcp_url_with_query(
     if not updates:
         return mcp_url
     parts = urlsplit(mcp_url)
-    kept = [
-        segment
-        for segment in parts.query.split("&")
-        if segment and unquote_plus(segment.split("=", 1)[0]) not in updates
-    ]
+    kept = _query_without(parts.query, updates)
     return urlunsplit(parts._replace(query="&".join([*kept, urlencode(updates)])))
+
+
+def _query_without(query: str, keys: Collection[str]) -> list[str]:
+    """The non-empty ``&`` segments of ``query`` whose decoded name is not in ``keys``."""
+    return [
+        segment
+        for segment in query.split("&")
+        if segment and unquote_plus(segment.split("=", 1)[0]) not in keys
+    ]
+
+
+def mcp_url_without_query_param(mcp_url: str, key: str) -> str:
+    """Return ``mcp_url`` with every ``key`` parameter dropped from its query.
+
+    Names are compared decoded, as the server reads them (``guard%72ails`` is
+    ``guardrails``); the rest of the query is kept verbatim.
+
+    Args:
+        mcp_url: The MCP endpoint URL.
+        key: The query parameter to drop, e.g. ``guardrails``.
+
+    Returns:
+        The URL without any ``key`` segment and without a bare ``?`` when
+        nothing else is left; ``mcp_url`` itself, as written, when it has no
+        ``key`` parameter.
+    """
+    parts = urlsplit(mcp_url)
+    kept = _query_without(parts.query, (key,))
+    if len(kept) == sum(1 for segment in parts.query.split("&") if segment):
+        return mcp_url
+    return urlunsplit(parts._replace(query="&".join(kept)))
 
 
 def mcp_url_has_tools_allowlist(mcp_url: str) -> bool:
@@ -579,9 +606,20 @@ def _format_validation_errors(errors: list[Any]) -> str:
 # followed by a boundary — a port (``:\d+``), a path/query/fragment delimiter, or
 # end-of-string — so a prefix-match attack like ``http://localhost.evil.com`` or a
 # userinfo trick like ``http://localhost@evil.com`` cannot smuggle an external host
-# past the check (#189). Scheme matching stays case-sensitive to preserve prior
-# behavior; the trigger below is the lowercase ``http://`` literal.
-_LOCALHOST_HTTP_RE = re.compile(r"^http://(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?(?:[/?#]|$)")
+# past the check (#189). Every URL parser reads the scheme and host without regard
+# to case, so ``HTTP://evil.com`` is fetched over plain HTTP exactly like
+# ``http://evil.com`` (#274); the match is ASCII-only, so no Unicode case fold
+# (``ſ`` → ``s``) can spell ``localhost``. Any ``http:`` scheme counts, slashes or
+# not: WHATWG parsers read ``http:/evil.com`` and ``http:evil.com`` as
+# ``http://evil.com``, and a loopback URL written that way is refused.
+_PLAIN_HTTP_RE = re.compile(r"^http:", re.IGNORECASE | re.ASCII)
+_LOCALHOST_HTTP_RE = re.compile(
+    r"^http://(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?(?:[/?#]|$)", re.IGNORECASE | re.ASCII
+)
+# What URL parsers drop before they read a scheme: whitespace and C0 controls
+# around the URL, and (WHATWG: Node, browsers, Rust's ``url`` crate, which the
+# harnesses ``kagura setup`` writes for use) a tab or newline anywhere in it.
+_URL_IGNORED_RE = re.compile(r"^[\x00-\x20\s]+|[\x00-\x20\s]+$|[\t\n\r]")
 
 
 def normalize_uuid(value: object, *, label: str) -> str:
@@ -662,8 +700,28 @@ def validate_lat_lon(lat: object, lon: object) -> None:
     validate_coordinate("lon", lon, 180)
 
 
+def normalize_url(url: str) -> str:
+    """Return ``url`` as a URL parser reads it, before it reads the scheme.
+
+    Surrounding whitespace and C0 controls go, and so does any tab or newline
+    inside it. Nothing else changes: the scheme and host keep their case.
+
+    Args:
+        url: A URL as the user gave it.
+
+    Returns:
+        The URL :func:`validate_https_url` checks.
+    """
+    return _URL_IGNORED_RE.sub("", url)
+
+
 def validate_https_url(url: str, *, label: str = "URL") -> None:
     """Enforce HTTPS except for localhost development.
+
+    The URL is checked as a parser reads it (:func:`normalize_url`), the
+    scheme and host in any case. ``" HTTP://evil.com"`` is plain HTTP to
+    ``evil.com`` for httpx once a caller strips it, and for every harness
+    that reads the URL from its config (#274).
 
     Args:
         url: URL to validate.
@@ -672,8 +730,9 @@ def validate_https_url(url: str, *, label: str = "URL") -> None:
     Raises:
         ValueError: If URL uses HTTP and is not a loopback host.
     """
-    if url.startswith("http://") and not _LOCALHOST_HTTP_RE.match(url):
+    candidate = normalize_url(url)
+    if _PLAIN_HTTP_RE.match(candidate) and not _LOCALHOST_HTTP_RE.match(candidate):
         raise ValueError(
-            f"{label} must use HTTPS for security (got: {url}). "
+            f"{label} must use HTTPS for security (got: {candidate}). "
             "HTTP is only allowed for localhost development."
         )

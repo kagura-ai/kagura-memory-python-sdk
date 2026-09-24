@@ -1,10 +1,12 @@
 """``kagura setup codex|hermes|openclaw`` (#260).
 
-Every test runs against a temporary home: ``HOME``, ``CODEX_HOME``,
-``HERMES_HOME`` and ``OPENCLAW_CONFIG_PATH`` point into ``tmp_path``, the
-credentials file is a temporary one, no harness CLI is on the (patched)
-``PATH`` unless a test puts it there, and ``subprocess.run`` is a recorder —
-nothing reads or changes the developer's real harness configuration.
+Every test runs against a temporary home: ``HOME`` points into ``tmp_path``
+and ``CODEX_HOME``, ``HERMES_HOME``, ``OPENCLAW_STATE_DIR``,
+``OPENCLAW_CONFIG_PATH`` and ``OPENCLAW_WORKSPACE_DIR`` are unset unless a
+test sets them, the credentials file is a temporary one, no harness CLI is on
+the (patched) ``PATH`` unless a test puts it there, and ``subprocess.run`` is
+a recorder — nothing reads or changes the developer's real harness
+configuration.
 """
 
 from __future__ import annotations
@@ -97,7 +99,13 @@ def env(tmp_path, monkeypatch, isolated_kagura_credentials):
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("USERPROFILE", str(home))
-    for var in ("CODEX_HOME", "HERMES_HOME", "OPENCLAW_CONFIG_PATH"):
+    for var in (
+        "CODEX_HOME",
+        "HERMES_HOME",
+        "OPENCLAW_STATE_DIR",
+        "OPENCLAW_CONFIG_PATH",
+        "OPENCLAW_WORKSPACE_DIR",
+    ):
         monkeypatch.delenv(var, raising=False)
     work = tmp_path / "work"
     work.mkdir()
@@ -176,6 +184,11 @@ def tty(monkeypatch):
 
 def run(*args: str, input: str | None = None):
     return CliRunner().invoke(main, ["setup", *args], input=input)
+
+
+def flat(output: str) -> str:
+    """``output`` on one line, for a message wrapped to fit the terminal."""
+    return " ".join(output.split())
 
 
 def printed_json(output: str) -> Any:
@@ -277,12 +290,12 @@ class TestCodex:
         assert result.exit_code == 0, result.output
         assert "bearer token from an environment variable" in result.output
         assert "guardrail hooks read their credential" in result.output
+        # `codex mcp add` overwrites an entry of the same name: no remove first (#274).
         assert recorder.mutating() == [
-            ["/usr/bin/codex", "mcp", "remove", "kagura-memory"],
             ["/usr/bin/codex", "mcp", "add", "kagura-memory", "--", PROXY, "--profile", "default"],
         ]
 
-    def test_failed_add_after_remove_says_the_entry_is_gone(self, env, on_path, recorder):
+    def test_failed_force_add_leaves_the_previous_entry(self, env, on_path, recorder):
         on_path("codex")
         codex_config(env).write_text(
             '[mcp_servers.kagura-memory]\ncommand = "kagura-mcp"\n', encoding="utf-8"
@@ -291,7 +304,55 @@ class TestCodex:
         result = run("codex", "--profile", "default", "--force", "-y")
         assert result.exit_code == 1
         assert "codex mcp add` failed: boom" in result.output
-        assert "previous kagura-memory entry was removed" in result.output
+        assert "removed" not in result.output
+        assert [argv[1:3] for argv in recorder.mutating()] == [["mcp", "add"]]
+
+    def test_dry_run_with_an_existing_entry_shows_a_single_add(self, env, on_path, recorder):
+        on_path("codex")
+        codex_config(env).write_text(
+            '[mcp_servers.kagura-memory]\ncommand = "kagura-mcp"\n', encoding="utf-8"
+        )
+        result = run("codex", "--profile", "default", "--dry-run")
+        assert result.exit_code == 0, result.output
+        assert (
+            f"With --force, would run: codex mcp add kagura-memory -- {PROXY} --profile default"
+            in result.output
+        )
+        assert "mcp remove" not in result.output
+        assert recorder.mutating() == []
+
+    def test_name_may_start_with_a_digit(self, on_path, recorder):
+        on_path("codex")
+        result = run("codex", "--profile", "default", "--name", "9lives", "-y")
+        assert result.exit_code == 0, result.output
+        assert recorder.mutating()[0][1:4] == ["mcp", "add", "9lives"]
+
+    @pytest.mark.parametrize(
+        "given",
+        [
+            f"  {MCP_URL}\n",
+            # What the HTTPS check drops, the entry does not keep either.
+            f"\x01{MCP_URL}\x1f",
+            MCP_URL.replace("https", "ht\ttps").replace("/mcp", "/m\ncp"),
+        ],
+        ids=["whitespace", "c0-controls", "tab-and-newline"],
+    )
+    def test_url_form_mcp_url_is_the_url_the_https_check_read(self, on_path, recorder, given):
+        on_path("codex")
+        result = run("codex", "--url-form", "--mcp-url", given, "-y")
+        assert result.exit_code == 0, result.output
+        [argv] = recorder.mutating()
+        assert argv[argv.index("--url") + 1] == MCP_URL
+
+    def test_url_form_keeps_a_guardrails_context_already_in_the_url(self, on_path, recorder):
+        # Codex reads MCP instructions: the context the URL names still does something.
+        on_path("codex")
+        url = f"{MCP_URL}?guardrails={CTX}"
+        result = run("codex", "--url-form", "--mcp-url", url, "-y")
+        assert result.exit_code == 0, result.output
+        [argv] = recorder.mutating()
+        assert argv[argv.index("--url") + 1] == url
+        assert "not written" not in result.output
 
     def test_static_header_entry_is_described_not_echoed(self, env, on_path):
         on_path("codex")
@@ -608,6 +669,117 @@ class TestHermesPaths:
         assert hermes_key_env("my_srv") == "MCP_MY_SRV_API_KEY"
 
 
+class TestHermesBlock:
+    """The printed block when config.yaml already has a top-level ``mcp_servers:`` (#274).
+
+    A second top-level key would replace the first (YAML keeps the last), and
+    every server under it with it, so only the entry is printed.
+    """
+
+    STDIO_ENTRY = [
+        "kagura-memory:",
+        f'  command: "{PROXY}"',
+        '  args: ["--profile", "default"]',
+    ]
+
+    @staticmethod
+    def config(home: Path) -> Path:
+        path = home / ".hermes" / "config.yaml"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path
+
+    @staticmethod
+    def printed(lines: list[str], indent: str) -> str:
+        """``lines`` as setup prints them: its 4-space margin, then ``indent``."""
+        return "".join(f"\n    {indent}{line}" for line in lines) + "\n"
+
+    @pytest.mark.parametrize(
+        ("text", "indent"),
+        [
+            ("model: gpt\nmcp_servers:\n  other:\n    command: foo\n", "  "),
+            ("mcp_servers:\n    other:\n        url: https://x\n", "    "),
+            ("\ufeffmcp_servers:\n  other:\n    command: foo\n", "  "),
+            ('"mcp_servers":\n  other:\n    command: foo\n', "  "),
+            ("'mcp_servers' :\n  other:\n    command: foo\n", "  "),
+            ("mcp_servers:  # mine\n# note\n\n   other:\n     command: foo\n", "   "),
+            ("mcp_servers:\r\n  other:\r\n    command: foo\r\n", "  "),
+            ("mcp_servers:\nmodel: gpt\n", "  "),  # a key with no entries yet
+            ("model: gpt\nmcp_servers:", "  "),  # the last line
+        ],
+        ids=[
+            "after-other-keys",
+            "4-space",
+            "bom",
+            "double-quoted",
+            "single-quoted",
+            "comments",
+            "crlf",
+            "empty",
+            "last-line",
+        ],
+    )
+    def test_existing_key_gets_the_entry_alone(self, env, recorder, text, indent):
+        self.config(env).write_text(text, encoding="utf-8")
+        result = run("hermes", "--profile", "default", "-y")
+        assert result.exit_code == 0, result.output
+        assert self.printed(self.STDIO_ENTRY, indent) in result.output
+        assert "\n    mcp_servers:" not in result.output
+        assert "Add this kagura-memory entry to its mcp_servers: mapping:" in result.output
+        assert "already has a top-level mcp_servers: key" in result.output
+        assert "inline" not in result.output
+        assert recorder.calls == []
+
+    def test_url_form_entry_alone(self, env, recorder):
+        self.config(env).write_text("mcp_servers:\n  other:\n    command: foo\n", encoding="utf-8")
+        result = run("hermes", "--url-form", "--mcp-url", MCP_URL, "-y")
+        assert result.exit_code == 0, result.output
+        entry = [
+            "kagura-memory:",
+            f'  url: "{MCP_URL}"',
+            "  headers:",
+            '    Authorization: "Bearer ${MCP_KAGURA_MEMORY_API_KEY}"',
+        ]
+        assert self.printed(entry, "  ") in result.output
+
+    @pytest.mark.parametrize("value", ["{}", "null", "{other: {command: foo}}", "~"])
+    def test_inline_value_must_become_a_block_first(self, env, recorder, value):
+        self.config(env).write_text(f"mcp_servers: {value}\nmodel: gpt\n", encoding="utf-8")
+        result = run("hermes", "--profile", "default", "-y")
+        assert result.exit_code == 0, result.output
+        assert self.printed(self.STDIO_ENTRY, "  ") in result.output
+        assert "written inline" in result.output
+        assert "rewrite it" in result.output
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "",
+            "model: gpt\n",
+            "agents:\n  mcp_servers:\n    x: {}\n",
+            "# mcp_servers:\n",
+            "mcp_servers_old:\n  x: 1\n",
+        ],
+        ids=["empty", "other-keys", "nested", "comment", "longer-name"],
+    )
+    def test_without_a_top_level_key_prints_the_whole_block(self, env, recorder, text):
+        self.config(env).write_text(text, encoding="utf-8")
+        result = run("hermes", "--profile", "default", "-y")
+        assert result.exit_code == 0, result.output
+        assert self.printed(["mcp_servers:", *(f"  {x}" for x in self.STDIO_ENTRY)], "") in (
+            result.output
+        )
+        assert "Add this kagura-memory entry to it:" in result.output
+        assert "already has" not in result.output
+
+    def test_unreadable_config_prints_the_whole_block_with_a_note(self, env, recorder):
+        self.config(env).mkdir()  # a directory where the file should be
+        result = run("hermes", "--profile", "default", "-y")
+        assert result.exit_code == 0, result.output
+        assert "\n    mcp_servers:\n      kagura-memory:\n" in result.output
+        assert "could not read ~/.hermes/config.yaml" in result.output
+        assert "put only the kagura-memory entry under it" in result.output
+
+
 # =============================================================================
 # OpenClaw
 # =============================================================================
@@ -720,6 +892,132 @@ class TestOpenClaw:
         }
         assert recorder.calls == []
 
+    def test_state_dir_holds_the_config_the_env_file_and_the_workspace(
+        self, tmp_path, monkeypatch, recorder, digest
+    ):
+        # OpenClaw keeps all three under $OPENCLAW_STATE_DIR when it is set (#274).
+        state = tmp_path / "oc-state"
+        monkeypatch.setenv("OPENCLAW_STATE_DIR", f" {state} ")
+        result = run(
+            "openclaw",
+            *("--profile", "default", "--url-form", "--mcp-url", MCP_URL),
+            *("--context-id", CTX, "--agents-md", "-y"),
+        )
+        assert result.exit_code == 0, result.output
+        assert f"OpenClaw ({state / 'openclaw.json'})" in result.output
+        assert f"KAGURA_API_KEY=<your-api-key>` to {state / '.env'}" in result.output
+        assert "~/.openclaw" not in result.output
+        assert (state / "workspace" / "AGENTS.md").read_text(encoding="utf-8") == EXPORT_BLOCK
+
+    def test_state_dir_expands_a_leading_tilde(self, monkeypatch, recorder):
+        monkeypatch.setenv("OPENCLAW_STATE_DIR", "~/oc-state")
+        result = run("openclaw", "--profile", "default", "-y")
+        assert result.exit_code == 0, result.output
+        assert "OpenClaw (~/oc-state/openclaw.json)" in result.output
+        assert "~/oc-state/workspace/AGENTS.md" in result.output
+
+    def test_workspace_dir_wins_over_state_dir_for_the_export(
+        self, tmp_path, monkeypatch, recorder, digest
+    ):
+        # OpenClaw's resolveDefaultAgentWorkspaceDir reads $OPENCLAW_WORKSPACE_DIR first.
+        state, workspace = tmp_path / "oc-state", tmp_path / "ws"
+        monkeypatch.setenv("OPENCLAW_STATE_DIR", str(state))
+        monkeypatch.setenv("OPENCLAW_WORKSPACE_DIR", f" {workspace} ")
+        result = run("openclaw", "--profile", "default", "--context-id", CTX, "--agents-md", "-y")
+        assert result.exit_code == 0, result.output
+        assert (workspace / "AGENTS.md").read_text(encoding="utf-8") == EXPORT_BLOCK
+        assert not (state / "workspace").exists()
+        # The config and the key's .env stay in the state directory.
+        assert f"OpenClaw ({state / 'openclaw.json'})" in result.output
+
+    def test_workspace_dir_expands_a_leading_tilde(self, monkeypatch, recorder):
+        monkeypatch.setenv("OPENCLAW_WORKSPACE_DIR", "~/oc-ws")
+        result = run("openclaw", "--profile", "default", "-y")
+        assert result.exit_code == 0, result.output
+        assert "~/oc-ws/AGENTS.md,\n  which OpenClaw loads" in result.output
+        assert "OpenClaw (~/.openclaw/openclaw.json)" in result.output
+
+    def test_config_path_wins_over_state_dir(self, tmp_path, monkeypatch, recorder):
+        monkeypatch.setenv("OPENCLAW_STATE_DIR", str(tmp_path / "oc-state"))
+        monkeypatch.setenv("OPENCLAW_CONFIG_PATH", str(tmp_path / "oc.json"))
+        result = run("openclaw", "--url-form", "--mcp-url", MCP_URL, "-y")
+        assert result.exit_code == 0, result.output
+        assert f"OpenClaw ({tmp_path / 'oc.json'})" in result.output
+        # The key still goes in the state directory's .env.
+        assert f"to {tmp_path / 'oc-state' / '.env'}" in result.output
+
+
+def printed_url(harness: str, output: str) -> str:
+    """The URL in the Hermes or OpenClaw block setup printed."""
+    if harness == "openclaw":
+        return printed_json(output)["mcp"]["servers"]["kagura-memory"]["url"]
+    [line] = [x for x in output.splitlines() if x.strip().startswith("url: ")]
+    return json.loads(line.split("url: ", 1)[1])
+
+
+@pytest.mark.parametrize("harness", ["hermes", "openclaw"])
+class TestNoInstructionsUrl:
+    """A ``?guardrails=`` context in ``--mcp-url`` never reaches their entry (#274)."""
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            f"guardrails={CTX}&profile=core",
+            f"profile=core&guardrails={CTX}&guardrails=off",  # the server reads the first
+            f"guard%72ails={CTX}&profile=core",  # the server decodes the name
+            "guardrails=typo&profile=core",
+        ],
+        ids=["context", "context-first", "encoded-name", "not-a-context"],
+    )
+    def test_guardrails_value_is_dropped_with_a_warning(self, harness, recorder, query):
+        result = run(harness, "--url-form", "--mcp-url", f"{MCP_URL}?{query}", "-y")
+        assert result.exit_code == 0, result.output
+        assert printed_url(harness, result.output) == f"{MCP_URL}?profile=core"
+        assert "so the ?guardrails= value in --mcp-url has no effect there and is not written" in (
+            flat(result.output)
+        )
+        assert CTX not in result.output
+
+    def test_one_warning_when_guardrails_is_given_both_ways(self, harness, recorder):
+        url = f"{MCP_URL}?guardrails={CTX}"
+        result = run(harness, "--url-form", "--mcp-url", url, "--guardrails", CTX, "-y")
+        assert result.exit_code == 0, result.output
+        assert printed_url(harness, result.output) == MCP_URL
+        assert result.output.count("does not read MCP instructions") == 1
+        assert (
+            "so --guardrails and the ?guardrails= value in --mcp-url have no effect there "
+            "and are not written"
+        ) in flat(result.output)
+
+    def test_url_without_other_parameters_loses_its_query(self, harness, recorder):
+        result = run(harness, "--url-form", "--mcp-url", f"{MCP_URL}?guardrails={CTX}", "-y")
+        assert result.exit_code == 0, result.output
+        assert printed_url(harness, result.output) == MCP_URL
+
+    @pytest.mark.parametrize(
+        ("query", "written"),
+        [
+            ("profile=core&guardrails=off", "profile=core&guardrails=off"),
+            # The server reads the first value: only that off is kept, never the context.
+            (f"guardrails=OFF&guardrails={CTX}", "guardrails=off"),
+        ],
+        ids=["off", "off-first"],
+    )
+    def test_guardrails_off_is_kept_with_a_warning(self, harness, recorder, query, written):
+        result = run(harness, "--url-form", "--mcp-url", f"{MCP_URL}?{query}", "-y")
+        assert result.exit_code == 0, result.output
+        assert printed_url(harness, result.output) == f"{MCP_URL}?{written}"
+        assert "--mcp-url has ?guardrails=off" in result.output
+        assert "not written" not in result.output
+        assert CTX not in result.output
+
+    def test_url_without_guardrails_is_left_alone(self, harness, recorder):
+        url = f"{MCP_URL}?profile=core&tools=a,b"
+        result = run(harness, "--url-form", "--mcp-url", url, "-y")
+        assert result.exit_code == 0, result.output
+        assert printed_url(harness, result.output) == url
+        assert "Warning" not in result.output
+
 
 # =============================================================================
 # Shared rules
@@ -743,8 +1041,46 @@ class TestSharedFlags:
         result = run(harness, "--url-form", "--mcp-url", "http://example.com/mcp", "-y")
         assert result.exit_code == 2
 
+    @pytest.mark.parametrize(
+        "url", ["HTTP://example.com/mcp", " http://example.com/mcp", "hTtP://example.com/mcp"]
+    )
+    def test_plain_http_mcp_url_in_any_spelling_is_refused(self, harness, on_path, recorder, url):
+        on_path(harness)
+        result = run(harness, "--url-form", "--mcp-url", url, "-y")
+        assert result.exit_code == 2
+        assert "must use HTTPS" in result.output
+        assert recorder.calls == []
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "--help",
+            "memory.kagura-ai.com/mcp",
+            "ftp://memory.kagura-ai.com/mcp",
+            "https://",
+            "https://[::1/mcp",
+        ],
+    )
+    def test_mcp_url_that_is_no_https_url_is_refused(self, harness, on_path, recorder, url):
+        # It goes on the harness argv after --url, where "--help" would read as an option.
+        on_path(harness)
+        result = run(harness, "--url-form", f"--mcp-url={url}", "-y")
+        assert result.exit_code == 2
+        assert "use an https:// URL" in result.output
+        assert recorder.calls == []
+
     def test_bad_name(self, harness):
         assert run(harness, "--profile", "default", "--name", "a.b", "-y").exit_code == 2
+
+    @pytest.mark.parametrize("name", ["--help", "-h", "-", "_kagura", "-kagura"])
+    def test_name_must_start_with_a_letter_or_digit(self, harness, on_path, recorder, name):
+        # The name is a positional in every harness argv: `codex mcp add --help …`
+        # prints the help, exits 0 and configures nothing (#274).
+        on_path(harness)
+        result = run(harness, "--profile", "default", f"--name={name}", "-y")
+        assert result.exit_code == 2
+        assert "starting with a letter or digit" in result.output
+        assert recorder.calls == []
 
     @pytest.mark.parametrize("flags", [["-y"], []], ids=["-y", "no-tty"])
     def test_agents_md_without_prompts_needs_a_context(self, harness, flags):

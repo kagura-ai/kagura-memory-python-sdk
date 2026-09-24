@@ -52,9 +52,11 @@ import shlex
 import shutil
 import subprocess
 import sys
+import textwrap
 import tomllib
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from functools import cached_property
 from pathlib import Path
 from typing import Any, ClassVar, Literal
 from urllib.parse import quote_plus, urlsplit, urlunsplit
@@ -67,6 +69,8 @@ from ._http import (
     base_url_from_mcp,
     mcp_url_guardrails_off,
     mcp_url_with_query,
+    mcp_url_without_query_param,
+    normalize_url,
     normalize_uuid,
     validate_https_url,
 )
@@ -84,7 +88,9 @@ HarnessName = Literal["codex", "hermes", "openclaw"]
 DEFAULT_KEY_ENV = "KAGURA_API_KEY"
 
 # Codex, Hermes and OpenClaw all accept these; a dot would nest a TOML table.
-_SERVER_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+# The name is a positional in every harness argv, so it starts with a letter or
+# digit: `codex mcp add --help …` prints the help and exits 0 with nothing saved.
+_SERVER_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 # OpenClaw substitutes only upper-case ${VAR} names.
 _ENV_NAME_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
@@ -239,13 +245,25 @@ class _Harness(ABC):
     def add_args(self, name: str, entry: _Entry) -> list[str]:
         """The harness command (after its name) that adds ``entry`` as ``name``."""
 
-    def replace_args(self, name: str, entry: _Entry) -> list[list[str]]:
-        """The commands that replace an existing ``name`` (``--force``)."""
-        return [self.add_args(name, entry)]
+    def replace_args(self, name: str, entry: _Entry) -> list[str]:
+        """The harness command that replaces an existing ``name`` (``--force``).
+
+        One command, never a remove and then an add: a failed add would then
+        leave no entry at all.
+        """
+        return self.add_args(name, entry)
 
     @abstractmethod
     def block(self, name: str, entry: _Entry) -> str:
         """``entry`` in the config file's own syntax, to print."""
+
+    def block_target(self) -> str:
+        """Where in the config file the printed block goes."""
+        return "it"
+
+    def block_notes(self, name: str) -> list[str]:
+        """Lines to print with the block, on how it fits the file as it is."""
+        return []
 
     def key_env(self, name: str, requested: str | None) -> str:
         """The variable the URL form reads the API key from."""
@@ -354,13 +372,11 @@ class _Codex(_Harness):
         return _classify(entry) if isinstance(entry, dict) else None
 
     def add_args(self, name: str, entry: _Entry) -> list[str]:
+        # `mcp add` also replaces an entry of the same name, whatever its form.
         if entry.command is not None:
             return ["mcp", "add", name, "--", entry.command, *entry.args]
         assert entry.url is not None and entry.key_env is not None
         return ["mcp", "add", name, "--url", entry.url, "--bearer-token-env-var", entry.key_env]
-
-    def replace_args(self, name: str, entry: _Entry) -> list[list[str]]:
-        return [["mcp", "remove", name], self.add_args(name, entry)]
 
     def block(self, name: str, entry: _Entry) -> str:
         q = json.dumps  # a JSON string is a TOML basic string
@@ -398,6 +414,50 @@ class _Codex(_Harness):
         self, name: str, existing: _Existing | None, hooks_on: bool, *, ask: bool
     ) -> None:
         _codex_hook_warning(name, existing, hooks_on, ask=ask)
+
+
+# The top-level `mcp_servers:` key of a config.yaml, and what follows its colon.
+# A BOM before it and a quoted key are valid YAML too: missing either would print
+# a second top-level key.
+_YAML_SERVERS_KEY_RE = re.compile(r"""^\ufeff?(["']?)mcp_servers\1[ \t]*:(.*)$""")
+# Blank and comment lines neither open nor close a block.
+_YAML_SKIP_RE = re.compile(r"^\s*(?:#|$)")
+_YAML_INDENT_RE = re.compile(r"^([ \t]+)\S")
+
+
+@dataclass(frozen=True)
+class _YamlServers:
+    """The top-level ``mcp_servers:`` key a Hermes ``config.yaml`` already has."""
+
+    #: The indent of the entries under it (two spaces when it has none yet).
+    indent: str
+    #: Its value is written inline (flow style, or a scalar such as ``null``).
+    inline: bool
+
+
+def _yaml_servers(text: str) -> _YamlServers | None:
+    """Find a top-level ``mcp_servers:`` key in ``config.yaml`` text, without parsing YAML.
+
+    YAML keeps the last of two equal keys, so a second top-level
+    ``mcp_servers:`` pasted in would drop every server under the first,
+    without an error.
+
+    Args:
+        text: The file's text.
+
+    Returns:
+        The key's entry indent and form, or None when the file has no such key.
+    """
+    lines = re.split(r"\r?\n", text)
+    for i, line in enumerate(lines):
+        key = _YAML_SERVERS_KEY_RE.match(line)
+        if key is None:
+            continue
+        inline = not _YAML_SKIP_RE.match(key.group(2))
+        after = next((x for x in lines[i + 1 :] if not _YAML_SKIP_RE.match(x)), "")
+        indent = _YAML_INDENT_RE.match(after)
+        return _YamlServers(indent.group(1) if indent else "  ", inline)
+    return None
 
 
 def hermes_home() -> Path:
@@ -481,19 +541,59 @@ class _Hermes(_Harness):
         assert entry.url is not None
         return ["mcp", "add", name, "--url", entry.url, "--auth", "header"]
 
+    @cached_property
+    def _servers_key(self) -> tuple[_YamlServers | None, str | None]:
+        """config.yaml's top-level ``mcp_servers:`` key, and why the file could not be read."""
+        try:
+            text = self.config_path().read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return None, None
+        except (OSError, ValueError) as e:
+            return None, _exc_message(e)
+        return _yaml_servers(text), None
+
     def block(self, name: str, entry: _Entry) -> str:
         q = json.dumps  # a JSON string is a YAML double-quoted scalar
-        lines = ["mcp_servers:", f"  {name}:"]
+        lines = [f"{name}:"]
         if entry.command is not None:
             args = ", ".join(q(a) for a in entry.args)
-            lines += [f"    command: {q(entry.command)}", f"    args: [{args}]"]
+            lines += [f"  command: {q(entry.command)}", f"  args: [{args}]"]
         else:
             lines += [
-                f"    url: {q(entry.url)}",
-                "    headers:",
-                f"      Authorization: {q(entry.auth_header())}",
+                f"  url: {q(entry.url)}",
+                "  headers:",
+                f"    Authorization: {q(entry.auth_header())}",
             ]
-        return "\n".join(lines)
+        servers, _ = self._servers_key
+        if servers is None:
+            return "\n".join(["mcp_servers:", *(f"  {line}" for line in lines)])
+        # The entry alone, to go under the key the file has.
+        return "\n".join(f"{servers.indent}{line}" for line in lines)
+
+    def block_target(self) -> str:
+        servers, _ = self._servers_key
+        return "it" if servers is None else "its mcp_servers: mapping"
+
+    def block_notes(self, name: str) -> list[str]:
+        servers, unread = self._servers_key
+        where = _path_label(self.config_path())
+        if unread is not None:
+            return [
+                f"Setup could not read {where} ({unread}): if it already has a\n"
+                f"  top-level mcp_servers: key, put only the {name} entry under it."
+            ]
+        if servers is None:
+            return []
+        notes = [
+            f"{where} already has a top-level mcp_servers: key, so only the\n"
+            "  entry is printed: a second one would replace the first and every server under it."
+        ]
+        if servers.inline:
+            notes.append(
+                "Its mcp_servers value is written inline (flow style or null): rewrite it\n"
+                f"  as a block mapping, one server per indented key, before adding {name}."
+            )
+        return notes
 
     def key_env(self, name: str, requested: str | None) -> str:
         return hermes_key_env(name)
@@ -524,10 +624,30 @@ class _Hermes(_Harness):
         ]
 
 
+def _openclaw_env_path(var: str) -> Path | None:
+    """An OpenClaw path variable as OpenClaw reads it: trimmed, a leading ``~`` expanded."""
+    value = os.environ.get(var, "").strip()
+    return Path(value).expanduser() if value else None
+
+
+def openclaw_state_dir() -> Path:
+    """``$OPENCLAW_STATE_DIR``, else ``~/.openclaw``: OpenClaw's config and ``.env``."""
+    return _openclaw_env_path("OPENCLAW_STATE_DIR") or Path.home() / ".openclaw"
+
+
 def openclaw_config_path() -> Path:
-    """``$OPENCLAW_CONFIG_PATH``, else ``~/.openclaw/openclaw.json``."""
-    env = os.environ.get("OPENCLAW_CONFIG_PATH")
-    return Path(env) if env else Path.home() / ".openclaw" / "openclaw.json"
+    """``$OPENCLAW_CONFIG_PATH``, else ``openclaw.json`` in :func:`openclaw_state_dir`."""
+    return _openclaw_env_path("OPENCLAW_CONFIG_PATH") or openclaw_state_dir() / "openclaw.json"
+
+
+def openclaw_workspace_dir() -> Path:
+    """OpenClaw's default agent workspace, as its ``resolveDefaultAgentWorkspaceDir`` finds it.
+
+    ``$OPENCLAW_WORKSPACE_DIR``, else ``workspace`` in :func:`openclaw_state_dir`.
+    An ``agents.defaults.workspace`` in openclaw.json overrides both there; setup
+    has no JSON5 reader, so ``--agents-md PATH`` names such a workspace.
+    """
+    return _openclaw_env_path("OPENCLAW_WORKSPACE_DIR") or openclaw_state_dir() / "workspace"
 
 
 class _OpenClaw(_Harness):
@@ -566,23 +686,24 @@ class _OpenClaw(_Harness):
             args = [a for arg in entry.args for a in ("--arg", arg)]
             return ["mcp", "add", name, "--command", entry.command, *args]
         assert entry.url is not None
-        # --no-probe: the key is not in ~/.openclaw/.env yet.
+        # --no-probe: the key is not in OpenClaw's .env yet.
         return [
             *("mcp", "add", name, "--url", entry.url, "--transport", "streamable-http"),
             *("--header", f"Authorization={entry.auth_header()}", "--no-probe"),
         ]
 
-    def replace_args(self, name: str, entry: _Entry) -> list[list[str]]:
+    def replace_args(self, name: str, entry: _Entry) -> list[str]:
         # `mcp add` refuses an existing name; `mcp set` replaces the entry.
-        return [["mcp", "set", name, json.dumps(self.server(entry))]]
+        return ["mcp", "set", name, json.dumps(self.server(entry))]
 
     def block(self, name: str, entry: _Entry) -> str:
         return json.dumps({"mcp": {"servers": {name: self.server(entry)}}}, indent=2)
 
     def key_note(self, entry: _Entry, *, ran: bool) -> str:
+        env_file = _path_label(openclaw_state_dir() / ".env")
         return (
-            f"Add `{entry.key_env}=<your-api-key>` to ~/.openclaw/.env with an editor: the\n"
-            f"  entry sends ${{{entry.key_env}}} (mcp.servers headers take no SecretRef),\n"
+            f"Add `{entry.key_env}=<your-api-key>` to {env_file} with an editor:\n"
+            f"  the entry sends ${{{entry.key_env}}} (mcp.servers headers take no SecretRef),\n"
             "  and setup never sees the key."
         )
 
@@ -590,8 +711,8 @@ class _OpenClaw(_Harness):
         return ["mcp", "doctor", name, "--probe"]
 
     def agents_md_path(self) -> Path:
-        # agents.defaults.workspace, which OpenClaw loads every session.
-        return Path.home() / ".openclaw" / "workspace" / "AGENTS.md"
+        # The default agent workspace, which OpenClaw loads every session.
+        return openclaw_workspace_dir() / "AGENTS.md"
 
     def notes(self) -> list[str]:
         return [
@@ -757,7 +878,10 @@ def _check_flags(
 ) -> None:
     """Reject flag combinations that cannot work before anything is read (exit 2)."""
     if not _SERVER_NAME_RE.fullmatch(name):
-        raise click.BadParameter("use 1-64 letters, digits, '-' or '_'", param_hint="'--name'")
+        raise click.BadParameter(
+            "use 1-64 letters, digits, '-' or '_', starting with a letter or digit",
+            param_hint="'--name'",
+        )
     if not url_form:
         if mcp_url is not None or api_key_env is not None:
             raise click.UsageError("--mcp-url and --api-key-env go with --url-form.")
@@ -776,6 +900,16 @@ def _check_flags(
             validate_https_url(mcp_url, label="MCP URL")
         except ValueError as e:
             raise click.BadParameter(str(e), param_hint="'--mcp-url'") from None
+        # It follows --url on the harness argv, where "--help" would read as an option.
+        try:
+            parts = urlsplit(mcp_url)
+        except ValueError:  # e.g. an unclosed IPv6 bracket
+            parts = None
+        if parts is None or parts.scheme.lower() not in ("http", "https") or not parts.netloc:
+            raise click.BadParameter(
+                "use an https:// URL, e.g. https://memory.kagura-ai.com/mcp/w/<workspace-id>",
+                param_hint="'--mcp-url'",
+            )
     if api_key_env is not None:
         if h.names_key_env:
             raise click.UsageError(
@@ -846,13 +980,43 @@ def _codex_hook_warning(
         raise click.ClickException("Setup cancelled; nothing was written.")
 
 
-def _warn_guardrails_off_url(h: _Harness, url: str) -> None:
-    """Warn when a Hermes/OpenClaw URL already carries ``?guardrails=off``."""
-    if mcp_url_guardrails_off(url):
+def _drop_guardrails_context(h: _Harness, *, flag: bool, mcp_url: str | None) -> str | None:
+    """``mcp_url`` for a Hermes/OpenClaw entry, without a ``?guardrails=`` context.
+
+    Neither reads MCP instructions, so a context there changes nothing, and a
+    context id is never written into their entry: neither the ``--guardrails``
+    context (``flag``) nor any ``guardrails`` value in ``mcp_url``. One
+    warning names what was dropped. ``off``, when it comes first in
+    ``mcp_url`` (the value the server reads), is kept as asked, alone and with
+    a warning of its own: it removes the ``get_context_info`` block, the lane
+    they have.
+
+    Returns:
+        ``mcp_url`` without a guardrails context; None without ``--url-form``.
+    """
+    dropped = ["--guardrails"] if flag else []
+    if mcp_url is not None and mcp_url_guardrails_off(mcp_url):
         click.echo(
             f"\n  Warning: --mcp-url has ?guardrails=off, which removes the guardrails block\n"
             f"  from get_context_info: {h.title} then gets no guardrails from Kagura."
         )
+        mcp_url = mcp_url_with_query(mcp_url, guardrails="off")
+    elif mcp_url is not None:
+        kept = mcp_url_without_query_param(mcp_url, "guardrails")
+        if kept != mcp_url:
+            dropped.append("the ?guardrails= value in --mcp-url")
+            mcp_url = kept
+    if dropped:
+        has, is_ = ("have", "are") if len(dropped) > 1 else ("has", "is")
+        warning = (
+            f"Warning: {h.title} does not read MCP instructions, so {' and '.join(dropped)} "
+            f"{has} no effect there and {is_} not written. Guardrails reach {h.title} through "
+            "get_context_info (on by default) and the AGENTS.md export (--agents-md)."
+        )
+        # One message for one or both sources, so it is wrapped rather than laid out.
+        lines = textwrap.wrap(warning, 80, break_on_hyphens=False)
+        click.echo("\n" + "\n".join(f"  {line}" for line in lines))
+    return mcp_url
 
 
 def _resolve_context(
@@ -993,6 +1157,9 @@ def run_setup_harness(
     """
     h = HARNESSES[harness]()
     interactive = not non_interactive and _stdin_is_tty()
+    # The entry gets the URL the HTTPS check passed, not one with padding or
+    # control characters a harness might keep.
+    mcp_url = normalize_url(mcp_url) if mcp_url is not None else None
     _check_flags(
         h,
         profile=profile,
@@ -1040,13 +1207,10 @@ def run_setup_harness(
     export_context = context_id
     if guardrails not in (None, "off"):
         export_context = export_context or guardrails
-        if not h.reads_instructions:
-            click.echo(
-                f"\n  Warning: {h.title} does not read MCP instructions, so --guardrails has no\n"
-                f"  effect there and is not written. Guardrails reach {h.title} through\n"
-                "  get_context_info (on by default) and the AGENTS.md export (--agents-md)."
-            )
-            guardrails = None
+    if not h.reads_instructions:
+        # _check_flags refused "off" here, so a --guardrails value is a context.
+        mcp_url = _drop_guardrails_context(h, flag=guardrails is not None, mcp_url=mcp_url)
+        guardrails = None
     lane_from_context = False
     if h.reads_instructions and guardrails is None:
         if url_form and hooks_on:
@@ -1106,25 +1270,26 @@ def run_setup_harness(
             # starts with "<"), shown as it is rather than URL-encoded.
             url = url.replace(f"guardrails={quote_plus(guardrails)}", f"guardrails={guardrails}")
         entry = _Entry(url=url, key_env=h.key_env(name, api_key_env))
-        if not h.reads_instructions:
-            _warn_guardrails_off_url(h, url)
-    commands = h.replace_args(name, entry) if existing is not None else [h.add_args(name, entry)]
+    command = h.replace_args(name, entry) if existing is not None else h.add_args(name, entry)
     reason = _print_reason(h, exe, non_interactive, interactive)
 
     click.echo("")
+    show_block = dry_run or reason is not None
+    if show_block:
+        for note in h.block_notes(name):
+            click.echo(f"  {note}")
     if reason is None:
         verb = "Would run" if dry_run else "Running"
         if dry_run and existing is not None and not force:
             verb = "With --force, would run"
-        for args in commands:
-            click.echo(f"  {verb}: {shlex.join([h.cli, *args])}")
+        click.echo(f"  {verb}: {shlex.join([h.cli, *command])}")
     else:
         replace = " in place of the existing one" if existing is not None else ""
         click.echo(
             f"  Setup does not edit {where} itself ({reason}).\n"
-            f"  Add this {name} entry to it{replace}:"
+            f"  Add this {name} entry to {h.block_target()}{replace}:"
         )
-    if dry_run or reason is not None:
+    if show_block:
         click.echo("")
         _echo_block(h.block(name, entry))
     if dry_run:
@@ -1134,15 +1299,7 @@ def run_setup_harness(
     # 6. Write through the harness
     if reason is None:
         assert exe is not None
-        for i, args in enumerate(commands):
-            try:
-                _run_or_fail(h, exe, args, attached=h.interactive_add)
-            except click.ClickException as e:
-                if i:
-                    e.message += (
-                        f"\nThe previous {name} entry was removed; re-run setup to add one."
-                    )
-                raise
+        _run_or_fail(h, exe, command, attached=h.interactive_add)
         if not h.saved(name, exe, entry):
             skipped = " and skipped the AGENTS.md export" if export_path is not None else ""
             raise click.ClickException(

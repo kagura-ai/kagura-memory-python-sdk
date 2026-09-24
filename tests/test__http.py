@@ -21,7 +21,9 @@ from kagura_memory._http import (
     mcp_url_guardrails_off,
     mcp_url_has_tools_allowlist,
     mcp_url_with_query,
+    mcp_url_without_query_param,
     normalize_guardrails,
+    normalize_url,
     normalize_uuid,
     validate_https_url,
     validate_lat_lon,
@@ -333,6 +335,78 @@ def test_reject_message_includes_label_and_url():
         validate_https_url("http://localhost.evil.com", label="MCP URL")
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        # Every URL parser reads the scheme without regard to case (#274).
+        "HTTP://evil.com",
+        "Http://evil.com/mcp",
+        "hTtP://evil.com",
+        # A URL parser drops surrounding whitespace before reading the scheme.
+        " http://evil.com/mcp",
+        "http://evil.com/mcp\n",
+        "\thttp://evil.com",
+        "\u3000http://evil.com",
+        # WHATWG parsers (Node, Rust's url crate) also drop C0 controls around the
+        # URL and a tab or newline anywhere in it ...
+        "\x00http://evil.com",
+        "\x1fhttp://evil.com",
+        "ht\ttp://evil.com",
+        "http\n://evil.com",
+        # ... and read a special scheme without its slashes as http://host.
+        "http:/evil.com",
+        "http:evil.com",
+        "http:\\\\evil.com",
+        # The loopback exception, whatever the case, still needs a loopback host.
+        "HTTP://LOCALHOST.evil.com",
+        "HTTP://localhost@evil.com",
+        " http://127.0.0.1.evil.com",
+        # ASCII-only: no Unicode case fold spells "localhost" ("ſ" folds to "s").
+        "http://localhoſt",
+    ],
+)
+def test_plain_http_in_any_spelling_rejected(url: str):
+    """No spelling a URL parser reads as plain HTTP to a remote host gets past the check."""
+    with pytest.raises(ValueError, match="must use HTTPS"):
+        validate_https_url(url)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "HTTPS://api.example.com",
+        "hTtPs://api.example.com/mcp",
+        " https://api.example.com/mcp\n",
+        "HTTP://LOCALHOST:8080/mcp",
+        " http://127.0.0.1:5000/path",
+        "Http://[::1]:9000/mcp",
+    ],
+)
+def test_scheme_case_and_surrounding_whitespace_do_not_matter(url: str):
+    """HTTPS in any case passes, and so does loopback HTTP in any case."""
+    validate_https_url(url)  # must not raise
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("  https://h.example/mcp\n", "https://h.example/mcp"),
+        ("\x00\x1fhttps://h.example/mcp　", "https://h.example/mcp"),
+        ("ht\ttps://h.exa\nmple/m\rcp", "https://h.example/mcp"),
+        # Only what a parser drops: case and inner spaces stay.
+        ("HTTPS://H.example/a b", "HTTPS://H.example/a b"),
+    ],
+)
+def test_normalize_url_drops_what_a_parser_drops(url: str, expected: str):
+    assert normalize_url(url) == expected
+
+
+def test_reject_message_shows_the_url_as_a_parser_reads_it():
+    """The message names the trimmed URL, so the rejected scheme is visible."""
+    with pytest.raises(ValueError, match=r"\(got: HTTP://evil\.com/mcp\)"):
+        validate_https_url("  HTTP://evil.com/mcp\n", label="MCP URL")
+
+
 def test_retry_after_seconds_parses_digits_else_none():
     """_retry_after_seconds honors integer seconds, else None (incl. HTTP-date / absent)."""
     from kagura_memory._http import _retry_after_seconds
@@ -573,6 +647,29 @@ def test_mcp_url_with_query_none_is_a_no_op():
     url = "https://h.example/mcp?guardrails=off"
     assert mcp_url_with_query(url) == url
     assert mcp_url_with_query(url, tool_profile="core") == url + "&profile=core"
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        (
+            "https://h.example/mcp?guardrails=a&tools=x,y&guardrails=off#f",
+            "https://h.example/mcp?tools=x,y#f",
+        ),
+        # Names compare decoded, as the server reads them.
+        ("https://h.example/mcp?guard%72ails=a&profile=core", "https://h.example/mcp?profile=core"),
+        ("https://h.example/mcp?guardrails", "https://h.example/mcp"),
+    ],
+)
+def test_mcp_url_without_query_param_drops_every_value(url, expected):
+    assert mcp_url_without_query_param(url, "guardrails") == expected
+
+
+@pytest.mark.parametrize(
+    "url", ["https://h.example/mcp", "https://h.example/mcp?", "https://h.example/mcp?&tools=a,b&"]
+)
+def test_mcp_url_without_query_param_leaves_a_url_without_the_key_as_it_is(url):
+    assert mcp_url_without_query_param(url, "guardrails") == url
 
 
 @pytest.mark.parametrize(

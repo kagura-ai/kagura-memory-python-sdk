@@ -912,7 +912,10 @@ default profile. Re-run setup after moving the SDK to another environment.
 
 Setup changes a harness's config only through that harness's own CLI. Without
 the CLI on `PATH` (or, for Hermes, without a terminal or with `-y`), it prints
-the block and the file to add it to and edits nothing. An entry of the same name
+the block and the file to add it to and edits nothing. When Hermes's
+`config.yaml` already has a top-level `mcp_servers:` key, it prints the entry
+alone, indented to go under that key: a second `mcp_servers:` key would replace
+the first, and every server under it. An entry of the same name
 stops setup unless you pass `--force`; setup says what kind of entry it is
 (stdio, URL with a bearer from an environment variable, URL with OAuth) and
 never prints its values. Setup asks questions only with a terminal and without
@@ -926,8 +929,8 @@ same).
 
 | | Codex | Hermes Agent | OpenClaw |
 |---|---|---|---|
-| Config | `~/.codex/config.toml` (`$CODEX_HOME`) | `~/.hermes/config.yaml` (`$HERMES_HOME`, or the active Hermes profile's) | `~/.openclaw/openclaw.json` (`OPENCLAW_CONFIG_PATH`) |
-| Written with | `codex mcp add` (`--force`: `codex mcp remove` first) | `hermes mcp add`, attached to your terminal: it probes the server and asks which tools to enable | `openclaw mcp add`, which probes first (`--force`: `openclaw mcp set`) |
+| Config | `~/.codex/config.toml` (`$CODEX_HOME`) | `~/.hermes/config.yaml` (`$HERMES_HOME`, or the active Hermes profile's) | `~/.openclaw/openclaw.json` (`$OPENCLAW_STATE_DIR/openclaw.json`, or `OPENCLAW_CONFIG_PATH`) |
+| Written with | `codex mcp add` (`--force`: the same command, which replaces the entry) | `hermes mcp add`, attached to your terminal: it probes the server and asks which tools to enable | `openclaw mcp add`, which probes first (`--force`: `openclaw mcp set`) |
 | Check it | `codex mcp get kagura-memory` | `hermes mcp test kagura-memory` | `openclaw mcp doctor kagura-memory --probe` |
 | Guardrails | MCP `instructions`: `--context-id` (or `--guardrails <uuid>`) adds `--guardrails` to the proxy | `get_context_info` (on by default), plus the opt-in `AGENTS.md` export | same as Hermes |
 
@@ -942,14 +945,19 @@ guardrails, or the deployment turns the digest off; setup prints the
 what Codex receives. Hermes and OpenClaw do not read `instructions`: they
 see guardrails in the `guardrails` block of `get_context_info`, which
 `?guardrails=off` would remove, so `--guardrails off` is refused for them (exit 2)
-and a context id is never written into their entry.
+and a context id is never written into their entry: a `?guardrails=<uuid>`
+already in `--mcp-url` is dropped with a warning (a `?guardrails=off` the server
+would read is kept, alone and with a warning).
 
 **`AGENTS.md` export** (opt-in; server v0.74.0+). `--agents-md [PATH]` writes a
 snapshot of the context's tool guardrails — the same block as
 `kagura guardrails digest --out` — into a file the harness loads every session:
 for Hermes the first of `.hermes.md`, `HERMES.md`, `AGENTS.override.md`,
 `AGENTS.md`, `CLAUDE.md` in the current directory (else `AGENTS.md`); for OpenClaw
-`~/.openclaw/workspace/AGENTS.md`; for Codex `$CODEX_HOME/AGENTS.md` (`~/.codex`),
+`AGENTS.md` in its default workspace, found as OpenClaw finds it:
+`$OPENCLAW_WORKSPACE_DIR`, else `workspace` in `$OPENCLAW_STATE_DIR`, else
+`~/.openclaw/workspace` (setup does not read an `agents.defaults.workspace` set in
+`openclaw.json`: pass that path to `--agents-md`); for Codex `$CODEX_HOME/AGENTS.md` (`~/.codex`),
 or `AGENTS.override.md` there when it exists, since Codex reads it instead —
 rarely needed, as the digest already arrives in `instructions`. An interactive
 Hermes or OpenClaw run offers it (default no) and lists the profile's contexts;
@@ -978,7 +986,7 @@ point at that server too (`KAGURA_MCP_URL` for `KAGURA_API_KEY`).
 |---|---|---|
 | Codex | `bearer_token_env_var = "KAGURA_API_KEY"` (`--api-key-env` to rename; `?guardrails=off` while the plugin's hooks are on) | `export KAGURA_API_KEY=…` in the shell profile that starts Codex (the `kagura` CLI also ranks this variable above OAuth profiles) |
 | Hermes | `Authorization: Bearer ${MCP_KAGURA_MEMORY_API_KEY}` (the name Hermes derives from the server name) | `hermes mcp add --auth header` asks for it and stores it in Hermes's `.env`; when setup prints the block, add it there yourself |
-| OpenClaw | `Authorization: Bearer ${KAGURA_API_KEY}`, always with `transport: "streamable-http"` (a URL entry defaults to SSE) | `~/.openclaw/.env`; the entry is added with `--no-probe`, so run `openclaw mcp doctor kagura-memory --probe` once the key is there |
+| OpenClaw | `Authorization: Bearer ${KAGURA_API_KEY}`, always with `transport: "streamable-http"` (a URL entry defaults to SSE) | `~/.openclaw/.env` (`$OPENCLAW_STATE_DIR/.env`); the entry is added with `--no-probe`, so run `openclaw mcp doctor kagura-memory --probe` once the key is there |
 
 ## API Coverage
 
