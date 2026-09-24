@@ -120,7 +120,9 @@ Relay:
   (`codex mcp login`, `hermes mcp login`, `openclaw mcp login`) in their own
   terminal, with a browser that can reach the harness's loopback callback. Never
   run it for them, and never ask for, print or pass a token: the harness keeps
-  it. A version stop (exit 1) means the server is older than 0.77.0 or its
+  it. A Hermes stop saying the entry was saved disabled: the user signs in with
+  `hermes mcp login <name>` and then runs the `hermes config set … enabled true`
+  it names. A version stop (exit 1) means the server is older than 0.77.0 or its
   version is unconfirmed: offer the stdio entry (`--profile`) or `--url-form`
   with an API key.
 - The Codex plugin-hooks warning: a stdio or `--oauth` entry turns the

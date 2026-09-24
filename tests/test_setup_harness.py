@@ -71,8 +71,13 @@ class Recorder:
         self.hermes_saves = True
         #: False: Hermes cannot set up OAuth and saves the entry with no `auth`.
         self.hermes_oauth_ok = True
+        #: False: the add's probe (the sign-in) fails, and "Save config anyway"
+        #: saves the entry with `enabled: false`.
+        self.hermes_probe_ok = True
         #: The `auth` of each Hermes entry, as `hermes config get` reads it back.
         self.hermes_auth: dict[str, str] = {}
+        #: The `enabled` of each Hermes entry, likewise.
+        self.hermes_enabled: dict[str, bool] = {}
 
     def __call__(self, argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         self.calls.append((list(argv), kwargs))
@@ -82,16 +87,22 @@ class Recorder:
             out = self.detect_out.get(cli)
             return subprocess.CompletedProcess(argv, 0 if out else 1, out or "", "")
         if sub == "config get":
-            auth = self.hermes_auth.get(argv[3].split(".")[1])
-            if auth is None:
+            if self.returncodes.get(sub):
+                return subprocess.CompletedProcess(argv, self.returncodes[sub], "", "boom")
+            _, server, key = argv[3].split(".", 2)
+            value = {"auth": self.hermes_auth, "enabled": self.hermes_enabled}[key].get(server)
+            if value is None:
                 return subprocess.CompletedProcess(argv, 1, "", f"Config key not set: {argv[3]}")
-            return subprocess.CompletedProcess(argv, 0, json.dumps(auth) + "\n", "")
+            return subprocess.CompletedProcess(argv, 0, json.dumps(value) + "\n", "")
         code = self.returncodes.get(sub, 0)
         if cli == "hermes" and sub == "mcp add" and code == 0 and self.hermes_saves:
+            name = argv[3]
             transport = argv[argv.index("--url" if "--url" in argv else "--command") + 1]
-            self.detect_out[cli] = f"  {argv[3]}    {transport}   all\n"
-            if argv[-2:] == ["--auth", "oauth"] and self.hermes_oauth_ok:
-                self.hermes_auth[argv[3]] = "oauth"
+            self.detect_out[cli] = f"  {name}    {transport}   all\n"
+            if "--auth" in argv and argv[argv.index("--auth") + 1] == "oauth":
+                if self.hermes_oauth_ok:
+                    self.hermes_auth[name] = "oauth"
+            self.hermes_enabled[name] = self.hermes_probe_ok
         return subprocess.CompletedProcess(argv, code, "", "boom" if code else "")
 
     def argvs(self) -> list[list[str]]:
@@ -1320,25 +1331,37 @@ class TestOAuthHermes:
         result = run("hermes", *OAUTH, input="n\n")
         assert result.exit_code == 0, result.output
         [(argv, kwargs)] = [c for c in recorder.calls if c[0] in recorder.mutating()]
+        # The add's probe runs the sign-in: `hermes mcp login`'s bound, not 30 s.
         assert argv == [
             "/usr/bin/hermes",
             *("mcp", "add", "kagura-memory", "--url", MCP_URL, "--auth", "oauth"),
+            *("--connect-timeout", "315"),
         ]
         assert "capture_output" not in kwargs and "timeout" not in kwargs
-        assert [
-            "/usr/bin/hermes",
-            *("config", "get", "mcp_servers.kagura-memory.auth", "--json"),
-        ] in recorder.argvs()
+        for key in ("auth", "enabled"):
+            assert [
+                "/usr/bin/hermes",
+                *("config", "get", f"mcp_servers.kagura-memory.{key}", "--json"),
+            ] in recorder.argvs()
         out = flat(result.output)
         assert "Done: hermes wrote kagura-memory" in out
+        assert "with --connect-timeout 315" in out
+        assert "keeps as the entry's connect_timeout" in out
         assert "`hermes mcp login kagura-memory`" in out
         assert "memory-cloud#1671" in out
         assert "~/.hermes/mcp-tokens/kagura-memory.json" in out
         assert "MCP_KAGURA_MEMORY_API_KEY" not in out
 
-    @pytest.mark.parametrize("auth", [None, "header"], ids=["no-auth", "other-auth"])
-    def test_an_entry_saved_without_auth_oauth_is_not_saved(
-        self, on_path, recorder, tty, digest, auth
+    @pytest.mark.parametrize(
+        ("auth", "said"),
+        [
+            (None, "Hermes's kagura-memory entry has no auth: oauth"),
+            ("header", "Hermes still has the existing kagura-memory entry, of another auth kind"),
+        ],
+        ids=["no-auth", "other-auth"],
+    )
+    def test_an_entry_without_auth_oauth_is_not_saved(
+        self, on_path, recorder, tty, digest, auth, said
     ):
         on_path("hermes")
         recorder.hermes_oauth_ok = False
@@ -1347,7 +1370,46 @@ class TestOAuthHermes:
         result = run("hermes", *OAUTH, "--context-id", CTX, "--agents-md", input="n\n")
         assert result.exit_code == 1
         out = flat(result.output)
-        assert "Hermes saved kagura-memory without auth: oauth" in out
+        assert said in out
+        assert "Re-run with --force" in out
+        assert "setup skipped the AGENTS.md export" in out
+        assert "Done:" not in out
+        assert digest.calls == []
+
+    def test_a_kept_entry_is_not_called_saved(self, on_path, recorder, tty):
+        """--force, and the user declines Hermes's overwrite of a header entry."""
+        on_path("hermes")
+        recorder.detect_out["hermes"] = f"  kagura-memory    {MCP_URL}   all\n"
+        recorder.hermes_auth["kagura-memory"] = "header"
+        recorder.hermes_saves = False
+        result = run("hermes", *OAUTH, "--force", input="n\n")
+        assert result.exit_code == 1
+        out = flat(result.output)
+        assert "still has the existing kagura-memory entry" in out
+        assert "overwrite prompt was declined" in out
+        assert "Hermes saved" not in out
+
+    def test_an_unread_auth_is_not_called_missing(self, on_path, recorder, tty):
+        on_path("hermes")
+        recorder.returncodes["config get"] = 2
+        result = run("hermes", *OAUTH, input="n\n")
+        assert result.exit_code == 1
+        out = flat(result.output)
+        assert "Setup could not read back the auth of kagura-memory" in out
+        assert "`hermes config get mcp_servers.kagura-memory.auth` failed" in out
+        assert "`hermes mcp list`" in out
+        assert "no auth: oauth" not in out and "Done:" not in out
+
+    def test_an_entry_saved_disabled_is_not_done(self, on_path, recorder, tty, digest):
+        """A sign-in that did not finish, then "Save config anyway?": enabled false."""
+        on_path("hermes")
+        recorder.hermes_probe_ok = False
+        result = run("hermes", *OAUTH, "--context-id", CTX, "--agents-md", input="n\n")
+        assert result.exit_code == 1
+        out = flat(result.output)
+        assert "Hermes saved kagura-memory disabled" in out
+        assert "Sign in with `hermes mcp login kagura-memory`" in out
+        assert "`hermes config set mcp_servers.kagura-memory.enabled true`" in out
         assert "setup skipped the AGENTS.md export" in out
         assert "Done:" not in out
         assert digest.calls == []

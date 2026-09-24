@@ -604,6 +604,13 @@ def hermes_key_env(name: str) -> str:
     return f"MCP_{suffix}_API_KEY"
 
 
+#: The ``--connect-timeout`` of an ``--oauth`` ``hermes mcp add``, whose probe
+#: runs the browser sign-in: Hermes's ``login_connect_timeout``, the
+#: ``oauth.timeout`` callback window (300 s) plus 15 s for the token exchange.
+#: Hermes keeps it as the entry's ``connect_timeout`` (default 60 s).
+HERMES_OAUTH_CONNECT_TIMEOUT_SEC = 315
+
+
 class _Hermes(_Harness):
     key = "hermes"
     title = "Hermes Agent"
@@ -637,37 +644,77 @@ class _Hermes(_Harness):
                 f"`hermes mcp list` shows no new {name} entry: `hermes mcp add` was\n"
                 "  cancelled or failed there, so nothing was saved"
             )
-        # When Hermes cannot set up OAuth it asks "Continue without
-        # authentication?" (default yes) and saves the entry with no `auth`.
-        if entry.oauth and self._auth(name, exe) != "oauth":
-            return (
-                f"Hermes saved {name} without auth: oauth (it continues without authentication\n"
-                "  when it cannot set up OAuth), so the entry cannot sign in to Kagura. Re-run\n"
-                "  with --force to replace it"
+        return self._oauth_not_saved(name, exe) if entry.oauth else None
+
+    def _oauth_not_saved(self, name: str, exe: str) -> str | None:
+        """Why the ``--oauth`` entry ``name`` cannot sign in, from its ``auth`` and ``enabled``."""
+        read, auth = self._config_get(name, exe, "auth")
+        if not read:
+            return _wrap(
+                f"Setup could not read back the auth of {name} (`hermes config get "
+                f"mcp_servers.{name}.auth` failed), so it cannot tell whether Hermes saved an "
+                "OAuth entry: check it with that command or `hermes mcp list`"
+            )
+        if auth is None:
+            # When Hermes cannot set up OAuth it asks "Continue without
+            # authentication?" (default yes) and saves the entry with no `auth`.
+            return _wrap(
+                f"Hermes's {name} entry has no auth: oauth, so it cannot sign in to Kagura: "
+                "Hermes continues without authentication when it cannot set up OAuth, and "
+                "keeps an existing entry when its overwrite prompt is declined. Re-run with "
+                "--force to replace it"
+            )
+        if auth != "oauth":
+            # This add never writes another auth: the entry is one Hermes kept.
+            return _wrap(
+                f"Hermes still has the existing {name} entry, of another auth kind (its "
+                "overwrite prompt was declined), so nothing was saved. Re-run with --force "
+                "and let Hermes overwrite it"
+            )
+        # After a failed probe (the sign-in did not finish), "Save config
+        # anyway?" saves the entry with enabled: false, which Hermes never
+        # connects to; `hermes mcp login` does not turn it back on.
+        _, enabled = self._config_get(name, exe, "enabled")
+        if enabled is False:
+            return _wrap(
+                f"Hermes saved {name} disabled, since its sign-in or connection check did not "
+                "finish, and it never connects to a disabled entry. Sign in with `hermes mcp "
+                f"login {name}`, then turn the entry on with `hermes config set "
+                f"mcp_servers.{name}.enabled true`"
             )
         return None
 
-    def _auth(self, name: str, exe: str) -> object:
-        """The entry's ``auth`` value, from ``hermes config get``; None when unset or unread.
+    def _config_get(self, name: str, exe: str, key: str) -> tuple[bool, object]:
+        """``mcp_servers.<name>.<key>`` from ``hermes config get``: ``(read, value)``.
 
+        ``value`` is None when the key is not set (Hermes exits 1 with "Config
+        key not set"); ``read`` is False when the command failed otherwise.
         Only that one key is read: never the headers, env or args, which can
         hold a secret. Hermes prints the value as one JSON line.
         """
-        proc = _capture(exe, ["config", "get", f"mcp_servers.{name}.auth", "--json"])
+        proc = _capture(exe, ["config", "get", f"mcp_servers.{name}.{key}", "--json"])
+        if proc is not None and proc.returncode == 1 and "Config key not set" in proc.stderr:
+            return True, None
         if proc is None or proc.returncode != 0 or not proc.stdout.strip():
-            return None
+            return False, None
         try:
-            return json.loads(proc.stdout.strip().splitlines()[-1])
+            return True, json.loads(proc.stdout.strip().splitlines()[-1])
         except ValueError:
-            return None
+            return False, None
 
     def add_args(self, name: str, entry: _Entry) -> list[str]:
         if entry.command is not None:
             # --args takes the rest of the command line, so it goes last.
             return ["mcp", "add", name, "--command", entry.command, "--args", *entry.args]
         assert entry.url is not None
-        auth = "oauth" if entry.oauth else "header"
-        return ["mcp", "add", name, "--url", entry.url, "--auth", auth]
+        if entry.oauth:
+            # The add's probe runs the browser sign-in, bounded by connect_timeout
+            # (30 s unless set); give it the bound `hermes mcp login` uses.
+            return [
+                *("mcp", "add", name, "--url", entry.url, "--auth", "oauth"),
+                *("--connect-timeout", str(HERMES_OAUTH_CONNECT_TIMEOUT_SEC)),
+            ]
+        return ["mcp", "add", name, "--url", entry.url, "--auth", "header"]
 
     @cached_property
     def _servers_key(self) -> tuple[_YamlServers | None, str | None]:
@@ -745,7 +792,9 @@ class _Hermes(_Harness):
         if ran:
             first = (
                 "Hermes signs in itself: `hermes mcp add` above started its sign-in when it "
-                f"probed the server. If it did not log in, run `{login}`"
+                f"probed the server, with --connect-timeout {HERMES_OAUTH_CONNECT_TIMEOUT_SEC} "
+                "(the bound `hermes mcp login` uses), which Hermes keeps as the entry's "
+                f"connect_timeout. If it did not log in, run `{login}`"
             )
         else:
             first = f"Once the entry is in config.yaml, sign in with `{login}`"

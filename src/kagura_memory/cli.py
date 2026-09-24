@@ -1775,7 +1775,8 @@ _HARNESS_OAUTH_HELP = {
     "hermes": (
         "With --url-form: a URL entry with `auth: oauth` and no key, which Hermes signs in to "
         "itself (memory-cloud 0.77.0+, which setup checks first) when `hermes mcp add` probes "
-        "it, or later with `hermes mcp login NAME`. Its device flow waits on memory-cloud#1671."
+        "it (given --connect-timeout 315, which Hermes keeps), or later with "
+        "`hermes mcp login NAME`. Its device flow waits on memory-cloud#1671."
     ),
     "openclaw": (
         "With --url-form: a URL entry with `auth: oauth` and no key (memory-cloud 0.77.0+, "
@@ -1932,9 +1933,11 @@ def setup_hermes(**params):
     With --url-form --oauth (memory-cloud 0.77.0+, whose client registration
     accepts Hermes Agent; setup checks the version first), the entry is a
     URL with `auth: oauth`, and Hermes signs in itself when `hermes mcp add`
-    probes it, or later with `hermes mcp login NAME` (the browser flow: its
-    device flow waits on memory-cloud#1671). The stdio entry stays the
-    default.
+    probes it (setup gives the add --connect-timeout 315, the bound
+    `hermes mcp login` uses, which Hermes keeps as the entry's
+    connect_timeout), or later with `hermes mcp login NAME` (the browser
+    flow: its device flow waits on memory-cloud#1671). The stdio entry stays
+    the default.
 
     \b
     Examples:
