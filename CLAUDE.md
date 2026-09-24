@@ -11,7 +11,7 @@ Python SDK for Kagura Memory Cloud. Seven clients:
 - `AgentsClient` — REST client for the agent control plane: bootstrap (`POST /api/v1/agents/{agent_id}/bootstrap`) + registry/binding CRUD (owner/admin; server v0.49.0+)
 - `MemoryClient` — REST client for tool guardrails: `load_guardrails` (`POST /api/v1/memory/guardrails`) + the `AGENTS.md` digest (`GET /api/v1/memory/guardrails/digest`) for API-key-only hooks and scripts (server v0.74.0+)
 
-Checked against memory-cloud up to **v0.76.0** (production). `MIN_SERVER_VERSION` stays **0.17.1** and is advisory; newer surfaces carry their own server floor (README compatibility table).
+Checked against memory-cloud up to **v0.77.0** (latest release). `MIN_SERVER_VERSION` stays **0.17.1** and is advisory; newer surfaces carry their own server floor (README compatibility table).
 
 ## Development Workflow
 
