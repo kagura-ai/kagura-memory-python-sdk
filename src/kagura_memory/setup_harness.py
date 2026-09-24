@@ -653,17 +653,22 @@ class _Hermes(_Harness):
     def not_saved(self, name: str, exe: str, entry: _Entry, *, replaced: bool) -> str | None:
         # `hermes mcp add` exits 0 when the user cancels an overwrite, declines
         # to save after a failed probe, or hits a validation error; only the
-        # list tells. A same-form entry that was kept looks the same, though.
+        # list tells. A same-form entry that was kept looks the same there,
+        # though: for --oauth, its auth and url tell.
         found = self.detect(name, exe)
         if found is None or found.kind != ("stdio" if entry.command else "URL"):
             return (
                 f"`hermes mcp list` shows no new {name} entry: `hermes mcp add` was\n"
                 "  cancelled or failed there, so nothing was saved"
             )
-        return self._oauth_not_saved(name, exe, replaced=replaced) if entry.oauth else None
+        return self._oauth_not_saved(name, exe, entry, replaced=replaced) if entry.oauth else None
 
-    def _oauth_not_saved(self, name: str, exe: str, *, replaced: bool) -> str | None:
-        """Why the ``--oauth`` entry ``name`` cannot sign in, from its ``auth`` and ``enabled``."""
+    def _oauth_not_saved(self, name: str, exe: str, entry: _Entry, *, replaced: bool) -> str | None:
+        """Why the ``--oauth`` entry ``name`` is not ``entry`` or cannot sign in.
+
+        From its ``auth``, its ``url`` when an entry existed before the add,
+        and its ``enabled``.
+        """
         read, auth = self._config_get(name, exe, "auth")
         if not read:
             return _wrap(
@@ -687,6 +692,23 @@ class _Hermes(_Harness):
                 f"{no_oauth}Hermes continues without authentication when it cannot set up "
                 "OAuth. Re-run with --force to replace it"
             )
+        if replaced:
+            # A kept entry can be an OAuth one too (another workspace's): its
+            # url tells, which `hermes mcp list` truncates.
+            read, url = self._config_get(name, exe, "url")
+            if not read:
+                return _wrap(
+                    f"Setup could not read back the url of {name} (`hermes config get "
+                    f"mcp_servers.{name}.url` failed), so it cannot tell whether Hermes replaced "
+                    "the existing entry: check it with that command"
+                )
+            if url != entry.url:
+                return _wrap(
+                    f"Hermes's {name} entry is still the existing one, for another URL: Hermes "
+                    "keeps the existing entry when its overwrite prompt is declined, or when the "
+                    "add stops before saving. Re-run with --force and accept Hermes's overwrite "
+                    "prompt"
+                )
         # After a failed probe (the sign-in did not finish), "Save config
         # anyway?" saves the entry with enabled: false, which Hermes never
         # connects to; `hermes mcp login` does not turn it back on.

@@ -79,6 +79,10 @@ class Recorder:
         self.hermes_auth: dict[str, str] = {}
         #: The `enabled` of each Hermes entry, likewise.
         self.hermes_enabled: dict[str, bool] = {}
+        #: The `url` of each Hermes URL entry, likewise.
+        self.hermes_url: dict[str, str] = {}
+        #: The keys whose `hermes config get` fails, e.g. {"url"}.
+        self.hermes_unreadable: set[str] = set()
 
     def __call__(self, argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         self.calls.append((list(argv), kwargs))
@@ -88,10 +92,16 @@ class Recorder:
             out = self.detect_out.get(cli)
             return subprocess.CompletedProcess(argv, 0 if out else 1, out or "", "")
         if sub == "config get":
-            if self.returncodes.get(sub):
-                return subprocess.CompletedProcess(argv, self.returncodes[sub], "", "boom")
             _, server, key = argv[3].split(".", 2)
-            value = {"auth": self.hermes_auth, "enabled": self.hermes_enabled}[key].get(server)
+            code = self.returncodes.get(sub) or (2 if key in self.hermes_unreadable else 0)
+            if code:
+                return subprocess.CompletedProcess(argv, code, "", "boom")
+            values = {
+                "auth": self.hermes_auth,
+                "enabled": self.hermes_enabled,
+                "url": self.hermes_url,
+            }
+            value = values[key].get(server)
             if value is None:
                 return subprocess.CompletedProcess(argv, 1, "", f"Config key not set: {argv[3]}")
             return subprocess.CompletedProcess(argv, 0, json.dumps(value) + "\n", "")
@@ -100,6 +110,8 @@ class Recorder:
             name = argv[3]
             transport = argv[argv.index("--url" if "--url" in argv else "--command") + 1]
             self.detect_out[cli] = f"  {name}    {transport}   all\n"
+            if "--url" in argv:
+                self.hermes_url[name] = transport
             if "--auth" in argv and argv[argv.index("--auth") + 1] == "oauth":
                 if self.hermes_oauth_ok:
                     self.hermes_auth[name] = "oauth"
@@ -1554,6 +1566,55 @@ class TestOAuthHermes:
         assert "Re-run with --force and accept Hermes's overwrite prompt" in out
         assert "Re-run with --force to replace it" not in out
         assert "Hermes saved" not in out and "Done:" not in out
+
+    @pytest.fixture
+    def kept_oauth_entry(self, recorder) -> str:
+        """An OAuth entry of the same name, for another workspace's URL."""
+        old = "https://memory.kagura-ai.com/mcp/w/ws-OLD"
+        recorder.detect_out["hermes"] = f"  kagura-memory    {old}   all\n"
+        recorder.hermes_auth["kagura-memory"] = "oauth"
+        recorder.hermes_enabled["kagura-memory"] = True
+        recorder.hermes_url["kagura-memory"] = old
+        return old
+
+    def test_a_kept_oauth_entry_is_not_called_saved(self, on_path, recorder, tty, kept_oauth_entry):
+        """--force, and the user declines Hermes's overwrite of an OAuth entry.
+
+        It already has ``auth: oauth`` and is enabled: only its url tells.
+        """
+        on_path("hermes")
+        recorder.hermes_saves = False
+        result = run("hermes", *OAUTH, "--force", input="n\n")
+        assert result.exit_code == 1
+        assert [
+            "/usr/bin/hermes",
+            *("config", "get", "mcp_servers.kagura-memory.url", "--json"),
+        ] in recorder.argvs()
+        out = flat(result.output)
+        assert "Hermes's kagura-memory entry is still the existing one, for another URL" in out
+        assert "Hermes keeps the existing entry when its overwrite prompt is declined" in out
+        assert "Re-run with --force and accept Hermes's overwrite prompt" in out
+        assert "no auth: oauth" not in out and "Done:" not in out
+        # Described, never echoed.
+        assert kept_oauth_entry not in out
+
+    def test_a_replaced_oauth_entry_is_done(self, on_path, recorder, tty, kept_oauth_entry):
+        on_path("hermes")
+        result = run("hermes", *OAUTH, "--force", input="n\n")
+        assert result.exit_code == 0, result.output
+        assert recorder.hermes_url["kagura-memory"] == MCP_URL
+        assert "Done: hermes wrote kagura-memory" in flat(result.output)
+
+    def test_an_unread_url_is_not_called_replaced(self, on_path, recorder, tty, kept_oauth_entry):
+        on_path("hermes")
+        recorder.hermes_unreadable.add("url")
+        result = run("hermes", *OAUTH, "--force", input="n\n")
+        assert result.exit_code == 1
+        out = flat(result.output)
+        assert "Setup could not read back the url of kagura-memory" in out
+        assert "`hermes config get mcp_servers.kagura-memory.url` failed" in out
+        assert "whether Hermes replaced the existing entry" in out
+        assert "Done:" not in out
 
     def test_an_unread_auth_is_not_called_missing(self, on_path, recorder, tty):
         on_path("hermes")
