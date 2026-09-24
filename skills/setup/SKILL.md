@@ -89,18 +89,22 @@ file and edits nothing. Options:
 - `--url-form --mcp-url <url> [--api-key-env VAR]` — a URL entry that reads a
   long-lived API key from an environment variable; setup never sees the key.
 - `--url-form --oauth --mcp-url <url>` (memory-cloud 0.77.0+) — a URL entry with
-  no key, which the harness signs in to itself in a browser: `codex mcp login
-  <name>`, `hermes mcp login <name>` (browser flow; its device flow waits on
-  memory-cloud#1671) or `openclaw mcp login <name>`. Setup first checks the
-  server's version and stops (exit 1) below 0.77.0 or when it cannot confirm
-  it; `--dry-run` sends no request. `codex mcp add` starts Codex's sign-in, so
-  from your shell (no terminal) setup prints the table instead. Use it only
-  when the user asks for it: the stdio entry stays the default (one
-  `kagura auth login` for every harness, on any server).
+  no key. 0.77.0 accepts the harness's own client registration, and the harness
+  then signs in itself in a browser: `codex mcp login <name>`, `hermes mcp login
+  <name>` (browser flow; its device flow waits on memory-cloud#1671) or
+  `openclaw mcp login <name>`. A full sign-in on a `/mcp/w/<workspace-id>` URL
+  has not been verified yet (README, "What has been checked"): say so when you
+  offer it. Setup first checks the server's version and stops (exit 1) below
+  0.77.0 or when it cannot confirm it; `--dry-run` sends no request.
+  `codex mcp add` starts Codex's sign-in, so from your shell (no terminal) setup
+  prints the table instead. Use it only when the user asks for it: the stdio
+  entry stays the default (one `kagura auth login` for every harness, on any
+  server).
 - `--force` replaces an existing entry of the same name (setup stops otherwise);
-  `-y` never prompts and never hands the terminal to `hermes mcp add`. Your
-  shell has no terminal, so setup behaves as with `-y` either way: it never
-  stops at a prompt, and Hermes gets the printed block.
+  `-y` never prompts and never hands the terminal to `hermes mcp add` or, with
+  `--oauth`, `codex mcp add`. Your shell has no terminal, so setup behaves as
+  with `-y` either way: it never stops at a prompt, and Hermes (and Codex with
+  `--oauth`) gets the printed block.
 
 Relay:
 
@@ -118,13 +122,15 @@ Relay:
   file. Never print, ask for, or pass the key on a command line.
 - The `--oauth` login note: the user runs the harness login it names
   (`codex mcp login`, `hermes mcp login`, `openclaw mcp login`) in their own
-  terminal, with a browser that can reach the harness's loopback callback. Never
-  run it for them, and never ask for, print or pass a token: the harness keeps
-  it. A Hermes stop saying the entry was saved disabled: the user signs in with
-  `hermes mcp login <name>` and then runs the `hermes config set … enabled true`
-  it names. A version stop (exit 1) means the server is older than 0.77.0 or its
-  version is unconfirmed: offer the stdio entry (`--profile`) or `--url-form`
-  with an API key.
+  terminal. The browser is redirected to the harness's loopback callback; on a
+  remote host the note names the way round (Codex `--no-browser`, Hermes's
+  paste-the-redirect-URL prompt, OpenClaw `--code`). Never run it for them,
+  and never ask for, print or pass a token or a pasted redirect URL: the
+  harness keeps the token. A Hermes stop saying the entry was saved disabled:
+  the user signs in with `hermes mcp login <name>` and then runs the
+  `hermes config set … enabled true` it names. A version stop (exit 1) means
+  the server is older than 0.77.0 or its version is unconfirmed: offer the
+  stdio entry (`--profile`) or `--url-form` with an API key.
 - The Codex plugin-hooks warning: a stdio or `--oauth` entry turns the
   kagura-memory Codex plugin's guardrail hooks into no-ops; suggest `--url-form`
   with an API key if the user relies on them.

@@ -1220,9 +1220,13 @@ class TestOAuthCodex:
         out = flat(result.output)
         assert "Codex signs in itself" in out
         assert "If it did not log in, run `codex mcp login kagura-memory`" in out
-        assert "--no-browser" in out
+        assert "when the browser cannot reach it" in out and "add --no-browser" in out
+        assert "needs a browser" not in out
         assert "setup never sees it" in out
-        assert 'the OS keyring ("Codex MCP Credentials")' in out
+        assert (
+            'the OS keyring ("Codex MCP Credentials"; on Windows, its encrypted secrets store '
+            "in ~/.codex), else in ~/.codex/.credentials.json"
+        ) in out
         assert "export KAGURA_API_KEY" not in out
 
     @pytest.mark.parametrize("flags", [["-y"], []], ids=["-y", "no-tty"])
@@ -1384,6 +1388,7 @@ class TestOAuthHermes:
         assert "keeps as the entry's connect_timeout" in out
         assert "`hermes mcp login kagura-memory`" in out
         assert "memory-cloud#1671" in out
+        assert "paste the redirect URL at Hermes's prompt" in out
         assert "~/.hermes/mcp-tokens/kagura-memory.json" in out
         assert "MCP_KAGURA_MEMORY_API_KEY" not in out
 
@@ -1525,6 +1530,11 @@ class TestOAuthOpenClaw:
             }
         }
         assert recorder.calls == []
+        out = flat(result.output)
+        assert (
+            "Once the entry is in openclaw.json, sign in with `openclaw mcp login kagura-memory`"
+        ) in out
+        assert "`openclaw mcp login kagura-memory --code <code>`" in out
 
 
 @pytest.mark.parametrize(
@@ -1541,7 +1551,10 @@ def test_help_documents_the_oauth_form_and_its_login(harness, login):
     out = flat(result.output)
     assert "--url-form --oauth --mcp-url https://memory.kagura-ai.com/mcp/w/WS_ID" in out
     assert "memory-cloud 0.77.0+" in out
+    assert "client registration" in out
     assert login in out
+    # Until a harness has signed in end to end on a /mcp/w/<workspace-id> URL (#282).
+    assert "A full sign-in on a /mcp/w/<workspace-id> URL is not verified yet" in out
 
 
 @pytest.mark.parametrize(

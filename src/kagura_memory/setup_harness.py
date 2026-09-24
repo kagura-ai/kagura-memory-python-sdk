@@ -14,8 +14,9 @@ OAuth client registration is accepted there; before 0.77.0 it is rejected.
 The stdio entry stays the default all the same: that needs no per-harness
 browser sign-in and works on older servers, and Hermes's device-flow sign-in
 still waits on memory-cloud#1671. The opt-in ``--url-form --oauth`` writes a
-URL entry with no key, which the harness signs in to itself; setup first
-checks that the entry's server is memory-cloud 0.77.0+.
+URL entry with no key, which the harness then signs in to itself; setup first
+checks that the entry's server is memory-cloud 0.77.0+. A full sign-in by a
+harness on a ``/mcp/w/<workspace-id>`` URL has not been verified yet.
 
 Rules the three commands share:
 
@@ -311,7 +312,12 @@ class _Harness(ABC):
 
     @abstractmethod
     def sign_in_note(self, name: str, *, ran: bool) -> str:
-        """How the user signs the ``--oauth`` entry in; setup never runs the harness login."""
+        """How the user signs the ``--oauth`` entry in; setup never runs the harness login.
+
+        It names the harness's way round a browser that cannot reach its
+        loopback callback (a remote host). ``ran``: setup ran the add command,
+        rather than printing the block.
+        """
 
     @abstractmethod
     def token_store(self, name: str) -> str:
@@ -320,11 +326,10 @@ class _Harness(ABC):
     def login_note(self, name: str, *, ran: bool) -> str:
         """What replaces :meth:`key_note` for an ``--oauth`` entry: who signs in, and where."""
         return _wrap(
-            f"{self.sign_in_note(name, ran=ran)} The sign-in needs a browser that can reach "
-            f"{self.title}'s loopback callback on this host. memory-cloud's consent screen "
-            f"shows the client name {self.title} sends, which nothing verifies: approve only a "
-            f"sign-in you started. {self.title} keeps the token in {self.token_store(name)}; "
-            "setup never sees it."
+            f"{self.sign_in_note(name, ran=ran)} memory-cloud's consent screen shows the "
+            f"client name {self.title} sends, which nothing verifies: approve only a sign-in "
+            f"you started. {self.title} keeps the token in {self.token_store(name)}; setup "
+            "never sees it."
         )
 
     def add_failure_note(self, name: str, entry: _Entry) -> str:
@@ -478,15 +483,22 @@ class _Codex(_Harness):
         else:
             first = f"Once the table is in config.toml, sign in with `{login}`."
         return (
-            f"{first} On a host with no browser, add --no-browser: Codex then prints the URL "
-            "and takes the callback URL pasted back. Codex keys the token on the entry's URL, "
-            "so changing its ?guardrails= later (another --guardrails or --context-id) means "
-            "signing in again."
+            f"{first} The sign-in redirects the browser to Codex's loopback callback on this "
+            "host; when the browser cannot reach it (no browser here, or a remote host), add "
+            "--no-browser: Codex then prints the URL and takes the callback URL pasted back. "
+            "Codex keys the token on the entry's URL, so changing its ?guardrails= later "
+            "(another --guardrails or --context-id) means signing in again."
         )
 
     def token_store(self, name: str) -> str:
+        home = _path_label(codex_home())
         fallback = _path_label(codex_home() / ".credentials.json")
-        return f'the OS keyring ("Codex MCP Credentials"), else in {fallback}'
+        # On Windows Codex turns its secret_auth_storage feature on by default,
+        # which keeps MCP OAuth tokens in an encrypted local store under CODEX_HOME.
+        return (
+            f'the OS keyring ("Codex MCP Credentials"; on Windows, its encrypted secrets '
+            f"store in {home}), else in {fallback}"
+        )
 
     def add_failure_note(self, name: str, entry: _Entry) -> str:
         if not entry.oauth:
@@ -798,7 +810,12 @@ class _Hermes(_Harness):
             )
         else:
             first = f"Once the entry is in config.yaml, sign in with `{login}`"
-        return f"{first} (the browser flow: its --flow device waits on memory-cloud#1671)."
+        return (
+            f"{first} (the browser flow: its --flow device waits on memory-cloud#1671). The "
+            "sign-in redirects the browser to Hermes's loopback callback on this host; when "
+            "the browser cannot reach it (a remote host), paste the redirect URL at Hermes's "
+            "prompt."
+        )
 
     def token_store(self, name: str) -> str:
         return _path_label(hermes_home() / "mcp-tokens" / f"{name}.json")
@@ -911,9 +928,11 @@ class _OpenClaw(_Harness):
     def sign_in_note(self, name: str, *, ran: bool) -> str:
         # `mcp add` and `mcp set` save an OAuth entry without signing in.
         login = f"openclaw mcp login {name}"
+        first = "Sign in" if ran else "Once the entry is in openclaw.json, sign in"
         return (
-            f"Sign in with `{login}`, then check it with the command below. When the "
-            f"browser cannot reach the callback, `{login} --code <code>` takes the code "
+            f"{first} with `{login}`, then check it with the command below. The sign-in "
+            "redirects the browser to OpenClaw's loopback callback on this host; when the "
+            f"browser cannot reach it (a remote host), `{login} --code <code>` takes the code "
             "from the redirect."
         )
 
