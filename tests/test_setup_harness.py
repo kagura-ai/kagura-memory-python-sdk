@@ -1461,42 +1461,37 @@ class TestOAuthHermes:
         assert "~/.hermes/mcp-tokens/kagura-memory.json" in out
         assert "MCP_KAGURA_MEMORY_API_KEY" not in out
 
-    @pytest.mark.parametrize(
-        ("auth", "said"),
-        [
-            (None, "Hermes's kagura-memory entry has no auth: oauth"),
-            ("header", "Hermes still has the existing kagura-memory entry, of another auth kind"),
-        ],
-        ids=["no-auth", "other-auth"],
-    )
-    def test_an_entry_without_auth_oauth_is_not_saved(
-        self, on_path, recorder, tty, digest, auth, said
-    ):
+    def test_an_entry_without_auth_oauth_is_not_saved(self, on_path, recorder, tty, digest):
+        """Hermes could not set up OAuth, and continued without authentication."""
         on_path("hermes")
         recorder.hermes_oauth_ok = False
-        if auth is not None:
-            recorder.hermes_auth["kagura-memory"] = auth
         result = run("hermes", *OAUTH, "--context-id", CTX, "--agents-md", input="n\n")
         assert result.exit_code == 1
         out = flat(result.output)
-        assert said in out
-        assert "Re-run with --force" in out
+        assert "Hermes's kagura-memory entry has no auth: oauth" in out
+        assert "Hermes continues without authentication when it cannot set up OAuth" in out
+        assert "Re-run with --force to replace it" in out
+        assert "overwrite prompt" not in out
         assert "setup skipped the AGENTS.md export" in out
         assert "Done:" not in out
         assert digest.calls == []
 
     def test_a_kept_entry_is_not_called_saved(self, on_path, recorder, tty):
-        """--force, and the user declines Hermes's overwrite of a header entry."""
+        """--force, and the user declines Hermes's overwrite of a header entry.
+
+        Hermes writes a header entry as ``headers`` with no ``auth`` key.
+        """
         on_path("hermes")
         recorder.detect_out["hermes"] = f"  kagura-memory    {MCP_URL}   all\n"
-        recorder.hermes_auth["kagura-memory"] = "header"
         recorder.hermes_saves = False
         result = run("hermes", *OAUTH, "--force", input="n\n")
         assert result.exit_code == 1
         out = flat(result.output)
-        assert "still has the existing kagura-memory entry" in out
-        assert "overwrite prompt was declined" in out
-        assert "Hermes saved" not in out
+        assert "Hermes's kagura-memory entry has no auth: oauth" in out
+        assert "Hermes keeps the existing entry when its overwrite prompt is declined" in out
+        assert "Re-run with --force and accept Hermes's overwrite prompt" in out
+        assert "Re-run with --force to replace it" not in out
+        assert "Hermes saved" not in out and "Done:" not in out
 
     def test_an_unread_auth_is_not_called_missing(self, on_path, recorder, tty):
         on_path("hermes")

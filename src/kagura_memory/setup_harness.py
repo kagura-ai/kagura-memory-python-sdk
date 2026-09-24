@@ -364,8 +364,11 @@ class _Harness(ABC):
         ``ask`` lets the user stop (ClickException).
         """
 
-    def not_saved(self, name: str, exe: str, entry: _Entry) -> str | None:
-        """After the add command exited 0: why ``entry`` is not saved as ``name``, or None."""
+    def not_saved(self, name: str, exe: str, entry: _Entry, *, replaced: bool) -> str | None:
+        """After the add command exited 0: why ``entry`` is not saved as ``name``, or None.
+
+        ``replaced``: a ``name`` entry existed before the add (``--force``).
+        """
         return None
 
 
@@ -646,7 +649,7 @@ class _Hermes(_Harness):
                 return _Existing("URL" if is_url else "stdio")
         return None
 
-    def not_saved(self, name: str, exe: str, entry: _Entry) -> str | None:
+    def not_saved(self, name: str, exe: str, entry: _Entry, *, replaced: bool) -> str | None:
         # `hermes mcp add` exits 0 when the user cancels an overwrite, declines
         # to save after a failed probe, or hits a validation error; only the
         # list tells. A same-form entry that was kept looks the same, though.
@@ -656,9 +659,9 @@ class _Hermes(_Harness):
                 f"`hermes mcp list` shows no new {name} entry: `hermes mcp add` was\n"
                 "  cancelled or failed there, so nothing was saved"
             )
-        return self._oauth_not_saved(name, exe) if entry.oauth else None
+        return self._oauth_not_saved(name, exe, replaced=replaced) if entry.oauth else None
 
-    def _oauth_not_saved(self, name: str, exe: str) -> str | None:
+    def _oauth_not_saved(self, name: str, exe: str, *, replaced: bool) -> str | None:
         """Why the ``--oauth`` entry ``name`` cannot sign in, from its ``auth`` and ``enabled``."""
         read, auth = self._config_get(name, exe, "auth")
         if not read:
@@ -667,21 +670,21 @@ class _Hermes(_Harness):
                 f"mcp_servers.{name}.auth` failed), so it cannot tell whether Hermes saved an "
                 "OAuth entry: check it with that command or `hermes mcp list`"
             )
-        if auth is None:
-            # When Hermes cannot set up OAuth it asks "Continue without
-            # authentication?" (default yes) and saves the entry with no `auth`.
-            return _wrap(
-                f"Hermes's {name} entry has no auth: oauth, so it cannot sign in to Kagura: "
-                "Hermes continues without authentication when it cannot set up OAuth, and "
-                "keeps an existing entry when its overwrite prompt is declined. Re-run with "
-                "--force to replace it"
-            )
         if auth != "oauth":
-            # This add never writes another auth: the entry is one Hermes kept.
+            # Hermes writes `auth` only as `oauth` (a header entry is `headers`
+            # alone). When it cannot set up OAuth it asks "Continue without
+            # authentication?" (default yes) and saves the entry with no `auth`;
+            # when its overwrite prompt is declined it keeps the existing entry.
+            no_oauth = f"Hermes's {name} entry has no auth: oauth, so it cannot sign in to Kagura: "
+            if replaced:
+                return _wrap(
+                    f"{no_oauth}Hermes keeps the existing entry when its overwrite prompt is "
+                    "declined, and continues without authentication when it cannot set up "
+                    "OAuth. Re-run with --force and accept Hermes's overwrite prompt"
+                )
             return _wrap(
-                f"Hermes still has the existing {name} entry, of another auth kind (its "
-                "overwrite prompt was declined), so nothing was saved. Re-run with --force "
-                "and let Hermes overwrite it"
+                f"{no_oauth}Hermes continues without authentication when it cannot set up "
+                "OAuth. Re-run with --force to replace it"
             )
         # After a failed probe (the sign-in did not finish), "Save config
         # anyway?" saves the entry with enabled: false, which Hermes never
@@ -1681,7 +1684,7 @@ def run_setup_harness(
             attached=h.attached_add(entry),
             note=h.add_failure_note(name, entry),
         )
-        problem = h.not_saved(name, exe, entry)
+        problem = h.not_saved(name, exe, entry, replaced=existing is not None)
         if problem is not None:
             skipped = "; setup skipped the AGENTS.md export" if export_path is not None else ""
             raise click.ClickException(f"{problem}{skipped}.")
