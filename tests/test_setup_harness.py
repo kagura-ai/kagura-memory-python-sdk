@@ -2572,3 +2572,29 @@ def test_dry_run_export_without_a_context_names_the_prompt(tty):
     result = run("openclaw", "--profile", "default", "--agents-md", "--dry-run")
     assert result.exit_code == 0, result.output
     assert "for context <chosen at the context prompt>" in result.output
+
+
+def test_hermes_config_value_that_is_not_json_is_unread(monkeypatch):
+    # An older Hermes prints the value as plain text, not one JSON line.
+    monkeypatch.setattr(
+        setup_harness,
+        "_capture",
+        lambda exe, args: subprocess.CompletedProcess([exe, *args], 0, "oauth\n", ""),
+    )
+    assert setup_harness._Hermes()._config_get("kagura-memory", "hermes", "auth") == (False, None)
+
+
+def test_profiles_on_an_unusable_credentials_file_is_empty(monkeypatch):
+    def unusable():
+        raise ValueError("credentials.json is not valid JSON")
+
+    monkeypatch.setattr(setup_harness, "load_credentials_file", unusable)
+    assert setup_harness._profiles_on(MCP_URL) == []
+
+
+def test_broken_config_names_any_other_load_failure(monkeypatch):
+    def too_deep():
+        raise RecursionError("maximum recursion depth exceeded")
+
+    monkeypatch.setattr(setup_harness, "load_config", too_deep)
+    assert setup_harness._broken_config() == "~/.kagura.json (RecursionError)"
