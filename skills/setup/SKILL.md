@@ -70,8 +70,10 @@ kagura setup codex --profile <name> --dry-run
 ```
 
 The entry runs the same `kagura-mcp` proxy by absolute path with `--profile`
-(these harnesses filter the environment and cannot sign in with OAuth
-themselves yet). Setup writes it only through the harness CLI (`codex mcp add`,
+(these harnesses filter the environment). It stays the default: memory-cloud
+accepts these harnesses' own OAuth client registration on a loopback redirect
+only from 0.77.0 (memory-cloud#1657), and Hermes's device-flow sign-in still
+waits on memory-cloud#1671. Setup writes it only through the harness CLI (`codex mcp add`,
 `hermes mcp add`, `openclaw mcp add|set`); otherwise it prints the block and the
 file and edits nothing. Options:
 

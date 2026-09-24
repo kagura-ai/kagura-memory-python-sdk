@@ -1,13 +1,19 @@
 """``kagura setup codex|hermes|openclaw`` — MCP entries for other harnesses (#260).
 
-memory-cloud's dynamic client registration accepts a loopback client only
-when its name carries a known keyword, and OpenAI Codex, Hermes Agent and
-OpenClaw register under names it does not know (memory-cloud#1657), so none
-of them can sign in on its own. Each can spawn a stdio server, though, and
+OpenAI Codex, Hermes Agent and OpenClaw can each spawn a stdio server, and
 ``kagura-mcp`` already forwards every JSON-RPC message with a fresh bearer
 from the ``kagura auth login`` profile. The default entry therefore runs the
-proxy; ``--url-form`` writes a URL entry that reads a long-lived API key
-from an environment variable instead.
+proxy: one device-flow login serves every harness, on any supported server.
+``--url-form`` writes a URL entry that reads a long-lived API key from an
+environment variable instead.
+
+memory-cloud's dynamic client registration accepts a loopback client only
+when its name carries a known keyword. From memory-cloud 0.77.0 the keywords
+include Codex, Hermes Agent and OpenClaw (memory-cloud#1657), so their own
+OAuth client registration is accepted there; before 0.77.0 it is rejected.
+The stdio entry stays the default all the same: that needs no per-harness
+browser sign-in and works on older servers, and Hermes's device-flow sign-in
+still waits on memory-cloud#1671.
 
 Rules the three commands share:
 
