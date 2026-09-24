@@ -1292,6 +1292,41 @@ class TestOAuthCodex:
         assert "changing its ?guardrails= later" in out
         assert "KAGURA_MCP_URL" not in out
 
+    def test_without_profile_the_preview_uses_the_chain_on_the_entry_server(
+        self, on_path, recorder, tty
+    ):
+        on_path("codex")
+        result = run("codex", *OAUTH, "--context-id", CTX)
+        assert result.exit_code == 0, result.output
+        out = flat(result.output)
+        assert f"can read): kagura guardrails digest {CTX} --target instructions" in out
+        assert "no credential on" not in out and "KAGURA_MCP_URL" not in out
+
+    @pytest.mark.parametrize("chain", ["api-key", "profile", "none"])
+    def test_without_profile_no_preview_runs_on_another_server(
+        self, on_path, recorder, tty, monkeypatch, chain
+    ):
+        # KAGURA_API_KEY (on the default server, no KAGURA_MCP_URL), the default
+        # profile (on memory.kagura-ai.com), or no credential at all.
+        if chain == "api-key":
+            monkeypatch.setenv("KAGURA_API_KEY", API_KEY)
+        elif chain == "none":
+            save_credentials_file(CredentialsFile())
+        other = "https://kagura.example.com/mcp/w/ws-1"
+        on_path("codex")
+        result = run("codex", "--url-form", "--oauth", "--mcp-url", other, "--context-id", CTX)
+        assert result.exit_code == 0, result.output
+        out = flat(result.output)
+        assert (
+            "The kagura CLI has no credential on https://kagura.example.com here: log in "
+            "there with `kagura auth login --server https://kagura.example.com --profile NAME`"
+        ) in out
+        preview = f"KAGURA_PROFILE=NAME kagura guardrails digest {CTX} --target instructions"
+        assert (f"env -u KAGURA_API_KEY {preview}" if chain == "api-key" else preview) in out
+        # Pinning the server would send the key for another server to this one.
+        assert "KAGURA_MCP_URL" not in out
+        assert API_KEY not in out
+
     @pytest.mark.parametrize("context", [[], ["--context-id", CTX]], ids=["no-context", "context"])
     def test_hooks_on_neither_turn_guardrails_off_nor_stay_silent(
         self, env, on_path, recorder, context

@@ -1012,11 +1012,28 @@ def _kagura_command(args: list[str], profile: str | None, cf: CredentialsFile | 
     command = shlex.join(["kagura", *args])
     if profile is None or cf is None:
         return command
+    if profile == cf.default_profile and not os.environ.get("KAGURA_API_KEY", "").strip():
+        return command
+    return _on_profile(profile, command)
+
+
+def _on_profile(profile: str, command: str) -> str:
+    """``command`` run on ``profile``, even with ``KAGURA_API_KEY`` set here."""
     if os.environ.get("KAGURA_API_KEY", "").strip():
         return f"env -u KAGURA_API_KEY KAGURA_PROFILE={shlex.quote(profile)} {command}"
-    if profile != cf.default_profile:
-        return f"KAGURA_PROFILE={shlex.quote(profile)} {command}"
-    return command
+    return f"KAGURA_PROFILE={shlex.quote(profile)} {command}"
+
+
+def _cli_chain_on(mcp_url: str) -> bool:
+    """True when the kagura CLI's usual chain has a credential on ``mcp_url``'s server.
+
+    Reads the credentials only, as :func:`_export_auth` does.
+    """
+    try:
+        auth = _resolve_auth(api_key=None, mcp_url=None, profile=None)
+    except KaguraAuthError:
+        return False
+    return _deployment(auth.mcp_url) == _deployment(mcp_url)
 
 
 def _write_export(
@@ -1410,14 +1427,25 @@ def _echo_block(block: str) -> None:
 
 def _preview_command(
     context_id: str, entry: _Entry, profile: str | None, cf: CredentialsFile | None
-) -> str:
+) -> str | None:
     """``kagura guardrails digest <ctx> --target instructions`` on the entry's own credential.
 
     An ``--oauth`` entry's token stays with the harness, so its preview runs
-    on the profile (on the entry's server) or on the CLI's usual chain.
+    on the profile (on the entry's server, as setup checked) or on the CLI's
+    usual chain when that is on the entry's server too.
+
+    Returns:
+        The command; None for an ``--oauth`` entry without ``--profile`` when
+        the chain has no credential on the entry's server. Pinning the
+        server with ``KAGURA_MCP_URL`` would send ``KAGURA_API_KEY``, a key
+        for another server, to it.
     """
     args = ["guardrails", "digest", context_id, "--target", "instructions"]
-    if entry.url is None or entry.oauth:
+    if entry.url is None:
+        return _kagura_command(args, profile, cf)
+    if entry.oauth:
+        if profile is None and not _cli_chain_on(entry.url):
+            return None
         return _kagura_command(args, profile, cf)
     # The URL form: the key in the entry's variable, on the entry's server.
     env = [] if entry.key_env == DEFAULT_KEY_ENV else [f'KAGURA_API_KEY="${{{entry.key_env}}}"']
@@ -1639,19 +1667,33 @@ def run_setup_harness(
         click.echo(f"  {h.key_note(entry, ran=reason is None)}")
     if h.reads_instructions and guardrails not in (None, "off"):
         assert guardrails is not None
-        preview = (
-            "Preview it on the kagura CLI's credential\n"
-            "  (Codex gets what the account it signed in with can read):"
-            if entry.oauth
-            else "Preview what it sends:"
-        )
+        command = _preview_command(guardrails, entry, profile, cf)
+        if command is None:
+            # An --oauth entry without --profile, and no CLI credential on its server.
+            assert entry.url is not None
+            deployment = _deployment(entry.url)
+            preview = (
+                "The kagura CLI has no credential on\n"
+                f"  {deployment} here: log in there with\n"
+                f"  `kagura auth login --server {deployment} --profile NAME`,\n"
+                "  then preview it (Codex gets what the account it signed in with can read):"
+            )
+            digest = ["guardrails", "digest", guardrails, "--target", "instructions"]
+            command = _on_profile("NAME", shlex.join(["kagura", *digest]))
+        elif entry.oauth:
+            preview = (
+                "Preview it on the kagura CLI's credential\n"
+                "  (Codex gets what the account it signed in with can read):"
+            )
+        else:
+            preview = "Preview what it sends:"
         click.echo(
             "  Codex should get the tool guardrail digest of context\n"
             f"  {guardrails} in the MCP instructions when it connects.\n"
             "  The server sends only its base text instead when the entry's credential\n"
             "  cannot read that context, the context has no guardrails, or the deployment\n"
             f"  turns the digest off. {preview}\n"
-            f"    {_preview_command(guardrails, entry, profile, cf)}\n"
+            f"    {command}\n"
             "  Use a context whose editor list you control: every editor's guardrail\n"
             "  summaries reach the model."
         )
