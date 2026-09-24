@@ -26,6 +26,7 @@ from ._http import (
     validate_https_url,
     validate_lat_lon,
 )
+from ._version import meets_minimum, parse_version
 from .exceptions import (
     KaguraConnectionError,
     KaguraError,
@@ -79,7 +80,10 @@ the connected server is older. Plain ``KaguraClient`` instantiation and
 tool calls never raise on version mismatch, and older servers may
 silently ignore unknown parameters."""
 
-_MIN_SERVER_VERSION_TUPLE = tuple(int(x) for x in MIN_SERVER_VERSION.split(".")[:3])
+_min_server_version = parse_version(MIN_SERVER_VERSION)
+if _min_server_version is None:  # pragma: no cover - a malformed constant fails at import
+    raise ValueError(f"MIN_SERVER_VERSION is not MAJOR.MINOR.PATCH: {MIN_SERVER_VERSION!r}")
+_MIN_SERVER_VERSION_TUPLE: tuple[int, int, int] = _min_server_version
 
 # Measurement-lane column caps (memory-cloud #1333: ``measurements.metric`` is
 # VARCHAR(64), ``unit`` VARCHAR(32)). Checked locally only to spare a round-trip
@@ -2547,15 +2551,17 @@ class KaguraClient:
         :data:`MIN_SERVER_VERSION`. Does not raise. Older servers may
         silently ignore unknown parameters.
 
+        A ``v`` prefix, build metadata and pre-release suffixes are read,
+        so ``"v0.16.0"`` and ``"0.17.1-rc1"`` (a pre-release of the minimum)
+        both warn. A version with no ``MAJOR.MINOR.PATCH`` at its start, such
+        as ``"0.17"`` or ``"main-abc123"``, cannot be compared and does not
+        warn; ``kagura doctor`` reports it as ``info``.
+
         Returns:
             ServerInfo from the server.
         """
         info = await self.get_server_info()
-        try:
-            server_ver = tuple(int(x) for x in info.version.split(".")[:3])
-        except (ValueError, IndexError):
-            return info
-        if server_ver < _MIN_SERVER_VERSION_TUPLE:
+        if meets_minimum(info.version, _MIN_SERVER_VERSION_TUPLE) is False:
             logging.getLogger("kagura_memory").warning(
                 "Server version %s is below the SDK's tested minimum %s. "
                 "Some features may not work; older servers may silently "

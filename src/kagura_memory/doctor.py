@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import shlex
 from dataclasses import dataclass, field
 from datetime import UTC
@@ -15,6 +16,7 @@ from typing import Any, Literal
 
 from ._auth import _SOURCE_LABEL, _OAuthAuth, _resolve_auth, _StaticAuth
 from ._http import validate_https_url
+from ._version import meets_minimum, parse_version
 from .auth.cli import _redact_token
 from .auth.credentials import REFRESH_SKEW_SEC, load_credentials_file
 from .claude_code import (
@@ -24,7 +26,7 @@ from .claude_code import (
     find_kagura_mcp_entries,
     unset_header_vars,
 )
-from .client import MIN_SERVER_VERSION, KaguraClient
+from .client import _MIN_SERVER_VERSION_TUPLE, MIN_SERVER_VERSION, KaguraClient
 from .config import load_config
 from .exceptions import KaguraAuthError, KaguraConnectionError, _exc_message
 from .setup_claude import _kagura_mcp_on_path
@@ -43,6 +45,11 @@ _OPTIONAL_INGESTION_DEPENDENCIES: dict[str, str] = {
     "ingest-youtube": "youtube_transcript_api",
     "ingest-browser": "playwright",
 }
+# The LiteLLM releases compromised in the March 2026 supply-chain attack.
+_LITELLM_BLOCKED_RELEASES = frozenset({(1, 82, 7), (1, 82, 8)})
+# A PEP 440 epoch, after the optional "v": "0!1.82.7" and "v0!1.82.7" are the
+# release 1.82.7. The "v" goes with it, since parse_version needs none.
+_PEP440_EPOCH_RE = re.compile(r"\Av?\d+!", re.ASCII | re.IGNORECASE)
 _PROVIDER_ENV_KEYS: dict[str, str] = {
     "gemini": "GEMINI_API_KEY",
     "anthropic": "ANTHROPIC_API_KEY",
@@ -105,20 +112,6 @@ def _looks_like_kagura_key(value: str) -> bool:
     return value.startswith("kagura_") and len(value) >= 10
 
 
-def _parse_version_prefix(version: str) -> tuple[int, int, int] | None:
-    parts: list[int] = []
-    for piece in version.split("."):
-        if len(parts) == 3:
-            break
-        digits = "".join(ch for ch in piece if ch.isdigit())
-        if not digits:
-            break
-        parts.append(int(digits))
-    if len(parts) != 3:
-        return None
-    return (parts[0], parts[1], parts[2])
-
-
 def _check_optional_dependencies() -> list[DoctorCheck]:
     checks: list[DoctorCheck] = []
     available: list[str] = []
@@ -152,8 +145,10 @@ def _check_litellm() -> DoctorCheck:
             message="LiteLLM not installed",
         )
 
-    parsed = _parse_version_prefix(version)
-    if parsed in {(1, 82, 7), (1, 82, 8)}:
+    # Pre-, post-, dev- and local versions share the triple, so they are
+    # blocked too, as the ``ingest`` extra's ``<1.82.7`` pin excludes them.
+    parsed = parse_version(_PEP440_EPOCH_RE.sub("", version.strip()))
+    if parsed in _LITELLM_BLOCKED_RELEASES:
         return DoctorCheck(
             section="security",
             status="fail",
@@ -641,9 +636,10 @@ async def _check_server(
 
     checks.append(DoctorCheck(section="server", status="pass", message="Server reachable"))
 
-    server_version = _parse_version_prefix(info.version)
-    minimum_version = _parse_version_prefix(MIN_SERVER_VERSION)
-    if server_version is None or minimum_version is None:
+    # The same comparison check_server_version() just made, so its warning and
+    # this verdict cannot disagree.
+    meets = meets_minimum(info.version, _MIN_SERVER_VERSION_TUPLE)
+    if meets is None:
         checks.append(
             DoctorCheck(
                 section="server",
@@ -654,7 +650,7 @@ async def _check_server(
         )
         return checks
 
-    if server_version < minimum_version:
+    if not meets:
         checks.append(
             DoctorCheck(
                 section="server",

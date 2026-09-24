@@ -3751,7 +3751,7 @@ async def test_check_server_version_ok(caplog):
         with caplog.at_level(logging.WARNING, logger="kagura_memory"):
             result = await client.check_server_version()
             assert result.version == MIN_SERVER_VERSION
-            assert "below minimum" not in caplog.text
+            assert "is below" not in caplog.text
 
     await client.close()
 
@@ -3783,8 +3783,8 @@ async def test_check_server_version_old(caplog):
 
 
 @pytest.mark.asyncio
-async def test_check_server_version_non_semver():
-    """check_server_version() should not crash on non-semver version strings."""
+async def test_check_server_version_non_semver(caplog):
+    """check_server_version() reads a pre-release suffix instead of skipping the check."""
     client = _make_initialized_client()
 
     mock_response = MagicMock()
@@ -3797,10 +3797,71 @@ async def test_check_server_version_non_semver():
 
     with patch.object(client._client, "get", new_callable=AsyncMock) as mock_get:
         mock_get.return_value = mock_response
-        result = await client.check_server_version()
-        assert result.version == "0.6.1-rc1"
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="kagura_memory"):
+            result = await client.check_server_version()
+            assert result.version == "0.6.1-rc1"
+            assert "Server version 0.6.1-rc1 is below" in caplog.text
 
     await client.close()
+
+
+def test_min_server_version_tuple_is_parsed_from_the_constant():
+    from kagura_memory.client import _MIN_SERVER_VERSION_TUPLE
+
+    assert MIN_SERVER_VERSION == "0.17.1"
+    assert _MIN_SERVER_VERSION_TUPLE == (0, 17, 1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("version", "warns"),
+    [
+        ("0.6.1-rc1", True),
+        ("0.16.9-beta", True),
+        ("v0.16.0", True),
+        ("0.17.0-rc1", True),
+        ("0.17.1-rc1", True),  # a pre-release of the minimum comes before it
+        ("0.9.99", True),
+        (MIN_SERVER_VERSION, False),
+        (f"v{MIN_SERVER_VERSION}", False),
+        ("0.17.1+build", False),
+        ("0.17.2-rc1", False),
+        ("0.76.0", False),
+        # Unparseable: no verdict, so no warning (kagura doctor reports "info").
+        ("0.17", False),
+        ("main-abc123", False),
+        ("", False),
+    ],
+)
+async def test_check_server_version_verdicts(caplog, version, warns):
+    """check_server_version() warns exactly when the version is below the minimum."""
+    import logging
+
+    client = _make_initialized_client()
+    mock_response = MagicMock()
+    mock_response.json.return_value = {"name": "Kagura Memory Cloud", "version": version}
+    mock_response.raise_for_status = MagicMock()
+
+    try:
+        with (
+            patch.object(client._client, "get", new_callable=AsyncMock, return_value=mock_response),
+            caplog.at_level(logging.WARNING, logger="kagura_memory"),
+        ):
+            result = await client.check_server_version()
+    finally:
+        await client.close()
+
+    assert result.version == version
+    warnings = [r.getMessage() for r in caplog.records if "tested minimum" in r.getMessage()]
+    if warns:
+        assert warnings == [
+            f"Server version {version} is below the SDK's tested minimum {MIN_SERVER_VERSION}. "
+            "Some features may not work; older servers may silently ignore unknown parameters."
+        ]
+    else:
+        assert warnings == []
 
 
 # ============================================================================
