@@ -1714,9 +1714,9 @@ _HARNESS_GUARDRAILS_HELP = {
         "Add `--guardrails` to the kagura-mcp arguments (the URL's ?guardrails= with "
         "--url-form; server v0.74.0+). Codex reads the MCP instructions, which then carry "
         "that context's tool guardrail digest. Defaults to --context-id, or to 'off' with "
-        "--url-form while the kagura-memory plugin's guardrail hooks are on. Use a context "
-        "whose editor list you control. 'off' also removes the guardrails block from "
-        "get_context_info."
+        "--url-form and an API key while the kagura-memory plugin's guardrail hooks are on. "
+        "Use a context whose editor list you control. 'off' also removes the guardrails block "
+        "from get_context_info. With --oauth, changing it later means `codex mcp login` again."
     ),
     "hermes": (
         "Never written: Hermes does not read MCP instructions. 'off' is refused (it would "
@@ -1753,14 +1753,34 @@ _HARNESS_AGENTS_MD_HELP = {
 _HARNESS_KEY_ENV_HELP = {
     "codex": (
         "With --url-form: the variable Codex reads the API key from (bearer_token_env_var; "
-        "default KAGURA_API_KEY, which every kagura command also ranks above OAuth profiles)."
+        "default KAGURA_API_KEY, which every kagura command also ranks above OAuth profiles). "
+        "Not with --oauth."
     ),
     "hermes": (
         "Not accepted: Hermes names the variable MCP_<NAME>_API_KEY and asks for the key itself."
     ),
     "openclaw": (
         "With --url-form: the variable the Authorization header references, kept in "
-        "OpenClaw's .env ($OPENCLAW_STATE_DIR, else ~/.openclaw; default KAGURA_API_KEY)."
+        "OpenClaw's .env ($OPENCLAW_STATE_DIR, else ~/.openclaw; default KAGURA_API_KEY). "
+        "Not with --oauth."
+    ),
+}
+_HARNESS_OAUTH_HELP = {
+    "codex": (
+        "With --url-form: a URL entry with no key, which Codex signs in to itself (memory-cloud "
+        "0.77.0+, which setup checks first). `codex mcp add` then starts the browser sign-in, "
+        "so it runs only with a terminal and without -y; otherwise setup prints the table, and "
+        "you sign in with `codex mcp login NAME` (--no-browser on a host with no browser)."
+    ),
+    "hermes": (
+        "With --url-form: a URL entry with `auth: oauth` and no key, which Hermes signs in to "
+        "itself (memory-cloud 0.77.0+, which setup checks first) when `hermes mcp add` probes "
+        "it, or later with `hermes mcp login NAME`. Its device flow waits on memory-cloud#1671."
+    ),
+    "openclaw": (
+        "With --url-form: a URL entry with `auth: oauth` and no key (memory-cloud 0.77.0+, "
+        "which setup checks first). OpenClaw saves it without probing; sign in with "
+        "`openclaw mcp login NAME`, then run `openclaw mcp doctor NAME --probe`."
     ),
 }
 
@@ -1809,16 +1829,20 @@ def _harness_command(harness: HarnessName):
                 "--url-form",
                 is_flag=True,
                 help=(
-                    "Write a URL entry that sends a long-lived API key from an environment "
-                    "variable instead of the kagura-mcp stdio entry (needs --mcp-url). Setup "
-                    "never sees the key; an OAuth token never goes in one."
+                    "Write a URL entry instead of the kagura-mcp stdio entry (needs --mcp-url). "
+                    "It sends a long-lived API key from an environment variable, which setup "
+                    "never sees; with --oauth it holds no key, and the harness signs in itself."
                 ),
             ),
             click.option(
                 "--mcp-url",
-                help="With --url-form: the MCP URL your API key works with (…/mcp/w/<workspace>)",
+                help=(
+                    "With --url-form: the MCP URL your API key works with, or that the harness "
+                    "signs in to with --oauth (…/mcp/w/<workspace>)"
+                ),
             ),
             click.option("--api-key-env", metavar="VAR", help=_HARNESS_KEY_ENV_HELP[harness]),
+            click.option("--oauth", is_flag=True, help=_HARNESS_OAUTH_HELP[harness]),
             click.option(
                 "--force", is_flag=True, help="Replace an existing entry of the same name"
             ),
@@ -1857,22 +1881,31 @@ def setup_codex(**params):
 
     Adds the kagura-memory MCP server with `codex mcp add`, which writes
     ~/.codex/config.toml ($CODEX_HOME); with --force the same command
-    replaces an entry of the same name. The entry runs the refresh-aware
-    kagura-mcp proxy, by absolute path, on your `kagura auth login`
-    profile: no API key, and Codex never signs in to Kagura itself.
+    replaces an entry of the same name. By default the entry runs the
+    refresh-aware kagura-mcp proxy, by absolute path, on your `kagura auth
+    login` profile: no API key, and Codex never signs in to Kagura itself.
     Without codex on PATH, setup prints the [mcp_servers] table to add
     instead.
 
     Codex reads the server's MCP instructions, so --context-id (or
     --guardrails CONTEXT_ID) puts that context's tool guardrail digest in
     them. The kagura-memory Codex plugin's guardrail hooks read only a URL
-    entry's bearer: with them turned on, use --url-form.
+    entry's bearer: with them turned on, use --url-form with an API key.
+
+    With --url-form --oauth (memory-cloud 0.77.0+, whose client registration
+    accepts Codex; setup checks the version first), the entry is a bare URL
+    and Codex signs in itself: `codex mcp add` starts the browser sign-in,
+    so setup runs it only with a terminal and without -y, and otherwise
+    prints the table for you to add and sign in with `codex mcp login NAME`.
+    Codex keeps the token in its own store, keyed on the URL. The stdio
+    entry stays the default.
 
     \b
     Examples:
       kagura setup codex --profile default
       kagura setup codex --profile default --context-id CTX_UUID
       kagura setup codex --url-form --mcp-url https://memory.kagura-ai.com/mcp/w/WS_ID
+      kagura setup codex --url-form --oauth --mcp-url https://memory.kagura-ai.com/mcp/w/WS_ID
       kagura setup codex --profile default --dry-run
     """
     _run_setup_harness_command("codex", params)
@@ -1896,11 +1929,19 @@ def setup_hermes(**params):
     get_context_info (on by default) and, if you choose, an AGENTS.md
     export block (--agents-md; an interactive run offers it).
 
+    With --url-form --oauth (memory-cloud 0.77.0+, whose client registration
+    accepts Hermes Agent; setup checks the version first), the entry is a
+    URL with `auth: oauth`, and Hermes signs in itself when `hermes mcp add`
+    probes it, or later with `hermes mcp login NAME` (the browser flow: its
+    device flow waits on memory-cloud#1671). The stdio entry stays the
+    default.
+
     \b
     Examples:
       kagura setup hermes --profile default
       kagura setup hermes --profile default --context-id CTX_UUID --agents-md
       kagura setup hermes --url-form --mcp-url https://memory.kagura-ai.com/mcp/w/WS_ID
+      kagura setup hermes --url-form --oauth --mcp-url https://memory.kagura-ai.com/mcp/w/WS_ID
       kagura setup hermes --profile default -y     # print the block only
     """
     _run_setup_harness_command("hermes", params)
@@ -1927,11 +1968,18 @@ def setup_openclaw(**params):
     workspace/ in that state directory (--agents-md; an interactive run
     offers it).
 
+    With --url-form --oauth (memory-cloud 0.77.0+, whose client registration
+    accepts OpenClaw; setup checks the version first), the entry is a URL
+    with `auth: "oauth"` and no header, which OpenClaw saves without
+    probing: sign in with `openclaw mcp login NAME`, then check it with
+    `openclaw mcp doctor NAME --probe`. The stdio entry stays the default.
+
     \b
     Examples:
       kagura setup openclaw --profile default
       kagura setup openclaw --profile default --context-id CTX_UUID --agents-md
       kagura setup openclaw --url-form --mcp-url https://memory.kagura-ai.com/mcp/w/WS_ID
+      kagura setup openclaw --url-form --oauth --mcp-url https://memory.kagura-ai.com/mcp/w/WS_ID
       kagura setup openclaw --profile default --force
     """
     _run_setup_harness_command("openclaw", params)

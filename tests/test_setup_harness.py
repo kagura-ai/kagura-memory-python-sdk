@@ -4,13 +4,15 @@ Every test runs against a temporary home: ``HOME`` points into ``tmp_path``
 and ``CODEX_HOME``, ``HERMES_HOME``, ``OPENCLAW_STATE_DIR``,
 ``OPENCLAW_CONFIG_PATH`` and ``OPENCLAW_WORKSPACE_DIR`` are unset unless a
 test sets them, the credentials file is a temporary one, no harness CLI is on
-the (patched) ``PATH`` unless a test puts it there, and ``subprocess.run`` is
-a recorder — nothing reads or changes the developer's real harness
-configuration.
+the (patched) ``PATH`` unless a test puts it there, ``subprocess.run`` is
+a recorder and ``GET /api/v1/system/info`` goes to an in-process mock —
+nothing reads or changes the developer's real harness configuration, and
+nothing reaches a server.
 """
 
 from __future__ import annotations
 
+import itertools
 import json
 import shutil
 import subprocess
@@ -21,6 +23,7 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
+import httpx
 import pytest
 from click.testing import CliRunner
 
@@ -66,6 +69,10 @@ class Recorder:
         self.returncodes: dict[str, int] = {}
         #: False: `hermes mcp add` exits 0 without saving (a cancelled overwrite).
         self.hermes_saves = True
+        #: False: Hermes cannot set up OAuth and saves the entry with no `auth`.
+        self.hermes_oauth_ok = True
+        #: The `auth` of each Hermes entry, as `hermes config get` reads it back.
+        self.hermes_auth: dict[str, str] = {}
 
     def __call__(self, argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         self.calls.append((list(argv), kwargs))
@@ -74,10 +81,17 @@ class Recorder:
         if sub == "mcp list" or (sub == "mcp show" and "--json" in argv):
             out = self.detect_out.get(cli)
             return subprocess.CompletedProcess(argv, 0 if out else 1, out or "", "")
+        if sub == "config get":
+            auth = self.hermes_auth.get(argv[3].split(".")[1])
+            if auth is None:
+                return subprocess.CompletedProcess(argv, 1, "", f"Config key not set: {argv[3]}")
+            return subprocess.CompletedProcess(argv, 0, json.dumps(auth) + "\n", "")
         code = self.returncodes.get(sub, 0)
         if cli == "hermes" and sub == "mcp add" and code == 0 and self.hermes_saves:
             transport = argv[argv.index("--url" if "--url" in argv else "--command") + 1]
             self.detect_out[cli] = f"  {argv[3]}    {transport}   all\n"
+            if argv[-2:] == ["--auth", "oauth"] and self.hermes_oauth_ok:
+                self.hermes_auth[argv[3]] = "oauth"
         return subprocess.CompletedProcess(argv, code, "", "boom" if code else "")
 
     def argvs(self) -> list[list[str]]:
@@ -88,7 +102,8 @@ class Recorder:
         return [
             a
             for a in self.argvs()
-            if " ".join(a[1:3]) != "mcp list" and not (a[1:3] == ["mcp", "show"] and "--json" in a)
+            if " ".join(a[1:3]) not in ("mcp list", "config get")
+            and not (a[1:3] == ["mcp", "show"] and "--json" in a)
         ]
 
 
@@ -127,6 +142,38 @@ def recorder(monkeypatch) -> Recorder:
 @pytest.fixture(autouse=True)
 def proxy(monkeypatch):
     monkeypatch.setattr(setup_harness, "_proxy_path", lambda: PROXY)
+
+
+class SystemInfo:
+    """``GET /api/v1/system/info`` for ``--oauth``: tests set ``version``, ``status`` or ``exc``."""
+
+    def __init__(self) -> None:
+        self.version: str | None = "0.77.0"
+        self.status = 200
+        self.exc: type[Exception] | None = None
+        self.requests: list[httpx.Request] = []
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        if self.exc is not None:
+            raise self.exc("connection refused", request=request)
+        if request.url.path != "/api/v1/system/info" or self.status != 200:
+            return httpx.Response(self.status if self.status != 200 else 404, json={})
+        body: dict[str, Any] = {"name": "Kagura Memory Cloud", "features": {}}
+        if self.version is not None:
+            body["version"] = self.version
+        return httpx.Response(200, json=body)
+
+
+@pytest.fixture(autouse=True)
+def system_info(monkeypatch) -> SystemInfo:
+    server = SystemInfo()
+    monkeypatch.setattr(
+        setup_harness,
+        "make_oauth_client",
+        lambda *a, **k: httpx.AsyncClient(transport=httpx.MockTransport(server)),
+    )
+    return server
 
 
 @pytest.fixture
@@ -1020,6 +1067,402 @@ class TestNoInstructionsUrl:
 
 
 # =============================================================================
+# The OAuth URL form (--url-form --oauth, #282)
+# =============================================================================
+
+OAUTH = ("--url-form", "--oauth", "--mcp-url", MCP_URL)
+#: What an --oauth entry must never carry: a header, a key variable or a reference.
+KEY_MARKERS = ("Authorization", "bearer_token_env_var", "bearer-token-env-var", "${", "headers")
+
+
+def files_under(root: Path) -> dict[Path, bytes]:
+    return {p: p.read_bytes() for p in root.rglob("*") if p.is_file()}
+
+
+def printed_block(output: str) -> list[str]:
+    """The block setup printed: the 4-space-indented lines after "Add this …:" and a blank."""
+    after = output.split("Add this", 1)[1].splitlines()[2:]
+    return list(itertools.takewhile(lambda line: line.startswith("    "), after))
+
+
+@pytest.mark.parametrize("harness", ["codex", "hermes", "openclaw"])
+class TestOAuthFlags:
+    @pytest.mark.parametrize(
+        "flags",
+        [
+            ["--oauth", "--profile", "default"],
+            ["--oauth", "--mcp-url", MCP_URL],
+            ["--url-form", "--oauth"],
+        ],
+        ids=["no-url-form", "mcp-url-only", "no-mcp-url"],
+    )
+    def test_oauth_needs_url_form_and_mcp_url(self, harness, on_path, recorder, system_info, flags):
+        on_path(harness)
+        result = run(harness, *flags, "-y")
+        assert result.exit_code == 2
+        assert "--oauth needs --url-form and --mcp-url" in flat(result.output)
+        assert recorder.calls == [] and system_info.requests == []
+
+    def test_oauth_refuses_api_key_env(self, harness, on_path, recorder, system_info):
+        on_path(harness)
+        result = run(harness, *OAUTH, "--api-key-env", "KAGURA_API_KEY", "-y")
+        assert result.exit_code == 2
+        assert "--oauth and --api-key-env exclude each other" in flat(result.output)
+        assert recorder.calls == [] and system_info.requests == []
+
+    def test_a_bad_mcp_url_stops_before_the_server_check(self, harness, recorder, system_info):
+        result = run(harness, "--url-form", "--oauth", "--mcp-url", "http://example.com/mcp", "-y")
+        assert result.exit_code == 2
+        assert system_info.requests == []
+
+    def test_profile_on_another_server_stops_before_the_server_check(
+        self, harness, recorder, system_info
+    ):
+        other = "https://kagura.example.com/mcp/w/ws-1"
+        result = run(harness, "--profile", "default", *OAUTH[:3], other, "-y")
+        assert result.exit_code == 2
+        assert "must be on the same server" in flat(result.output)
+        assert system_info.requests == []
+
+
+@pytest.mark.parametrize("harness", ["codex", "hermes", "openclaw"])
+class TestOAuthServerCheck:
+    def test_0_77_0_proceeds_with_one_unauthenticated_request(
+        self, harness, on_path, recorder, system_info, monkeypatch
+    ):
+        monkeypatch.setenv("KAGURA_API_KEY", API_KEY)
+        on_path(harness)
+        result = run(harness, "--url-form", "--oauth", "--mcp-url", f"{MCP_URL}?profile=core", "-y")
+        assert result.exit_code == 0, result.output
+        [request] = system_info.requests
+        assert str(request.url) == "https://memory.kagura-ai.com/api/v1/system/info"
+        assert "authorization" not in {k.lower() for k in request.headers}
+        assert "runs memory-cloud 0.77.0" in result.output
+
+    @pytest.mark.parametrize(
+        ("version", "status", "exc", "said"),
+        [
+            ("0.76.0", 200, None, "runs memory-cloud 0.76.0"),
+            ("0.77.0-rc1", 200, None, "runs memory-cloud 0.77.0-rc1"),
+            ("main-abc123", 200, None, "reports main-abc123"),
+            (None, 200, None, "reports no version"),
+            ("0.77.0", 500, None, "could not confirm"),
+            ("0.77.0", 200, httpx.ConnectError, "could not confirm"),
+        ],
+        ids=["0.76.0", "rc", "unparseable", "no-version", "500", "connection-error"],
+    )
+    def test_anything_else_stops_before_detection_and_writes_nothing(
+        self, harness, env, on_path, recorder, system_info, digest, version, status, exc, said
+    ):
+        system_info.version, system_info.status, system_info.exc = version, status, exc
+        on_path(harness)
+        # An entry that detection would report, and a file the export would change.
+        codex_config(env).write_text(
+            '[mcp_servers.kagura-memory]\nurl = "https://x/mcp"\n', encoding="utf-8"
+        )
+        recorder.detect_out["hermes"] = "  kagura-memory    https://x/mcp   all\n"
+        recorder.detect_out["openclaw"] = json.dumps({"url": "https://x/mcp"})
+        before = files_under(env.parent)
+        result = run(harness, *OAUTH, "--context-id", CTX, "--agents-md", "--force", "-y")
+        assert result.exit_code == 1
+        message = flat(result.output)
+        assert said in message
+        assert "Nothing was written" in message
+        assert "--oauth needs memory-cloud 0.77.0+" in message
+        assert "memory-cloud#1657" in message
+        assert "the default stdio entry (--profile NAME" in message
+        assert "--url-form with an API key" in message
+        assert "Existing kagura-memory entry" not in result.output
+        assert recorder.calls == []
+        assert digest.calls == []
+        assert files_under(env.parent) == before
+        assert len(system_info.requests) == 1
+
+    def test_dry_run_sends_no_request(self, harness, on_path, recorder, system_info, tty):
+        on_path(harness)
+        result = run(harness, *OAUTH, "--dry-run")
+        assert result.exit_code == 0, result.output
+        assert system_info.requests == []
+        assert "The real run first checks that https://memory.kagura-ai.com runs memory-cloud" in (
+            result.output
+        )
+        assert recorder.mutating() == []
+
+    @pytest.mark.parametrize(
+        "form", [["--profile", "default"], ["--url-form", "--mcp-url", MCP_URL]]
+    )
+    def test_the_other_forms_send_no_request(self, harness, on_path, system_info, form):
+        on_path(harness)
+        assert run(harness, *form, "-y").exit_code == 0
+        assert system_info.requests == []
+
+
+class TestOAuthCodex:
+    def test_tty_runs_a_bare_url_add_attached(self, on_path, recorder, tty):
+        on_path("codex")
+        result = run("codex", *OAUTH)
+        assert result.exit_code == 0, result.output
+        [(argv, kwargs)] = [c for c in recorder.calls if c[0] in recorder.mutating()]
+        assert argv == ["/usr/bin/codex", "mcp", "add", "kagura-memory", "--url", MCP_URL]
+        # It starts Codex's browser sign-in: no captured output, no timeout.
+        assert "capture_output" not in kwargs and "timeout" not in kwargs
+        out = flat(result.output)
+        assert "Codex signs in itself" in out
+        assert "If it did not log in, run `codex mcp login kagura-memory`" in out
+        assert "--no-browser" in out
+        assert "setup never sees it" in out
+        assert 'the OS keyring ("Codex MCP Credentials")' in out
+        assert "export KAGURA_API_KEY" not in out
+
+    @pytest.mark.parametrize("flags", [["-y"], []], ids=["-y", "no-tty"])
+    def test_without_tty_or_with_y_prints_the_table_and_the_login(
+        self, on_path, recorder, env, flags, monkeypatch
+    ):
+        on_path("codex")
+        monkeypatch.setattr(setup_harness, "_stdin_is_tty", lambda: bool(flags))
+        result = run("codex", *OAUTH, *flags)
+        assert result.exit_code == 0, result.output
+        assert recorder.mutating() == []
+        why = "-y was given" if flags else "stdin is not a terminal"
+        assert f"(`codex mcp add` starts the sign-in and {why})" in result.output
+        assert printed_block(result.output) == [
+            "    [mcp_servers.kagura-memory]",
+            f'    url = "{MCP_URL}"',
+        ]
+        assert "bearer_token_env_var" not in result.output
+        assert "sign in with `codex mcp login kagura-memory`" in flat(result.output)
+        assert not (env / ".codex").exists()
+
+    def test_without_codex_prints_the_table(self, recorder):
+        result = run("codex", *OAUTH, "-y")
+        assert result.exit_code == 0, result.output
+        assert "`codex` is not on PATH" in result.output
+        assert f'url = "{MCP_URL}"' in result.output
+        assert "bearer_token_env_var" not in result.output
+        assert recorder.calls == []
+
+    def test_force_runs_the_same_add(self, env, on_path, recorder, tty):
+        on_path("codex")
+        codex_config(env).write_text(
+            '[mcp_servers.kagura-memory]\nurl = "https://x/mcp"\nbearer_token_env_var = "K"\n',
+            encoding="utf-8",
+        )
+        result = run("codex", *OAUTH, "--force")
+        assert result.exit_code == 0, result.output
+        assert recorder.mutating() == [
+            ["/usr/bin/codex", "mcp", "add", "kagura-memory", "--url", MCP_URL]
+        ]
+
+    def test_failed_add_says_the_entry_may_be_saved(self, on_path, recorder, tty):
+        on_path("codex")
+        recorder.returncodes["mcp add"] = 1
+        result = run("codex", *OAUTH)
+        assert result.exit_code == 1
+        out = flat(result.output)
+        assert "`codex mcp add` failed: exit code 1" in out
+        assert "may be saved already" in out
+        assert "`codex mcp login kagura-memory`" in out
+
+    def test_context_goes_in_the_url_and_the_preview_uses_the_profile(
+        self, on_path, recorder, tty, monkeypatch
+    ):
+        monkeypatch.setenv("KAGURA_API_KEY", API_KEY)
+        on_path("codex")
+        result = run("codex", "--profile", "work", *OAUTH, "--context-id", CTX)
+        assert result.exit_code == 0, result.output
+        [argv] = recorder.mutating()
+        assert argv[-2:] == ["--url", f"{MCP_URL}?guardrails={CTX}"]
+        out = flat(result.output)
+        assert (
+            f"env -u KAGURA_API_KEY KAGURA_PROFILE=work kagura guardrails digest {CTX} "
+            "--target instructions"
+        ) in out
+        assert "Codex gets what the account it signed in with can read" in out
+        assert "changing its ?guardrails= later" in out
+        assert "KAGURA_MCP_URL" not in out
+
+    @pytest.mark.parametrize("context", [[], ["--context-id", CTX]], ids=["no-context", "context"])
+    def test_hooks_on_neither_turn_guardrails_off_nor_stay_silent(
+        self, env, on_path, recorder, context
+    ):
+        on_path("codex")
+        turn_on_codex_hooks(env)
+        result = run("codex", *OAUTH, *context, "-y")
+        assert result.exit_code == 0, result.output
+        [line] = [x for x in result.output.splitlines() if x.strip().startswith("url = ")]
+        url = json.loads(line.split("url = ", 1)[1])
+        assert url == (f"{MCP_URL}?guardrails={CTX}" if context else MCP_URL)
+        assert "guardrails=off" not in result.output
+        out = flat(result.output)
+        assert "guardrail hooks read their credential only from a URL entry with a bearer" in out
+        assert "so with an --oauth entry they do nothing" in out
+        assert "re-run with --url-form and an API key (no --oauth)" in out
+
+    def test_hooks_on_ask_before_the_oauth_entry(self, env, on_path, recorder, tty):
+        on_path("codex")
+        turn_on_codex_hooks(env)
+        result = run("codex", *OAUTH, input="n\n")
+        assert result.exit_code == 1
+        assert "Write the --oauth entry anyway?" in result.output
+        assert recorder.mutating() == []
+
+    def test_explicit_guardrails_off_is_kept(self, on_path, recorder, tty):
+        on_path("codex")
+        result = run("codex", *OAUTH, "--guardrails", "off")
+        assert result.exit_code == 0, result.output
+        [argv] = recorder.mutating()
+        assert argv[-1] == f"{MCP_URL}?guardrails=off"
+
+
+class TestOAuthHermes:
+    def test_tty_runs_the_oauth_add_attached_and_reads_auth_back(self, on_path, recorder, tty):
+        on_path("hermes")
+        result = run("hermes", *OAUTH, input="n\n")
+        assert result.exit_code == 0, result.output
+        [(argv, kwargs)] = [c for c in recorder.calls if c[0] in recorder.mutating()]
+        assert argv == [
+            "/usr/bin/hermes",
+            *("mcp", "add", "kagura-memory", "--url", MCP_URL, "--auth", "oauth"),
+        ]
+        assert "capture_output" not in kwargs and "timeout" not in kwargs
+        assert [
+            "/usr/bin/hermes",
+            *("config", "get", "mcp_servers.kagura-memory.auth", "--json"),
+        ] in recorder.argvs()
+        out = flat(result.output)
+        assert "Done: hermes wrote kagura-memory" in out
+        assert "`hermes mcp login kagura-memory`" in out
+        assert "memory-cloud#1671" in out
+        assert "~/.hermes/mcp-tokens/kagura-memory.json" in out
+        assert "MCP_KAGURA_MEMORY_API_KEY" not in out
+
+    @pytest.mark.parametrize("auth", [None, "header"], ids=["no-auth", "other-auth"])
+    def test_an_entry_saved_without_auth_oauth_is_not_saved(
+        self, on_path, recorder, tty, digest, auth
+    ):
+        on_path("hermes")
+        recorder.hermes_oauth_ok = False
+        if auth is not None:
+            recorder.hermes_auth["kagura-memory"] = auth
+        result = run("hermes", *OAUTH, "--context-id", CTX, "--agents-md", input="n\n")
+        assert result.exit_code == 1
+        out = flat(result.output)
+        assert "Hermes saved kagura-memory without auth: oauth" in out
+        assert "setup skipped the AGENTS.md export" in out
+        assert "Done:" not in out
+        assert digest.calls == []
+
+    @pytest.mark.parametrize("flags", [["-y"], []], ids=["-y", "no-tty"])
+    def test_printed_block_has_auth_oauth_and_no_headers(
+        self, on_path, recorder, flags, monkeypatch
+    ):
+        on_path("hermes")
+        monkeypatch.setattr(setup_harness, "_stdin_is_tty", lambda: bool(flags))
+        result = run("hermes", *OAUTH, *flags)
+        assert result.exit_code == 0, result.output
+        assert recorder.mutating() == []
+        assert printed_block(result.output) == [
+            "    mcp_servers:",
+            "      kagura-memory:",
+            f'        url: "{MCP_URL}"',
+            "        auth: oauth",
+        ]
+        assert "headers" not in result.output
+        assert "sign in with `hermes mcp login kagura-memory`" in flat(result.output)
+
+    def test_block_under_an_existing_key(self, env, recorder):
+        config = env / ".hermes" / "config.yaml"
+        config.parent.mkdir(parents=True)
+        config.write_text("mcp_servers:\n  other:\n    command: foo\n", encoding="utf-8")
+        result = run("hermes", *OAUTH, "-y")
+        assert result.exit_code == 0, result.output
+        assert f'\n      kagura-memory:\n        url: "{MCP_URL}"\n        auth: oauth\n' in (
+            result.output
+        )
+
+
+class TestOAuthOpenClaw:
+    def test_add_argv(self, on_path, recorder):
+        on_path("openclaw")
+        result = run("openclaw", *OAUTH, "-y")
+        assert result.exit_code == 0, result.output
+        assert recorder.mutating() == [
+            [
+                "/usr/bin/openclaw",
+                *("mcp", "add", "kagura-memory", "--url", MCP_URL),
+                *("--transport", "streamable-http", "--auth", "oauth"),
+            ]
+        ]
+        out = flat(result.output)
+        assert "Sign in with `openclaw mcp login kagura-memory`" in out
+        assert "Check it with: openclaw mcp doctor kagura-memory --probe" in out
+        assert "~/.openclaw/state/openclaw.sqlite" in out
+        assert "setup never sees it" in out
+        assert ".env" not in out
+
+    def test_force_uses_mcp_set(self, on_path, recorder):
+        on_path("openclaw")
+        recorder.detect_out["openclaw"] = json.dumps({"command": "kagura-mcp"})
+        result = run("openclaw", *OAUTH, "--force", "-y")
+        assert result.exit_code == 0, result.output
+        [argv] = recorder.mutating()
+        assert argv[:4] == ["/usr/bin/openclaw", "mcp", "set", "kagura-memory"]
+        assert json.loads(argv[4]) == {
+            "url": MCP_URL,
+            "transport": "streamable-http",
+            "auth": "oauth",
+        }
+
+    def test_printed_block(self, recorder):
+        result = run("openclaw", *OAUTH, "-y")
+        assert result.exit_code == 0, result.output
+        assert printed_json(result.output) == {
+            "mcp": {
+                "servers": {
+                    "kagura-memory": {
+                        "url": MCP_URL,
+                        "transport": "streamable-http",
+                        "auth": "oauth",
+                    }
+                }
+            }
+        }
+        assert recorder.calls == []
+
+
+@pytest.mark.parametrize(
+    ("harness", "login"),
+    [
+        ("codex", "codex mcp login NAME"),
+        ("hermes", "hermes mcp login NAME"),
+        ("openclaw", "openclaw mcp login NAME"),
+    ],
+)
+def test_help_documents_the_oauth_form_and_its_login(harness, login):
+    result = run(harness, "--help")
+    assert result.exit_code == 0, result.output
+    out = flat(result.output)
+    assert "--url-form --oauth --mcp-url https://memory.kagura-ai.com/mcp/w/WS_ID" in out
+    assert "memory-cloud 0.77.0+" in out
+    assert login in out
+
+
+@pytest.mark.parametrize(
+    ("version", "shown"),
+    [
+        ("0.76.0", "0.76.0"),
+        ("0.76.0\x1b[2J", "'0.76.0\\x1b[2J'"),
+        (76, "76"),
+        ("9" * 100, "'" + "9" * 12 + "..."),
+    ],
+    ids=["plain", "control-characters", "not-a-string", "long"],
+)
+def test_a_reported_version_is_printed_safely(version, shown):
+    assert setup_harness._shown_version(version).startswith(shown)
+    assert len(setup_harness._shown_version(version)) <= 64
+
+
+# =============================================================================
 # Shared rules
 # =============================================================================
 
@@ -1158,20 +1601,28 @@ def test_dry_run_reports_an_existing_entry_and_prints_the_block(env, recorder):
 
 
 @pytest.mark.parametrize("harness", ["codex", "hermes", "openclaw"])
-@pytest.mark.parametrize("url_form", [False, True], ids=["stdio", "url-form"])
+@pytest.mark.parametrize(
+    "form",
+    [[], ["--url-form", "--mcp-url", MCP_URL], list(OAUTH)],
+    ids=["stdio", "url-form", "oauth"],
+)
+@pytest.mark.parametrize("flags", [["-y"], []], ids=["-y", "tty"])
 def test_no_secret_in_output_argv_or_files(
-    harness, url_form, env, on_path, recorder, monkeypatch, tty
+    harness, form, flags, env, on_path, recorder, monkeypatch, tty
 ):
-    """The access token and an exported API key never reach output, argv or a file."""
+    """The access token and an exported API key never reach output, argv or a file.
+
+    An ``--oauth`` entry also carries no header, key variable or reference.
+    """
     monkeypatch.setenv("KAGURA_API_KEY", API_KEY)
     on_path(harness)
-    form = ["--url-form", "--mcp-url", MCP_URL] if url_form else []
     result = run(
         harness,
         "--profile",
         "default",
         *form,
-        *("--context-id", CTX, "--agents-md", "-y"),
+        *("--context-id", CTX, "--agents-md", *flags),
+        input="n\n",
     )
     assert result.exit_code == 0, result.output
     for secret in (ACCESS_TOKEN, API_KEY):
@@ -1180,6 +1631,10 @@ def test_no_secret_in_output_argv_or_files(
         for path in env.parent.rglob("*"):
             if path.is_file() and "credentials" not in path.name:
                 assert secret not in path.read_text(encoding="utf-8", errors="replace")
+    if "--oauth" in form:
+        for marker in KEY_MARKERS:
+            assert marker not in result.output
+            assert all(marker not in " ".join(argv) for argv in recorder.argvs())
 
 
 # =============================================================================
