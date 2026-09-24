@@ -27,6 +27,11 @@ _STALE_PHRASES = [
     "immutable after creation",  # an operator can migrate the model since v0.66.0
     "only ``recall.related_tags`` does",  # recall stopped sending sample_summary in v0.73.0
     'pinned["results"]',  # load_pinned returns ``memories``
+    "`--server` override: decline it",  # plugin 0.77.0 reads kagura-mcp's --guardrails
+    "memory-cloud#1669 proposes",  # memory-cloud v0.77.0 shipped it
+    # memory-cloud v0.77.0 accepts the Codex, Hermes and OpenClaw registration.
+    "not allowlisted, memory-cloud#1657",
+    "issues/1657) is open",
 ]
 
 
@@ -62,7 +67,7 @@ def test_no_stale_server_behaviour_in_docs(phrase: str) -> None:
         (KaguraClient.merge_contexts, ["pending_embedding"]),
         (KaguraClient.get_agent_bootstrap, ["``trigger``", "include_details"]),
         (AgentsClient.bootstrap, ["``trigger``", "include_details"]),
-        (KaguraClient.get_server_info, ["search_defaults", "model_extra"]),
+        (KaguraClient.get_server_info, ["search_defaults", "model_extra", "terms_version"]),
         (KaguraClient.__init__, ["?profile=", "?tools=", "tools/list"]),
         (TagInfo, ["sample_summary"]),
     ],

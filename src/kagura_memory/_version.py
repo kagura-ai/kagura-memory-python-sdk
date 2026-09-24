@@ -1,8 +1,9 @@
 """The SDK's one version parser: memory-cloud server versions and PyPI versions.
 
-``kagura doctor``, :meth:`KaguraClient.check_server_version` and
-``device_flow.invite_support`` compare a version string with a minimum, and
-the LiteLLM check in ``kagura doctor`` compares one with blocked releases.
+``kagura doctor``, :meth:`KaguraClient.check_server_version`,
+``device_flow.invite_support`` and ``kagura setup codex|hermes|openclaw
+--url-form --oauth`` compare a version string with a minimum, and the
+LiteLLM check in ``kagura doctor`` compares one with blocked releases.
 They all read the string here, so one string gets one verdict.
 
 A version is ``v?MAJOR.MINOR.PATCH`` at the start of the string, in ASCII

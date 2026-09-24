@@ -40,7 +40,7 @@ class ServerFeatures(BaseModel):
     allows. Every flag defaults to ``False``, which also stands for "not
     reported": a server older than a flag omits it. Flags newer than this SDK
     are kept, not dropped — read them from ``model_extra``. The typed flags are
-    the ones memory-cloud v0.76.0 sends.
+    the ones memory-cloud v0.77.0 sends.
     """
 
     model_config = ConfigDict(extra="allow")
@@ -72,6 +72,11 @@ class ServerInfo(BaseModel):
     settings a new context starts with — ``use_rerank``,
     ``reranker_provider`` and ``reranker_model`` (names only, never URLs or
     keys). It is ``None`` on older servers.
+
+    ``terms_version`` (memory-cloud v0.77.0+, #1665) is the current
+    terms-of-service version. It is ``None`` when the deployment does not
+    record acceptance, or on an older server. Acceptance is a web sign-in
+    step and never gates API or MCP calls.
     """
 
     name: str
@@ -79,6 +84,7 @@ class ServerInfo(BaseModel):
     description: str | None = None
     environment: str | None = None
     search_defaults: dict[str, Any] | None = None
+    terms_version: str | None = None
     features: ServerFeatures = Field(default_factory=ServerFeatures)
 
 
@@ -908,8 +914,8 @@ class ContextTagsResponse(BaseModel):
 
     ``list_tags`` reshapes it into :class:`ListTagsResponse`. Not exported;
     it carries the server model's name, which a drift error reports.
-    Unlike the MCP tool, the route sends no ``context_name`` (through
-    memory-cloud v0.76.0; memory-cloud#1669 proposes adding it) and adds a
+    Unlike the MCP tool, the route sends no ``context_name`` before
+    memory-cloud v0.77.0 (memory-cloud#1669), and it adds a
     ``sample_summary`` per tag, which :class:`TagInfo` drops.
     """
 

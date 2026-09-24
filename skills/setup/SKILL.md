@@ -70,8 +70,10 @@ kagura setup codex --profile <name> --dry-run
 ```
 
 The entry runs the same `kagura-mcp` proxy by absolute path with `--profile`
-(these harnesses filter the environment and cannot sign in with OAuth
-themselves yet). Setup writes it only through the harness CLI (`codex mcp add`,
+(these harnesses filter the environment). It stays the default: memory-cloud
+accepts these harnesses' own OAuth client registration on a loopback redirect
+only from 0.77.0 (memory-cloud#1657), and Hermes's device-flow sign-in still
+waits on memory-cloud#1671. Setup writes it only through the harness CLI (`codex mcp add`,
 `hermes mcp add`, `openclaw mcp add|set`); otherwise it prints the block and the
 file and edits nothing. Options:
 
@@ -86,10 +88,23 @@ file and edits nothing. Options:
   with `-y` or without a terminal).
 - `--url-form --mcp-url <url> [--api-key-env VAR]` — a URL entry that reads a
   long-lived API key from an environment variable; setup never sees the key.
+- `--url-form --oauth --mcp-url <url>` (memory-cloud 0.77.0+) — a URL entry with
+  no key. 0.77.0 accepts the harness's own client registration, and the harness
+  then signs in itself in a browser: `codex mcp login <name>`, `hermes mcp login
+  <name>` (browser flow; its device flow waits on memory-cloud#1671) or
+  `openclaw mcp login <name>`. A full sign-in on a `/mcp/w/<workspace-id>` URL
+  has not been verified yet (README, "What has been checked"): say so when you
+  offer it. Setup first checks the server's version and stops (exit 1) below
+  0.77.0 or when it cannot confirm it; `--dry-run` sends no request.
+  `codex mcp add` starts Codex's sign-in, so from your shell (no terminal) setup
+  prints the table instead. Use it only when the user asks for it: the stdio
+  entry stays the default (one `kagura auth login` for every harness, on any
+  server).
 - `--force` replaces an existing entry of the same name (setup stops otherwise);
-  `-y` never prompts and never hands the terminal to `hermes mcp add`. Your
-  shell has no terminal, so setup behaves as with `-y` either way: it never
-  stops at a prompt, and Hermes gets the printed block.
+  `-y` never prompts and never hands the terminal to `hermes mcp add` or, with
+  `--oauth`, `codex mcp add`. Your shell has no terminal, so setup behaves as
+  with `-y` either way: it never stops at a prompt, and Hermes (and Codex with
+  `--oauth`) gets the printed block.
 
 Relay:
 
@@ -105,8 +120,20 @@ Relay:
 - An existing-entry stop: relay its kind and ask whether to re-run with `--force`.
 - The URL form's key note: the user puts the key in the named variable or `.env`
   file. Never print, ask for, or pass the key on a command line.
-- The Codex plugin-hooks warning: a stdio entry turns the kagura-memory Codex
-  plugin's guardrail hooks into no-ops; suggest `--url-form` if the user relies on them.
+- The `--oauth` login note: the user runs the harness login it names
+  (`codex mcp login`, `hermes mcp login`, `openclaw mcp login`) in their own
+  terminal. The browser is redirected to the harness's loopback callback; on a
+  remote host the note names the way round (Codex `--no-browser`, Hermes's
+  paste-the-redirect-URL prompt, OpenClaw `--code`). Never run it for them,
+  and never ask for, print or pass a token or a pasted redirect URL: the
+  harness keeps the token. A Hermes stop saying the entry was saved disabled:
+  the user signs in with `hermes mcp login <name>` and then runs the
+  `hermes config set … enabled true` it names. A version stop (exit 1) means
+  the server is older than 0.77.0 or its version is unconfirmed: offer the
+  stdio entry (`--profile`) or `--url-form` with an API key.
+- The Codex plugin-hooks warning: a stdio or `--oauth` entry turns the
+  kagura-memory Codex plugin's guardrail hooks into no-ops; suggest `--url-form`
+  with an API key if the user relies on them.
 - Suggest the printed check command (`codex mcp get`, `hermes mcp test`,
   `openclaw mcp doctor --probe`).
 
@@ -140,9 +167,11 @@ server does not also send a guardrail digest. Re-run `kagura setup claude --prof
 <name> --guardrails off`: the entry then runs `kagura-mcp --guardrails off`, which adds
 the query at run time, so no `--server` override (which pins the host) is needed. Pass
 `--guardrails off` again on every later re-run; setup notes it when a re-run drops it.
-memory-cloud v0.76.0's `/kagura-memory:setup` reads the query only from `--server` or
-the profile's URL, so it may still report `guardrails=off` as missing and offer a
-`--server` override: decline it. `kagura guardrails load <the plugin's context_id>` shows that context's set
+From plugin 0.77.0 (memory-cloud v0.77.0), `/kagura-memory:setup` reads
+`--guardrails` / `--tool-profile` in the `kagura-mcp` args and offers
+`--guardrails off` itself. An older plugin reports `guardrails=off` as missing and
+offers a `--server` override. Update the plugin rather than accept it: the fix is
+client-side, so it works against any server. `kagura guardrails load <the plugin's context_id>` shows that context's set
 as the CLI's own credential sees it (the bare command uses `.kagura.json`'s context,
 which may be a different one). The hooks use their own API key, and an agent binding
 filters the set per credential, so what they load can differ from that output.

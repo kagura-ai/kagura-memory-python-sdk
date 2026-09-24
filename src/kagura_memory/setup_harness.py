@@ -1,13 +1,22 @@
 """``kagura setup codex|hermes|openclaw`` — MCP entries for other harnesses (#260).
 
-memory-cloud's dynamic client registration accepts a loopback client only
-when its name carries a known keyword, and OpenAI Codex, Hermes Agent and
-OpenClaw register under names it does not know (memory-cloud#1657), so none
-of them can sign in on its own. Each can spawn a stdio server, though, and
+OpenAI Codex, Hermes Agent and OpenClaw can each spawn a stdio server, and
 ``kagura-mcp`` already forwards every JSON-RPC message with a fresh bearer
 from the ``kagura auth login`` profile. The default entry therefore runs the
-proxy; ``--url-form`` writes a URL entry that reads a long-lived API key
-from an environment variable instead.
+proxy: one device-flow login serves every harness, on any supported server.
+``--url-form`` writes a URL entry that reads a long-lived API key from an
+environment variable instead.
+
+memory-cloud's dynamic client registration accepts a loopback client only
+when its name carries a known keyword. From memory-cloud 0.77.0 the keywords
+include Codex, Hermes Agent and OpenClaw (memory-cloud#1657), so their own
+OAuth client registration is accepted there; before 0.77.0 it is rejected.
+The stdio entry stays the default all the same: that needs no per-harness
+browser sign-in and works on older servers, and Hermes's device-flow sign-in
+still waits on memory-cloud#1671. The opt-in ``--url-form --oauth`` writes a
+URL entry with no key, which the harness then signs in to itself; setup first
+checks that the entry's server is memory-cloud 0.77.0+. A full sign-in by a
+harness on a ``/mcp/w/<workspace-id>`` URL has not been verified yet.
 
 Rules the three commands share:
 
@@ -17,7 +26,8 @@ Rules the three commands share:
   the command is interactive and there is no terminal (or ``-y``), setup
   prints the block and the file and edits nothing: the SDK has no TOML,
   YAML or JSON5 writer, and text appended to such a file can duplicate a
-  key.
+  key. ``codex mcp add`` of an ``--oauth`` entry starts Codex's browser
+  sign-in, so it counts as interactive.
 * **Filtered environments.** Each harness passes a filtered environment to
   the servers it spawns, so the stdio entry names ``kagura-mcp`` by
   absolute path and always passes ``--profile``; it never depends on
@@ -25,9 +35,10 @@ Rules the three commands share:
   ``default_profile``. ``HOME`` needs nothing: ``Path.home()`` falls back
   to the password database when it is unset.
 * **No secret is written, printed or passed on a command line.** The stdio
-  entry holds none, and the URL form names the variable the key is read
-  from. An existing entry is read only to say what kind it is; nothing read
-  from it is echoed.
+  entry holds none, the URL form names the variable the key is read from,
+  and an ``--oauth`` entry has neither a header nor a key variable: the
+  harness keeps its own token, which setup never sees. An existing entry is
+  read only to say what kind it is; nothing read from it is echoed.
 * **Prompts need a terminal.** Setup asks only with a terminal on stdin and
   without ``-y``; otherwise (an agent's shell, CI, ``</dev/null``) it runs
   as ``-y`` does and never stops at a prompt.
@@ -48,6 +59,7 @@ import asyncio
 import json
 import os
 import re
+import reprlib
 import shlex
 import shutil
 import subprocess
@@ -74,8 +86,11 @@ from ._http import (
     normalize_uuid,
     validate_https_url,
 )
-from .auth.credentials import CredentialsFile
+from ._version import meets_minimum
+from .auth.credentials import CredentialsFile, load_credentials_file
+from .auth.device_flow import fetch_system_info, make_oauth_client
 from .claude_code import MCP_PROXY_COMMAND, _path_label, _runs_proxy, holds_credential
+from .config import load_config
 from .exceptions import KaguraAuthError, KaguraNotFoundError, _exc_message
 from .memory_client import MemoryClient
 from .models import GuardrailDigest
@@ -86,6 +101,15 @@ HarnessName = Literal["codex", "hermes", "openclaw"]
 #: The variable the Codex and OpenClaw URL forms read the API key from, as in
 #: memory-cloud's own setup docs. Hermes names its variable itself.
 DEFAULT_KEY_ENV = "KAGURA_API_KEY"
+
+HARNESS_OAUTH_MIN_SERVER_VERSION: tuple[int, int, int] = (0, 77, 0)
+"""First memory-cloud release whose DCR accepts the harnesses' own OAuth clients.
+
+memory-cloud v0.77.0 (memory-cloud#1657) adds ``codex``, ``hermes`` and
+``openclaw`` to the loopback keywords of its dynamic client registration.
+Before it, their registration gets 400 ``invalid_client_metadata``, so an
+``--oauth`` entry could never sign in; setup checks the version first.
+"""
 
 # Codex, Hermes and OpenClaw all accept these; a dot would nest a TOML table.
 # The name is a positional in every harness argv, so it starts with a letter or
@@ -130,6 +154,14 @@ def _proxy_path() -> str:
     return os.path.abspath(found)
 
 
+def _wrap(text: str) -> str:
+    """``text`` wrapped to follow a two-space indent, never breaking a `command`."""
+    # textwrap does not split at NUL, so a command's spaces hold while it wraps.
+    held = re.sub(r"`[^`]*`", lambda m: m.group(0).replace(" ", "\0"), text)
+    lines = textwrap.wrap(held, 78, break_on_hyphens=False, break_long_words=False)
+    return "\n  ".join(lines).replace("\0", " ")
+
+
 # =============================================================================
 # The entry, and what a harness already has
 # =============================================================================
@@ -145,6 +177,8 @@ class _Entry:
     #: URL form: the endpoint, and the variable holding the API key.
     url: str | None = None
     key_env: str | None = None
+    #: URL form with ``--oauth``: no key, the harness signs in itself.
+    oauth: bool = False
 
     def auth_header(self) -> str:
         """The URL form's ``Authorization`` value: a reference, never a key."""
@@ -241,6 +275,10 @@ class _Harness(ABC):
     def detect(self, name: str, exe: str | None) -> _Existing | None:
         """The entry ``name`` has now, from its config or a read-only command."""
 
+    def attached_add(self, entry: _Entry) -> bool:
+        """Adding ``entry`` prompts or signs in, so it runs attached to a terminal or not at all."""
+        return self.interactive_add
+
     @abstractmethod
     def add_args(self, name: str, entry: _Entry) -> list[str]:
         """The harness command (after its name) that adds ``entry`` as ``name``."""
@@ -274,6 +312,32 @@ class _Harness(ABC):
         """Where the URL form's key goes; never asks for it."""
 
     @abstractmethod
+    def sign_in_note(self, name: str, *, ran: bool) -> str:
+        """How the user signs the ``--oauth`` entry in; setup never runs the harness login.
+
+        It names the harness's way round a browser that cannot reach its
+        loopback callback (a remote host). ``ran``: setup ran the add command,
+        rather than printing the block.
+        """
+
+    @abstractmethod
+    def token_store(self, name: str) -> str:
+        """Where the harness keeps the ``--oauth`` entry's token."""
+
+    def login_note(self, name: str, *, ran: bool) -> str:
+        """What replaces :meth:`key_note` for an ``--oauth`` entry: who signs in, and where."""
+        return _wrap(
+            f"{self.sign_in_note(name, ran=ran)} memory-cloud's consent screen shows the "
+            f"client name {self.title} sends, which nothing verifies: approve only a sign-in "
+            f"you started. {self.title} keeps the token in {self.token_store(name)}; setup "
+            "never sees it."
+        )
+
+    def add_failure_note(self, name: str, entry: _Entry) -> str:
+        """What to do when the add command failed, for the error message; may be empty."""
+        return ""
+
+    @abstractmethod
     def verify_args(self, name: str) -> list[str]:
         """The harness command that checks the entry."""
 
@@ -293,14 +357,20 @@ class _Harness(ABC):
         """True when a plugin's hooks read their credential from the ``name`` entry."""
         return False
 
-    def warn_stdio_entry(
-        self, name: str, existing: _Existing | None, hooks_on: bool, *, ask: bool
+    def warn_keyless_entry(
+        self, name: str, existing: _Existing | None, hooks_on: bool, *, oauth: bool, ask: bool
     ) -> None:
-        """Say what a stdio entry costs here; ``ask`` lets the user stop (ClickException)."""
+        """Say what an entry without a key (stdio, or ``--oauth``) costs here.
 
-    def saved(self, name: str, exe: str, entry: _Entry) -> bool:
-        """After the add command exited 0: whether ``entry`` is now saved as ``name``."""
-        return True
+        ``ask`` lets the user stop (ClickException).
+        """
+
+    def not_saved(self, name: str, exe: str, entry: _Entry, *, replaced: bool) -> str | None:
+        """After the add command exited 0: why ``entry`` is not saved as ``name``, or None.
+
+        ``replaced``: a ``name`` entry existed before the add (``--force``).
+        """
+        return None
 
 
 def codex_home() -> Path:
@@ -371,11 +441,19 @@ class _Codex(_Harness):
         entry = servers.get(name) if isinstance(servers, dict) else None
         return _classify(entry) if isinstance(entry, dict) else None
 
+    def attached_add(self, entry: _Entry) -> bool:
+        # With no bearer_token_env_var, `mcp add --url` saves the entry and then
+        # starts Codex's browser sign-in once discovery finds OAuth.
+        return entry.oauth
+
     def add_args(self, name: str, entry: _Entry) -> list[str]:
         # `mcp add` also replaces an entry of the same name, whatever its form.
         if entry.command is not None:
             return ["mcp", "add", name, "--", entry.command, *entry.args]
-        assert entry.url is not None and entry.key_env is not None
+        assert entry.url is not None
+        if entry.oauth:
+            return ["mcp", "add", name, "--url", entry.url]
+        assert entry.key_env is not None
         return ["mcp", "add", name, "--url", entry.url, "--bearer-token-env-var", entry.key_env]
 
     def block(self, name: str, entry: _Entry) -> str:
@@ -385,7 +463,10 @@ class _Codex(_Harness):
             args = ", ".join(q(a) for a in entry.args)
             lines += [f"command = {q(entry.command)}", f"args = [{args}]"]
         else:
-            lines += [f"url = {q(entry.url)}", f"bearer_token_env_var = {q(entry.key_env)}"]
+            # An entry without a bearer is an OAuth one: `auth` defaults to "oauth".
+            lines.append(f"url = {q(entry.url)}")
+            if not entry.oauth:
+                lines.append(f"bearer_token_env_var = {q(entry.key_env)}")
         return "\n".join(lines)
 
     def key_note(self, entry: _Entry, *, ran: bool) -> str:
@@ -394,6 +475,41 @@ class _Codex(_Harness):
             f"Codex reads the API key from ${var} when it connects: set it in the environment\n"
             f"  that starts Codex, e.g. `export {var}=<your-api-key>` in your shell profile.\n"
             "  (Codex refuses an inline bearer_token on a URL entry.)"
+        )
+
+    def sign_in_note(self, name: str, *, ran: bool) -> str:
+        login = f"codex mcp login {name}"
+        if ran:
+            first = (
+                "Codex signs in itself: `codex mcp add` above started its sign-in if it found "
+                f"OAuth on the server. If it did not log in, run `{login}`."
+            )
+        else:
+            first = f"Once the table is in config.toml, sign in with `{login}`."
+        return (
+            f"{first} The sign-in redirects the browser to Codex's loopback callback on this "
+            "host; when the browser cannot reach it (no browser here, or a remote host), add "
+            "--no-browser: Codex then prints the URL and takes the callback URL pasted back. "
+            "Codex keys the token on the entry's URL, so changing its ?guardrails= later "
+            "(another --guardrails or --context-id) means signing in again."
+        )
+
+    def token_store(self, name: str) -> str:
+        home = _path_label(codex_home())
+        fallback = _path_label(codex_home() / ".credentials.json")
+        # On Windows Codex turns its secret_auth_storage feature on by default,
+        # which keeps MCP OAuth tokens in an encrypted local store under CODEX_HOME.
+        return (
+            f'the OS keyring ("Codex MCP Credentials"; on Windows, its encrypted secrets '
+            f"store in {home}), else in {fallback}"
+        )
+
+    def add_failure_note(self, name: str, entry: _Entry) -> str:
+        if not entry.oauth:
+            return ""
+        return (
+            "\n  Codex saves the entry before it signs in, so it may be saved already: check with\n"
+            f"  `codex mcp get {name}`, then sign in with `codex mcp login {name}`."
         )
 
     def verify_args(self, name: str) -> list[str]:
@@ -410,10 +526,10 @@ class _Codex(_Harness):
     def plugin_hooks_on(self, name: str) -> bool:
         return codex_hooks_enabled(name)
 
-    def warn_stdio_entry(
-        self, name: str, existing: _Existing | None, hooks_on: bool, *, ask: bool
+    def warn_keyless_entry(
+        self, name: str, existing: _Existing | None, hooks_on: bool, *, oauth: bool, ask: bool
     ) -> None:
-        _codex_hook_warning(name, existing, hooks_on, ask=ask)
+        _codex_hook_warning(name, existing, hooks_on, oauth=oauth, ask=ask)
 
 
 # The top-level `mcp_servers:` key of a config.yaml, and what follows its colon.
@@ -504,6 +620,13 @@ def hermes_key_env(name: str) -> str:
     return f"MCP_{suffix}_API_KEY"
 
 
+#: The ``--connect-timeout`` of an ``--oauth`` ``hermes mcp add``, whose probe
+#: runs the browser sign-in: Hermes's ``login_connect_timeout``, the
+#: ``oauth.timeout`` callback window (300 s) plus 15 s for the token exchange.
+#: Hermes keeps it as the entry's ``connect_timeout`` (default 60 s).
+HERMES_OAUTH_CONNECT_TIMEOUT_SEC = 315
+
+
 class _Hermes(_Harness):
     key = "hermes"
     title = "Hermes Agent"
@@ -527,18 +650,108 @@ class _Hermes(_Harness):
                 return _Existing("URL" if is_url else "stdio")
         return None
 
-    def saved(self, name: str, exe: str, entry: _Entry) -> bool:
+    def not_saved(self, name: str, exe: str, entry: _Entry, *, replaced: bool) -> str | None:
         # `hermes mcp add` exits 0 when the user cancels an overwrite, declines
         # to save after a failed probe, or hits a validation error; only the
-        # list tells. A same-form entry that was kept looks the same, though.
+        # list tells. A same-form entry that was kept looks the same there,
+        # though: for --oauth, its auth and url tell.
         found = self.detect(name, exe)
-        return found is not None and found.kind == ("stdio" if entry.command else "URL")
+        if found is None or found.kind != ("stdio" if entry.command else "URL"):
+            return (
+                f"`hermes mcp list` shows no new {name} entry: `hermes mcp add` was\n"
+                "  cancelled or failed there, so nothing was saved"
+            )
+        return self._oauth_not_saved(name, exe, entry, replaced=replaced) if entry.oauth else None
+
+    def _oauth_not_saved(self, name: str, exe: str, entry: _Entry, *, replaced: bool) -> str | None:
+        """Why the ``--oauth`` entry ``name`` is not ``entry`` or cannot sign in.
+
+        From its ``auth``, its ``url`` when an entry existed before the add,
+        and its ``enabled``.
+        """
+        read, auth = self._config_get(name, exe, "auth")
+        if not read:
+            return _wrap(
+                f"Setup could not read back the auth of {name} (`hermes config get "
+                f"mcp_servers.{name}.auth` failed), so it cannot tell whether Hermes saved an "
+                "OAuth entry: check it with that command or `hermes mcp list`"
+            )
+        if auth != "oauth":
+            # Hermes writes `auth` only as `oauth` (a header entry is `headers`
+            # alone). When it cannot set up OAuth it asks "Continue without
+            # authentication?" (default yes) and saves the entry with no `auth`;
+            # when its overwrite prompt is declined it keeps the existing entry.
+            no_oauth = f"Hermes's {name} entry has no auth: oauth, so it cannot sign in to Kagura: "
+            if replaced:
+                return _wrap(
+                    f"{no_oauth}Hermes keeps the existing entry when its overwrite prompt is "
+                    "declined, and continues without authentication when it cannot set up "
+                    "OAuth. Re-run with --force and accept Hermes's overwrite prompt"
+                )
+            return _wrap(
+                f"{no_oauth}Hermes continues without authentication when it cannot set up "
+                "OAuth. Re-run with --force to replace it"
+            )
+        if replaced:
+            # A kept entry can be an OAuth one too (another workspace's): its
+            # url tells, which `hermes mcp list` truncates.
+            read, url = self._config_get(name, exe, "url")
+            if not read:
+                return _wrap(
+                    f"Setup could not read back the url of {name} (`hermes config get "
+                    f"mcp_servers.{name}.url` failed), so it cannot tell whether Hermes replaced "
+                    "the existing entry: check it with that command"
+                )
+            if url != entry.url:
+                return _wrap(
+                    f"Hermes's {name} entry is still the existing one, for another URL: Hermes "
+                    "keeps the existing entry when its overwrite prompt is declined, or when the "
+                    "add stops before saving. Re-run with --force and accept Hermes's overwrite "
+                    "prompt"
+                )
+        # After a failed probe (the sign-in did not finish), "Save config
+        # anyway?" saves the entry with enabled: false, which Hermes never
+        # connects to; `hermes mcp login` does not turn it back on.
+        _, enabled = self._config_get(name, exe, "enabled")
+        if enabled is False:
+            return _wrap(
+                f"Hermes saved {name} disabled, since its sign-in or connection check did not "
+                "finish, and it never connects to a disabled entry. Sign in with `hermes mcp "
+                f"login {name}`, then turn the entry on with `hermes config set "
+                f"mcp_servers.{name}.enabled true`"
+            )
+        return None
+
+    def _config_get(self, name: str, exe: str, key: str) -> tuple[bool, object]:
+        """``mcp_servers.<name>.<key>`` from ``hermes config get``: ``(read, value)``.
+
+        ``value`` is None when the key is not set (Hermes exits 1 with "Config
+        key not set"); ``read`` is False when the command failed otherwise.
+        Only that one key is read: never the headers, env or args, which can
+        hold a secret. Hermes prints the value as one JSON line.
+        """
+        proc = _capture(exe, ["config", "get", f"mcp_servers.{name}.{key}", "--json"])
+        if proc is not None and proc.returncode == 1 and "Config key not set" in proc.stderr:
+            return True, None
+        if proc is None or proc.returncode != 0 or not proc.stdout.strip():
+            return False, None
+        try:
+            return True, json.loads(proc.stdout.strip().splitlines()[-1])
+        except ValueError:
+            return False, None
 
     def add_args(self, name: str, entry: _Entry) -> list[str]:
         if entry.command is not None:
             # --args takes the rest of the command line, so it goes last.
             return ["mcp", "add", name, "--command", entry.command, "--args", *entry.args]
         assert entry.url is not None
+        if entry.oauth:
+            # The add's probe runs the browser sign-in, bounded by connect_timeout
+            # (30 s unless set); give it the bound `hermes mcp login` uses.
+            return [
+                *("mcp", "add", name, "--url", entry.url, "--auth", "oauth"),
+                *("--connect-timeout", str(HERMES_OAUTH_CONNECT_TIMEOUT_SEC)),
+            ]
         return ["mcp", "add", name, "--url", entry.url, "--auth", "header"]
 
     @cached_property
@@ -558,6 +771,8 @@ class _Hermes(_Harness):
         if entry.command is not None:
             args = ", ".join(q(a) for a in entry.args)
             lines += [f"  command: {q(entry.command)}", f"  args: [{args}]"]
+        elif entry.oauth:
+            lines += [f"  url: {q(entry.url)}", "  auth: oauth"]
         else:
             lines += [
                 f"  url: {q(entry.url)}",
@@ -609,6 +824,27 @@ class _Hermes(_Harness):
             f"Add `{entry.key_env}=<your-api-key>` to {env_file} with an editor:\n"
             "  the entry reads it from there, and setup never sees the key."
         )
+
+    def sign_in_note(self, name: str, *, ran: bool) -> str:
+        login = f"hermes mcp login {name}"
+        if ran:
+            first = (
+                "Hermes signs in itself: `hermes mcp add` above started its sign-in when it "
+                f"probed the server, with --connect-timeout {HERMES_OAUTH_CONNECT_TIMEOUT_SEC} "
+                "(the bound `hermes mcp login` uses), which Hermes keeps as the entry's "
+                f"connect_timeout. If it did not log in, run `{login}`"
+            )
+        else:
+            first = f"Once the entry is in config.yaml, sign in with `{login}`"
+        return (
+            f"{first} (the browser flow: its --flow device waits on memory-cloud#1671). The "
+            "sign-in redirects the browser to Hermes's loopback callback on this host; when "
+            "the browser cannot reach it (a remote host), paste the redirect URL at Hermes's "
+            "prompt."
+        )
+
+    def token_store(self, name: str) -> str:
+        return _path_label(hermes_home() / "mcp-tokens" / f"{name}.json")
 
     def verify_args(self, name: str) -> list[str]:
         return ["mcp", "test", name]
@@ -675,17 +911,25 @@ class _OpenClaw(_Harness):
         if entry.command is not None:
             return {"command": entry.command, "args": list(entry.args)}
         # OpenClaw defaults a URL entry to SSE; memory-cloud serves Streamable HTTP.
-        return {
-            "url": entry.url,
-            "transport": "streamable-http",
-            "headers": {"Authorization": entry.auth_header()},
-        }
+        # With auth "oauth" it ignores static headers, so the entry has none.
+        server: dict[str, Any] = {"url": entry.url, "transport": "streamable-http"}
+        if entry.oauth:
+            server["auth"] = "oauth"
+        else:
+            server["headers"] = {"Authorization": entry.auth_header()}
+        return server
 
     def add_args(self, name: str, entry: _Entry) -> list[str]:
         if entry.command is not None:
             args = [a for arg in entry.args for a in ("--arg", arg)]
             return ["mcp", "add", name, "--command", entry.command, *args]
         assert entry.url is not None
+        if entry.oauth:
+            # `mcp add` never probes an OAuth entry: it saves it for `mcp login`.
+            return [
+                *("mcp", "add", name, "--url", entry.url, "--transport", "streamable-http"),
+                *("--auth", "oauth"),
+            ]
         # --no-probe: the key is not in OpenClaw's .env yet.
         return [
             *("mcp", "add", name, "--url", entry.url, "--transport", "streamable-http"),
@@ -706,6 +950,21 @@ class _OpenClaw(_Harness):
             f"  the entry sends ${{{entry.key_env}}} (mcp.servers headers take no SecretRef),\n"
             "  and setup never sees the key."
         )
+
+    def sign_in_note(self, name: str, *, ran: bool) -> str:
+        # `mcp add` and `mcp set` save an OAuth entry without signing in.
+        login = f"openclaw mcp login {name}"
+        first = "Sign in" if ran else "Once the entry is in openclaw.json, sign in"
+        return (
+            f"{first} with `{login}`, then check it with the command below. The sign-in "
+            "redirects the browser to OpenClaw's loopback callback on this host; when the "
+            f"browser cannot reach it (a remote host), `{login} --code <code>` takes the code "
+            "from the redirect."
+        )
+
+    def token_store(self, name: str) -> str:
+        database = _path_label(openclaw_state_dir() / "state" / "openclaw.sqlite")
+        return f"its state database ({database})"
 
     def verify_args(self, name: str) -> list[str]:
         return ["mcp", "doctor", name, "--probe"]
@@ -798,11 +1057,72 @@ def _kagura_command(args: list[str], profile: str | None, cf: CredentialsFile | 
     command = shlex.join(["kagura", *args])
     if profile is None or cf is None:
         return command
+    if profile == cf.default_profile and not os.environ.get("KAGURA_API_KEY", "").strip():
+        return command
+    return _on_profile(profile, command)
+
+
+def _on_profile(profile: str, command: str) -> str:
+    """``command`` run on ``profile``, even with ``KAGURA_API_KEY`` set here."""
     if os.environ.get("KAGURA_API_KEY", "").strip():
         return f"env -u KAGURA_API_KEY KAGURA_PROFILE={shlex.quote(profile)} {command}"
-    if profile != cf.default_profile:
-        return f"KAGURA_PROFILE={shlex.quote(profile)} {command}"
-    return command
+    return f"KAGURA_PROFILE={shlex.quote(profile)} {command}"
+
+
+def _on_server(mcp_url: str, server: str) -> bool:
+    """True when the stored ``mcp_url`` is on ``server``; False when it is not a URL at all."""
+    try:
+        return _deployment(mcp_url) == server
+    except Exception:  # noqa: BLE001 - a hand-edited file can hold any JSON value
+        return False
+
+
+def _cli_chain_on(mcp_url: str) -> bool:
+    """True when the kagura CLI's usual chain has a credential on ``mcp_url``'s server.
+
+    Reads the credentials only, as :func:`_export_auth` does. It runs after
+    the entry is written, so a chain it cannot resolve for any reason (no
+    credential, a ``.kagura.json`` it cannot read or parse, or one that is
+    not a config object) counts as no credential rather than failing setup.
+    """
+    try:
+        auth = _resolve_auth(api_key=None, mcp_url=None, profile=None)
+    except Exception:  # noqa: BLE001 - after the write, any failure means no credential
+        return False
+    return _on_server(auth.mcp_url, _deployment(mcp_url))
+
+
+def _profiles_on(mcp_url: str) -> list[str]:
+    """The stored OAuth profiles on ``mcp_url``'s server, by name; reads the file only.
+
+    Like :func:`_cli_chain_on`, it runs after the write: a profile whose URL
+    it cannot read is left out, and a file it cannot read holds none.
+    """
+    server = _deployment(mcp_url)
+    try:
+        profiles = load_credentials_file().profiles
+    except Exception:  # noqa: BLE001 - after the write, an unusable file has no profile
+        return []
+    return sorted(name for name, creds in profiles.items() if _on_server(creds.mcp_url, server))
+
+
+def _broken_config() -> str | None:
+    """The ``.kagura.json`` every kagura command loads first, when it cannot be read or parsed.
+
+    Returns:
+        Its path and why, never its contents; None when it loads or there is none.
+    """
+    try:
+        load_config()
+        return None
+    except OSError as e:
+        why = e.strerror or type(e).__name__
+    except ValueError:
+        why = "not UTF-8 JSON"
+    except Exception as e:  # noqa: BLE001 - runs after the write: named, never raised
+        why = type(e).__name__
+    local = Path(".kagura.json")
+    return f"{_path_label(local.absolute()) if local.exists() else '~/.kagura.json'} ({why})"
 
 
 def _write_export(
@@ -874,6 +1194,7 @@ def _check_flags(
     url_form: bool,
     mcp_url: str | None,
     api_key_env: str | None,
+    oauth: bool,
     interactive: bool,
 ) -> None:
     """Reject flag combinations that cannot work before anything is read (exit 2)."""
@@ -881,6 +1202,16 @@ def _check_flags(
         raise click.BadParameter(
             "use 1-64 letters, digits, '-' or '_', starting with a letter or digit",
             param_hint="'--name'",
+        )
+    if oauth and (not url_form or not mcp_url):
+        raise click.UsageError(
+            "--oauth needs --url-form and --mcp-url: the URL the harness signs in to, e.g. "
+            "--url-form --oauth --mcp-url https://memory.kagura-ai.com/mcp/w/<workspace-id>."
+        )
+    if oauth and api_key_env is not None:
+        raise click.UsageError(
+            "--oauth and --api-key-env exclude each other: an --oauth entry has no key "
+            "variable, since the harness signs in itself."
         )
     if not url_form:
         if mcp_url is not None or api_key_env is not None:
@@ -954,29 +1285,92 @@ def _check_same_server(profile: str, profile_url: str, mcp_url: str) -> None:
         )
 
 
+async def _fetch_system_info(base_url: str) -> dict[str, Any] | None:
+    async with make_oauth_client() as client:
+        return await fetch_system_info(client, base_url)
+
+
+def _shown_version(version: object) -> str:
+    """A version a server reported, safe to print: short and printable, else its repr."""
+    if isinstance(version, str) and version.isprintable() and len(version) <= 64:
+        return version
+    return reprlib.repr(version)
+
+
+def _check_oauth_server(h: _Harness, mcp_url: str) -> None:
+    """Stop unless the ``--oauth`` entry's server is memory-cloud 0.77.0+ (exit 1).
+
+    One unauthenticated ``GET /api/v1/system/info`` on the entry's server,
+    as ``kagura auth login --invite`` sends. Before 0.77.0 the harness's
+    client registration is rejected, so the entry could never sign in. A
+    version setup cannot read (no answer, not a 200, unparseable) stops it
+    too: nothing confirms the registration would be accepted.
+
+    Raises:
+        click.ClickException: The server is older, or its version is unconfirmed.
+    """
+    deployment = _deployment(mcp_url)
+    info = asyncio.run(_fetch_system_info(base_url_from_mcp(mcp_url)))
+    version = None if info is None else info.get("version")
+    meets = meets_minimum(version, HARNESS_OAUTH_MIN_SERVER_VERSION)
+    if meets is True:
+        click.echo(
+            f"  {deployment} runs memory-cloud {_shown_version(version)}, which accepts\n"
+            f"  {h.title}'s own client registration (0.77.0+)."
+        )
+        return
+    if meets is False:
+        why = f"{deployment} runs memory-cloud {_shown_version(version)}"
+    elif info is None:
+        why = (
+            f"setup could not confirm the version of {deployment} (GET /api/v1/system/info "
+            "did not answer 200 with a JSON object)"
+        )
+    else:
+        reported = "no version" if version is None else _shown_version(version)
+        why = (
+            f"setup could not confirm the version of {deployment} (/api/v1/system/info "
+            f"reports {reported})"
+        )
+    raise click.ClickException(
+        _wrap(
+            f"Nothing was written: --oauth needs memory-cloud 0.77.0+, and {why}. Before "
+            f"0.77.0, dynamic client registration rejects {h.title}'s own client "
+            "(memory-cloud#1657). Use the default stdio entry (--profile NAME, from "
+            "`kagura auth login`) or --url-form with an API key instead."
+        )
+    )
+
+
 def _codex_hook_warning(
-    name: str, existing: _Existing | None, hooks_on: bool, *, ask: bool
+    name: str, existing: _Existing | None, hooks_on: bool, *, oauth: bool, ask: bool
 ) -> None:
-    """Say that a stdio entry leaves the Codex plugin's guardrail hooks without a credential.
+    """Say that an entry without a key leaves the Codex plugin's guardrail hooks without one.
+
+    The stdio entry holds no bearer, and an ``--oauth`` entry's token stays in
+    Codex's own store: the hooks report an OAuth entry as unsupported.
 
     Raises:
         click.ClickException: The hooks are on and the user chose not to go on.
     """
     if not hooks_on and not (existing is not None and existing.url_credential):
         return
+    form = "an --oauth entry" if oauth else "the stdio entry"
     click.echo(
         "\n  Warning: the kagura-memory Codex plugin's guardrail hooks read their credential\n"
-        "  only from a URL entry (bearer_token_env_var, env_http_headers or http_headers),\n"
-        "  so with the stdio entry they do nothing."
+        "  only from a URL entry with a bearer (bearer_token_env_var, env_http_headers or\n"
+        f"  http_headers), so with {form} they do nothing."
     )
     if not hooks_on:
         return
     data = _path_label(codex_home() / "plugins" / "data")
     click.echo(
         f"  They are turned on here for the {name} entry (a config.json under\n"
-        f"  {data}/kagura-memory-*/): to keep them, re-run with --url-form."
+        f"  {data}/kagura-memory-*/): to keep them, re-run with --url-form and an API key"
+        f"{' (no --oauth)' if oauth else ''}."
     )
-    if ask and not click.confirm("Write the stdio entry anyway?", default=False):
+    kind = "--oauth" if oauth else "stdio"
+    if ask and not click.confirm(f"Write the {kind} entry anyway?", default=False):
         raise click.ClickException("Setup cancelled; nothing was written.")
 
 
@@ -1069,22 +1463,24 @@ def _dry_run_context(chosen: str | None) -> str | None:
 
 
 def _print_reason(
-    h: _Harness, exe: str | None, non_interactive: bool, interactive: bool
+    h: _Harness, exe: str | None, entry: _Entry, non_interactive: bool, interactive: bool
 ) -> str | None:
     """Why setup prints the block instead of running the harness command, or None."""
     if exe is None:
         return f"`{h.cli}` is not on PATH"
-    if h.interactive_add and not interactive:
+    if h.attached_add(entry) and not interactive:
         why = "-y was given" if non_interactive else "stdin is not a terminal"
-        return f"`{h.cli} mcp add` is interactive and {why}"
+        what = "is interactive" if h.interactive_add else "starts the sign-in"
+        return f"`{h.cli} mcp add` {what} and {why}"
     return None
 
 
-def _run_or_fail(h: _Harness, exe: str, args: list[str], *, attached: bool) -> None:
+def _run_or_fail(h: _Harness, exe: str, args: list[str], *, attached: bool, note: str = "") -> None:
     """Run ``<harness> <args>`` (attached to the terminal when it prompts).
 
     Raises:
-        click.ClickException: It failed; the message names the subcommand.
+        click.ClickException: It failed; the message names the subcommand,
+            followed by ``note``.
     """
     name = f"{h.cli} {' '.join(args[:2])}"
     try:
@@ -1101,12 +1497,16 @@ def _run_or_fail(h: _Harness, exe: str, args: list[str], *, attached: bool) -> N
                 check=False,
             )
     except subprocess.TimeoutExpired as e:
-        raise click.ClickException(f"`{name}` failed: timed out after {e.timeout:g}s") from None
+        raise click.ClickException(
+            f"`{name}` failed: timed out after {e.timeout:g}s{note}"
+        ) from None
     except (OSError, subprocess.SubprocessError) as e:
-        raise click.ClickException(f"`{name}` failed: {_exc_message(e)}") from None
+        raise click.ClickException(f"`{name}` failed: {_exc_message(e)}{note}") from None
     if proc.returncode != 0:
         detail = "" if attached else (proc.stderr or proc.stdout or "").strip()
-        raise click.ClickException(f"`{name}` failed: {detail or f'exit code {proc.returncode}'}")
+        raise click.ClickException(
+            f"`{name}` failed: {detail or f'exit code {proc.returncode}'}{note}"
+        )
 
 
 def _echo_block(block: str) -> None:
@@ -1116,10 +1516,25 @@ def _echo_block(block: str) -> None:
 
 def _preview_command(
     context_id: str, entry: _Entry, profile: str | None, cf: CredentialsFile | None
-) -> str:
-    """``kagura guardrails digest <ctx> --target instructions`` on the entry's own credential."""
+) -> str | None:
+    """``kagura guardrails digest <ctx> --target instructions`` on the entry's own credential.
+
+    An ``--oauth`` entry's token stays with the harness, so its preview runs
+    on the profile (on the entry's server, as setup checked) or on the CLI's
+    usual chain when that is on the entry's server too.
+
+    Returns:
+        The command; None for an ``--oauth`` entry without ``--profile`` when
+        the chain's credential is not on the entry's server. Pinning the
+        server with ``KAGURA_MCP_URL`` would send ``KAGURA_API_KEY``, a key
+        for another server, to it.
+    """
     args = ["guardrails", "digest", context_id, "--target", "instructions"]
     if entry.url is None:
+        return _kagura_command(args, profile, cf)
+    if entry.oauth:
+        if profile is None and not _cli_chain_on(entry.url):
+            return None
         return _kagura_command(args, profile, cf)
     # The URL form: the key in the entry's variable, on the entry's server.
     env = [] if entry.key_env == DEFAULT_KEY_ENV else [f'KAGURA_API_KEY="${{{entry.key_env}}}"']
@@ -1138,6 +1553,7 @@ def run_setup_harness(
     url_form: bool,
     mcp_url: str | None,
     api_key_env: str | None,
+    oauth: bool,
     force: bool,
     non_interactive: bool,
     dry_run: bool,
@@ -1147,13 +1563,16 @@ def run_setup_harness(
     ``guardrails`` must already be normalized (``off`` or a canonical UUID).
     ``agents_md`` is None without ``--agents-md`` and ``""`` for the
     harness's default file. Setup prompts only with a terminal on stdin and
-    without ``-y``; otherwise it behaves as ``-y`` does. See the module
-    docstring for the rules.
+    without ``-y``; otherwise it behaves as ``-y`` does. With ``oauth`` (and
+    ``url_form``), the entry has no key and the harness signs in itself; the
+    server must be memory-cloud 0.77.0+, which a real run checks before it
+    detects, runs or writes anything. See the module docstring for the rules.
 
     Raises:
         click.UsageError: A flag combination that cannot work (exit 2).
-        click.ClickException: A missing profile or ``kagura-mcp``, an existing
-            entry without ``force``, or a failed check or harness command.
+        click.ClickException: A missing profile or ``kagura-mcp``, a server
+            ``oauth`` cannot use, an existing entry without ``force``, or a
+            failed check or harness command.
     """
     h = HARNESSES[harness]()
     interactive = not non_interactive and _stdin_is_tty()
@@ -1170,6 +1589,7 @@ def run_setup_harness(
         url_form=url_form,
         mcp_url=mcp_url,
         api_key_env=api_key_env,
+        oauth=oauth,
         interactive=interactive,
     )
     cf, creds = _load_profile(profile) if profile is not None else (None, None)
@@ -1183,6 +1603,15 @@ def run_setup_harness(
     if dry_run:
         click.echo("Dry run: nothing is written, run or fetched.")
     click.echo(f"\nSetting up Kagura Memory for {h.title} ({where})")
+    if oauth:
+        assert mcp_url is not None
+        if dry_run:
+            click.echo(
+                f"  The real run first checks that {_deployment(mcp_url)} runs memory-cloud\n"
+                "  0.77.0+ (GET /api/v1/system/info); this dry run sends no request."
+            )
+        else:
+            _check_oauth_server(h, mcp_url)
 
     # 1. What the harness has now (read-only)
     existing = h.detect(name, exe)
@@ -1193,9 +1622,11 @@ def run_setup_harness(
     else:
         click.echo(f"  No {name} entry yet.")
     hooks_on = h.plugin_hooks_on(name)
-    if not url_form:
+    if not url_form or oauth:
         # No question when the existing-entry stop below ends the run anyway.
-        h.warn_stdio_entry(name, existing, hooks_on, ask=ask and (existing is None or force))
+        h.warn_keyless_entry(
+            name, existing, hooks_on, oauth=oauth, ask=ask and (existing is None or force)
+        )
     if existing is not None and not force:
         stop = f"a {name} entry already exists ({existing.kind}); re-run with --force to replace it"
         if not dry_run:
@@ -1213,7 +1644,9 @@ def run_setup_harness(
         guardrails = None
     lane_from_context = False
     if h.reads_instructions and guardrails is None:
-        if url_form and hooks_on:
+        # The hooks cannot read an --oauth entry, so "off" would leave only the
+        # get_context_info block and nothing to deliver the rest.
+        if url_form and hooks_on and not oauth:
             guardrails = "off"
             click.echo(
                 "  The plugin's hooks deliver guardrails, so the URL gets ?guardrails=off\n"
@@ -1269,9 +1702,12 @@ def run_setup_harness(
             # A dry run's placeholder for a context name (a UUID or "off" never
             # starts with "<"), shown as it is rather than URL-encoded.
             url = url.replace(f"guardrails={quote_plus(guardrails)}", f"guardrails={guardrails}")
-        entry = _Entry(url=url, key_env=h.key_env(name, api_key_env))
+        if oauth:
+            entry = _Entry(url=url, oauth=True)
+        else:
+            entry = _Entry(url=url, key_env=h.key_env(name, api_key_env))
     command = h.replace_args(name, entry) if existing is not None else h.add_args(name, entry)
-    reason = _print_reason(h, exe, non_interactive, interactive)
+    reason = _print_reason(h, exe, entry, non_interactive, interactive)
 
     click.echo("")
     show_block = dry_run or reason is not None
@@ -1299,28 +1735,71 @@ def run_setup_harness(
     # 6. Write through the harness
     if reason is None:
         assert exe is not None
-        _run_or_fail(h, exe, command, attached=h.interactive_add)
-        if not h.saved(name, exe, entry):
-            skipped = " and skipped the AGENTS.md export" if export_path is not None else ""
-            raise click.ClickException(
-                f"`{h.cli} mcp list` shows no new {name} entry: `{h.cli} mcp add` was\n"
-                f"  cancelled or failed there, so nothing was saved{skipped}."
-            )
+        _run_or_fail(
+            h,
+            exe,
+            command,
+            attached=h.attached_add(entry),
+            note=h.add_failure_note(name, entry),
+        )
+        problem = h.not_saved(name, exe, entry, replaced=existing is not None)
+        if problem is not None:
+            skipped = "; setup skipped the AGENTS.md export" if export_path is not None else ""
+            raise click.ClickException(f"{problem}{skipped}.")
         click.echo(f"  Done: {h.cli} wrote {name} to {where}.")
 
     # 7. What the user does next
     click.echo("")
-    if entry.url is not None:
+    if entry.oauth:
+        click.echo(f"  {h.login_note(name, ran=reason is None)}")
+    elif entry.url is not None:
         click.echo(f"  {h.key_note(entry, ran=reason is None)}")
     if h.reads_instructions and guardrails not in (None, "off"):
         assert guardrails is not None
+        command = _preview_command(guardrails, entry, profile, cf)
+        if command is None:
+            # An --oauth entry without --profile, and the CLI's usual chain is
+            # not on its server: a stored profile there, else a login there.
+            assert entry.url is not None
+            deployment = _deployment(entry.url)
+            on_server = _profiles_on(entry.url)
+            if on_server:
+                preview = (
+                    "The kagura CLI's usual credential is not on\n"
+                    f"  {deployment}; preview it on a profile there ({', '.join(on_server)})\n"
+                    "  (Codex gets what the account it signed in with can read):"
+                )
+            else:
+                preview = (
+                    "The kagura CLI's usual credential is not on\n"
+                    f"  {deployment}, and no profile is: log in there with\n"
+                    f"  `kagura auth login --server {deployment} --profile NAME`,\n"
+                    "  then preview it (Codex gets what the account it signed in with can read):"
+                )
+            digest = ["guardrails", "digest", guardrails, "--target", "instructions"]
+            profile_name = on_server[0] if on_server else "NAME"
+            command = _on_profile(profile_name, shlex.join(["kagura", *digest]))
+        elif entry.oauth:
+            preview = (
+                "Preview it on the kagura CLI's credential\n"
+                "  (Codex gets what the account it signed in with can read):"
+            )
+        else:
+            preview = "Preview what it sends:"
+        fails = ""
+        broken = _broken_config()
+        if broken is not None:
+            fails = "\n  " + _wrap(
+                f"The preview fails until {broken} is fixed or removed: every kagura command "
+                "reads it first."
+            )
         click.echo(
             "  Codex should get the tool guardrail digest of context\n"
             f"  {guardrails} in the MCP instructions when it connects.\n"
             "  The server sends only its base text instead when the entry's credential\n"
             "  cannot read that context, the context has no guardrails, or the deployment\n"
-            "  turns the digest off. Preview what it sends:\n"
-            f"    {_preview_command(guardrails, entry, profile, cf)}\n"
+            f"  turns the digest off. {preview}\n"
+            f"    {command}{fails}\n"
             "  Use a context whose editor list you control: every editor's guardrail\n"
             "  summaries reach the model."
         )
