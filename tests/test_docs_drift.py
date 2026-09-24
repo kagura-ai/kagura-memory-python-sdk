@@ -27,6 +27,7 @@ _STALE_PHRASES = [
     "immutable after creation",  # an operator can migrate the model since v0.66.0
     "only ``recall.related_tags`` does",  # recall stopped sending sample_summary in v0.73.0
     'pinned["results"]',  # load_pinned returns ``memories``
+    "`--server` override: decline it",  # plugin 0.77.0 reads kagura-mcp's --guardrails
 ]
 
 

@@ -140,9 +140,11 @@ server does not also send a guardrail digest. Re-run `kagura setup claude --prof
 <name> --guardrails off`: the entry then runs `kagura-mcp --guardrails off`, which adds
 the query at run time, so no `--server` override (which pins the host) is needed. Pass
 `--guardrails off` again on every later re-run; setup notes it when a re-run drops it.
-memory-cloud v0.76.0's `/kagura-memory:setup` reads the query only from `--server` or
-the profile's URL, so it may still report `guardrails=off` as missing and offer a
-`--server` override: decline it. `kagura guardrails load <the plugin's context_id>` shows that context's set
+From plugin 0.77.0 (memory-cloud v0.77.0), `/kagura-memory:setup` reads
+`--guardrails` / `--tool-profile` in the `kagura-mcp` args and offers
+`--guardrails off` itself. An older plugin reports `guardrails=off` as missing and
+offers a `--server` override. Update the plugin rather than accept it: the fix is
+client-side, so it works against any server. `kagura guardrails load <the plugin's context_id>` shows that context's set
 as the CLI's own credential sees it (the bare command uses `.kagura.json`'s context,
 which may be a different one). The hooks use their own API key, and an agent binding
 filters the set per credential, so what they load can differ from that output.
