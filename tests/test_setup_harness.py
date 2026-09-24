@@ -1322,14 +1322,83 @@ class TestOAuthCodex:
         assert result.exit_code == 0, result.output
         out = flat(result.output)
         assert (
-            "The kagura CLI has no credential on https://kagura.example.com here: log in "
-            "there with `kagura auth login --server https://kagura.example.com --profile NAME`"
+            "The kagura CLI's usual credential is not on https://kagura.example.com, and no "
+            "profile is: log in there with "
+            "`kagura auth login --server https://kagura.example.com --profile NAME`"
         ) in out
         preview = f"KAGURA_PROFILE=NAME kagura guardrails digest {CTX} --target instructions"
         assert (f"env -u KAGURA_API_KEY {preview}" if chain == "api-key" else preview) in out
         # Pinning the server would send the key for another server to this one.
         assert "KAGURA_MCP_URL" not in out
         assert API_KEY not in out
+
+    @pytest.mark.parametrize("chain", ["profile", "api-key", "require-profile"])
+    def test_without_profile_the_preview_names_a_profile_on_the_entry_server(
+        self, on_path, recorder, tty, monkeypatch, chain
+    ):
+        # The usual chain is on another server (the default profile, or
+        # KAGURA_API_KEY on the default server) or refuses the implicit default
+        # (KAGURA_REQUIRE_PROFILE), but the stored profile "work" is on this one.
+        other = "https://kagura.example.com"
+        cf = CredentialsFile()
+        cf.set_profile("default", make_oauth_creds())
+        cf.set_profile("work", make_oauth_creds(server=other))
+        save_credentials_file(cf)
+        if chain == "api-key":
+            monkeypatch.setenv("KAGURA_API_KEY", API_KEY)
+        elif chain == "require-profile":
+            monkeypatch.setenv("KAGURA_REQUIRE_PROFILE", "1")
+        on_path("codex")
+        mcp_url = f"{other}/mcp/w/ws-1"
+        result = run("codex", "--url-form", "--oauth", "--mcp-url", mcp_url, "--context-id", CTX)
+        assert result.exit_code == 0, result.output
+        out = flat(result.output)
+        assert (
+            f"The kagura CLI's usual credential is not on {other}; preview it on a profile "
+            "there (work)"
+        ) in out
+        preview = f"KAGURA_PROFILE=work kagura guardrails digest {CTX} --target instructions"
+        assert (f"env -u KAGURA_API_KEY {preview}" if chain == "api-key" else preview) in out
+        assert "kagura auth login" not in out and "NAME" not in out
+        assert "KAGURA_MCP_URL" not in out and API_KEY not in out
+
+    def test_require_profile_names_every_profile_on_the_entry_server(
+        self, on_path, recorder, tty, monkeypatch
+    ):
+        # Both stored profiles are on the entry's server, but the usual chain
+        # refuses the implicit default.
+        monkeypatch.setenv("KAGURA_REQUIRE_PROFILE", "1")
+        on_path("codex")
+        result = run("codex", *OAUTH, "--context-id", CTX)
+        assert result.exit_code == 0, result.output
+        out = flat(result.output)
+        assert (
+            "The kagura CLI's usual credential is not on https://memory.kagura-ai.com; "
+            "preview it on a profile there (default, work)"
+        ) in out
+        assert f"KAGURA_PROFILE=default kagura guardrails digest {CTX} --target instructions" in out
+        assert "kagura auth login" not in out
+
+    @pytest.mark.parametrize("config", ["malformed", "unreadable"])
+    def test_an_unusable_kagura_json_leaves_the_written_entry_done(
+        self, on_path, recorder, tty, config
+    ):
+        # No profile and no key: the usual chain reaches ./.kagura.json, and
+        # only after the add has written the entry.
+        save_credentials_file(CredentialsFile())
+        if config == "malformed":
+            Path(".kagura.json").write_text("{not json", encoding="utf-8")
+        else:
+            Path(".kagura.json").mkdir()
+        on_path("codex")
+        result = run("codex", *OAUTH, "--context-id", CTX)
+        assert result.exit_code == 0, result.output
+        out = flat(result.output)
+        assert "Done: codex wrote kagura-memory" in out
+        assert "Setup failed" not in out
+        assert "usual credential is not on https://memory.kagura-ai.com, and no profile is" in out
+        assert f"KAGURA_PROFILE=NAME kagura guardrails digest {CTX} --target instructions" in out
+        assert "Check it with: codex mcp get kagura-memory" in out
 
     @pytest.mark.parametrize("context", [[], ["--context-id", CTX]], ids=["no-context", "context"])
     def test_hooks_on_neither_turn_guardrails_off_nor_stay_silent(

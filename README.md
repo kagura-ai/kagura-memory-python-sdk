@@ -1029,8 +1029,9 @@ not get `?guardrails=off` (the hooks cannot read it), and setup prints the hooks
 warning. The `--guardrails` preview runs on the `kagura` CLI's own credential:
 what Codex receives depends on the account it signed in with. Without
 `--profile`, it uses the CLI's usual credential only when that is on the
-`--mcp-url` server; otherwise setup prints the `kagura auth login --server` to
-run first, and the command on that login.
+`--mcp-url` server; otherwise it names the stored profiles on that server and
+runs on the first, or, when there is none, prints the `kagura auth login
+--server` to run first and the command on that login.
 
 What has been checked: memory-cloud 0.77.0 accepts these harnesses' client
 registration on a loopback redirect, and setup's commands follow the sources of

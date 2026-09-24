@@ -87,7 +87,7 @@ from ._http import (
     validate_https_url,
 )
 from ._version import meets_minimum
-from .auth.credentials import CredentialsFile
+from .auth.credentials import CredentialsFile, load_credentials_file
 from .auth.device_flow import fetch_system_info, make_oauth_client
 from .claude_code import MCP_PROXY_COMMAND, _path_label, _runs_proxy, holds_credential
 from .exceptions import KaguraAuthError, KaguraNotFoundError, _exc_message
@@ -1046,13 +1046,22 @@ def _on_profile(profile: str, command: str) -> str:
 def _cli_chain_on(mcp_url: str) -> bool:
     """True when the kagura CLI's usual chain has a credential on ``mcp_url``'s server.
 
-    Reads the credentials only, as :func:`_export_auth` does.
+    Reads the credentials only, as :func:`_export_auth` does. It runs after
+    the entry is written, so a ``.kagura.json`` it cannot read or parse
+    counts as no credential rather than failing setup.
     """
     try:
         auth = _resolve_auth(api_key=None, mcp_url=None, profile=None)
-    except KaguraAuthError:
+    except (KaguraAuthError, OSError, ValueError):
         return False
     return _deployment(auth.mcp_url) == _deployment(mcp_url)
+
+
+def _profiles_on(mcp_url: str) -> list[str]:
+    """The stored OAuth profiles on ``mcp_url``'s server, by name; reads the file only."""
+    server = _deployment(mcp_url)
+    profiles = load_credentials_file().profiles
+    return sorted(name for name, creds in profiles.items() if _deployment(creds.mcp_url) == server)
 
 
 def _write_export(
@@ -1455,7 +1464,7 @@ def _preview_command(
 
     Returns:
         The command; None for an ``--oauth`` entry without ``--profile`` when
-        the chain has no credential on the entry's server. Pinning the
+        the chain's credential is not on the entry's server. Pinning the
         server with ``KAGURA_MCP_URL`` would send ``KAGURA_API_KEY``, a key
         for another server, to it.
     """
@@ -1688,17 +1697,27 @@ def run_setup_harness(
         assert guardrails is not None
         command = _preview_command(guardrails, entry, profile, cf)
         if command is None:
-            # An --oauth entry without --profile, and no CLI credential on its server.
+            # An --oauth entry without --profile, and the CLI's usual chain is
+            # not on its server: a stored profile there, else a login there.
             assert entry.url is not None
             deployment = _deployment(entry.url)
-            preview = (
-                "The kagura CLI has no credential on\n"
-                f"  {deployment} here: log in there with\n"
-                f"  `kagura auth login --server {deployment} --profile NAME`,\n"
-                "  then preview it (Codex gets what the account it signed in with can read):"
-            )
+            on_server = _profiles_on(entry.url)
+            if on_server:
+                preview = (
+                    "The kagura CLI's usual credential is not on\n"
+                    f"  {deployment}; preview it on a profile there ({', '.join(on_server)})\n"
+                    "  (Codex gets what the account it signed in with can read):"
+                )
+            else:
+                preview = (
+                    "The kagura CLI's usual credential is not on\n"
+                    f"  {deployment}, and no profile is: log in there with\n"
+                    f"  `kagura auth login --server {deployment} --profile NAME`,\n"
+                    "  then preview it (Codex gets what the account it signed in with can read):"
+                )
             digest = ["guardrails", "digest", guardrails, "--target", "instructions"]
-            command = _on_profile("NAME", shlex.join(["kagura", *digest]))
+            profile_name = on_server[0] if on_server else "NAME"
+            command = _on_profile(profile_name, shlex.join(["kagura", *digest]))
         elif entry.oauth:
             preview = (
                 "Preview it on the kagura CLI's credential\n"
