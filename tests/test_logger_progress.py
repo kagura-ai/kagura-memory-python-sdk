@@ -659,22 +659,16 @@ def test_resource_import_credential_failure_opens_no_stream(mock_rc_cls, mock_co
     mock_rc_cls._from_resolved_auth.assert_not_called()
 
 
-def _wired_resource_client(mock_rc_cls: MagicMock, **ingest: object) -> AsyncMock:
-    mock_rc = AsyncMock()
-    for key, value in ingest.items():
-        setattr(mock_rc.ingest_events, key, value)
-    mock_rc.__aenter__ = AsyncMock(return_value=mock_rc)
-    mock_rc.__aexit__ = AsyncMock(return_value=None)
-    mock_rc_cls._from_resolved_auth.return_value = mock_rc
-    return mock_rc
-
-
 @patch("kagura_memory.cli.load_config")
 @patch("kagura_memory.cli.ResourceClient")
 def test_resource_import_names_an_unmessaged_failure(mock_rc_cls, mock_config):
     """``Import failed: {e}`` printed nothing after the colon for such an error."""
     mock_config.return_value = {"api_key": "key", "mcp_url": "https://test.com/mcp"}
-    _wired_resource_client(mock_rc_cls, side_effect=RuntimeError())
+    mock_rc = AsyncMock()
+    mock_rc.ingest_events.side_effect = RuntimeError()
+    mock_rc.__aenter__ = AsyncMock(return_value=mock_rc)
+    mock_rc.__aexit__ = AsyncMock(return_value=None)
+    mock_rc_cls._from_resolved_auth.return_value = mock_rc
     result = _import("--progress", "json", input='{"name": "a"}')
     assert result.exit_code == 1
     [terminal] = [e for e in _parse_lines(result.stderr) if e["kind"] in ("success", "error")]
@@ -712,83 +706,6 @@ def test_resource_import_bad_row_is_a_clean_error(
     assert f"Error: {message}" in result.output
     assert result.exception is None or isinstance(result.exception, SystemExit)
     mock_rc_cls._from_resolved_auth.assert_not_called()
-
-
-_FILE_ID = "10000000-0000-0000-0000-000000000002"
-
-
-def _uploading(file_obj):
-    """A ``FilesClient.upload`` stand-in that reports progress as the real one does."""
-
-    async def upload(*, logger=None, **_):
-        logger.action("Reserving upload", stage="reserve")
-        logger.success("Upload complete", stage="complete", detail={"file_id": file_obj.id})
-        return file_obj
-
-    return upload
-
-
-def _upload_remember(tmp_path, remember_result):
-    from datetime import UTC, datetime
-
-    from kagura_memory.models import FileObject
-
-    file_obj = FileObject(
-        id=_FILE_ID,
-        workspace_id="00000000-0000-0000-0000-000000000001",
-        filename="hello.txt",
-        content_type="text/plain",
-        size_bytes=2,
-        sha256="a" * 64,
-        status="uploaded",
-        created_at=datetime(2026, 5, 11, tzinfo=UTC),
-    )
-    path = tmp_path / "hello.txt"
-    path.write_text("hi")
-    config = {
-        "api_key": "key",
-        "mcp_url": "https://test.com/mcp",
-        "context_id": "00000000-0000-0000-0000-000000000001",
-    }
-    with (
-        patch("kagura_memory.cli.load_config", return_value=config),
-        patch("kagura_memory.cli.FilesClient") as files_cls,
-        patch("kagura_memory.cli.KaguraClient") as kagura_cls,
-    ):
-        files = AsyncMock()
-        files.upload.side_effect = _uploading(file_obj)
-        files.__aenter__ = AsyncMock(return_value=files)
-        files.__aexit__ = AsyncMock(return_value=None)
-        files_cls._from_resolved_auth.return_value = files
-        kagura = AsyncMock()
-        if isinstance(remember_result, BaseException):
-            kagura.remember.side_effect = remember_result
-        else:
-            kagura.remember.return_value = remember_result
-        kagura.__aenter__ = AsyncMock(return_value=kagura)
-        kagura.__aexit__ = AsyncMock(return_value=None)
-        kagura_cls.return_value = kagura
-        return CliRunner().invoke(
-            main, ["files", "upload", str(path), "--remember", "--progress", "json"]
-        )
-
-
-def test_files_upload_remember_failure_ends_the_stream_in_error(tmp_path):
-    """The upload's success went out first, so a failed command's stream ended in success."""
-    result = _upload_remember(tmp_path, RuntimeError("boom"))
-    assert result.exit_code == 1
-    events = _parse_lines(result.stderr)
-    assert [e["kind"] for e in events] == ["action", "error"]
-    assert "creating the linked memory failed: boom" in events[-1]["msg"]
-    assert events[-1]["detail"]["reserved_file_id"] == _FILE_ID
-
-
-def test_files_upload_remember_success_is_the_last_event(tmp_path):
-    result = _upload_remember(tmp_path, {"memory_id": "mem-1"})
-    assert result.exit_code == 0, result.output
-    events = _parse_lines(result.stderr)
-    assert [e["kind"] for e in events] == ["action", "success"]
-    assert events[-1]["detail"] == {"file_id": _FILE_ID}
 
 
 @pytest.mark.asyncio

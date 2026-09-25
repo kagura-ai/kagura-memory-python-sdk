@@ -1854,16 +1854,15 @@ class TestOAuthHermes:
         assert recorder.hermes_entries["kagura-memory"]["url"] == MCP_URL
         assert "Done: hermes wrote kagura-memory" in flat(result.output)
 
-    def test_an_unread_url_is_not_called_replaced(self, on_path, recorder, tty, kept_oauth_entry):
-        """An older Hermes whose whole-entry read fails: its keys are read one by one."""
+    def test_an_unread_entry_is_not_called_replaced(self, on_path, recorder, tty, kept_oauth_entry):
+        """An older Hermes whose `config get` fails: `mcp list` shows only the form."""
         on_path("hermes")
-        recorder.hermes_unreadable.update(("", "url"))
+        recorder.hermes_unreadable.add("")
         result = run("hermes", *OAUTH, "--force", input="n\n")
         assert result.exit_code == 1
         out = flat(result.output)
-        assert "Setup could not read back the url of kagura-memory" in out
-        assert "`hermes config get mcp_servers.kagura-memory.url` failed" in out
-        assert "whether Hermes replaced the existing entry" in out
+        assert "Setup could not read back Hermes's kagura-memory entry" in out
+        assert "whether Hermes saved an OAuth entry it can sign in with" in out
         assert "Done:" not in out
 
     def test_an_unread_auth_is_not_called_missing(self, on_path, recorder, tty):
@@ -1872,8 +1871,8 @@ class TestOAuthHermes:
         result = run("hermes", *OAUTH, input="n\n")
         assert result.exit_code == 1
         out = flat(result.output)
-        assert "Setup could not read back the auth of kagura-memory" in out
-        assert "`hermes config get mcp_servers.kagura-memory.auth` failed" in out
+        assert "Setup could not read back Hermes's kagura-memory entry" in out
+        assert "`hermes config get mcp_servers.kagura-memory` failed" in out
         assert "`hermes mcp list`" in out
         assert "no auth: oauth" not in out and "Done:" not in out
 
@@ -2929,7 +2928,7 @@ def test_hermes_config_value_that_is_not_json_is_unread(monkeypatch):
         "_capture",
         lambda exe, args: subprocess.CompletedProcess([exe, *args], 0, "oauth\n", ""),
     )
-    assert setup_harness._Hermes()._config_get("kagura-memory", "hermes", "auth") == (False, None)
+    assert setup_harness._Hermes()._config_get("kagura-memory", "hermes") == (False, None)
 
 
 def test_profiles_on_an_unusable_credentials_file_is_empty(monkeypatch):

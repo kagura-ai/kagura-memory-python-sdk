@@ -18,7 +18,7 @@ from ._auth import (
     _StaticAuth,
 )
 from ._guardrail_export import write_guardrail_block
-from ._http import normalize_guardrails, normalize_uuid, validate_lat_lon
+from ._http import normalize_guardrails, normalize_uuid, path_segment, validate_lat_lon
 from .auth.cli import auth as _auth_group
 from .claude_code import MCP_SERVER_NAME
 from .client import KaguraClient
@@ -1599,27 +1599,20 @@ def _guardrails_option(ctx, param, value: str | None) -> str | None:
         raise click.BadParameter(str(e)) from None
 
 
-# `--agents-md=VALUE` arrives with this prefix (see _HarnessCommand); no real
-# path holds a NUL, so it cannot be mistaken for one.
-_LITERAL_VALUE = "\0"
-
-
 class _HarnessCommand(click.Command):
     """``kagura setup <harness>``: ``--agents-md=VALUE`` takes VALUE as written (#285).
 
     click reads an option whose value may be left out (``is_flag=False``,
     ``flag_value``) by pushing an ``=VALUE`` back onto the arguments, and then
     parses a VALUE that starts with ``-`` as the next option: ``--agents-md=-y``
-    wrote the default file and silently set ``-y``. Prefixing the value keeps
-    it a value; :func:`_agents_md_option` strips the prefix again.
+    wrote the default file and silently set ``-y``. Such a VALUE is passed as
+    ``./VALUE``, the same path.
     """
 
     def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
         end = args.index("--") if "--" in args else len(args)
         args = [
-            f"--agents-md={_LITERAL_VALUE}{a[len('--agents-md=') :]}"
-            if i < end and a.startswith("--agents-md=")
-            else a
+            a.replace("=-", "=./-", 1) if i < end and a.startswith("--agents-md=-") else a
             for i, a in enumerate(args)
         ]
         return super().parse_args(ctx, args)
@@ -1631,9 +1624,6 @@ def _agents_md_option(ctx, param, value: str | None) -> str | None:
     A PATH of only whitespace is refused, rather than creating a file named
     ``' '`` (#285).
     """
-    if value is None:
-        return None
-    value = value.removeprefix(_LITERAL_VALUE)
     if value and not value.strip():
         raise click.BadParameter(
             "the path is blank; name a file, or give --agents-md alone for the default one"
@@ -2158,19 +2148,10 @@ def _get_kagura_client() -> KaguraClient:
 
 def _run_resource_command(
     operation: Callable[[ResourceClient], Awaitable[Any]],
-    *,
-    started: Callable[[], None] | None = None,
 ) -> None:
-    """Execute a ResourceClient operation with standard boilerplate.
-
-    ``started`` runs once the client is built, right before ``operation``:
-    a command that opens a progress stream there can close it in
-    ``operation``, since a config or credential failure comes before (#285).
-    """
+    """Execute a ResourceClient operation with standard boilerplate."""
     try:
         client = _get_resource_client()
-        if started is not None:
-            started()
 
         async def _run() -> Any:
             async with client:
@@ -2658,22 +2639,6 @@ def resource_import(resource_id, api_key, input_file, fmt, id_column, version, v
 
     logger = _resolve_progress_logger(verbose, progress)
 
-    def started() -> None:
-        # Pre-flight announcement: keep stdout strictly machine-readable (the
-        # JSON output below) by routing the human-readable count to stderr.
-        # Suppress entirely when progress is silent (--progress=none, or no -v
-        # and no --progress) so scripts piping stderr to /dev/null see nothing
-        # unexpected; otherwise emit it as a structured "start" action through
-        # the logger so the rich path stays consistent and json consumers get
-        # a parseable event. Only once the client is built: from here on the
-        # stream ends with exactly one success or error (#285).
-        if logger is not None:
-            logger.action(
-                "Importing events",
-                f"{len(events)} event(s)",
-                stage="import_start",
-            )
-
     # Batch ingest (100 at a time). The CLI command is ONE user-facing
     # operation, so it must emit exactly one terminal event. ``ingest_events``
     # also has its own per-call terminal contract — calling it N times with
@@ -2683,6 +2648,20 @@ def resource_import(resource_id, api_key, input_file, fmt, id_column, version, v
     # per-batch progress here at the CLI level, and close with one terminal
     # event at the very end covering the whole import.
     async def op(client: ResourceClient) -> str:
+        # Pre-flight announcement: keep stdout strictly machine-readable (the
+        # JSON output below) by routing the human-readable count to stderr.
+        # Suppress entirely when progress is silent (--progress=none, or no -v
+        # and no --progress) so scripts piping stderr to /dev/null see nothing
+        # unexpected; otherwise emit it as a structured "start" action through
+        # the logger so the rich path stays consistent and json consumers get
+        # a parseable event. Only here, once the client is built: from this
+        # event on the stream ends with exactly one success or error (#285).
+        if logger is not None:
+            logger.action(
+                "Importing events",
+                f"{len(events)} event(s)",
+                stage="import_start",
+            )
         total_created = 0
         total_failed = 0
         all_errors: list[dict] = []
@@ -2727,7 +2706,7 @@ def resource_import(resource_id, api_key, input_file, fmt, id_column, version, v
             )
         return json.dumps(output, indent=2, ensure_ascii=False)
 
-    _run_resource_command(op, started=started)
+    _run_resource_command(op)
 
 
 # =============================================================================
@@ -3080,7 +3059,7 @@ def files_upload(
             memory = await _remember_file_object(
                 ctx, path, file_obj, summary, memory_type, importance, tags
             )
-        except Exception as e:
+        except BaseException as e:  # Ctrl-C too: the stream still ends in an error
             # The upload already succeeded — surface the file_id so the user
             # knows the file_object exists and does not re-upload a duplicate.
             message = (
@@ -3099,6 +3078,8 @@ def files_upload(
                         "confirmed": True,
                     },
                 )
+            if not isinstance(e, Exception):
+                raise
             raise click.ClickException(_cli_error_message(e, message)) from e
         if isinstance(upload_logger, _HeldSuccessLogger):
             upload_logger.release()
@@ -3223,8 +3204,8 @@ def _run_workspace_command(
         auth = _resolve_auth(api_key=None, mcp_url=None, profile=None, config=config)
         ws_id = _resolve_workspace_from_source(auth, config, workspace_id, flag="--workspace")
         # Checked before the prompt, so nobody confirms against an id that
-        # was never valid (#285); the client normalizes it again.
-        normalize_uuid(ws_id, label="workspace_id")
+        # was never valid (#285).
+        ws_id = normalize_uuid(ws_id, label="workspace_id")
         if confirm is not None:
             confirm(ws_id)
         client = WorkspaceClient._from_resolved_auth(
@@ -3248,14 +3229,25 @@ _WORKSPACE_OPT_HELP = "Workspace UUID (default: the credential source's workspac
 
 
 def _user_id_param(_ctx: click.Context, _param: click.Parameter, value: str) -> str:
-    """Refuse a user id that cannot be one URL path segment, before anything runs (#285).
-
-    ``.`` and ``..`` survive percent-encoding and URL resolution climbs them:
-    ``member remove ..`` would send ``DELETE /api/v1/workspaces/<ws>``.
-    """
-    if value in ("", ".", ".."):
-        raise click.BadParameter(f"{value!r} is not a valid user id.")
+    """Refuse a user id :func:`path_segment` refuses, before anything runs (#285)."""
+    try:
+        path_segment(value, label="user id")
+    except ValueError:
+        raise click.BadParameter(f"{value!r} is not a valid user id.") from None
     return value
+
+
+def _context_uuids_param(
+    _ctx: click.Context, _param: click.Parameter, value: tuple[str, ...]
+) -> tuple[str, ...]:
+    """``--context`` values as canonical UUIDs: a non-UUID got HTTP 500 from the server (#285)."""
+    canonical = []
+    for c in value:
+        try:
+            canonical.append(normalize_uuid(c, label="--context"))
+        except ValueError:
+            raise click.BadParameter(f"{c!r} is not a valid context UUID.") from None
+    return tuple(canonical)
 
 
 @main.group()
@@ -3405,6 +3397,7 @@ def invite():
     "-c",
     "context_ids",
     multiple=True,
+    callback=_context_uuids_param,
     help="Context UUID the invitee may access (repeatable; required for member/viewer)",
 )
 @click.option(
@@ -3439,14 +3432,6 @@ def invite_create(
             f"--role {role} requires at least one --context/-c <uuid> "
             "(the invitee's context grant)."
         )
-    for c in context_ids:
-        # The server answers a non-UUID with an HTTP 500 (#285).
-        try:
-            normalize_uuid(c, label="--context")
-        except ValueError:
-            raise click.BadParameter(
-                f"{c!r} is not a valid context UUID.", param_hint="'--context' / '-c'"
-            ) from None
 
     async def op(client: WorkspaceClient, ws: str) -> str:
         inv = await client.create_invitation(

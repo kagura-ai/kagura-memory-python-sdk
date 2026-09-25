@@ -123,12 +123,14 @@ class VerboseLogger:
         observability stream. Matches the JSON path's
         ``except OSError`` in :meth:`_emit_json`.
 
-        Callers pass a :class:`~rich.text.Text`, never a markup string: a
-        caller's text is printed as written, with no markup or emoji codes
-        read in it (``report[bold].pdf``, ``:thumbs_up:``), and a ``[/x]`` in
-        an error message cannot raise ``MarkupError`` inside the caller's
-        except handler and replace the real error (#285).
+        Callers pass a :class:`~rich.text.Text`, and a plain string is read
+        with no markup or emoji codes either: a caller's text is printed as
+        written (``report[bold].pdf``, ``:thumbs_up:``), and a ``[/x]`` in an
+        error message cannot raise ``MarkupError`` inside the caller's except
+        handler and replace the real error (#285).
         """
+        kwargs.setdefault("markup", False)
+        kwargs.setdefault("emoji", False)
         try:
             self._console.print(*args, **kwargs)
         except OSError:
