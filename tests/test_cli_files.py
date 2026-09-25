@@ -357,6 +357,21 @@ def test_files_upload_remember_failure_ends_the_stream_in_error(
 @patch("kagura_memory.cli.load_config")
 @patch("kagura_memory.cli.KaguraClient")
 @patch("kagura_memory.cli.FilesClient")
+def test_files_upload_remember_interrupted_ends_the_stream_in_error(
+    mock_files_cls, mock_kagura_cls, mock_config, tmp_path
+):
+    """Ctrl-C during the memory write still ends the stream in kind=error."""
+    result, events = _upload_remember_json(
+        mock_files_cls, mock_kagura_cls, mock_config, tmp_path, KeyboardInterrupt()
+    )
+    assert result.exit_code == 1
+    assert [e["kind"] for e in events] == ["action", "error"]
+    assert "creating the linked memory failed: KeyboardInterrupt" in events[-1]["msg"]
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+@patch("kagura_memory.cli.FilesClient")
 def test_files_upload_remember_success_is_the_last_event(
     mock_files_cls, mock_kagura_cls, mock_config, tmp_path
 ):

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import itertools
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -844,6 +845,41 @@ class TestHermes:
         assert "Re-run with --agents-md" not in result.output
         assert digest.calls == []
 
+    def test_older_hermes_without_config_get_is_checked_with_mcp_list(self, on_path, recorder, tty):
+        on_path("hermes")
+        recorder.hermes_unreadable.add("")
+        result = run("hermes", "--profile", "default", input="n\n")
+        assert result.exit_code == 0, result.output
+        assert "Done: hermes wrote kagura-memory" in result.output
+        assert ["/usr/bin/hermes", "mcp", "list"] in recorder.argvs()
+
+    def test_older_hermes_cancelled_add_shows_no_new_entry(self, on_path, recorder, tty):
+        on_path("hermes")
+        recorder.hermes_unreadable.add("")
+        recorder.hermes_saves = False
+        result = run("hermes", "--profile", "default", input="n\n")
+        assert result.exit_code == 1
+        assert "`hermes mcp list` shows no new kagura-memory entry" in result.output
+
+    def test_an_entry_other_than_the_new_one_is_not_saved(self, recorder):
+        """No entry before the add, and not the one setup asked for after it."""
+        recorder.hermes_entries["kagura-memory"] = {"url": "https://x/mcp"}
+        entry = setup_harness._Entry(command=PROXY, args=("--profile", "default"))
+        problem = setup_harness._Hermes().not_saved(
+            "kagura-memory", "/usr/bin/hermes", entry, replaced=False
+        )
+        assert problem is not None
+        assert "(URL with no credential) is not the one setup asked for" in flat(problem)
+        assert "https://x/mcp" not in problem
+
+    def test_dry_run_with_only_cursorrules_names_the_file(self, recorder, tty):
+        Path(".cursorrules").write_text("rules", encoding="utf-8")
+        result = run("hermes", "--profile", "default", "--dry-run")
+        assert result.exit_code == 0, result.output
+        out = flat(result.output)
+        assert "AGENTS.md: not offered. Hermes loads only" in out
+        assert ".cursorrules here" in out
+
     def test_no_offer_with_y(self, digest):
         result = run("hermes", "--profile", "default", "--context-id", CTX, "-y")
         assert result.exit_code == 0, result.output
@@ -963,6 +999,20 @@ class TestHermesPaths:
         after = self.hermes_loads(directory)
         assert target in after
         assert set(before) <= set(after)  # nothing the user had stops loading
+
+    @pytest.mark.skipif(
+        not hasattr(os, "geteuid") or os.geteuid() == 0, reason="needs an unreadable file"
+    )
+    def test_an_unreadable_file_counts_as_empty(self, tmp_path):
+        self.layout(tmp_path, {"CLAUDE.md": "claude", "AGENTS.md": "agents"})
+        (tmp_path / "AGENTS.md").chmod(0)
+        try:
+            assert hermes_context_file(tmp_path) == tmp_path / "CLAUDE.md"
+        finally:
+            (tmp_path / "AGENTS.md").chmod(0o644)
+
+    def test_only_hermes_can_have_no_default_file(self):
+        assert setup_harness._Codex().no_agents_md_reason() == ""
 
     @pytest.mark.parametrize("rules", [".cursorrules", ".cursor/rules/a.mdc"])
     def test_only_cursor_rules_leave_no_default_file(self, tmp_path, rules):

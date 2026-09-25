@@ -2030,7 +2030,12 @@ def run_setup_harness(
         click.echo(f"  {note}")
     click.echo(f"  Check it with: {shlex.join([h.cli, *h.verify_args(name)])}")
     # No hint when no default file fits: a new one would displace the user's.
-    if export_path is None and not h.reads_instructions and not offered and default_path:
+    if (
+        export_path is None
+        and not h.reads_instructions
+        and not offered
+        and default_path is not None
+    ):
         click.echo(
             "  Re-run with --agents-md --context-id <id> to put a snapshot of a context's\n"
             f"  tool guardrails into {_path_label(default_path)},\n"
