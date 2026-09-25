@@ -750,7 +750,8 @@ class _HermesEntry:
         """True when this is ``entry``: its command and args, or its url."""
         if entry.command is not None:
             return self.url is None and (self.command, self.args) == (entry.command, entry.args)
-        return self.url == entry.url
+        # `--auth header` never writes `auth`: an OAuth entry at this url is the kept one (#287).
+        return self.url == entry.url and (entry.oauth or not self.oauth)
 
 
 class _Hermes(_Harness):

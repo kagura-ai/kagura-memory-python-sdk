@@ -702,12 +702,34 @@ class TestHermes:
         assert "Warning: Hermes saved the entry with no Authorization header" in out
         assert "keeps it in" not in out
 
-    def test_url_entry_with_a_header_gets_the_env_note(self, on_path, recorder, tty):
+    @pytest.mark.parametrize(
+        "existing", [None, {"url": MCP_URL, "auth": "oauth"}], ids=["new", "replaces-oauth"]
+    )
+    def test_url_entry_with_a_header_gets_the_env_note(self, on_path, recorder, tty, existing):
         on_path("hermes")
-        result = run("hermes", "--url-form", "--mcp-url", MCP_URL, input="n\n")
+        force = ()
+        if existing is not None:
+            recorder.hermes_entries["kagura-memory"] = existing
+            force = ("--force",)
+        result = run("hermes", "--url-form", "--mcp-url", MCP_URL, *force, input="n\n")
         assert result.exit_code == 0, result.output
+        assert "Done: hermes wrote kagura-memory" in flat(result.output)
         assert "Hermes asked for the key itself and keeps it in" in result.output
         assert "Warning" not in result.output
+
+    def test_kept_oauth_entry_at_the_same_url_is_not_the_new_one(self, on_path, recorder, tty):
+        """--force of the API-key URL form, and the user declines Hermes's overwrite (#287)."""
+        on_path("hermes")
+        recorder.hermes_saves = False
+        recorder.hermes_entries["kagura-memory"] = {"url": MCP_URL, "auth": "oauth"}
+        result = run("hermes", "--url-form", "--mcp-url", MCP_URL, "--context-id", CTX,
+                     "--agents-md", "--force", input="n\n")  # fmt: skip
+        assert result.exit_code == 1
+        out = flat(result.output)
+        assert "Hermes's kagura-memory entry is still the existing one (URL with OAuth)" in out
+        assert "setup skipped the AGENTS.md export" in out
+        assert "keeps it in" not in out and "Done:" not in out
+        assert not Path("AGENTS.md").exists()
 
     @pytest.mark.parametrize(
         ("entry", "kind"),
