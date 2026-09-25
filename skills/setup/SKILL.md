@@ -72,8 +72,7 @@ kagura setup codex --profile <name> --dry-run
 The entry runs the same `kagura-mcp` proxy by absolute path with `--profile`
 (these harnesses filter the environment). It stays the default: memory-cloud
 accepts these harnesses' own OAuth client registration on a loopback redirect
-only from 0.77.0 (memory-cloud#1657), and Hermes's device-flow sign-in still
-waits on memory-cloud#1671. Setup writes it only through the harness CLI (`codex mcp add`,
+only from 0.77.0 (memory-cloud#1657). Setup writes it only through the harness CLI (`codex mcp add`,
 `hermes mcp add`, `openclaw mcp add|set`); otherwise it prints the block and the
 file and edits nothing. Options:
 
@@ -96,7 +95,8 @@ file and edits nothing. Options:
 - `--url-form --oauth --mcp-url <url>` (memory-cloud 0.77.0+) — a URL entry with
   no key. 0.77.0 accepts the harness's own client registration, and the harness
   then signs in itself in a browser: `codex mcp login <name>`, `hermes mcp login
-  <name>` (browser flow; its device flow waits on memory-cloud#1671) or
+  <name>` (browser flow; on memory-cloud 0.78.0+ `--flow device` signs in with a
+  code at the server's /device page and needs no loopback callback) or
   `openclaw mcp login <name>`. A full sign-in on a `/mcp/w/<workspace-id>` URL
   has not been verified yet (README, "What has been checked"): say so when you
   offer it. Setup first checks the server's version and stops (exit 1) below

@@ -32,6 +32,10 @@ _STALE_PHRASES = [
     # memory-cloud v0.77.0 accepts the Codex, Hermes and OpenClaw registration.
     "not allowlisted, memory-cloud#1657",
     "issues/1657) is open",
+    # memory-cloud v0.78.0 shipped #1671: Hermes's device flow works from it.
+    "waits on memory-cloud#1671",
+    "device flow waits on",
+    "device-flow sign-in still",
 ]
 
 
