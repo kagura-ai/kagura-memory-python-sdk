@@ -1826,9 +1826,11 @@ _HARNESS_AGENTS_MD_HELP = {
     ),
     "hermes": (
         "Write the context's tool guardrail export block into PATH (default: the context "
-        "file Hermes loads here, the first of .hermes.md, HERMES.md, AGENTS.override.md, "
-        "AGENTS.md, CLAUDE.md, else AGENTS.md). An interactive run offers it. Only the "
-        "marked block changes."
+        "file Hermes loads from here: the nearest .hermes.md or HERMES.md up to the git "
+        "root, else this directory's AGENTS file, else its CLAUDE.md, else a new "
+        "AGENTS.md; none when only Cursor rules load, which a new AGENTS.md would stop "
+        "loading). An interactive run offers it. Only the marked block changes; an empty "
+        "set removes it."
     ),
     "openclaw": (
         "Write the context's tool guardrail export block into PATH (default AGENTS.md in "
@@ -2023,8 +2025,12 @@ def setup_hermes(**params):
     your `kagura auth login` profile.
 
     Hermes does not read MCP instructions: guardrails reach it through
-    get_context_info (on by default) and, if you choose, an AGENTS.md
-    export block (--agents-md; an interactive run offers it).
+    get_context_info (on by default) and, if you choose, an export block
+    (--agents-md; an interactive run offers it) in the context file Hermes
+    loads from this directory, so a user's own file keeps loading. Hermes
+    loads only the first type it finds (.hermes.md/HERMES.md, AGENTS files,
+    CLAUDE.md, Cursor rules); with only Cursor rules, name a file with
+    --agents-md PATH.
 
     With --url-form --oauth (memory-cloud 0.77.0+, whose client registration
     accepts Hermes Agent; setup checks the version first), the entry is a

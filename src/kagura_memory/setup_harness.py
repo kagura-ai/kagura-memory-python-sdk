@@ -342,8 +342,17 @@ class _Harness(ABC):
         """The harness command that checks the entry."""
 
     @abstractmethod
-    def agents_md_path(self) -> Path:
-        """The always-loaded file the export goes into by default."""
+    def agents_md_path(self) -> Path | None:
+        """The always-loaded file the export goes into by default.
+
+        None when every such file would change what the harness loads
+        (:meth:`no_agents_md_reason` says why): there is then no offer, and
+        ``--agents-md`` needs a PATH.
+        """
+
+    def no_agents_md_reason(self) -> str:
+        """Why :meth:`agents_md_path` is None, naming the file it would displace."""
+        return ""
 
     def notes(self) -> list[str]:
         """Harness-specific lines for the end of the run."""
@@ -515,7 +524,7 @@ class _Codex(_Harness):
     def verify_args(self, name: str) -> list[str]:
         return ["mcp", "get", name]
 
-    def agents_md_path(self) -> Path:
+    def agents_md_path(self) -> Path | None:
         # Codex reads the global AGENTS.override.md in place of AGENTS.md.
         override = codex_home() / "AGENTS.override.md"
         return override if override.is_file() else codex_home() / "AGENTS.md"
@@ -595,22 +604,82 @@ def hermes_home() -> Path:
     return root
 
 
-#: The project context files Hermes looks for, in order; it loads only the first.
-HERMES_CONTEXT_FILES = (".hermes.md", "HERMES.md", "AGENTS.override.md", "AGENTS.md", "CLAUDE.md")
+#: The names of each project context file type Hermes looks for, in its order.
+_HERMES_OWN_FILES = (".hermes.md", "HERMES.md")
+_HERMES_AGENTS_FILES = ("AGENTS.override.md", "AGENTS.md", "agents.md")
+_HERMES_CLAUDE_FILES = ("CLAUDE.md", "claude.md")
 
 
-def hermes_context_file(directory: Path) -> Path:
-    """The context file Hermes loads in ``directory``.
+def _has_text(path: Path) -> bool:
+    """True when ``path`` is a file with something left after ``strip()``, as Hermes reads it."""
+    try:
+        return path.is_file() and bool(path.read_text(encoding="utf-8", errors="replace").strip())
+    except OSError:
+        return False
+
+
+def _first_with_text(directory: Path, names: tuple[str, ...]) -> Path | None:
+    return next((directory / n for n in names if _has_text(directory / n)), None)
+
+
+def _git_root(directory: Path) -> Path | None:
+    """The nearest of ``directory`` and its parents that holds ``.git``, as Hermes finds it."""
+    return next((d for d in (directory, *directory.parents) if (d / ".git").exists()), None)
+
+
+def hermes_cursor_rules(directory: Path) -> Path | None:
+    """The Cursor rules file Hermes loads in ``directory``: ``.cursorrules``, else a rule file."""
+    rules = sorted((directory / ".cursor" / "rules").glob("*.mdc"))
+    return next((f for f in (directory / ".cursorrules", *rules) if _has_text(f)), None)
+
+
+def hermes_context_file(directory: Path) -> Path | None:
+    """The file the export goes into so that Hermes, run in ``directory``, loads it (#278).
+
+    Hermes loads only the first of these types that has a file with text in
+    it (``hermes-agent`` ``agent/prompt_builder.py``):
+
+    1. ``.hermes.md`` / ``HERMES.md``: the nearest that exists, from
+       ``directory`` up to the git root (``directory`` alone outside a
+       repository). The walk stops there even when that file is empty.
+    2. ``AGENTS.override.md`` / ``AGENTS.md`` / ``agents.md``: every
+       directory from the git root down to ``directory``, the first with text
+       in each.
+    3. ``CLAUDE.md`` / ``claude.md`` in ``directory``.
+    4. ``.cursorrules`` / ``.cursor/rules/*.mdc`` in ``directory``.
+
+    The export goes into the loaded ``.hermes.md`` / ``HERMES.md`` (even one
+    in a parent directory), into ``directory``'s AGENTS file that loads (a
+    new ``AGENTS.md`` there when the chain loads only from parents), or into
+    the loaded ``CLAUDE.md``. With nothing loaded, a new ``AGENTS.md``.
+    Writing any other file would stop Hermes loading the user's own.
 
     Args:
         directory: The directory Hermes runs in.
 
     Returns:
-        The first of :data:`HERMES_CONTEXT_FILES` that exists, else ``AGENTS.md``.
+        The file; None when only Cursor rules load, which a new ``AGENTS.md``
+        would stop loading (:func:`hermes_cursor_rules` names them).
     """
-    for name in HERMES_CONTEXT_FILES:
-        if (directory / name).is_file():
-            return directory / name
+    root = _git_root(directory)
+    if root is None:
+        chain = [directory]
+    else:
+        parts = directory.relative_to(root).parts
+        chain = [root, *(root.joinpath(*parts[: i + 1]) for i in range(len(parts)))]
+    for d in reversed(chain):
+        own = next((d / n for n in _HERMES_OWN_FILES if (d / n).is_file()), None)
+        if own is not None:
+            if _has_text(own):
+                return own
+            break  # an empty one ends the lookup: Hermes moves on to the next type
+    if any(_first_with_text(d, _HERMES_AGENTS_FILES) for d in chain):
+        return _first_with_text(directory, _HERMES_AGENTS_FILES) or directory / "AGENTS.md"
+    claude = _first_with_text(directory, _HERMES_CLAUDE_FILES)
+    if claude is not None:
+        return claude
+    if hermes_cursor_rules(directory) is not None:
+        return None
     return directory / "AGENTS.md"
 
 
@@ -627,6 +696,63 @@ def hermes_key_env(name: str) -> str:
 HERMES_OAUTH_CONNECT_TIMEOUT_SEC = 315
 
 
+@dataclass(frozen=True)
+class _HermesEntry:
+    """What setup keeps of a Hermes ``mcp_servers.<name>`` entry (#278).
+
+    Only these: never a header value, the ``env`` or any other key, which can
+    hold a secret (``hermes config get`` masks credential-shaped keys, but by
+    name only). Nothing here is echoed; :attr:`kind` describes it.
+    """
+
+    command: str | None
+    args: tuple[str, ...]
+    url: str | None
+    oauth: bool
+    #: ``headers`` has an ``Authorization`` key (any case).
+    authorization: bool
+    enabled: bool
+
+    @classmethod
+    def read(cls, value: object) -> _HermesEntry:
+        entry = value if isinstance(value, dict) else {}
+        headers = entry.get("headers")
+        args = entry.get("args")
+        # As `hermes mcp list` reads it: a string counts only as true/1/yes.
+        enabled = entry.get("enabled", True)
+        if isinstance(enabled, str):
+            enabled = enabled.lower() in {"true", "1", "yes"}
+        return cls(
+            command=entry["command"] if isinstance(entry.get("command"), str) else None,
+            args=tuple(str(a) for a in args) if isinstance(args, list) else (),
+            url=entry["url"] if isinstance(entry.get("url"), str) else None,
+            oauth=entry.get("auth") == "oauth",
+            authorization=isinstance(headers, dict)
+            and any(isinstance(k, str) and k.lower() == "authorization" for k in headers),
+            enabled=bool(enabled),
+        )
+
+    @property
+    def kind(self) -> str:
+        # A url wins over a command, as in `hermes mcp list`.
+        if self.url is not None:
+            if self.oauth:
+                return "URL with OAuth"
+            if self.authorization:
+                return "URL with an Authorization header"
+            return "URL with no credential"
+        if self.command is not None:
+            proxy = _runs_proxy({"command": self.command, "args": list(self.args)})
+            return "stdio (kagura-mcp)" if proxy else "stdio (another command)"
+        return "an entry setup does not recognise"
+
+    def is_(self, entry: _Entry) -> bool:
+        """True when this is ``entry``: its command and args, or its url."""
+        if entry.command is not None:
+            return self.url is None and (self.command, self.args) == (entry.command, entry.args)
+        return self.url == entry.url
+
+
 class _Hermes(_Harness):
     key = "hermes"
     title = "Hermes Agent"
@@ -634,13 +760,36 @@ class _Hermes(_Harness):
     interactive_add = True
     names_key_env = True
 
+    def __init__(self) -> None:
+        #: The entry as read back after the add, for the notes that follow.
+        self._saved: _HermesEntry | None = None
+
     def config_path(self) -> Path:
         return hermes_home() / "config.yaml"
 
+    def _read_entry(self, name: str, exe: str) -> tuple[bool, _HermesEntry | None]:
+        """``(read, entry)`` from ``hermes config get mcp_servers.<name> --json``.
+
+        ``entry`` is None when Hermes has no such entry; ``read`` is False
+        when the command failed otherwise (an older Hermes), and the caller
+        falls back to ``hermes mcp list``.
+        """
+        read, value = self._config_get(name, exe)
+        return read, (_HermesEntry.read(value) if read and value is not None else None)
+
     def detect(self, name: str, exe: str | None) -> _Existing | None:
+        if exe is None:
+            return None
+        read, found = self._read_entry(name, exe)
+        if read:
+            return None if found is None else _Existing(found.kind)
+        return self._list_detect(name, exe)
+
+    def _list_detect(self, name: str, exe: str) -> _Existing | None:
+        """The entry from ``hermes mcp list``, for a Hermes whose ``config get`` failed."""
         # `hermes mcp list` has no --json: match the Name column, and tell
         # stdio from URL by the Transport column (the URL, or the command).
-        proc = _capture(exe, ["mcp", "list"]) if exe else None
+        proc = _capture(exe, ["mcp", "list"])
         if proc is None or proc.returncode != 0:
             return None
         for line in _ANSI_RE.sub("", proc.stdout).splitlines():
@@ -653,9 +802,41 @@ class _Hermes(_Harness):
     def not_saved(self, name: str, exe: str, entry: _Entry, *, replaced: bool) -> str | None:
         # `hermes mcp add` exits 0 when the user cancels an overwrite, declines
         # to save after a failed probe, or hits a validation error; only the
-        # list tells. A same-form entry that was kept looks the same there,
-        # though: for --oauth, its auth and url tell.
-        found = self.detect(name, exe)
+        # entry read back tells, compared with what setup asked for.
+        read, found = self._read_entry(name, exe)
+        if not read:
+            return self._list_not_saved(name, exe, entry, replaced=replaced)
+        if found is None:
+            return (
+                f"Hermes has no {name} entry: `hermes mcp add` was cancelled or failed\n"
+                "  there, so nothing was saved"
+            )
+        if not found.is_(entry):
+            if not replaced:
+                return _wrap(
+                    f"Hermes's {name} entry ({found.kind}) is not the one setup asked for, "
+                    "so nothing was saved"
+                )
+            return _wrap(
+                f"Hermes's {name} entry is still the existing one ({found.kind}): Hermes "
+                "keeps the existing entry when its overwrite prompt is declined, or when the "
+                "add stops before saving, so nothing was saved. Re-run with --force and accept "
+                "Hermes's overwrite prompt"
+            )
+        if entry.oauth and not found.oauth:
+            return self._no_oauth(name, replaced=replaced)
+        if not found.enabled:
+            return self._disabled(name, oauth=entry.oauth)
+        self._saved = found
+        return None
+
+    def _list_not_saved(self, name: str, exe: str, entry: _Entry, *, replaced: bool) -> str | None:
+        """:meth:`not_saved` from ``hermes mcp list``, for a Hermes whose ``config get`` failed.
+
+        A same-form entry that was kept looks the same there: for ``--oauth``,
+        its ``auth`` and ``url`` are read one by one.
+        """
+        found = self._list_detect(name, exe)
         if found is None or found.kind != ("stdio" if entry.command else "URL"):
             return (
                 f"`hermes mcp list` shows no new {name} entry: `hermes mcp add` was\n"
@@ -677,21 +858,7 @@ class _Hermes(_Harness):
                 "OAuth entry: check it with that command or `hermes mcp list`"
             )
         if auth != "oauth":
-            # Hermes writes `auth` only as `oauth` (a header entry is `headers`
-            # alone). When it cannot set up OAuth it asks "Continue without
-            # authentication?" (default yes) and saves the entry with no `auth`;
-            # when its overwrite prompt is declined it keeps the existing entry.
-            no_oauth = f"Hermes's {name} entry has no auth: oauth, so it cannot sign in to Kagura: "
-            if replaced:
-                return _wrap(
-                    f"{no_oauth}Hermes keeps the existing entry when its overwrite prompt is "
-                    "declined, and continues without authentication when it cannot set up "
-                    "OAuth. Re-run with --force and accept Hermes's overwrite prompt"
-                )
-            return _wrap(
-                f"{no_oauth}Hermes continues without authentication when it cannot set up "
-                "OAuth. Re-run with --force to replace it"
-            )
+            return self._no_oauth(name, replaced=replaced)
         if replaced:
             # A kept entry can be an OAuth one too (another workspace's): its
             # url tells, which `hermes mcp list` truncates.
@@ -709,28 +876,56 @@ class _Hermes(_Harness):
                     "add stops before saving. Re-run with --force and accept Hermes's overwrite "
                     "prompt"
                 )
-        # After a failed probe (the sign-in did not finish), "Save config
-        # anyway?" saves the entry with enabled: false, which Hermes never
-        # connects to; `hermes mcp login` does not turn it back on.
         _, enabled = self._config_get(name, exe, "enabled")
         if enabled is False:
+            return self._disabled(name, oauth=True)
+        return None
+
+    def _no_oauth(self, name: str, *, replaced: bool) -> str:
+        # Hermes writes `auth` only as `oauth` (a header entry is `headers`
+        # alone). When it cannot set up OAuth it asks "Continue without
+        # authentication?" (default yes) and saves the entry with no `auth`;
+        # when its overwrite prompt is declined it keeps the existing entry.
+        no_oauth = f"Hermes's {name} entry has no auth: oauth, so it cannot sign in to Kagura: "
+        if replaced:
+            return _wrap(
+                f"{no_oauth}Hermes keeps the existing entry when its overwrite prompt is "
+                "declined, and continues without authentication when it cannot set up "
+                "OAuth. Re-run with --force and accept Hermes's overwrite prompt"
+            )
+        return _wrap(
+            f"{no_oauth}Hermes continues without authentication when it cannot set up "
+            "OAuth. Re-run with --force to replace it"
+        )
+
+    def _disabled(self, name: str, *, oauth: bool) -> str:
+        # After a failed probe, "Save config anyway?" saves the entry with
+        # enabled: false, which Hermes never connects to (for --oauth, the
+        # sign-in did not finish; `hermes mcp login` does not turn it back on).
+        turn_on = f"`hermes config set mcp_servers.{name}.enabled true`"
+        if oauth:
             return _wrap(
                 f"Hermes saved {name} disabled, since its sign-in or connection check did not "
                 "finish, and it never connects to a disabled entry. Sign in with `hermes mcp "
-                f"login {name}`, then turn the entry on with `hermes config set "
-                f"mcp_servers.{name}.enabled true`"
+                f"login {name}`, then turn the entry on with {turn_on}"
             )
-        return None
+        return _wrap(
+            f"Hermes saved {name} disabled, since its connection check did not pass, and it "
+            f"never connects to a disabled entry. Check it with `hermes mcp test {name}`, then "
+            f"turn it on with {turn_on}"
+        )
 
-    def _config_get(self, name: str, exe: str, key: str) -> tuple[bool, object]:
-        """``mcp_servers.<name>.<key>`` from ``hermes config get``: ``(read, value)``.
+    def _config_get(self, name: str, exe: str, key: str | None = None) -> tuple[bool, object]:
+        """``mcp_servers.<name>[.<key>]`` from ``hermes config get``: ``(read, value)``.
 
         ``value`` is None when the key is not set (Hermes exits 1 with "Config
         key not set"); ``read`` is False when the command failed otherwise.
-        Only that one key is read: never the headers, env or args, which can
-        hold a secret. Hermes prints the value as one JSON line.
+        Hermes prints the value as one JSON line, credential-shaped keys
+        masked. The whole entry (no ``key``) goes straight to
+        :class:`_HermesEntry`, which keeps no header value, env or other key.
         """
-        proc = _capture(exe, ["config", "get", f"mcp_servers.{name}.{key}", "--json"])
+        path = f"mcp_servers.{name}" if key is None else f"mcp_servers.{name}.{key}"
+        proc = _capture(exe, ["config", "get", path, "--json"])
         if proc is not None and proc.returncode == 1 and "Config key not set" in proc.stderr:
             return True, None
         if proc is None or proc.returncode != 0 or not proc.stdout.strip():
@@ -815,6 +1010,14 @@ class _Hermes(_Harness):
 
     def key_note(self, entry: _Entry, *, ran: bool) -> str:
         env_file = _path_label(hermes_home() / ".env")
+        if ran and self._saved is not None and not self._saved.authorization:
+            # Hermes saves no headers when its "requires authentication?" is
+            # answered no or the key is left empty.
+            return _wrap(
+                "Warning: Hermes saved the entry with no Authorization header (its key prompt "
+                "was declined or left empty), so it connects without a key and Kagura refuses "
+                "it. Re-run with --force and give Hermes the key when it asks"
+            )
         if ran:
             return (
                 f"Hermes asked for the key itself and keeps it in {env_file} as\n"
@@ -849,8 +1052,19 @@ class _Hermes(_Harness):
     def verify_args(self, name: str) -> list[str]:
         return ["mcp", "test", name]
 
-    def agents_md_path(self) -> Path:
+    def agents_md_path(self) -> Path | None:
+        # Discovery starts from the current directory, as the Hermes CLI's does;
+        # its gateway and cron start from terminal.cwd, so they pass a PATH.
         return hermes_context_file(Path.cwd())
+
+    def no_agents_md_reason(self) -> str:
+        rules = hermes_cursor_rules(Path.cwd())
+        label = _path_label(rules) if rules is not None else "Cursor rules"
+        return _wrap(
+            f"Hermes loads only {label} here, and it loads the first context file type "
+            "it finds: a new AGENTS.md would stop it loading that file. Name the file "
+            "with --agents-md PATH"
+        )
 
     def export_notes(self, path: Path) -> list[str]:
         return [
@@ -983,7 +1197,7 @@ class _OpenClaw(_Harness):
     def verify_args(self, name: str) -> list[str]:
         return ["mcp", "doctor", name, "--probe"]
 
-    def agents_md_path(self) -> Path:
+    def agents_md_path(self) -> Path | None:
         # The default agent workspace, which OpenClaw loads every session.
         return openclaw_workspace_dir() / "AGENTS.md"
 
@@ -1174,16 +1388,25 @@ def _write_export(
     except Exception as e:
         raise click.ClickException(f"{failed}: {_exc_message(e)}") from e
     if not digest.text.strip():
-        click.echo(
-            f"\n  Context {context_id} has no tool guardrails this credential can see (none\n"
-            f"  marked, or the context is not trusted-tier): nothing was written to {label}."
-        )
+        # As `guardrails digest --out` does: an earlier block goes, so the
+        # harness stops loading guardrails the server no longer serves. The
+        # server sends an empty export only for an empty trusted set, never
+        # on a failure (a denied context is a 404, handled above). Without a
+        # block, neither the file nor its directory is created (#278).
         try:
-            stale = has_guardrail_block(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            stale = False
-        if stale:
-            click.echo(f"  It still has an earlier block; remove it with:\n    {refresh}")
+            status = write_guardrail_block(path, "")
+        except (OSError, ValueError) as e:
+            raise click.ClickException(
+                f"{failed}: {label}: {_exc_message(e)}; left unchanged"
+            ) from e
+        none = (
+            f"\n  Context {context_id} has no tool guardrails this credential can see (none\n"
+            "  marked, or the context is not trusted-tier)"
+        )
+        if status == "removed":
+            click.echo(f"{none}: removed the earlier guardrail block from {label}.")
+        else:
+            click.echo(f"{none}: nothing was written to {label}.")
         return
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -1692,11 +1915,14 @@ def run_setup_harness(
     can_pick = contexts is not None or export_context is not None
     export_path = None
     offered = False
+    default_path = h.agents_md_path()
     if agents_md is not None:
-        export_path = _expand_home(agents_md) if agents_md else h.agents_md_path()
-    elif not h.reads_instructions and ask and can_pick:
+        export_path = _expand_home(agents_md) if agents_md else default_path
+        if export_path is None:
+            raise click.ClickException(f"Nothing was written: {h.no_agents_md_reason()}.")
+    elif not h.reads_instructions and ask and can_pick and default_path is not None:
         offered = True
-        path = h.agents_md_path()
+        path = default_path
         click.echo(
             f"\n  {h.title} does not read MCP instructions. A snapshot of a context's tool\n"
             f"  guardrails can go into {_path_label(path)}, which it loads every session."
@@ -1834,10 +2060,11 @@ def run_setup_harness(
     for note in h.notes():
         click.echo(f"  {note}")
     click.echo(f"  Check it with: {shlex.join([h.cli, *h.verify_args(name)])}")
-    if export_path is None and not h.reads_instructions and not offered:
+    # No hint when no default file fits: a new one would displace the user's.
+    if export_path is None and not h.reads_instructions and not offered and default_path:
         click.echo(
             "  Re-run with --agents-md --context-id <id> to put a snapshot of a context's\n"
-            f"  tool guardrails into {_path_label(h.agents_md_path())},\n"
+            f"  tool guardrails into {_path_label(default_path)},\n"
             f"  which {h.title} loads every session."
         )
 
@@ -1864,10 +2091,12 @@ def _echo_dry_run_export(
             f"(the guardrail block for context {context})"
         )
     elif not h.reads_instructions:
+        default_path = h.agents_md_path()
+        if default_path is None:
+            click.echo(f"\n  AGENTS.md: not offered. {h.no_agents_md_reason()}.")
+            return
         if interactive:
             when = "offered when setup runs"
         else:
             when = "not offered with -y" if non_interactive else "not offered without a terminal"
-        click.echo(
-            f"\n  AGENTS.md: {_path_label(h.agents_md_path())} ({when}; --agents-md writes it)"
-        )
+        click.echo(f"\n  AGENTS.md: {_path_label(default_path)} ({when}; --agents-md writes it)")

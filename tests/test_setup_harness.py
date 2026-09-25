@@ -72,16 +72,15 @@ class Recorder:
         self.hermes_saves = True
         #: False: Hermes cannot set up OAuth and saves the entry with no `auth`.
         self.hermes_oauth_ok = True
+        #: False: the header key prompt is declined, and the entry has no `headers`.
+        self.hermes_header_ok = True
         #: False: the add's probe (the sign-in) fails, and "Save config anyway"
         #: saves the entry with `enabled: false`.
         self.hermes_probe_ok = True
-        #: The `auth` of each Hermes entry, as `hermes config get` reads it back.
-        self.hermes_auth: dict[str, str] = {}
-        #: The `enabled` of each Hermes entry, likewise.
-        self.hermes_enabled: dict[str, bool] = {}
-        #: The `url` of each Hermes URL entry, likewise.
-        self.hermes_url: dict[str, str] = {}
-        #: The keys whose `hermes config get` fails, e.g. {"url"}.
+        #: Hermes's `mcp_servers` entries, as `hermes config get` reads them back.
+        self.hermes_entries: dict[str, dict[str, Any]] = {}
+        #: The keys whose `hermes config get` fails, e.g. {"url"}; "" is the
+        #: whole entry (an older Hermes, which setup reads with `mcp list`).
         self.hermes_unreadable: set[str] = set()
 
     def __call__(self, argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
@@ -92,31 +91,39 @@ class Recorder:
             out = self.detect_out.get(cli)
             return subprocess.CompletedProcess(argv, 0 if out else 1, out or "", "")
         if sub == "config get":
-            _, server, key = argv[3].split(".", 2)
+            _, server, *rest = argv[3].split(".", 2)
+            key = rest[0] if rest else ""
             code = self.returncodes.get(sub) or (2 if key in self.hermes_unreadable else 0)
             if code:
                 return subprocess.CompletedProcess(argv, code, "", "boom")
-            values = {
-                "auth": self.hermes_auth,
-                "enabled": self.hermes_enabled,
-                "url": self.hermes_url,
-            }
-            value = values[key].get(server)
+            entry = self.hermes_entries.get(server)
+            value = entry if not key else (entry or {}).get(key)
             if value is None:
                 return subprocess.CompletedProcess(argv, 1, "", f"Config key not set: {argv[3]}")
             return subprocess.CompletedProcess(argv, 0, json.dumps(value) + "\n", "")
         code = self.returncodes.get(sub, 0)
         if cli == "hermes" and sub == "mcp add" and code == 0 and self.hermes_saves:
-            name = argv[3]
-            transport = argv[argv.index("--url" if "--url" in argv else "--command") + 1]
-            self.detect_out[cli] = f"  {name}    {transport}   all\n"
-            if "--url" in argv:
-                self.hermes_url[name] = transport
-            if "--auth" in argv and argv[argv.index("--auth") + 1] == "oauth":
-                if self.hermes_oauth_ok:
-                    self.hermes_auth[name] = "oauth"
-            self.hermes_enabled[name] = self.hermes_probe_ok
+            self._hermes_add(argv)
         return subprocess.CompletedProcess(argv, code, "", "boom" if code else "")
+
+    def _hermes_add(self, argv: list[str]) -> None:
+        """Save the entry as `hermes mcp add` writes it to config.yaml."""
+        name = argv[3]
+        auth = argv[argv.index("--auth") + 1] if "--auth" in argv else None
+        if "--url" in argv:
+            transport = argv[argv.index("--url") + 1]
+            entry: dict[str, Any] = {"url": transport}
+            if auth == "oauth" and self.hermes_oauth_ok:
+                entry["auth"] = "oauth"
+            if auth == "header" and self.hermes_header_ok:
+                entry["headers"] = {"Authorization": f"Bearer ${{{hermes_key_env(name)}}}"}
+        else:
+            transport = argv[argv.index("--command") + 1]
+            entry = {"command": transport, "args": argv[argv.index("--args") + 1 :]}
+        if not self.hermes_probe_ok:
+            entry["enabled"] = False
+        self.hermes_entries[name] = entry
+        self.detect_out["hermes"] = f"  {name}    {transport}   all\n"
 
     def argvs(self) -> list[list[str]]:
         return [argv for argv, _ in self.calls]
@@ -630,17 +637,113 @@ class TestHermes:
         recorder.hermes_saves = False
         result = run("hermes", "--profile", "default", "--context-id", CTX, "--agents-md")
         assert result.exit_code == 1
-        assert "cancelled or failed there, so nothing was saved" in result.output
+        assert "cancelled or failed there, so nothing was saved" in flat(result.output)
         assert "skipped the AGENTS.md export" in result.output
         assert not Path("AGENTS.md").exists()
 
     def test_kept_url_entry_is_not_reported_as_the_new_one(self, on_path, recorder, tty):
         on_path("hermes")
         recorder.hermes_saves = False
-        recorder.detect_out["hermes"] = "  kagura-memory    https://x/mcp   all\n"
+        recorder.hermes_entries["kagura-memory"] = {"url": "https://x/mcp"}
         result = run("hermes", "--profile", "default", "--force", input="n\n")
         assert result.exit_code == 1
-        assert "shows no new kagura-memory entry" in result.output
+        out = flat(result.output)
+        assert "entry is still the existing one (URL with no credential)" in out
+        assert "so nothing was saved" in out
+        assert "https://x/mcp" not in out
+
+    def test_kept_same_form_entry_is_not_reported_as_the_new_one(self, on_path, recorder, tty):
+        """``mcp list`` showed a kept stdio entry as the new stdio one (#278)."""
+        on_path("hermes")
+        recorder.hermes_saves = False
+        recorder.hermes_entries["kagura-memory"] = {
+            "command": "/old/bin/kagura-mcp",
+            "args": ["--profile", "old"],
+        }
+        result = run("hermes", "--profile", "default", "--context-id", CTX, "--agents-md",
+                     "--force", input="n\n")  # fmt: skip
+        assert result.exit_code == 1
+        out = flat(result.output)
+        assert "entry is still the existing one (stdio (kagura-mcp))" in out
+        assert "setup skipped the AGENTS.md export" in out
+        assert "/old/bin" not in out and "Done:" not in out
+        assert not Path("AGENTS.md").exists()
+
+    def test_entry_saved_disabled_points_to_mcp_test(self, on_path, recorder, tty, digest):
+        on_path("hermes")
+        recorder.hermes_probe_ok = False
+        result = run("hermes", "--profile", "default", "--context-id", CTX, "--agents-md",
+                     input="n\n")  # fmt: skip
+        assert result.exit_code == 1
+        out = flat(result.output)
+        assert "Hermes saved kagura-memory disabled" in out
+        assert "Check it with `hermes mcp test kagura-memory`" in out
+        assert "`hermes config set mcp_servers.kagura-memory.enabled true`" in out
+        assert digest.calls == []
+
+    @pytest.mark.parametrize("value", ["false", "No", "0", "off"])
+    def test_a_string_enabled_is_read_as_mcp_list_reads_it(self, on_path, recorder, tty, value):
+        on_path("hermes")
+        result_entry = {"command": PROXY, "args": ["--profile", "default"], "enabled": value}
+        recorder.hermes_saves = False
+        recorder.hermes_entries["kagura-memory"] = result_entry
+        result = run("hermes", "--profile", "default", "--force", input="n\n")
+        assert result.exit_code == 1
+        assert "saved kagura-memory disabled" in flat(result.output)
+
+    def test_url_entry_without_a_header_gets_a_warning(self, on_path, recorder, tty):
+        """Hermes saves no headers when its key prompt is declined or left empty."""
+        on_path("hermes")
+        recorder.hermes_header_ok = False
+        result = run("hermes", "--url-form", "--mcp-url", MCP_URL, input="n\n")
+        assert result.exit_code == 0, result.output
+        out = flat(result.output)
+        assert "Warning: Hermes saved the entry with no Authorization header" in out
+        assert "keeps it in" not in out
+
+    def test_url_entry_with_a_header_gets_the_env_note(self, on_path, recorder, tty):
+        on_path("hermes")
+        result = run("hermes", "--url-form", "--mcp-url", MCP_URL, input="n\n")
+        assert result.exit_code == 0, result.output
+        assert "Hermes asked for the key itself and keeps it in" in result.output
+        assert "Warning" not in result.output
+
+    @pytest.mark.parametrize(
+        ("entry", "kind"),
+        [
+            ({"command": "/v/bin/kagura-mcp", "args": ["--profile", "p"]}, "stdio (kagura-mcp)"),
+            ({"command": "npx", "args": ["-y", "other"]}, "stdio (another command)"),
+            ({"url": MCP_URL, "auth": "oauth"}, "URL with OAuth"),
+            (
+                {"url": MCP_URL, "headers": {"authorization": "x"}},
+                "URL with an Authorization header",
+            ),
+            ({"url": MCP_URL}, "URL with no credential"),
+            ({"timeout": 5}, "an entry setup does not recognise"),
+        ],
+    )
+    def test_existing_entry_kind_from_config_get(self, on_path, recorder, entry, kind):
+        on_path("hermes")
+        recorder.hermes_entries["kagura-memory"] = entry
+        result = run("hermes", "--profile", "default", "-y")
+        assert result.exit_code == 1
+        assert f"Existing kagura-memory entry: {kind}" in result.output
+        assert [
+            "/usr/bin/hermes", "config", "get", "mcp_servers.kagura-memory", "--json"
+        ] in recorder.argvs()  # fmt: skip
+
+    def test_existing_entry_values_are_never_echoed(self, on_path, recorder):
+        on_path("hermes")
+        recorder.hermes_entries["kagura-memory"] = {
+            "url": "https://SECRET-URL.example/mcp",
+            "headers": {"Authorization": "Bearer SECRET-HEADER"},
+            "env": {"KEY": "SECRET-ENV"},
+            "args": ["--token", "SECRET-ARG"],
+        }
+        result = run("hermes", "--profile", "default", "-y")
+        assert result.exit_code == 1
+        assert "URL with an Authorization header" in result.output
+        assert "SECRET" not in result.output
 
     def test_printed_url_block_references_the_hermes_variable(self, recorder):
         result = run("hermes", "--url-form", "--mcp-url", MCP_URL, "-y")
@@ -666,7 +769,9 @@ class TestHermes:
         assert "MCP_KAGURA_MEMORY_API_KEY" in result.output
 
     def test_existing_entry_from_mcp_list_blocks_without_force(self, on_path, recorder, tty):
+        """An older Hermes, whose `config get` fails: its `mcp list` tells."""
         on_path("hermes")
+        recorder.hermes_unreadable.add("")
         recorder.detect_out["hermes"] = (
             "\n  MCP Servers:\n\n  Name  Transport  Tools  Status\n"
             "  kagura-memory    https://memory.kagura-ai.com/mcp   all   \x1b[32m✓ enabled\x1b[0m\n"
@@ -678,7 +783,7 @@ class TestHermes:
 
     def test_force_lets_hermes_ask_before_overwriting(self, on_path, recorder, tty):
         on_path("hermes")
-        recorder.detect_out["hermes"] = "  kagura-memory    /x/kagura-mcp --profile   all\n"
+        recorder.hermes_entries["kagura-memory"] = {"command": "/x/kagura-mcp", "args": []}
         result = run("hermes", "--profile", "default", "--force", input="n\n")
         assert result.exit_code == 0, result.output
         assert recorder.mutating()[0][1:4] == ["mcp", "add", "kagura-memory"]
@@ -707,6 +812,38 @@ class TestHermes:
         assert digest.calls == [("default", OTHER_CTX)]
         assert "Create new context" not in result.output
 
+    def test_only_cursorrules_agents_md_without_path_stops_before_the_add(
+        self, on_path, recorder, tty, digest
+    ):
+        on_path("hermes")
+        Path(".cursorrules").write_text("rules", encoding="utf-8")
+        result = run("hermes", "--profile", "default", "--context-id", CTX, "--agents-md")
+        assert result.exit_code == 1
+        out = flat(result.output)
+        assert "Nothing was written: Hermes loads only" in out
+        assert ".cursorrules here" in out and "--agents-md PATH" in out
+        assert recorder.mutating() == [] and digest.calls == []
+        assert not Path("AGENTS.md").exists()
+
+    def test_only_cursorrules_agents_md_with_path_writes_there(self, on_path, recorder, tty):
+        on_path("hermes")
+        Path(".cursorrules").write_text("rules", encoding="utf-8")
+        result = run(
+            "hermes", "--profile", "default", "--context-id", CTX, "--agents-md", "RULES.md",
+            input="n\n",
+        )  # fmt: skip
+        assert result.exit_code == 0, result.output
+        assert Path("RULES.md").read_text(encoding="utf-8") == EXPORT_BLOCK
+
+    def test_only_cursorrules_no_offer_and_no_hint(self, on_path, recorder, tty, digest):
+        on_path("hermes")
+        Path(".cursorrules").write_text("rules", encoding="utf-8")
+        result = run("hermes", "--profile", "default", "--context-id", CTX, input="n\n")
+        assert result.exit_code == 0, result.output
+        assert "Write the guardrail export block there?" not in result.output
+        assert "Re-run with --agents-md" not in result.output
+        assert digest.calls == []
+
     def test_no_offer_with_y(self, digest):
         result = run("hermes", "--profile", "default", "--context-id", CTX, "-y")
         assert result.exit_code == 0, result.output
@@ -730,6 +867,108 @@ class TestHermesPaths:
         for name in present:
             (tmp_path / name).write_text("x", encoding="utf-8")
         assert hermes_context_file(tmp_path) == tmp_path / expected
+
+    @staticmethod
+    def layout(root: Path, files: dict[str, str]) -> None:
+        for name, text in files.items():
+            (root / name).parent.mkdir(parents=True, exist_ok=True)
+            (root / name).write_text(text, encoding="utf-8")
+
+    @staticmethod
+    def hermes_loads(cwd: Path) -> list[Path]:
+        """What Hermes loads in ``cwd``, stated from its source (#278), apart from the code."""
+
+        def text(f: Path) -> bool:
+            return f.is_file() and bool(f.read_text(encoding="utf-8").strip())
+
+        root = next((d for d in (cwd, *cwd.parents) if (d / ".git").exists()), None)
+        if root is None:
+            dirs = [cwd]
+        else:  # the git root down to cwd
+            parts = cwd.relative_to(root).parts
+            dirs = [root.joinpath(*parts[:i]) for i in range(len(parts) + 1)]
+        for d in reversed(dirs):
+            found = [d / n for n in (".hermes.md", "HERMES.md") if (d / n).is_file()]
+            if found:
+                if text(found[0]):
+                    return [found[0]]
+                break
+        agents = []
+        for d in dirs:
+            first = next(
+                (d / n for n in ("AGENTS.override.md", "AGENTS.md", "agents.md") if text(d / n)),
+                None,
+            )
+            if first is not None:
+                agents.append(first)
+        if agents:
+            return agents
+        for names in (("CLAUDE.md", "claude.md"), (".cursorrules",)):
+            first = next((cwd / n for n in names if text(cwd / n)), None)
+            if first is not None:
+                return [first]
+        return []
+
+    # The layouts in #278's table, and four more from its acceptance list.
+    @pytest.mark.parametrize(
+        ("files", "cwd", "expected"),
+        [
+            ({".git/x": "", ".hermes.md": "own", "sub/x": ""}, "sub", ".hermes.md"),
+            (
+                {".git/x": "", ".hermes.md": "own", "sub/AGENTS.md": "agents"},
+                "sub",
+                ".hermes.md",
+            ),
+            (
+                {".git/x": "", "AGENTS.md": "root", "sub/CLAUDE.md": "claude"},
+                "sub",
+                "sub/AGENTS.md",
+            ),
+            ({".hermes.md": "", "AGENTS.md": "agents"}, ".", "AGENTS.md"),
+            ({"AGENTS.override.md": " \n", "AGENTS.md": "agents"}, ".", "AGENTS.md"),
+            ({"agents.md": "agents"}, ".", "agents.md"),
+            ({"claude.md": "claude"}, ".", "claude.md"),
+            # A .hermes.md above the git root is not read.
+            ({".hermes.md": "own", "repo/.git/x": ""}, "repo", "repo/AGENTS.md"),
+            # Without .git, only the current directory is.
+            ({".hermes.md": "own", "sub/x": ""}, "sub", "sub/AGENTS.md"),
+            # An empty nearer .hermes.md ends the lookup.
+            ({".git/x": "", ".hermes.md": "own", "sub/.hermes.md": ""}, "sub", "sub/AGENTS.md"),
+            ({".hermes.md": "", "HERMES.md": "own"}, ".", "AGENTS.md"),
+        ],
+        ids=[
+            "root-hermes-md",
+            "root-hermes-md-over-sub-agents",
+            "agents-chain-from-root",
+            "empty-hermes-md",
+            "empty-override",
+            "lower-agents-md",
+            "lower-claude-md",
+            "hermes-md-above-git-root",
+            "no-git-cwd-only",
+            "empty-sub-hermes-md",
+            "empty-hermes-md-hides-HERMES-md",
+        ],
+    )
+    def test_the_export_goes_where_hermes_loads_it(self, tmp_path, files, cwd, expected):
+        self.layout(tmp_path, files)
+        directory = tmp_path / cwd
+        before = self.hermes_loads(directory)
+        target = hermes_context_file(directory)
+        assert target == tmp_path / expected
+        target.write_text(
+            (target.read_text(encoding="utf-8") if target.exists() else "") + EXPORT_BLOCK,
+            encoding="utf-8",
+        )
+        after = self.hermes_loads(directory)
+        assert target in after
+        assert set(before) <= set(after)  # nothing the user had stops loading
+
+    @pytest.mark.parametrize("rules", [".cursorrules", ".cursor/rules/a.mdc"])
+    def test_only_cursor_rules_leave_no_default_file(self, tmp_path, rules):
+        self.layout(tmp_path, {rules: "rules"})
+        assert hermes_context_file(tmp_path) is None
+        assert setup_harness.hermes_cursor_rules(tmp_path) == tmp_path / rules
 
     def test_home_env_wins(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HERMES_HOME", str(tmp_path / "h"))
@@ -1206,7 +1445,7 @@ class TestOAuthServerCheck:
         codex_config(env).write_text(
             '[mcp_servers.kagura-memory]\nurl = "https://x/mcp"\n', encoding="utf-8"
         )
-        recorder.detect_out["hermes"] = "  kagura-memory    https://x/mcp   all\n"
+        recorder.hermes_entries["kagura-memory"] = {"url": "https://x/mcp"}
         recorder.detect_out["openclaw"] = json.dumps({"url": "https://x/mcp"})
         before = files_under(env.parent)
         result = run(harness, *OAUTH, "--context-id", CTX, "--agents-md", "--force", "-y")
@@ -1530,11 +1769,10 @@ class TestOAuthHermes:
             *("--connect-timeout", "315"),
         ]
         assert "capture_output" not in kwargs and "timeout" not in kwargs
-        for key in ("auth", "enabled"):
-            assert [
-                "/usr/bin/hermes",
-                *("config", "get", f"mcp_servers.kagura-memory.{key}", "--json"),
-            ] in recorder.argvs()
+        assert [
+            "/usr/bin/hermes",
+            *("config", "get", "mcp_servers.kagura-memory", "--json"),
+        ] in recorder.argvs()
         out = flat(result.output)
         assert "Done: hermes wrote kagura-memory" in out
         assert "with --connect-timeout 315" in out
@@ -1566,7 +1804,10 @@ class TestOAuthHermes:
         Hermes writes a header entry as ``headers`` with no ``auth`` key.
         """
         on_path("hermes")
-        recorder.detect_out["hermes"] = f"  kagura-memory    {MCP_URL}   all\n"
+        recorder.hermes_entries["kagura-memory"] = {
+            "url": MCP_URL,
+            "headers": {"Authorization": "Bearer ${MCP_KAGURA_MEMORY_API_KEY}"},
+        }
         recorder.hermes_saves = False
         result = run("hermes", *OAUTH, "--force", input="n\n")
         assert result.exit_code == 1
@@ -1582,9 +1823,7 @@ class TestOAuthHermes:
         """An OAuth entry of the same name, for another workspace's URL."""
         old = "https://memory.kagura-ai.com/mcp/w/ws-OLD"
         recorder.detect_out["hermes"] = f"  kagura-memory    {old}   all\n"
-        recorder.hermes_auth["kagura-memory"] = "oauth"
-        recorder.hermes_enabled["kagura-memory"] = True
-        recorder.hermes_url["kagura-memory"] = old
+        recorder.hermes_entries["kagura-memory"] = {"url": old, "auth": "oauth"}
         return old
 
     def test_a_kept_oauth_entry_is_not_called_saved(self, on_path, recorder, tty, kept_oauth_entry):
@@ -1598,10 +1837,10 @@ class TestOAuthHermes:
         assert result.exit_code == 1
         assert [
             "/usr/bin/hermes",
-            *("config", "get", "mcp_servers.kagura-memory.url", "--json"),
+            *("config", "get", "mcp_servers.kagura-memory", "--json"),
         ] in recorder.argvs()
         out = flat(result.output)
-        assert "Hermes's kagura-memory entry is still the existing one, for another URL" in out
+        assert "Hermes's kagura-memory entry is still the existing one (URL with OAuth)" in out
         assert "Hermes keeps the existing entry when its overwrite prompt is declined" in out
         assert "Re-run with --force and accept Hermes's overwrite prompt" in out
         assert "no auth: oauth" not in out and "Done:" not in out
@@ -1612,12 +1851,13 @@ class TestOAuthHermes:
         on_path("hermes")
         result = run("hermes", *OAUTH, "--force", input="n\n")
         assert result.exit_code == 0, result.output
-        assert recorder.hermes_url["kagura-memory"] == MCP_URL
+        assert recorder.hermes_entries["kagura-memory"]["url"] == MCP_URL
         assert "Done: hermes wrote kagura-memory" in flat(result.output)
 
     def test_an_unread_url_is_not_called_replaced(self, on_path, recorder, tty, kept_oauth_entry):
+        """An older Hermes whose whole-entry read fails: its keys are read one by one."""
         on_path("hermes")
-        recorder.hermes_unreadable.add("url")
+        recorder.hermes_unreadable.update(("", "url"))
         result = run("hermes", *OAUTH, "--force", input="n\n")
         assert result.exit_code == 1
         out = flat(result.output)
@@ -1981,14 +2221,43 @@ class TestExport:
         assert "no tool guardrails" in result.output
         assert not path.exists()
 
-    def test_empty_body_keeps_an_earlier_block_and_names_the_command(self, digest, tmp_path):
+    @pytest.mark.parametrize("newline", [b"\n", b"\r\n"], ids=["lf", "crlf"])
+    def test_empty_body_removes_an_earlier_block(self, digest, tmp_path, newline):
+        """As `guardrails digest --out` does: the harness stops loading a stale block (#278)."""
         digest.text = ""
         path = tmp_path / "AGENTS.md"
-        path.write_text(EXPORT_BLOCK, encoding="utf-8")
+        body = EXPORT_BLOCK.encode().replace(b"\n", newline)
+        top, bottom = b"# Top" + newline, b"## Bottom" + newline + b"text" + newline
+        path.write_bytes(top + newline + body + bottom)
         result = run(*self.args(path))
         assert result.exit_code == 0, result.output
-        assert path.read_text(encoding="utf-8") == EXPORT_BLOCK
-        assert "earlier block" in result.output
+        assert path.read_bytes() == top + bottom
+        assert "removed the earlier guardrail block from" in flat(result.output)
+
+    def test_empty_body_without_a_block_creates_no_file_or_directory(self, digest, tmp_path):
+        digest.text = ""
+        path = tmp_path / "new-dir" / "AGENTS.md"
+        result = run(*self.args(path))
+        assert result.exit_code == 0, result.output
+        assert "nothing was written to" in flat(result.output)
+        assert not path.parent.exists()
+
+    @pytest.mark.parametrize(
+        "content",
+        [
+            ("# P\n\n" + EXPORT_BLOCK + "\n" + EXPORT_BLOCK).encode(),
+            b"\xff\xfe not utf-8",
+        ],
+        ids=["two-blocks", "not-utf-8"],
+    )
+    def test_empty_body_leaves_a_file_it_cannot_splice_unchanged(self, digest, tmp_path, content):
+        digest.text = ""
+        path = tmp_path / "AGENTS.md"
+        path.write_bytes(content)
+        result = run(*self.args(path))
+        assert result.exit_code == 1
+        assert "left unchanged" in result.output
+        assert path.read_bytes() == content
 
     @pytest.mark.parametrize(
         ("codex_on_path", "said"),
@@ -2383,7 +2652,10 @@ def test_detection_command_that_cannot_run_counts_as_no_entry(on_path, monkeypat
     result = run("hermes", "--profile", "default", "-y")
     assert result.exit_code == 0, result.output
     assert "No kagura-memory entry yet." in result.output
-    assert calls == [["/usr/bin/hermes", "mcp", "list"]]
+    assert calls == [
+        ["/usr/bin/hermes", "config", "get", "mcp_servers.kagura-memory", "--json"],
+        ["/usr/bin/hermes", "mcp", "list"],
+    ]
 
 
 @pytest.mark.parametrize("stdout", ["not json", "warning: x\n{}", "[1, 2]"])
@@ -2578,6 +2850,7 @@ def test_codex_url_form_block_without_codex():
 
 def test_hermes_list_without_our_name_is_no_entry(on_path, recorder):
     on_path("hermes")
+    recorder.hermes_unreadable.add("")
     recorder.detect_out["hermes"] = "  Name  Transport\n  github   npx @mcp/github   all\n"
     result = run("hermes", "--profile", "default", "-y")
     assert result.exit_code == 0, result.output
