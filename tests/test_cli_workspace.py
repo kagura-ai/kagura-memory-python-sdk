@@ -10,6 +10,7 @@ from kagura_memory.cli import main
 from kagura_memory.models import WorkspaceInvitation, WorkspaceMember
 
 WS = "11111111-2222-3333-4444-555555555555"
+CTX = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 
 
 @pytest.fixture(autouse=True)
@@ -185,7 +186,7 @@ def test_invite_create_prints_url_once_with_warning(mock_cls, mock_config):
             "--role",
             "member",
             "--context",
-            "ctx-1",
+            CTX,
             "--expires-days",
             "7",
         ],
@@ -194,7 +195,7 @@ def test_invite_create_prints_url_once_with_warning(mock_cls, mock_config):
     assert "https://memory.kagura-ai.com/invite/tok" in result.output
     assert "shown once" in result.output  # stderr warning (CliRunner merges streams)
     inst.create_invitation.assert_awaited_once_with(
-        WS, "new@x.com", role="member", allowed_context_ids=["ctx-1"], expires_in_days=7
+        WS, "new@x.com", role="member", allowed_context_ids=[CTX], expires_in_days=7
     )
 
 
@@ -350,3 +351,101 @@ def test_client_error_becomes_click_error(mock_cls, mock_config):
     assert result.exit_code != 0
     assert "owner key required" in result.output
     assert "Traceback" not in result.output
+
+
+# ---------------------------------------------------------------------------
+# Bugs found while porting to TypeScript (#285)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("user_id", ["", ".", ".."])
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["workspace", "member", "remove", "{u}"],
+        ["workspace", "member", "remove", "{u}", "--yes"],
+        ["workspace", "member", "set-role", "{u}", "--role", "admin"],
+        ["workspace", "member", "add", "{u}", "--role", "member"],
+    ],
+    ids=["remove", "remove-yes", "set-role", "add"],
+)
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.WorkspaceClient")
+def test_dot_segment_user_id_is_a_usage_error_before_anything_runs(
+    mock_cls, mock_config, argv, user_id
+):
+    """`member remove .. --yes` would DELETE the workspace's own URL."""
+    mock_config.return_value = CONFIG
+    result = CliRunner().invoke(main, [a.format(u=user_id) for a in argv], input="y\n")
+    assert result.exit_code == 2, result.output
+    assert "not a valid user id" in result.output
+    assert "Remove" not in result.output  # no prompt
+    mock_config.assert_not_called()
+    mock_cls._from_resolved_auth.assert_not_called()
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.WorkspaceClient")
+def test_invalid_workspace_is_refused_before_the_prompt(mock_cls, mock_config):
+    mock_config.return_value = CONFIG
+    inst = _mock_client(mock_cls, remove_member=None)
+    result = CliRunner().invoke(
+        main,
+        ["workspace", "member", "remove", "google_2", "--workspace", "not-a-uuid"],
+        input="y\n",
+    )
+    assert result.exit_code == 1, result.output
+    assert "workspace_id must be a UUID, got 'not-a-uuid'" in result.output
+    assert "Remove google_2" not in result.output
+    inst.remove_member.assert_not_called()
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.WorkspaceClient")
+def test_invite_create_prints_a_dash_for_a_null_email(mock_cls, mock_config):
+    """`invite list` prints `-` for the same field."""
+    mock_config.return_value = CONFIG
+    _mock_client(mock_cls, create_invitation=_invitation(email=None, role="admin"))
+    result = CliRunner().invoke(
+        main, ["workspace", "invite", "create", "new@x.com", "--role", "admin"]
+    )
+    assert result.exit_code == 0, result.output
+    assert "Invitation #7 → - (role=admin" in result.output
+    assert "None" not in result.output
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.WorkspaceClient")
+def test_invite_create_refuses_a_non_uuid_context(mock_cls, mock_config):
+    """The server answers a non-UUID context with an HTTP 500."""
+    mock_config.return_value = CONFIG
+    result = CliRunner().invoke(
+        main, ["workspace", "invite", "create", "new@x.com", "-c", CTX, "-c", "ctx-1"]
+    )
+    assert result.exit_code == 2, result.output
+    assert "'--context' / '-c'" in result.output
+    assert "'ctx-1' is not a valid context UUID" in result.output
+    mock_cls._from_resolved_auth.assert_not_called()
+
+
+@pytest.mark.parametrize("value", [123, ["x"], {"a": 1}])
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.WorkspaceClient")
+def test_non_string_config_context_id_reads_as_absent(mock_cls, mock_config, value):
+    """A number there used to print `Error: 'int' object has no attribute 'strip'`."""
+    mock_config.return_value = {**CONFIG, "context_id": value}
+    result = CliRunner().invoke(main, ["workspace", "member", "list"])
+    assert result.exit_code == 1, result.output
+    assert "context_id is missing" in result.output
+    assert "attribute" not in result.output
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.WorkspaceClient")
+def test_non_string_config_context_id_leaves_no_hint(mock_cls, mock_config):
+    """With --workspace the pairing succeeds and the 403 hint gets no workspace."""
+    mock_config.return_value = {**CONFIG, "context_id": 123}
+    _mock_client(mock_cls, list_members=[])
+    result = CliRunner().invoke(main, ["workspace", "member", "list", "-w", WS])
+    assert result.exit_code == 0, result.output
+    assert mock_cls._from_resolved_auth.call_args.kwargs["workspace_id_hint"] is None

@@ -17,7 +17,7 @@ from ._auth import (
     _StaticAuth,
 )
 from ._guardrail_export import write_guardrail_block
-from ._http import normalize_guardrails, validate_lat_lon
+from ._http import normalize_guardrails, normalize_uuid, validate_lat_lon
 from .auth.cli import auth as _auth_group
 from .claude_code import MCP_SERVER_NAME
 from .client import KaguraClient
@@ -2613,6 +2613,12 @@ def resource_import(resource_id, api_key, input_file, fmt, id_column, version, v
 _CONTEXT_ID_AUTO = "auto"
 
 
+def _config_context_id(config: dict[str, Any]) -> str:
+    """``.kagura.json``'s ``context_id``, stripped; a non-string reads as absent (#285)."""
+    value = config.get("context_id")
+    return value.strip() if isinstance(value, str) else ""
+
+
 def _resolve_workspace_from_source(
     auth: _StaticAuth | _OAuthAuth,
     config: dict[str, Any],
@@ -2662,7 +2668,7 @@ def _resolve_workspace_from_source(
     # 3. Static api_key from .kagura.json → workspace must come from the
     #    same .kagura.json (context_id field, not the "auto" sentinel).
     if auth.source == "config":
-        cfg_ctx = (config.get("context_id") or "").strip()
+        cfg_ctx = _config_context_id(config)
         if cfg_ctx and cfg_ctx != _CONTEXT_ID_AUTO:
             return cfg_ctx
         raise click.ClickException(
@@ -2696,7 +2702,7 @@ def _bound_workspace_for_hint(auth: _StaticAuth | _OAuthAuth, config: dict[str, 
     lives in ``.kagura.json``'s ``context_id`` field.
     """
     if isinstance(auth, _StaticAuth) and auth.source == "config":
-        cfg_ctx = (config.get("context_id") or "").strip()
+        cfg_ctx = _config_context_id(config)
         if cfg_ctx and cfg_ctx != _CONTEXT_ID_AUTO:
             return cfg_ctx
     return None
@@ -3047,6 +3053,9 @@ def _run_workspace_command(
         config = load_config()
         auth = _resolve_auth(api_key=None, mcp_url=None, profile=None, config=config)
         ws_id = _resolve_workspace_from_source(auth, config, workspace_id, flag="--workspace")
+        # Checked before the prompt, so nobody confirms against an id that
+        # was never valid (#285); the client normalizes it again.
+        normalize_uuid(ws_id, label="workspace_id")
         if confirm is not None:
             confirm(ws_id)
         client = WorkspaceClient._from_resolved_auth(
@@ -3067,6 +3076,17 @@ def _run_workspace_command(
 
 
 _WORKSPACE_OPT_HELP = "Workspace UUID (default: the credential source's workspace)"
+
+
+def _user_id_param(_ctx: click.Context, _param: click.Parameter, value: str) -> str:
+    """Refuse a user id that cannot be one URL path segment, before anything runs (#285).
+
+    ``.`` and ``..`` survive percent-encoding and URL resolution climbs them:
+    ``member remove ..`` would send ``DELETE /api/v1/workspaces/<ws>``.
+    """
+    if value in ("", ".", ".."):
+        raise click.BadParameter(f"{value!r} is not a valid user id.")
+    return value
 
 
 @main.group()
@@ -3112,7 +3132,7 @@ def member_list(workspace_id: str | None, as_json: bool):
 
 
 @member.command(name="add")
-@click.argument("user_id")
+@click.argument("user_id", callback=_user_id_param)
 @click.option(
     "--role",
     type=click.Choice(["member", "admin", "viewer"]),
@@ -3140,7 +3160,7 @@ def member_add(user_id: str, role: str, workspace_id: str | None):
 
 
 @member.command(name="set-role")
-@click.argument("user_id")
+@click.argument("user_id", callback=_user_id_param)
 @click.option(
     "--role",
     type=click.Choice(["member", "admin", "viewer"]),
@@ -3164,7 +3184,7 @@ def member_set_role(user_id: str, role: str, workspace_id: str | None):
 
 
 @member.command(name="remove")
-@click.argument("user_id")
+@click.argument("user_id", callback=_user_id_param)
 @click.option("--yes", "-y", is_flag=True, default=False, help="Skip confirmation")
 @click.option("--workspace", "-w", "workspace_id", help=_WORKSPACE_OPT_HELP)
 def member_remove(user_id: str, yes: bool, workspace_id: str | None):
@@ -3245,6 +3265,14 @@ def invite_create(
             f"--role {role} requires at least one --context/-c <uuid> "
             "(the invitee's context grant)."
         )
+    for c in context_ids:
+        # The server answers a non-UUID with an HTTP 500 (#285).
+        try:
+            normalize_uuid(c, label="--context")
+        except ValueError:
+            raise click.BadParameter(
+                f"{c!r} is not a valid context UUID.", param_hint="'--context' / '-c'"
+            ) from None
 
     async def op(client: WorkspaceClient, ws: str) -> str:
         inv = await client.create_invitation(
@@ -3260,7 +3288,7 @@ def invite_create(
         )
         expires = inv.expires_at.date().isoformat() if inv.expires_at else "never"
         return (
-            f"Invitation #{inv.id} → {inv.email} (role={inv.role}, expires={expires})\n"
+            f"Invitation #{inv.id} → {inv.email or '-'} (role={inv.role}, expires={expires})\n"
             f"{inv.invitation_url or inv.token or '(no url returned)'}"
         )
 
@@ -3329,6 +3357,7 @@ def invite_revoke(invitation_id: int, workspace_id: str | None):
     "-u",
     "user_id",
     required=True,
+    callback=_user_id_param,
     help="Target member's user id (must hold member/viewer role; not yourself)",
 )
 @click.option("--name", "-n", "key_name", required=True, help="Key name (unique per workspace)")
@@ -3366,7 +3395,14 @@ def auth_create_key(user_id: str, key_name: str, expires_days: int, workspace_id
 
 
 @click.command(name="list-keys")
-@click.option("--user", "-u", "user_id", required=True, help="Target member's user id")
+@click.option(
+    "--user",
+    "-u",
+    "user_id",
+    required=True,
+    callback=_user_id_param,
+    help="Target member's user id",
+)
 @click.option("--json", "as_json", is_flag=True, default=False, help="Raw JSON output")
 @click.option("--workspace", "-w", "workspace_id", help=_WORKSPACE_OPT_HELP)
 def auth_list_keys(user_id: str, as_json: bool, workspace_id: str | None):
@@ -3400,7 +3436,14 @@ def auth_list_keys(user_id: str, as_json: bool, workspace_id: str | None):
 
 @click.command(name="revoke-key")
 @click.argument("key_id", type=int)
-@click.option("--user", "-u", "user_id", required=True, help="The member the key belongs to")
+@click.option(
+    "--user",
+    "-u",
+    "user_id",
+    required=True,
+    callback=_user_id_param,
+    help="The member the key belongs to",
+)
 @click.option("--yes", "-y", is_flag=True, default=False, help="Skip confirmation")
 @click.option("--workspace", "-w", "workspace_id", help=_WORKSPACE_OPT_HELP)
 def auth_revoke_key(key_id: int, user_id: str, yes: bool, workspace_id: str | None):
