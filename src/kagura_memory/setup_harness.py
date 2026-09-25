@@ -747,10 +747,15 @@ class _HermesEntry:
         return "an entry setup does not recognise"
 
     def is_(self, entry: _Entry) -> bool:
-        """True when this is ``entry``: its command and args, or its url."""
+        """True when this is ``entry``: its command and args, or its url.
+
+        An ``auth: oauth`` entry is never a header ``entry`` at the same url:
+        ``hermes mcp add --auth header`` does not write ``auth``, so it is the
+        entry Hermes kept (#287).
+        """
         if entry.command is not None:
             return self.url is None and (self.command, self.args) == (entry.command, entry.args)
-        return self.url == entry.url
+        return self.url == entry.url and (entry.oauth or not self.oauth)
 
 
 class _Hermes(_Harness):
