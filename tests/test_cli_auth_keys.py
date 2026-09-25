@@ -140,3 +140,42 @@ def test_revoke_key_yes_skips_prompt(mock_cls, mock_config):
     assert result.exit_code == 0, result.output
     assert "Revoked key #42" in result.output
     inst.revoke_member_key.assert_awaited_once_with(WS, "google_2", 42)
+
+
+@pytest.mark.parametrize("user_id", ["", ".", ".."])
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["auth", "create-key", "--user", "{u}", "--name", "ci", "--expires-days", "30"],
+        ["auth", "list-keys", "--user", "{u}"],
+        ["auth", "revoke-key", "42", "--user", "{u}"],
+        ["auth", "revoke-key", "42", "--user", "{u}", "--yes"],
+    ],
+    ids=["create-key", "list-keys", "revoke-key", "revoke-key-yes"],
+)
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.WorkspaceClient")
+def test_dot_segment_user_is_a_usage_error_before_anything_runs(
+    mock_cls, mock_config, argv, user_id
+):
+    """`--user ..` would address another endpoint (#285)."""
+    mock_config.return_value = CONFIG
+    result = CliRunner().invoke(main, [a.format(u=user_id) for a in argv], input="y\n")
+    assert result.exit_code == 2, result.output
+    assert "not a valid user id" in result.output
+    mock_config.assert_not_called()
+    mock_cls._from_resolved_auth.assert_not_called()
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.WorkspaceClient")
+def test_revoke_key_refuses_an_invalid_workspace_before_the_prompt(mock_cls, mock_config):
+    mock_config.return_value = CONFIG
+    inst = _mock_client(mock_cls, revoke_member_key=None)
+    result = CliRunner().invoke(
+        main, ["auth", "revoke-key", "42", "--user", "google_2", "-w", "nope"], input="y\n"
+    )
+    assert result.exit_code == 1, result.output
+    assert "workspace_id must be a UUID" in result.output
+    assert "Revoke key" not in result.output
+    inst.revoke_member_key.assert_not_called()

@@ -26,6 +26,7 @@ from kagura_memory.workspace_client import (
 )
 
 WS = "11111111-2222-3333-4444-555555555555"
+CTX = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 
 
 # ---------------------------------------------------------------------------
@@ -247,7 +248,7 @@ async def test_create_invitation():
         assert json.loads(request.content) == {
             "email": "new@x.com",
             "role": "member",
-            "allowed_context_ids": ["ctx-1"],
+            "allowed_context_ids": [CTX],
             "expires_in_days": 7,
         }
         return httpx.Response(
@@ -265,9 +266,17 @@ async def test_create_invitation():
 
     async with make_client(handler) as c:
         inv = await c.create_invitation(
-            WS, "new@x.com", allowed_context_ids=["ctx-1"], expires_in_days=7
+            WS, "new@x.com", allowed_context_ids=[CTX.upper()], expires_in_days=7
         )
     assert inv.id == 7 and inv.invitation_url is not None
+
+
+@pytest.mark.asyncio
+async def test_create_invitation_rejects_a_non_uuid_context_before_the_wire():
+    """The server answers a non-UUID context with an HTTP 500 (#285)."""
+    async with make_client(lambda r: httpx.Response(500)) as c:
+        with pytest.raises(ValueError, match="allowed_context_ids must be a UUID"):
+            await c.create_invitation(WS, "new@x.com", allowed_context_ids=[CTX, "ctx-1"])
 
 
 @pytest.mark.asyncio
@@ -530,6 +539,47 @@ async def test_member_key_user_id_segment_encoded():
     async with make_client(handler) as c:
         await c.list_member_keys(WS, "a/b#c")
     assert "a%2Fb%23c" in seen["path"]
+
+
+@pytest.mark.parametrize("user_id", ["", ".", ".."])
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda c, u: c.add_member(WS, u),
+        lambda c, u: c.update_member_role(WS, u, role="member"),
+        lambda c, u: c.remove_member(WS, u),
+        lambda c, u: c.mint_member_key(WS, u, "k", 30),
+        lambda c, u: c.list_member_keys(WS, u),
+        lambda c, u: c.revoke_member_key(WS, u, 1),
+    ],
+    ids=["add", "set-role", "remove", "mint", "list-keys", "revoke-key"],
+)
+@pytest.mark.asyncio
+async def test_dot_segment_user_ids_are_refused_before_the_wire(call, user_id):
+    """``remove_member(ws, "..")`` would DELETE the workspace's own URL (#285)."""
+    sent = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(request)
+        return httpx.Response(204)
+
+    async with make_client(handler) as c:
+        with pytest.raises(ValueError, match="user_id must not be"):
+            await call(c, user_id)
+    assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_a_user_id_holding_dots_stays_one_segment():
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.raw_path.decode()
+        return httpx.Response(204)
+
+    async with make_client(handler) as c:
+        await c.remove_member(WS, "../x")
+    assert seen["path"] == f"/api/v1/workspaces/{WS}/members/..%2Fx"
 
 
 # ---------------------------------------------------------------------------

@@ -8,7 +8,7 @@ from collections.abc import Collection, Mapping
 from datetime import UTC, datetime, time, timedelta
 from importlib.metadata import version as _pkg_version
 from typing import Any, NoReturn, TypeVar
-from urllib.parse import parse_qsl, unquote_plus, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, quote, unquote_plus, urlencode, urlsplit, urlunsplit
 
 import httpx
 from pydantic import BaseModel, ValidationError
@@ -644,6 +644,26 @@ def normalize_uuid(value: object, *, label: str) -> str:
         return str(uuid.UUID(str(value)))
     except (ValueError, TypeError) as exc:
         raise ValueError(f"{label} must be a UUID, got {value!r}") from exc
+
+
+def path_segment(value: str, *, label: str) -> str:
+    """``value`` percent-encoded as ONE segment of a REST path.
+
+    Encoded whole, so a ``/``, ``?``, ``#`` or ``%`` stays inside the
+    segment. ``.``, ``..`` and the empty string are refused instead: no
+    encoding changes them, and URL resolution then drops or climbs the
+    segment — ``remove_member(ws, "..")`` would send ``DELETE`` to
+    ``/api/v1/workspaces/<ws>``, the workspace itself (#285).
+
+    Raises:
+        ValueError: If ``value`` is empty, ``.`` or ``..``.
+    """
+    if value in ("", ".", ".."):
+        raise ValueError(
+            f"{label} must not be {value!r}: as a URL path segment it would "
+            "address a different endpoint"
+        )
+    return quote(value, safe="")
 
 
 def validate_coordinate(label: str, value: object, limit: int) -> None:

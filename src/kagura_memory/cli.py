@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import math
 import sys
 from collections.abc import Awaitable, Callable
 from datetime import datetime
@@ -17,7 +18,7 @@ from ._auth import (
     _StaticAuth,
 )
 from ._guardrail_export import write_guardrail_block
-from ._http import normalize_guardrails, validate_lat_lon
+from ._http import normalize_guardrails, normalize_uuid, path_segment, validate_lat_lon
 from .auth.cli import auth as _auth_group
 from .claude_code import MCP_SERVER_NAME
 from .client import KaguraClient
@@ -46,6 +47,20 @@ from .setup_harness import HarnessName, run_setup_harness
 from .workspace_client import WorkspaceClient
 
 _PROGRESS_CHOICES = ["rich", "json", "none"]
+
+
+class _FloatRange(click.FloatRange):
+    """``click.FloatRange`` that refuses NaN (#285).
+
+    Every comparison with NaN is false, so click's range check lets ``nan``
+    through, and it was sent as the value.
+    """
+
+    def convert(self, value: Any, param: click.Parameter | None, ctx: click.Context | None) -> Any:
+        rv = super().convert(value, param, ctx)
+        if math.isnan(rv):
+            self.fail(f"{rv} is not in the range {self._describe_range()}.", param, ctx)
+        return rv
 
 
 def _resolve_progress_logger(verbose: int, progress: str | None) -> VerboseLogger | None:
@@ -410,6 +425,7 @@ def remember(
     rejects string-typed lat/lon with a 422 by design. Note that updating a
     memory replaces details wholesale, so re-send location when you revise it.
 
+    \b
     Examples:
       kagura remember -s "FastAPI DI pattern" --content "Use Depends()..."
       kagura remember -c dev -s "OAuth2 setup" --content "..." --tags "auth,oauth"
@@ -463,6 +479,7 @@ def recall(query, context_id, k, rerank, trusted_only):
     config (memory-cloud v0.69.0+). --rerank applies only when the context
     enables reranking; --no-rerank always skips it.
 
+    \b
     Examples:
       kagura recall "FastAPI dependency injection"
       kagura recall "OAuth2 implementation" -k 10
@@ -488,6 +505,7 @@ def explore(context_id, memory_id, depth, min_weight):
     """
     Explore related memories via Neural Memory graph.
 
+    \b
     Examples:
       kagura explore -m "abc-123-def"
       kagura explore -c dev -m "abc-123" --depth 3
@@ -543,7 +561,7 @@ def explore(context_id, memory_id, depth, min_weight):
 @click.option(
     "--importance",
     "-i",
-    type=click.FloatRange(0.0, 1.0),
+    type=_FloatRange(0.0, 1.0),
     default=0.7,
     show_default=True,
     help="Importance 0.0-1.0 for the overview memory; sections inherit lower.",
@@ -658,6 +676,7 @@ def ingest_file(
     describe_image() yet. Pass --no-vision to skip vision-provider
     configuration entirely.
 
+    \b
     Examples:
       kagura ingest https://example.com/report.pdf
       kagura ingest ./report.pdf --tags "Q1,report"
@@ -777,6 +796,7 @@ def reference(context_id, memory_id):
     """
     Get full details of a specific memory.
 
+    \b
     Examples:
       kagura reference -m "abc-123-def"
       kagura reference -c dev -m "abc-123-def"
@@ -819,6 +839,7 @@ def update_memory(
 
     Use --memory-id for in-place update, or --external-id for upsert.
 
+    \b
     Examples:
       kagura update-memory -m MEM_UUID -s "updated summary"
       kagura update-memory --external-id ext-key -s "summary" --content "..." -t note
@@ -866,6 +887,7 @@ def forget(context_id, memory_id, query, k):
     Use --memory-id for specific deletion or --query for bulk deletion.
     The server refuses --query while recall is degraded (keyword-only).
 
+    \b
     Examples:
       kagura forget -m "abc-123-def"
       kagura forget -q "outdated test data" -k 5
@@ -904,6 +926,7 @@ def context_list(name_contains, summary, details, stats):
     Rows are slim by default (id, name, is_private, is_locked, last_used_at);
     memory-cloud v0.73.0+ is needed for --name-contains/--summary/--details.
 
+    \b
     Examples:
       kagura context list
       kagura context list --name-contains auth --summary
@@ -932,6 +955,7 @@ def context_create(name, display_name, description, summary, usage_guide, public
     """
     Create a new context.
 
+    \b
     Examples:
       kagura context create -n my-project
       kagura context create -n dev -d "Development notes" -s "Project dev context"
@@ -957,6 +981,7 @@ def context_delete(context_id, yes):
     """
     Soft-delete a context and all its memories.
 
+    \b
     Examples:
       kagura context delete CTX_UUID
       kagura context delete CTX_UUID -y
@@ -982,6 +1007,7 @@ def context_update(context_id, display_name, description, summary, usage_guide, 
     """
     Update a context's settings.
 
+    \b
     Examples:
       kagura context update CTX_UUID -s "Updated summary"
       kagura context update CTX_UUID --lock
@@ -1006,8 +1032,8 @@ def context_update(context_id, display_name, description, summary, usage_guide, 
 
 @context.command(name="search-config")
 @click.argument("context_id")
-@click.option("--semantic", type=click.FloatRange(0.0, 1.0), help="Semantic weight (0.0-1.0)")
-@click.option("--bm25", type=click.FloatRange(0.0, 1.0), help="BM25 weight (0.0-1.0)")
+@click.option("--semantic", type=_FloatRange(0.0, 1.0), help="Semantic weight (0.0-1.0)")
+@click.option("--bm25", type=_FloatRange(0.0, 1.0), help="BM25 weight (0.0-1.0)")
 @click.option("--fetch-factor", type=click.IntRange(1, 10), help="Fetch multiplier (1-10)")
 @click.option("--rerank/--no-rerank", default=None, help="Enable/disable reranking")
 @click.option(
@@ -1024,6 +1050,7 @@ def context_search_config(
 
     Weights must sum to 1.0.
 
+    \b
     Examples:
       kagura context search-config CTX_UUID --semantic 0.5 --bm25 0.5
       kagura context search-config CTX_UUID --rerank --reranker voyage
@@ -1093,6 +1120,7 @@ def edge_list(context_id, memory_id, min_weight, edge_types, limit):
     """
     List edges connected to a memory.
 
+    \b
     Examples:
       kagura edge list CTX_UUID MEM_UUID
       kagura edge list CTX_UUID MEM_UUID --min-weight 0.5 --type related_to
@@ -1128,6 +1156,7 @@ def edge_create(context_id, source_id, target_id, edge_type, weight, confidence)
     UPSERT semantics (existing weight is replaced only when the new weight is
     higher). Self-loops are rejected.
 
+    \b
     Examples:
       kagura edge create CTX_UUID SRC_UUID TGT_UUID
       kagura edge create CTX_UUID SRC_UUID TGT_UUID --type depends_on --weight 0.8
@@ -1159,6 +1188,7 @@ def edge_update(context_id, source_id, target_id, weight, edge_type):
 
     At least one of --weight or --type must be provided.
 
+    \b
     Examples:
       kagura edge update CTX_UUID SRC_UUID TGT_UUID --weight 0.9
       kagura edge update CTX_UUID SRC_UUID TGT_UUID --type related_to --weight 0.7
@@ -1188,6 +1218,7 @@ def edge_delete(context_id, source_id, target_id, yes):
     """
     Delete the edge between SOURCE_ID and TARGET_ID.
 
+    \b
     Examples:
       kagura edge delete CTX_UUID SRC_UUID TGT_UUID
       kagura edge delete CTX_UUID SRC_UUID TGT_UUID -y
@@ -1304,6 +1335,17 @@ def sleep_rollback(context_id, report_id, yes):
 # =============================================================================
 
 
+def _nonblank_path_option(ctx, param, value: Path | None) -> Path | None:
+    """Refuse an empty or whitespace-only file name as a usage error (#285).
+
+    ``click.Path`` turns ``''`` into ``Path('.')``, which only failed at the
+    write (``Is a directory``); a blank name would create a file called ``' '``.
+    """
+    if value is not None and (value == Path() or not str(value).strip()):
+        raise click.BadParameter("the path is blank; name a file")
+    return value
+
+
 @main.group()
 def guardrails():
     """Inspect a context's tool guardrails (server v0.74.0+)."""
@@ -1325,6 +1367,7 @@ def guardrails_load(context_id, cap):
     pinned_truncated / tool_triggered_truncated before trusting the set as
     complete.
 
+    \b
     Examples:
       kagura guardrails load
       kagura guardrails load CTX_UUID --cap 200
@@ -1350,6 +1393,7 @@ def guardrails_load(context_id, cap):
     "--out",
     "out_path",
     type=click.Path(dir_okay=False, path_type=Path),
+    callback=_nonblank_path_option,
     help="Write the export block into FILE (e.g. AGENTS.md) instead of printing it",
 )
 @click.option(
@@ -1379,6 +1423,7 @@ def guardrails_digest(context_id, target, out_path, profile, tools):
     a URL with ?profile= or ?tools=, repeat them with --profile / --tools:
     they decide which tool the truncation note names.
 
+    \b
     Examples:
       kagura guardrails digest CTX_UUID
       kagura guardrails digest CTX_UUID --out AGENTS.md
@@ -1552,6 +1597,38 @@ def _guardrails_option(ctx, param, value: str | None) -> str | None:
         return normalize_guardrails(value)
     except ValueError as e:
         raise click.BadParameter(str(e)) from None
+
+
+class _HarnessCommand(click.Command):
+    """``kagura setup <harness>``: ``--agents-md=VALUE`` takes VALUE as written (#285).
+
+    click reads an option whose value may be left out (``is_flag=False``,
+    ``flag_value``) by pushing an ``=VALUE`` back onto the arguments, and then
+    parses a VALUE that starts with ``-`` as the next option: ``--agents-md=-y``
+    wrote the default file and silently set ``-y``. Such a VALUE is passed as
+    ``./VALUE``, the same path.
+    """
+
+    def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
+        end = args.index("--") if "--" in args else len(args)
+        args = [
+            a.replace("=-", "=./-", 1) if i < end and a.startswith("--agents-md=-") else a
+            for i, a in enumerate(args)
+        ]
+        return super().parse_args(ctx, args)
+
+
+def _agents_md_option(ctx, param, value: str | None) -> str | None:
+    """``--agents-md``: None when absent, ``""`` for the harness's default file, else PATH.
+
+    A PATH of only whitespace is refused, rather than creating a file named
+    ``' '`` (#285).
+    """
+    if value and not value.strip():
+        raise click.BadParameter(
+            "the path is blank; name a file, or give --agents-md alone for the default one"
+        )
+    return value
 
 
 def _tool_profile_option(ctx, param, value: str | None) -> str | None:
@@ -1739,9 +1816,11 @@ _HARNESS_AGENTS_MD_HELP = {
     ),
     "hermes": (
         "Write the context's tool guardrail export block into PATH (default: the context "
-        "file Hermes loads here, the first of .hermes.md, HERMES.md, AGENTS.override.md, "
-        "AGENTS.md, CLAUDE.md, else AGENTS.md). An interactive run offers it. Only the "
-        "marked block changes."
+        "file Hermes loads from here: the nearest .hermes.md or HERMES.md up to the git "
+        "root, else this directory's AGENTS file, else its CLAUDE.md, else a new "
+        "AGENTS.md; none when only Cursor rules load, which a new AGENTS.md would stop "
+        "loading). An interactive run offers it. Only the marked block changes; an empty "
+        "set removes it."
     ),
     "openclaw": (
         "Write the context's tool guardrail export block into PATH (default AGENTS.md in "
@@ -1831,6 +1910,7 @@ def _harness_command(harness: HarnessName):
                 flag_value="",
                 default=None,
                 metavar="[PATH]",
+                callback=_agents_md_option,
                 help=_HARNESS_AGENTS_MD_HELP[harness],
             ),
             click.option(
@@ -1868,7 +1948,7 @@ def _harness_command(harness: HarnessName):
         ]
         for option in reversed(options):
             f = option(f)
-        return setup.command(name=harness)(f)
+        return setup.command(name=harness, cls=_HarnessCommand)(f)
 
     return decorate
 
@@ -1935,8 +2015,12 @@ def setup_hermes(**params):
     your `kagura auth login` profile.
 
     Hermes does not read MCP instructions: guardrails reach it through
-    get_context_info (on by default) and, if you choose, an AGENTS.md
-    export block (--agents-md; an interactive run offers it).
+    get_context_info (on by default) and, if you choose, an export block
+    (--agents-md; an interactive run offers it) in the context file Hermes
+    loads from this directory, so a user's own file keeps loading. Hermes
+    loads only the first type it finds (.hermes.md/HERMES.md, AGENTS files,
+    CLAUDE.md, Cursor rules); with only Cursor rules, name a file with
+    --agents-md PATH.
 
     With --url-form --oauth (memory-cloud 0.77.0+, whose client registration
     accepts Hermes Agent; setup checks the version first), the entry is a
@@ -2101,6 +2185,7 @@ def tokens_list(resource_id, limit):
     """
     List resource tokens.
 
+    \b
     Examples:
       kagura resource tokens list
       kagura resource tokens list --resource-id products
@@ -2123,6 +2208,7 @@ def tokens_create(resource_id, description, quota):
 
     The token is shown ONLY once — save it immediately.
 
+    \b
     Examples:
       kagura resource tokens create -r products
       kagura resource tokens create -r slack-messages -d "Slack integration" -q 5000
@@ -2147,6 +2233,7 @@ def tokens_update(token_id, description, quota):
     """
     Update a resource token.
 
+    \b
     Examples:
       kagura resource tokens update 42 -d "New description"
       kagura resource tokens update 42 -q 2000
@@ -2171,6 +2258,7 @@ def tokens_revoke(token_id):
     """
     Revoke (soft-delete) a resource token.
 
+    \b
     Examples:
       kagura resource tokens revoke 42
     """
@@ -2194,6 +2282,7 @@ def ingest(resource_id, api_key, doc_id, op, version, payload, importance):
     """
     Ingest a single resource event.
 
+    \b
     Examples:
       kagura resource ingest -r products -k KEY --doc-id SKU-001 -p '{"name":"Widget","price":9.99}'
       kagura resource ingest -r products -k KEY --doc-id SKU-999 --op delete
@@ -2228,6 +2317,7 @@ def ingest_batch(resource_id, api_key, file):
 
     The file should contain a JSON array of event objects.
 
+    \b
     Examples:
       kagura resource ingest-batch -r products -k KEY -f events.json
     """
@@ -2254,6 +2344,7 @@ def resource_stats(resource_id):
     """
     Show resource impact statistics.
 
+    \b
     Examples:
       kagura resource stats -r products
     """
@@ -2270,6 +2361,7 @@ def resource_list():
     """
     List all resources in the workspace (owner only).
 
+    \b
     Examples:
       kagura resource list
     """
@@ -2290,6 +2382,7 @@ def resource_indexer_status(resource_id):
     The ``state`` field is null when the indexer has never run for this
     resource (this is a normal 200 response, distinct from a 404).
 
+    \b
     Examples:
       kagura resource indexer-status -r products
     """
@@ -2318,6 +2411,7 @@ def resource_events(resource_id, limit, cursor, op, doc_id, version, since):
     The response includes a ``next_cursor``; pass it back via --cursor to
     page forward (null on the last page).
 
+    \b
     Examples:
       kagura resource events products
       kagura resource events products --op upsert --limit 20
@@ -2356,6 +2450,7 @@ def resource_schema(resource_id, schema_version):
     """
     Show resource field definitions (schema).
 
+    \b
     Examples:
       kagura resource schema -r products
       kagura resource schema -r products -v 2
@@ -2401,6 +2496,7 @@ def resource_setup(resource_id, name, summary, description, quota):
     """
     One-shot resource setup: create context + set resource_id + create token.
 
+    \b
     Examples:
       kagura resource setup -r products
       kagura resource setup -r products -n product-catalog
@@ -2452,6 +2548,7 @@ def resource_import(resource_id, api_key, input_file, fmt, id_column, version, v
     Auto-detects format from file extension, or specify --format.
     Each row/object becomes a resource event with op=upsert.
 
+    \b
     Examples:
       kagura resource import -r products -k TOKEN -f products.csv
       kagura resource import -r products -k TOKEN -f data.jsonl
@@ -2511,7 +2608,8 @@ def resource_import(resource_id, api_key, input_file, fmt, id_column, version, v
     if not rows:
         raise click.ClickException("No data found in input")
 
-    # Build events
+    # Build events. A bad row is a ClickException naming it, never a
+    # pydantic traceback (#285).
     events = []
     for i, row in enumerate(rows):
         if id_column:
@@ -2520,8 +2618,16 @@ def resource_import(resource_id, api_key, input_file, fmt, id_column, version, v
                     f"Row {i + 1}: column '{id_column}' not found. Keys: {list(row.keys())}"
                 )
             doc_id = str(row[id_column])
+            if not 1 <= len(doc_id) <= 255:
+                raise click.ClickException(
+                    f"Row {i + 1}: doc_id from column '{id_column}' must be 1-255 "
+                    f"characters, got {len(doc_id)}."
+                )
         else:
             doc_id = str(i + 1)
+        if None in row:
+            # csv.DictReader files a row's cells past the header under None.
+            raise click.ClickException(f"Row {i + 1}: more fields than the header has columns.")
         events.append(
             ResourceEventRequest(
                 op="upsert",
@@ -2532,19 +2638,6 @@ def resource_import(resource_id, api_key, input_file, fmt, id_column, version, v
         )
 
     logger = _resolve_progress_logger(verbose, progress)
-    # Pre-flight announcement: keep stdout strictly machine-readable (the
-    # JSON output below) by routing the human-readable count to stderr.
-    # Suppress entirely when progress is silent (--progress=none, or no -v
-    # and no --progress) so scripts piping stderr to /dev/null see nothing
-    # unexpected; otherwise emit it as a structured "start" action through
-    # the logger so the rich path stays consistent and json consumers get
-    # a parseable event.
-    if logger is not None:
-        logger.action(
-            "Importing events",
-            f"{len(events)} event(s)",
-            stage="import_start",
-        )
 
     # Batch ingest (100 at a time). The CLI command is ONE user-facing
     # operation, so it must emit exactly one terminal event. ``ingest_events``
@@ -2555,6 +2648,20 @@ def resource_import(resource_id, api_key, input_file, fmt, id_column, version, v
     # per-batch progress here at the CLI level, and close with one terminal
     # event at the very end covering the whole import.
     async def op(client: ResourceClient) -> str:
+        # Pre-flight announcement: keep stdout strictly machine-readable (the
+        # JSON output below) by routing the human-readable count to stderr.
+        # Suppress entirely when progress is silent (--progress=none, or no -v
+        # and no --progress) so scripts piping stderr to /dev/null see nothing
+        # unexpected; otherwise emit it as a structured "start" action through
+        # the logger so the rich path stays consistent and json consumers get
+        # a parseable event. Only here, once the client is built: from this
+        # event on the stream ends with exactly one success or error (#285).
+        if logger is not None:
+            logger.action(
+                "Importing events",
+                f"{len(events)} event(s)",
+                stage="import_start",
+            )
         total_created = 0
         total_failed = 0
         all_errors: list[dict] = []
@@ -2575,7 +2682,7 @@ def resource_import(resource_id, api_key, input_file, fmt, id_column, version, v
         except BaseException as e:
             if logger is not None:
                 logger.error(
-                    f"Import failed: {e}",
+                    f"Import failed: {_exc_message(e)}",
                     stage="complete",
                     detail={
                         "created_so_far": total_created,
@@ -2611,6 +2718,12 @@ def resource_import(resource_id, api_key, input_file, fmt, id_column, version, v
 # at runtime." Defined as a constant so the CLI, tests, and any future
 # config writer share one source of truth and cannot drift.
 _CONTEXT_ID_AUTO = "auto"
+
+
+def _config_context_id(config: dict[str, Any]) -> str:
+    """``.kagura.json``'s ``context_id``, stripped; a non-string reads as absent (#285)."""
+    value = config.get("context_id")
+    return value.strip() if isinstance(value, str) else ""
 
 
 def _resolve_workspace_from_source(
@@ -2662,7 +2775,7 @@ def _resolve_workspace_from_source(
     # 3. Static api_key from .kagura.json → workspace must come from the
     #    same .kagura.json (context_id field, not the "auto" sentinel).
     if auth.source == "config":
-        cfg_ctx = (config.get("context_id") or "").strip()
+        cfg_ctx = _config_context_id(config)
         if cfg_ctx and cfg_ctx != _CONTEXT_ID_AUTO:
             return cfg_ctx
         raise click.ClickException(
@@ -2696,7 +2809,7 @@ def _bound_workspace_for_hint(auth: _StaticAuth | _OAuthAuth, config: dict[str, 
     lives in ``.kagura.json``'s ``context_id`` field.
     """
     if isinstance(auth, _StaticAuth) and auth.source == "config":
-        cfg_ctx = (config.get("context_id") or "").strip()
+        cfg_ctx = _config_context_id(config)
         if cfg_ctx and cfg_ctx != _CONTEXT_ID_AUTO:
             return cfg_ctx
     return None
@@ -2818,6 +2931,28 @@ async def _remember_file_object(
     return result
 
 
+class _HeldSuccessLogger(VerboseLogger):
+    """A :class:`VerboseLogger` that holds its ``success`` event until :meth:`release`.
+
+    Every other event goes out as the wrapped logger would send it.
+    """
+
+    def __init__(self, inner: VerboseLogger) -> None:
+        super().__init__(inner.level, inner._console, output_format=inner.output_format)
+        self._held: tuple[str, str | None, dict[str, Any] | None] | None = None
+
+    def success(
+        self, message: str, *, stage: str | None = None, detail: dict[str, Any] | None = None
+    ) -> None:
+        self._held = (message, stage, detail)
+
+    def release(self) -> None:
+        """Send the held ``success`` event, if there is one."""
+        if self._held is not None:
+            message, stage, detail = self._held
+            super().success(message, stage=stage, detail=detail)
+
+
 @files.command(name="upload")
 @click.argument("path", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option("--context-id", "-c", help="Target context (workspace) UUID")
@@ -2852,7 +2987,7 @@ async def _remember_file_object(
 )
 @click.option(
     "--importance",
-    type=click.FloatRange(0.0, 1.0),
+    type=_FloatRange(0.0, 1.0),
     default=0.5,
     show_default=True,
     help="Importance 0.0-1.0 for the --remember memory.",
@@ -2894,6 +3029,7 @@ def files_upload(
     invoking an LLM — works for binaries and keyless environments. For
     LLM-extracted section memories use `kagura ingest` instead.
 
+    \b
     Examples:
       kagura files upload ./report.pdf --context-id ctx-uuid
       kagura files upload ./diagram.png --remember --tags "design,arch"
@@ -2904,6 +3040,10 @@ def files_upload(
         raise click.UsageError("--summary and --tags require --remember.")
 
     logger = _resolve_progress_logger(verbose, progress)
+    # With --remember the upload is not the whole command: its success is
+    # held until the memory is written, so a stream that ends in success
+    # never belongs to a command that failed (#285).
+    upload_logger = _HeldSuccessLogger(logger) if remember and logger is not None else logger
 
     async def op(client: FilesClient, ctx: str) -> str:
         file_obj = await client.upload(
@@ -2911,7 +3051,7 @@ def files_upload(
             source=path,
             content_type=content_type,
             binding_context_id=binding_context_id,
-            logger=logger,
+            logger=upload_logger,
         )
         if not remember:
             return file_obj.model_dump_json(indent=2)
@@ -2919,17 +3059,30 @@ def files_upload(
             memory = await _remember_file_object(
                 ctx, path, file_obj, summary, memory_type, importance, tags
             )
-        except Exception as e:
+        except BaseException as e:  # Ctrl-C too: the stream still ends in an error
             # The upload already succeeded — surface the file_id so the user
             # knows the file_object exists and does not re-upload a duplicate.
-            raise click.ClickException(
-                _cli_error_message(
-                    e,
-                    f"File uploaded (file_id={file_obj.id}), but creating the linked "
-                    f"memory failed: {_exc_message(e)}. The file_object is stored; "
-                    f"retry the memory write separately or reference it by file_id.",
+            message = (
+                f"File uploaded (file_id={file_obj.id}), but creating the linked "
+                f"memory failed: {_exc_message(e)}. The file_object is stored; "
+                f"retry the memory write separately or reference it by file_id."
+            )
+            if logger is not None:
+                logger.error(
+                    message,
+                    stage="complete",
+                    detail={
+                        "reserved_file_id": file_obj.id,
+                        "uploaded": True,
+                        "confirm_started": True,
+                        "confirmed": True,
+                    },
                 )
-            ) from e
+            if not isinstance(e, Exception):
+                raise
+            raise click.ClickException(_cli_error_message(e, message)) from e
+        if isinstance(upload_logger, _HeldSuccessLogger):
+            upload_logger.release()
         return json.dumps(
             {"file": file_obj.model_dump(mode="json"), "memory": memory},
             indent=2,
@@ -2949,6 +3102,7 @@ def files_download_url(file_id: str, context_id: str | None):
     The owning context (workspace) is required (server v0.41.0): pass
     ``--context-id`` or set it in your OAuth profile / .kagura.json.
 
+    \b
     Example:
       kagura files download-url <file_id> -c <context-id>
     """
@@ -2969,6 +3123,7 @@ def files_delete(file_id: str, context_id: str | None):
     The owning context (workspace) is required (server v0.41.0): pass
     ``--context-id`` or set it in your OAuth profile / .kagura.json.
 
+    \b
     Example:
       kagura files delete <file_id> -c <context-id>
     """
@@ -2994,6 +3149,7 @@ def files_list(context_id: str | None, limit: int, cursor: str | None):
     """
     List uploaded files in a context, newest first.
 
+    \b
     Example:
       kagura files list --context-id ctx-uuid
     """
@@ -3047,6 +3203,9 @@ def _run_workspace_command(
         config = load_config()
         auth = _resolve_auth(api_key=None, mcp_url=None, profile=None, config=config)
         ws_id = _resolve_workspace_from_source(auth, config, workspace_id, flag="--workspace")
+        # Checked before the prompt, so nobody confirms against an id that
+        # was never valid (#285).
+        ws_id = normalize_uuid(ws_id, label="workspace_id")
         if confirm is not None:
             confirm(ws_id)
         client = WorkspaceClient._from_resolved_auth(
@@ -3067,6 +3226,28 @@ def _run_workspace_command(
 
 
 _WORKSPACE_OPT_HELP = "Workspace UUID (default: the credential source's workspace)"
+
+
+def _user_id_param(_ctx: click.Context, _param: click.Parameter, value: str) -> str:
+    """Refuse a user id :func:`path_segment` refuses, before anything runs (#285)."""
+    try:
+        path_segment(value, label="user id")
+    except ValueError:
+        raise click.BadParameter(f"{value!r} is not a valid user id.") from None
+    return value
+
+
+def _context_uuids_param(
+    _ctx: click.Context, _param: click.Parameter, value: tuple[str, ...]
+) -> tuple[str, ...]:
+    """``--context`` values as canonical UUIDs: a non-UUID got HTTP 500 from the server (#285)."""
+    canonical = []
+    for c in value:
+        try:
+            canonical.append(normalize_uuid(c, label="--context"))
+        except ValueError:
+            raise click.BadParameter(f"{c!r} is not a valid context UUID.") from None
+    return tuple(canonical)
 
 
 @main.group()
@@ -3092,6 +3273,7 @@ def member_list(workspace_id: str | None, as_json: bool):
     """
     List workspace members with role, email, and join date.
 
+    \b
     Example:
       kagura workspace member list -w <workspace-uuid>
     """
@@ -3112,7 +3294,7 @@ def member_list(workspace_id: str | None, as_json: bool):
 
 
 @member.command(name="add")
-@click.argument("user_id")
+@click.argument("user_id", callback=_user_id_param)
 @click.option(
     "--role",
     type=click.Choice(["member", "admin", "viewer"]),
@@ -3128,6 +3310,7 @@ def member_add(user_id: str, role: str, workspace_id: str | None):
     creates a dangling membership row. Prefer
     `kagura workspace invite create <email>` for onboarding.
 
+    \b
     Example:
       kagura workspace member add google_1234 --role member
     """
@@ -3140,7 +3323,7 @@ def member_add(user_id: str, role: str, workspace_id: str | None):
 
 
 @member.command(name="set-role")
-@click.argument("user_id")
+@click.argument("user_id", callback=_user_id_param)
 @click.option(
     "--role",
     type=click.Choice(["member", "admin", "viewer"]),
@@ -3152,6 +3335,7 @@ def member_set_role(user_id: str, role: str, workspace_id: str | None):
     """
     Change a member's role.
 
+    \b
     Example:
       kagura workspace member set-role google_1234 --role admin
     """
@@ -3164,7 +3348,7 @@ def member_set_role(user_id: str, role: str, workspace_id: str | None):
 
 
 @member.command(name="remove")
-@click.argument("user_id")
+@click.argument("user_id", callback=_user_id_param)
 @click.option("--yes", "-y", is_flag=True, default=False, help="Skip confirmation")
 @click.option("--workspace", "-w", "workspace_id", help=_WORKSPACE_OPT_HELP)
 def member_remove(user_id: str, yes: bool, workspace_id: str | None):
@@ -3173,6 +3357,7 @@ def member_remove(user_id: str, yes: bool, workspace_id: str | None):
 
     Prompts for confirmation unless --yes is passed.
 
+    \b
     Example:
       kagura workspace member remove google_1234 --yes
     """
@@ -3212,6 +3397,7 @@ def invite():
     "-c",
     "context_ids",
     multiple=True,
+    callback=_context_uuids_param,
     help="Context UUID the invitee may access (repeatable; required for member/viewer)",
 )
 @click.option(
@@ -3234,6 +3420,7 @@ def invite_create(
     The invitation URL is printed ONCE — it is a join credential and is
     never shown again (invite list returns metadata only).
 
+    \b
     Example:
       kagura workspace invite create new@example.com --role member -c <context-uuid>
     """
@@ -3260,7 +3447,7 @@ def invite_create(
         )
         expires = inv.expires_at.date().isoformat() if inv.expires_at else "never"
         return (
-            f"Invitation #{inv.id} → {inv.email} (role={inv.role}, expires={expires})\n"
+            f"Invitation #{inv.id} → {inv.email or '-'} (role={inv.role}, expires={expires})\n"
             f"{inv.invitation_url or inv.token or '(no url returned)'}"
         )
 
@@ -3278,6 +3465,7 @@ def invite_list(include_accepted: bool, as_json: bool, workspace_id: str | None)
     Tokens/URLs are never shown here — the server nulls them for API-key
     callers, and the JSON output drops the fields entirely.
 
+    \b
     Example:
       kagura workspace invite list
     """
@@ -3307,6 +3495,7 @@ def invite_revoke(invitation_id: int, workspace_id: str | None):
     """
     Revoke a pending invitation by its integer id (see `invite list`).
 
+    \b
     Example:
       kagura workspace invite revoke 7
     """
@@ -3329,6 +3518,7 @@ def invite_revoke(invitation_id: int, workspace_id: str | None):
     "-u",
     "user_id",
     required=True,
+    callback=_user_id_param,
     help="Target member's user id (must hold member/viewer role; not yourself)",
 )
 @click.option("--name", "-n", "key_name", required=True, help="Key name (unique per workspace)")
@@ -3348,6 +3538,7 @@ def auth_create_key(user_id: str, key_name: str, expires_days: int, workspace_id
     member/viewer service identities: the server rejects self-targets
     and owner/admin targets. For your own key, use the web dashboard.
 
+    \b
     Example:
       kagura auth create-key --user google_1234 --name ci-bot --expires-days 90
     """
@@ -3366,13 +3557,21 @@ def auth_create_key(user_id: str, key_name: str, expires_days: int, workspace_id
 
 
 @click.command(name="list-keys")
-@click.option("--user", "-u", "user_id", required=True, help="Target member's user id")
+@click.option(
+    "--user",
+    "-u",
+    "user_id",
+    required=True,
+    callback=_user_id_param,
+    help="Target member's user id",
+)
 @click.option("--json", "as_json", is_flag=True, default=False, help="Raw JSON output")
 @click.option("--workspace", "-w", "workspace_id", help=_WORKSPACE_OPT_HELP)
 def auth_list_keys(user_id: str, as_json: bool, workspace_id: str | None):
     """
     List a member's API keys — metadata only, never the plaintext.
 
+    \b
     Example:
       kagura auth list-keys --user google_1234
     """
@@ -3400,7 +3599,14 @@ def auth_list_keys(user_id: str, as_json: bool, workspace_id: str | None):
 
 @click.command(name="revoke-key")
 @click.argument("key_id", type=int)
-@click.option("--user", "-u", "user_id", required=True, help="The member the key belongs to")
+@click.option(
+    "--user",
+    "-u",
+    "user_id",
+    required=True,
+    callback=_user_id_param,
+    help="The member the key belongs to",
+)
 @click.option("--yes", "-y", is_flag=True, default=False, help="Skip confirmation")
 @click.option("--workspace", "-w", "workspace_id", help=_WORKSPACE_OPT_HELP)
 def auth_revoke_key(key_id: int, user_id: str, yes: bool, workspace_id: str | None):
@@ -3409,6 +3615,7 @@ def auth_revoke_key(key_id: int, user_id: str, yes: bool, workspace_id: str | No
 
     Server-side this is a soft revoke — the row is kept for audit.
 
+    \b
     Example:
       kagura auth revoke-key 42 --user google_1234 --yes
     """

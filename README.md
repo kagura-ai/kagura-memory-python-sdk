@@ -959,8 +959,18 @@ would read is kept, alone and with a warning).
 **`AGENTS.md` export** (opt-in; server v0.74.0+). `--agents-md [PATH]` writes a
 snapshot of the context's tool guardrails — the same block as
 `kagura guardrails digest --out` — into a file the harness loads every session:
-for Hermes the first of `.hermes.md`, `HERMES.md`, `AGENTS.override.md`,
-`AGENTS.md`, `CLAUDE.md` in the current directory (else `AGENTS.md`); for OpenClaw
+for Hermes the context file it loads from the current directory, found as Hermes
+finds it, so the user's own file keeps loading. Hermes loads only the first type
+that has text: the nearest `.hermes.md` / `HERMES.md` from here up to the git root
+(an empty one ends that search), then the `AGENTS.override.md` / `AGENTS.md` /
+`agents.md` chain from the git root down, then `CLAUDE.md` / `claude.md`, then
+Cursor rules. The block goes into the loaded `.hermes.md` / `HERMES.md`, else this
+directory's loaded AGENTS file (a new `AGENTS.md` when the chain loads only from
+parent directories), else the loaded `CLAUDE.md`, else a new `AGENTS.md`. When only
+`.cursorrules` / `.cursor/rules/*.mdc` load, a new `AGENTS.md` would stop them
+loading: setup makes no offer, and `--agents-md` needs a PATH. The Hermes gateway
+and cron start from `terminal.cwd` instead of the current directory, so pass
+`--agents-md PATH` for them. For OpenClaw
 `AGENTS.md` in its default workspace, found as OpenClaw finds it:
 `$OPENCLAW_WORKSPACE_DIR`, else `workspace` in `$OPENCLAW_STATE_DIR`, else
 `~/.openclaw/workspace` (setup does not read an `agents.defaults.workspace` set in
@@ -969,8 +979,10 @@ or `AGENTS.override.md` there when it exists, since Codex reads it instead —
 rarely needed, as the digest already arrives in `instructions`. An interactive
 Hermes or OpenClaw run offers it (default no) and lists the profile's contexts;
 without a terminal or with `-y`, pass `--context-id`. Only the text between the
-`kagura-memory:guardrails` markers changes; a context with no guardrails writes
-nothing. Setup prints the command that refreshes the block.
+`kagura-memory:guardrails` markers changes. A context with no guardrails this
+credential can see writes nothing, and removes an earlier block, as
+`guardrails digest --out` does, so the harness stops loading guardrails the server
+no longer serves. Setup prints the command that refreshes the block.
 
 **Codex and the `kagura-memory` plugin's hooks.** memory-cloud's Codex plugin
 reads the credential for its guardrail hooks only from a URL entry with a bearer

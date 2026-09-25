@@ -28,6 +28,7 @@ from ..exceptions import (
     KaguraLLMError,
     KaguraQuotaError,
     KaguraRateLimitError,
+    _exc_message,
 )
 from ..files_client import FilesClient
 from ..logger import VerboseLogger, normalize_logger
@@ -291,7 +292,9 @@ class FileIngestor:
             # KaguraFetchError path below) rather than crashing uncaught, so
             # --json output stays machine-readable. Wrap as KaguraFetchError
             # so _fetch_failure_result (which reads .url) can render it.
-            log.error(f"Fetch failed: {e}", stage="complete", detail={"source": source})
+            log.error(
+                f"Fetch failed: {_exc_message(e)}", stage="complete", detail={"source": source}
+            )
             return _fetch_failure_result(
                 source, KaguraFetchError(str(e), url=source), is_dry_run=False, ingestor=self
             )
@@ -302,7 +305,9 @@ class FileIngestor:
             # ingest operation — keeping all terminal events on the same
             # stage lets consumers do coarse state tracking without a
             # special "fetch-failed" stage carve-out.
-            log.error(f"Fetch failed: {e}", stage="complete", detail={"source": source})
+            log.error(
+                f"Fetch failed: {_exc_message(e)}", stage="complete", detail={"source": source}
+            )
             return _fetch_failure_result(source, e, is_dry_run=False, ingestor=self)
         log.detail("Fetched bytes", len(fetched.body), stage="fetch")
         try:
@@ -318,7 +323,9 @@ class FileIngestor:
             )
         except BaseException as e:
             # Terminal-event guarantee: emit kind=error before propagating.
-            log.error(f"Ingest failed: {e}", stage="complete", detail={"source": source})
+            log.error(
+                f"Ingest failed: {_exc_message(e)}", stage="complete", detail={"source": source}
+            )
             raise
         # Success means the overview memory was created. Per-section errors
         # are best-effort (see IngestResult.success): they ride in

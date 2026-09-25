@@ -632,3 +632,129 @@ async def test_library_default_is_silent(capsys):
     # No logger= → no stderr emission.
     assert capsys.readouterr().err == ""
     await client.close()
+
+
+# ---------------------------------------------------------------------------
+# Bugs found while porting to TypeScript (#285)
+# ---------------------------------------------------------------------------
+
+
+def _import(*extra: str, input: str, fmt: str = "jsonl"):
+    return CliRunner().invoke(
+        main,
+        ["resource", "import", "-r", "products", "-k", "TOKEN", "--format", fmt, *extra],
+        input=input,
+    )
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.ResourceClient")
+def test_resource_import_credential_failure_opens_no_stream(mock_rc_cls, mock_config):
+    """``import_start`` came before the client was built, so a credential
+    failure left the stream with no terminal event."""
+    mock_config.return_value = {}  # no api_key, no profile: the chain fails
+    result = _import("--progress", "json", input='{"name": "a"}')
+    assert result.exit_code == 1, result.output
+    assert _parse_lines(result.stderr) == []
+    mock_rc_cls._from_resolved_auth.assert_not_called()
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.ResourceClient")
+def test_resource_import_names_an_unmessaged_failure(mock_rc_cls, mock_config):
+    """``Import failed: {e}`` printed nothing after the colon for such an error."""
+    mock_config.return_value = {"api_key": "key", "mcp_url": "https://test.com/mcp"}
+    mock_rc = AsyncMock()
+    mock_rc.ingest_events.side_effect = RuntimeError()
+    mock_rc.__aenter__ = AsyncMock(return_value=mock_rc)
+    mock_rc.__aexit__ = AsyncMock(return_value=None)
+    mock_rc_cls._from_resolved_auth.return_value = mock_rc
+    result = _import("--progress", "json", input='{"name": "a"}')
+    assert result.exit_code == 1
+    [terminal] = [e for e in _parse_lines(result.stderr) if e["kind"] in ("success", "error")]
+    assert terminal["msg"] == "Import failed: RuntimeError"
+
+
+@pytest.mark.parametrize(
+    ("fmt", "rows", "extra", "message"),
+    [
+        ("csv", "sku,name\na,b,c\n", [], "Row 1: more fields than the header has columns."),
+        (
+            "csv",
+            "sku,name\n,b\n",
+            ["--id-column", "sku"],
+            "Row 1: doc_id from column 'sku' must be 1-255 characters, got 0.",
+        ),
+        (
+            "jsonl",
+            json.dumps({"sku": "x" * 256}),
+            ["--id-column", "sku"],
+            "Row 1: doc_id from column 'sku' must be 1-255 characters, got 256.",
+        ),
+    ],
+    ids=["extra-cells", "empty-id", "long-id"],
+)
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.ResourceClient")
+def test_resource_import_bad_row_is_a_clean_error(
+    mock_rc_cls, mock_config, fmt, rows, extra, message
+):
+    """These rows ended in a pydantic ValidationError traceback."""
+    mock_config.return_value = {"api_key": "key", "mcp_url": "https://test.com/mcp"}
+    result = _import(*extra, input=rows, fmt=fmt)
+    assert result.exit_code == 1
+    assert f"Error: {message}" in result.output
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+    mock_rc_cls._from_resolved_auth.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_sdk_terminal_errors_name_an_unmessaged_exception(capsys):
+    """``Upload failed: {e}`` / ``Batch ingest failed: {e}`` ended at the colon."""
+    from kagura_memory import FilesClient
+    from kagura_memory.models import ResourceEventRequest
+    from kagura_memory.resource_client import ResourceClient
+
+    logger = VerboseLogger(output_format="json")
+    async with FilesClient(api_key="test", base_url="https://example.com") as files:
+        with patch.object(files._client, "request", new_callable=AsyncMock) as request:
+            request.side_effect = RuntimeError()
+            with pytest.raises(RuntimeError):
+                await files.upload(
+                    context_id="00000000-0000-0000-0000-000000000001",
+                    source=b"hi",
+                    filename="x.txt",
+                    logger=logger,
+                )
+    async with ResourceClient(api_key="test", base_url="https://example.com") as resources:
+        with patch.object(resources._client, "request", new_callable=AsyncMock) as request:
+            request.side_effect = RuntimeError()
+            with pytest.raises(RuntimeError):
+                await resources.ingest_events(
+                    "products",
+                    "TOKEN",
+                    [ResourceEventRequest(op="upsert", doc_id="1")],
+                    logger=logger,
+                )
+    errors = [e["msg"] for e in _parse_lines(capsys.readouterr().err) if e["kind"] == "error"]
+    assert errors == ["Upload failed: RuntimeError", "Batch ingest failed: RuntimeError"]
+
+
+def test_rich_path_prints_caller_text_as_written():
+    """File names and messages were read as markup (and emoji codes)."""
+    buf = io.StringIO()
+    console = Console(file=buf, force_terminal=False, no_color=True, width=200)
+    logger = VerboseLogger(level=2, console=console)
+    logger.action("Uploading report[bold].pdf", ":thumbs_up: [/x]")
+    logger.detail("k[red]", "v[/y]")
+    logger.success("Done :thumbs_up:")
+    logger.warning("w [/x]")
+    # A `[/x]` raised MarkupError here, inside the caller's except handler.
+    logger.error("Upload failed: bad [/x] path C:\\dir\\")
+    assert buf.getvalue().splitlines() == [
+        "→ Uploading report[bold].pdf :thumbs_up: [/x]",
+        "  • k[red]: v[/y]",
+        "✓ Done :thumbs_up:",
+        "⚠ w [/x]",
+        "✗ Upload failed: bad [/x] path C:\\dir\\",
+    ]

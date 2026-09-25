@@ -15,13 +15,18 @@ the owner-key 403 hint and the detail-carrying 429 quota mapping.
 from __future__ import annotations
 
 from typing import Any
-from urllib.parse import quote
 
 import httpx
 from pydantic import ValidationError
 
 from ._auth import _SOURCE_LABEL
-from ._http import _retry_after_seconds, extract_detail, normalize_uuid, sanitize_server_detail
+from ._http import (
+    _retry_after_seconds,
+    extract_detail,
+    normalize_uuid,
+    path_segment,
+    sanitize_server_detail,
+)
 from ._rest_base import KaguraRestClient
 from .exceptions import (
     KaguraConnectionError,
@@ -50,6 +55,16 @@ _UNIFORM_403 = "Insufficient permissions"
 def _normalize_workspace_id(workspace_id: str) -> str:
     """Canonicalize before URL interpolation — see :func:`normalize_uuid`."""
     return normalize_uuid(workspace_id, label="workspace_id")
+
+
+def _user_id_segment(user_id: str) -> str:
+    """``user_id`` as one path segment; ``.``, ``..`` and empty are refused (#285).
+
+    Percent-encoding leaves ``.`` and ``..`` as they are, so
+    ``remove_member(ws, "..")`` would send ``DELETE /api/v1/workspaces/<ws>``,
+    the workspace itself. See :func:`path_segment`.
+    """
+    return path_segment(user_id, label="user_id")
 
 
 def _require_int(value: object, label: str) -> int:
@@ -114,9 +129,12 @@ class WorkspaceClient(KaguraRestClient):
         typo creates a dangling membership row that lists with null
         name/email. Prefer :meth:`create_invitation` for onboarding;
         use this only with a user_id copied from a trusted source.
-        Duplicate members are rejected with 422.
+        Duplicate members are rejected with 422. ``.``, ``..`` and an
+        empty id are refused (``ValueError``): no other method could
+        address such a member afterwards.
         """
         workspace_id = _normalize_workspace_id(workspace_id)
+        _user_id_segment(user_id)
         self._validate_role(role)
         resp = await self._request(
             "POST",
@@ -133,7 +151,7 @@ class WorkspaceClient(KaguraRestClient):
         self._validate_role(role)
         resp = await self._request(
             "PUT",
-            f"/api/v1/workspaces/{workspace_id}/members/{quote(user_id, safe='')}",
+            f"/api/v1/workspaces/{workspace_id}/members/{_user_id_segment(user_id)}",
             json={"role": role},
         )
         return self._parse(WorkspaceMember, self._json(resp), "update_member_role")
@@ -143,7 +161,7 @@ class WorkspaceClient(KaguraRestClient):
         workspace_id = _normalize_workspace_id(workspace_id)
         await self._request(
             "DELETE",
-            f"/api/v1/workspaces/{workspace_id}/members/{quote(user_id, safe='')}",
+            f"/api/v1/workspaces/{workspace_id}/members/{_user_id_segment(user_id)}",
         )
 
     # -------------------------------------------------------------------
@@ -170,7 +188,8 @@ class WorkspaceClient(KaguraRestClient):
             email: Invitee email (must match their Google account).
             role: ``member`` | ``admin`` | ``viewer``.
             allowed_context_ids: Context grant — required (min 1) for
-                member/viewer invitations, ignored for admin.
+                member/viewer invitations, ignored for admin. Each must be
+                a UUID (``ValueError`` otherwise); sent in canonical form.
             expires_in_days: One of 7/30/90/365, or None = never expires.
         """
         workspace_id = _normalize_workspace_id(workspace_id)
@@ -187,7 +206,10 @@ class WorkspaceClient(KaguraRestClient):
             )
         body: dict[str, Any] = {"email": email, "role": role}
         if allowed_context_ids is not None:
-            body["allowed_context_ids"] = allowed_context_ids
+            # The server answers a non-UUID here with an HTTP 500 (#285).
+            body["allowed_context_ids"] = [
+                normalize_uuid(c, label="allowed_context_ids") for c in allowed_context_ids
+            ]
         if expires_in_days is not None:
             body["expires_in_days"] = expires_in_days
         resp = await self._request(
@@ -243,7 +265,7 @@ class WorkspaceClient(KaguraRestClient):
         resp = await self._request(
             "POST",
             f"/api/v1/workspaces/{workspace_id}/members/"
-            f"{quote(user_id, safe='')}/credentials/api-keys",
+            f"{_user_id_segment(user_id)}/credentials/api-keys",
             json={"name": name, "expires_days": expires_days},
         )
         payload = self._json(resp)
@@ -279,7 +301,7 @@ class WorkspaceClient(KaguraRestClient):
         workspace_id = _normalize_workspace_id(workspace_id)
         resp = await self._request(
             "GET",
-            f"/api/v1/workspaces/{workspace_id}/members/{quote(user_id, safe='')}/credentials",
+            f"/api/v1/workspaces/{workspace_id}/members/{_user_id_segment(user_id)}/credentials",
         )
         return [
             self._parse(MemberAPIKey, row, "list_member_keys")
@@ -297,7 +319,7 @@ class WorkspaceClient(KaguraRestClient):
         await self._request(
             "DELETE",
             f"/api/v1/workspaces/{workspace_id}/members/"
-            f"{quote(user_id, safe='')}/credentials/api-keys/"
+            f"{_user_id_segment(user_id)}/credentials/api-keys/"
             f"{_require_int(key_id, 'key_id')}",
         )
 

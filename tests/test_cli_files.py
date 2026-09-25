@@ -1,5 +1,6 @@
 """Tests for `kagura files ...` CLI commands."""
 
+import json
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -306,6 +307,80 @@ def test_files_upload_remember_failure_still_reports_file_id(
     assert result.exit_code != 0
     # The successful upload's file_id is surfaced despite the memory failure.
     assert SAMPLE_FILE_ID in result.output
+
+
+def _upload_remember_json(mock_files_cls, mock_kagura_cls, mock_config, tmp_path, remember):
+    """``files upload --remember --progress json``, with an upload that reports progress."""
+    mock_config.return_value = {
+        "api_key": "key",
+        "mcp_url": "https://test.com/mcp",
+        "context_id": SAMPLE_CTX_ID,
+    }
+    file_obj = _file_object()
+
+    async def upload(*, logger=None, **_):
+        logger.action("Reserving upload", stage="reserve")
+        logger.success("Upload complete", stage="complete", detail={"file_id": file_obj.id})
+        return file_obj
+
+    mock_files = _mock_files_client("upload", file_obj)
+    mock_files.upload.side_effect = upload
+    _wire_files_client_mock(mock_files_cls, mock_files)
+    mock_kagura = _mock_kagura_client(mock_kagura_cls)
+    if isinstance(remember, BaseException):
+        mock_kagura.remember.side_effect = remember
+    p = tmp_path / "hello.txt"
+    p.write_text("hi")
+    result = CliRunner().invoke(
+        main, ["files", "upload", str(p), "--remember", "--progress", "json"]
+    )
+    events = [json.loads(line) for line in result.stderr.splitlines() if line.startswith("{")]
+    return result, events
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+@patch("kagura_memory.cli.FilesClient")
+def test_files_upload_remember_failure_ends_the_stream_in_error(
+    mock_files_cls, mock_kagura_cls, mock_config, tmp_path
+):
+    """The upload's success went out first, so a failed command's stream ended in success (#285)."""
+    result, events = _upload_remember_json(
+        mock_files_cls, mock_kagura_cls, mock_config, tmp_path, RuntimeError("boom")
+    )
+    assert result.exit_code == 1
+    assert [e["kind"] for e in events] == ["action", "error"]
+    assert "creating the linked memory failed: boom" in events[-1]["msg"]
+    assert events[-1]["detail"]["reserved_file_id"] == SAMPLE_FILE_ID
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+@patch("kagura_memory.cli.FilesClient")
+def test_files_upload_remember_interrupted_ends_the_stream_in_error(
+    mock_files_cls, mock_kagura_cls, mock_config, tmp_path
+):
+    """Ctrl-C during the memory write still ends the stream in kind=error."""
+    result, events = _upload_remember_json(
+        mock_files_cls, mock_kagura_cls, mock_config, tmp_path, KeyboardInterrupt()
+    )
+    assert result.exit_code == 1
+    assert [e["kind"] for e in events] == ["action", "error"]
+    assert "creating the linked memory failed: KeyboardInterrupt" in events[-1]["msg"]
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+@patch("kagura_memory.cli.FilesClient")
+def test_files_upload_remember_success_is_the_last_event(
+    mock_files_cls, mock_kagura_cls, mock_config, tmp_path
+):
+    result, events = _upload_remember_json(
+        mock_files_cls, mock_kagura_cls, mock_config, tmp_path, None
+    )
+    assert result.exit_code == 0, result.output
+    assert [e["kind"] for e in events] == ["action", "success"]
+    assert events[-1]["detail"] == {"file_id": SAMPLE_FILE_ID}
 
 
 @patch("kagura_memory.cli.load_config")

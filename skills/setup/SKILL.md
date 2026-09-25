@@ -85,7 +85,12 @@ file and edits nothing. Options:
 - `--agents-md [PATH]` — write the context's guardrail export block (the
   `kagura guardrails digest --out` block) into the file the harness loads.
   Interactive Hermes/OpenClaw runs offer it. Needs a context (`--context-id`
-  with `-y` or without a terminal).
+  with `-y` or without a terminal). For Hermes the default is the context file
+  Hermes loads from the current directory (`.hermes.md`/`HERMES.md` up to the
+  git root, else the AGENTS file, else `CLAUDE.md`, else a new `AGENTS.md`), so
+  the user's own file keeps loading; with only Cursor rules there, setup stops
+  and asks for `--agents-md PATH`. A context with no guardrails removes an
+  earlier block.
 - `--url-form --mcp-url <url> [--api-key-env VAR]` — a URL entry that reads a
   long-lived API key from an environment variable; setup never sees the key.
 - `--url-form --oauth --mcp-url <url>` (memory-cloud 0.77.0+) — a URL entry with
@@ -127,8 +132,13 @@ Relay:
   paste-the-redirect-URL prompt, OpenClaw `--code`). Never run it for them,
   and never ask for, print or pass a token or a pasted redirect URL: the
   harness keeps the token. A Hermes stop saying the entry was saved disabled:
-  the user signs in with `hermes mcp login <name>` and then runs the
-  `hermes config set … enabled true` it names. A version stop (exit 1) means
+  the user signs in with `hermes mcp login <name>` (for a key or stdio entry,
+  checks it with `hermes mcp test <name>`) and then runs the
+  `hermes config set … enabled true` it names. A Hermes stop saying its entry
+  is still the existing one: Hermes kept it (its overwrite prompt was declined);
+  offer to re-run with `--force` and accept that prompt. A Hermes warning that
+  the URL entry has no Authorization header: the key prompt was declined or
+  left empty; offer to re-run with `--force`. A version stop (exit 1) means
   the server is older than 0.77.0 or its version is unconfirmed: offer the
   stdio entry (`--profile`) or `--url-form` with an API key.
 - The Codex plugin-hooks warning: a stdio or `--oauth` entry turns the

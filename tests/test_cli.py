@@ -2107,3 +2107,24 @@ def test_edge_delete_prompts_confirmation(mock_client_cls, mock_config):
     runner = CliRunner()
     result = runner.invoke(main, ["edge", "delete", "ctx-1", "src-uuid", "tgt-uuid"], input="n\n")
     assert result.exit_code != 0
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["files", "upload", "{path}", "--importance", "nan"],
+        ["ingest", "{path}", "--importance", "NaN"],
+        ["context", "search-config", "ctx", "--semantic", "nan"],
+        ["context", "search-config", "ctx", "--bm25", "-nan"],
+    ],
+    ids=["files-upload", "ingest", "semantic", "bm25"],
+)
+def test_float_range_refuses_nan(argv, tmp_path):
+    """click's FloatRange compares NaN false both ways and let it through (#285)."""
+    path = tmp_path / "a.txt"
+    path.write_text("hi")
+    with patch("kagura_memory.cli.load_config") as config:
+        result = CliRunner().invoke(main, [a.format(path=path) for a in argv])
+    assert result.exit_code == 2, result.output
+    assert "nan is not in the range 0.0<=x<=1.0." in result.output
+    config.assert_not_called()
