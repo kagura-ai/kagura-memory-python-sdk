@@ -16,8 +16,9 @@ browser sign-in and works on older servers. The opt-in ``--url-form --oauth`` wr
 URL entry with no key, which the harness then signs in to itself (from memory-cloud
 0.78.0, memory-cloud#1671, Hermes can also do so with its device flow, which needs
 no loopback callback); setup first
-checks that the entry's server is memory-cloud 0.77.0+. A full sign-in by a
-harness on a ``/mcp/w/<workspace-id>`` URL has not been verified yet.
+checks that the entry's server is memory-cloud 0.77.0+. Each harness has
+signed in end to end on a ``/mcp/w/<workspace-id>`` URL against memory-cloud
+0.78.0 (#284).
 
 Rules the three commands share:
 

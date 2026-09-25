@@ -2040,8 +2040,8 @@ def test_help_documents_the_oauth_form_and_its_login(harness, login):
     assert "memory-cloud 0.77.0+" in out
     assert "client registration" in out
     assert login in out
-    # Until a harness has signed in end to end on a /mcp/w/<workspace-id> URL (#282).
-    assert "A full sign-in on a /mcp/w/<workspace-id> URL is not verified yet" in out
+    # Each harness has signed in end to end on a /mcp/w/<workspace-id> URL (#284).
+    assert "not verified" not in out
 
 
 @pytest.mark.parametrize(

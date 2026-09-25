@@ -36,6 +36,10 @@ _STALE_PHRASES = [
     "waits on memory-cloud#1671",
     "device flow waits on",
     "device-flow sign-in still",
+    # Each harness signed in end to end on a /mcp/w/<workspace-id> URL (#284).
+    "not verified yet",
+    "has not been verified yet",
+    "_HARNESS_OAUTH_UNVERIFIED",
 ]
 
 

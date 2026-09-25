@@ -97,9 +97,8 @@ file and edits nothing. Options:
   then signs in itself in a browser: `codex mcp login <name>`, `hermes mcp login
   <name>` (browser flow; on memory-cloud 0.78.0+ `--flow device` signs in with a
   code at the server's /device page and needs no loopback callback) or
-  `openclaw mcp login <name>`. A full sign-in on a `/mcp/w/<workspace-id>` URL
-  has not been verified yet (README, "What has been checked"): say so when you
-  offer it. Setup first checks the server's version and stops (exit 1) below
+  `openclaw mcp login <name>`. Each harness has signed in end to end on a
+  `/mcp/w/<workspace-id>` URL (README, "What has been checked"). Setup first checks the server's version and stops (exit 1) below
   0.77.0 or when it cannot confirm it; `--dry-run` sends no request.
   `codex mcp add` starts Codex's sign-in, so from your shell (no terminal) setup
   prints the table instead. Use it only when the user asks for it: the stdio
