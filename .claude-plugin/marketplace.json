@@ -10,7 +10,7 @@
     {
       "name": "kagura-cli",
       "source": "./",
-      "version": "0.41.2",
+      "version": "0.41.3",
       "category": "ai"
     }
   ]
