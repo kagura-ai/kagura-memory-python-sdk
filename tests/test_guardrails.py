@@ -821,10 +821,14 @@ def test_splice_empty_digest_without_block_is_identity():
         "- (x) no markers\n",
         EXPORT_BLOCK + EXPORT_BLOCK,
         EXPORT_BLOCK.replace("<!-- kagura-memory:guardrails end -->\n", ""),
+        "<!-- kagura-memory:guardrails end -->\n"
+        + EXPORT_BLOCK.replace("<!-- kagura-memory:guardrails end -->\n", ""),
     ],
-    ids=["no-markers", "two-blocks", "no-end"],
+    ids=["no-markers", "two-blocks", "no-end", "end-first"],
 )
 def test_splice_rejects_malformed_fetched_block(block):
+    # An end-first block used to be written, and the next run then refused
+    # the file as broken (#285).
     with pytest.raises(ValueError, match="marker"):
         splice_guardrail_block("# Project\n", block)
 
@@ -983,6 +987,17 @@ def test_cli_guardrails_digest_tool_view_needs_instructions_target(flag):
     assert result.exit_code != 0
     assert "--target instructions" in result.output
     client.get_guardrail_digest.assert_not_called()
+
+
+@pytest.mark.parametrize("value", ["", "  "])
+def test_cli_guardrails_digest_blank_out_is_a_usage_error(value, tmp_path, monkeypatch):
+    """``--out ''`` passed click.Path as ``Path('.')`` and failed at the write (#285)."""
+    monkeypatch.chdir(tmp_path)
+    result, client = _digest(CTX, "--out", value)
+    assert result.exit_code == 2, result.output
+    assert "the path is blank" in result.output
+    client.get_guardrail_digest.assert_not_called()
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_cli_guardrails_digest_server_error_is_a_clean_message():

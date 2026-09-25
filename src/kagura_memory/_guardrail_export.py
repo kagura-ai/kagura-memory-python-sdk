@@ -47,15 +47,21 @@ def splice_guardrail_block(text: str, block: str) -> str:
 
     Raises:
         ValueError: The fetched block does not have exactly one begin and one
-            end marker line, or ``text`` holds more than one block or a broken
-            one — unterminated, or its end before its begin (fix that by hand
-            rather than guess).
+            end marker line, begin first, or ``text`` holds more than one block
+            or a broken one — unterminated, or its end before its begin (fix
+            that by hand rather than guess).
     """
     block = block.strip()
     if block and (
-        len(_GUARDRAIL_BEGIN_RE.findall(block)) != 1 or len(_GUARDRAIL_END_RE.findall(block)) != 1
+        len(_GUARDRAIL_BEGIN_RE.findall(block)) != 1
+        or len(_GUARDRAIL_END_RE.findall(block)) != 1
+        or not _GUARDRAIL_SPAN_RE.search(block)
     ):
-        raise ValueError("fetched block does not have exactly one begin and one end marker line")
+        # Out of order, the block would be written, and the next run would
+        # refuse the file as broken (#285).
+        raise ValueError(
+            "fetched block does not have exactly one begin and one end marker line, in that order"
+        )
     begins = len(_GUARDRAIL_BEGIN_RE.findall(text))
     span = _GUARDRAIL_SPAN_RE.search(text)
     if begins > 1 or begins != len(_GUARDRAIL_END_RE.findall(text)) or (begins and not span):

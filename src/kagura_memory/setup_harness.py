@@ -860,10 +860,24 @@ class _Hermes(_Harness):
         ]
 
 
+def _expand_home(value: str) -> Path:
+    """``value`` as a path, with a leading ``~`` or ``~/`` read as the home directory.
+
+    ``~user/…`` is kept as written: ``Path.expanduser`` raises for a user
+    that does not exist, which failed every ``setup openclaw`` with "Could
+    not determine home directory" when such a value was in an OpenClaw path
+    variable (#285).
+    """
+    separators = ("/", "\\") if os.name == "nt" else ("/",)
+    if value == "~" or (value[:1] == "~" and value[1:2] in separators):
+        return Path.home() / value[2:]
+    return Path(value)
+
+
 def _openclaw_env_path(var: str) -> Path | None:
     """An OpenClaw path variable as OpenClaw reads it: trimmed, a leading ``~`` expanded."""
     value = os.environ.get(var, "").strip()
-    return Path(value).expanduser() if value else None
+    return _expand_home(value) if value else None
 
 
 def openclaw_state_dir() -> Path:
@@ -1126,16 +1140,29 @@ def _broken_config() -> str | None:
 
 
 def _write_export(
-    h: _Harness, path: Path, context_id: str, auth: _StaticAuth | _OAuthAuth, refresh: str
+    h: _Harness,
+    path: Path,
+    context_id: str,
+    auth: _StaticAuth | _OAuthAuth,
+    refresh: str,
+    *,
+    applied: bool,
 ) -> None:
     """Fetch the export block and splice it into ``path``, replacing only the marked block.
 
+    ``applied``: the harness command wrote the entry, rather than setup
+    printing it for the user to add.
+
     Raises:
         click.ClickException: The fetch or the write failed (the MCP entry is
-            already set up by then).
+            already set up, or printed, by then).
     """
     label = _path_label(path)
-    failed = "The MCP entry is set up, but the AGENTS.md export failed"
+    failed = (
+        "The MCP entry is set up, but the AGENTS.md export failed"
+        if applied
+        else "The MCP entry is printed for you to add, but the AGENTS.md export failed"
+    )
     try:
         digest = asyncio.run(_fetch_digest(auth, context_id))
     except KaguraNotFoundError as e:
@@ -1161,7 +1188,8 @@ def _write_export(
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         status = write_guardrail_block(path, digest.text)
-        text = path.read_text(encoding="utf-8")
+        # As written: read_text would fold CRLF, and undercount the bytes (#285).
+        text = path.read_bytes().decode("utf-8")
     except (OSError, ValueError) as e:
         raise click.ClickException(f"{failed}: {label}: {_exc_message(e)}; left unchanged") from e
     done = "Already up to date:" if status == "unchanged" else "Wrote"
@@ -1665,7 +1693,7 @@ def run_setup_harness(
     export_path = None
     offered = False
     if agents_md is not None:
-        export_path = Path(agents_md).expanduser() if agents_md else h.agents_md_path()
+        export_path = _expand_home(agents_md) if agents_md else h.agents_md_path()
     elif not h.reads_instructions and ask and can_pick:
         offered = True
         path = h.agents_md_path()
@@ -1818,7 +1846,7 @@ def run_setup_harness(
         refresh = _kagura_command(
             ["guardrails", "digest", export_context, "--out", str(export_path)], profile, cf
         )
-        _write_export(h, export_path, export_context, export_auth, refresh)
+        _write_export(h, export_path, export_context, export_auth, refresh, applied=reason is None)
 
 
 def _echo_dry_run_export(

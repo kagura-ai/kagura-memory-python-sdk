@@ -1320,6 +1320,17 @@ def sleep_rollback(context_id, report_id, yes):
 # =============================================================================
 
 
+def _nonblank_path_option(ctx, param, value: Path | None) -> Path | None:
+    """Refuse an empty or whitespace-only file name as a usage error (#285).
+
+    ``click.Path`` turns ``''`` into ``Path('.')``, which only failed at the
+    write (``Is a directory``); a blank name would create a file called ``' '``.
+    """
+    if value is not None and (value == Path() or not str(value).strip()):
+        raise click.BadParameter("the path is blank; name a file")
+    return value
+
+
 @main.group()
 def guardrails():
     """Inspect a context's tool guardrails (server v0.74.0+)."""
@@ -1367,6 +1378,7 @@ def guardrails_load(context_id, cap):
     "--out",
     "out_path",
     type=click.Path(dir_okay=False, path_type=Path),
+    callback=_nonblank_path_option,
     help="Write the export block into FILE (e.g. AGENTS.md) instead of printing it",
 )
 @click.option(
@@ -1570,6 +1582,48 @@ def _guardrails_option(ctx, param, value: str | None) -> str | None:
         return normalize_guardrails(value)
     except ValueError as e:
         raise click.BadParameter(str(e)) from None
+
+
+# `--agents-md=VALUE` arrives with this prefix (see _HarnessCommand); no real
+# path holds a NUL, so it cannot be mistaken for one.
+_LITERAL_VALUE = "\0"
+
+
+class _HarnessCommand(click.Command):
+    """``kagura setup <harness>``: ``--agents-md=VALUE`` takes VALUE as written (#285).
+
+    click reads an option whose value may be left out (``is_flag=False``,
+    ``flag_value``) by pushing an ``=VALUE`` back onto the arguments, and then
+    parses a VALUE that starts with ``-`` as the next option: ``--agents-md=-y``
+    wrote the default file and silently set ``-y``. Prefixing the value keeps
+    it a value; :func:`_agents_md_option` strips the prefix again.
+    """
+
+    def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
+        end = args.index("--") if "--" in args else len(args)
+        args = [
+            f"--agents-md={_LITERAL_VALUE}{a[len('--agents-md=') :]}"
+            if i < end and a.startswith("--agents-md=")
+            else a
+            for i, a in enumerate(args)
+        ]
+        return super().parse_args(ctx, args)
+
+
+def _agents_md_option(ctx, param, value: str | None) -> str | None:
+    """``--agents-md``: None when absent, ``""`` for the harness's default file, else PATH.
+
+    A PATH of only whitespace is refused, rather than creating a file named
+    ``' '`` (#285).
+    """
+    if value is None:
+        return None
+    value = value.removeprefix(_LITERAL_VALUE)
+    if value and not value.strip():
+        raise click.BadParameter(
+            "the path is blank; name a file, or give --agents-md alone for the default one"
+        )
+    return value
 
 
 def _tool_profile_option(ctx, param, value: str | None) -> str | None:
@@ -1849,6 +1903,7 @@ def _harness_command(harness: HarnessName):
                 flag_value="",
                 default=None,
                 metavar="[PATH]",
+                callback=_agents_md_option,
                 help=_HARNESS_AGENTS_MD_HELP[harness],
             ),
             click.option(
@@ -1886,7 +1941,7 @@ def _harness_command(harness: HarnessName):
         ]
         for option in reversed(options):
             f = option(f)
-        return setup.command(name=harness)(f)
+        return setup.command(name=harness, cls=_HarnessCommand)(f)
 
     return decorate
 

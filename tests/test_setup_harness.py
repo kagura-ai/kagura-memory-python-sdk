@@ -1013,6 +1013,16 @@ class TestOpenClaw:
         # The config and the key's .env stay in the state directory.
         assert f"OpenClaw ({state / 'openclaw.json'})" in result.output
 
+    @pytest.mark.parametrize(
+        "var", ["OPENCLAW_STATE_DIR", "OPENCLAW_CONFIG_PATH", "OPENCLAW_WORKSPACE_DIR"]
+    )
+    def test_a_tilde_user_value_is_kept_as_written(self, monkeypatch, recorder, var):
+        """``Path.expanduser`` raised, failing every run: "Could not determine home" (#285)."""
+        monkeypatch.setenv(var, "~no-such-user-285/oc")
+        result = run("openclaw", "--profile", "default", "-y")
+        assert result.exit_code == 0, result.output
+        assert "~no-such-user-285/oc" in result.output
+
     def test_workspace_dir_expands_a_leading_tilde(self, monkeypatch, recorder):
         monkeypatch.setenv("OPENCLAW_WORKSPACE_DIR", "~/oc-ws")
         result = run("openclaw", "--profile", "default", "-y")
@@ -1980,7 +1990,19 @@ class TestExport:
         assert path.read_text(encoding="utf-8") == EXPORT_BLOCK
         assert "earlier block" in result.output
 
-    def test_404_is_a_visibility_error_after_the_entry(self, digest, tmp_path):
+    @pytest.mark.parametrize(
+        ("codex_on_path", "said"),
+        [
+            (True, "The MCP entry is set up, but"),
+            # Without codex the entry is only printed: it is not set up (#285).
+            (False, "The MCP entry is printed for you to add, but"),
+        ],
+    )
+    def test_404_is_a_visibility_error_after_the_entry(
+        self, digest, tmp_path, on_path, codex_on_path, said
+    ):
+        if codex_on_path:
+            on_path("codex")
         digest.error = KaguraNotFoundError("Context not found")
         path = tmp_path / "AGENTS.md"
         result = run(*self.args(path))
@@ -1988,8 +2010,47 @@ class TestExport:
         assert "not visible to this credential on\n  https://memory.kagura-ai.com" in (
             result.output
         )
-        assert "The MCP entry is set up" in result.output
+        assert said in result.output
+        assert "set up" not in result.output.replace(said, "")
         assert not path.exists()
+
+    @pytest.mark.parametrize("value", ["-y", "--dry-run", "-"])
+    def test_an_equals_value_starting_with_a_dash_is_the_path(self, digest, value):
+        """click parsed ``--agents-md=-y`` as the default file plus ``-y`` (#285)."""
+        result = run("codex", "--profile", "default", "--context-id", CTX, f"--agents-md={value}")
+        assert result.exit_code == 0, result.output
+        assert Path(value).read_text(encoding="utf-8") == EXPORT_BLOCK
+        assert not (Path.home() / ".codex" / "AGENTS.md").exists()
+        assert "Dry run" not in result.output
+
+    def test_an_empty_equals_value_is_the_default_file(self, env, digest):
+        result = run("codex", "--profile", "default", "--context-id", CTX, "--agents-md=", "-y")
+        assert result.exit_code == 0, result.output
+        assert (env / ".codex" / "AGENTS.md").read_text(encoding="utf-8") == EXPORT_BLOCK
+
+    def test_a_dash_after_a_space_is_still_the_next_option(self, env, digest):
+        result = run("codex", "--profile", "default", "--context-id", CTX, "--agents-md", "-y")
+        assert result.exit_code == 0, result.output
+        assert (env / ".codex" / "AGENTS.md").read_text(encoding="utf-8") == EXPORT_BLOCK
+
+    @pytest.mark.parametrize("argv", [["--agents-md= "], ["--agents-md", "  "]])
+    def test_a_blank_path_is_a_usage_error(self, recorder, digest, argv):
+        """It used to create a file named ``' '`` (#285)."""
+        result = run("codex", "--profile", "default", "--context-id", CTX, *argv, "-y")
+        assert result.exit_code == 2, result.output
+        assert "the path is blank" in result.output
+        assert recorder.mutating() == []
+        assert list(Path.cwd().iterdir()) == []
+
+    def test_a_tilde_user_path_is_kept_as_written(self, digest):
+        """``Path.expanduser`` raised for a user that does not exist (#285)."""
+        result = run(
+            "codex", "--profile", "default", "--context-id", CTX,
+            "--agents-md", "~no-such-user-285/AGENTS.md", "-y",
+        )  # fmt: skip
+        assert result.exit_code == 0, result.output
+        written = Path("~no-such-user-285") / "AGENTS.md"
+        assert written.read_text(encoding="utf-8") == EXPORT_BLOCK
 
     def test_non_default_profile_names_it_in_the_refresh_command(self, tmp_path):
         path = tmp_path / "AGENTS.md"
@@ -2273,7 +2334,9 @@ def test_digest_failure_other_than_404_is_reported_after_the_entry(digest, tmp_p
     path = tmp_path / "AGENTS.md"
     result = run("codex", "--profile", "default", "--context-id", CTX, "--agents-md", str(path))
     assert result.exit_code == 1
-    assert "The MCP entry is set up, but the AGENTS.md export failed: HTTP 503" in result.output
+    assert (
+        "The MCP entry is printed for you to add, but the AGENTS.md export failed: HTTP 503"
+    ) in result.output
     assert not path.exists()
 
 
@@ -2294,6 +2357,18 @@ def test_codex_agents_md_size_warning_counts_bytes(env, digest):
     result = run("codex", "--profile", "default", "--context-id", CTX, "--agents-md", "-y")
     assert result.exit_code == 0, result.output
     assert "bytes; Codex reads only the first 32768" in result.output
+
+
+def test_codex_agents_md_size_warning_counts_crlf_as_two_bytes(env, digest):
+    """read_text folded CRLF, so a CRLF file just over the cap got no warning (#285)."""
+    path = env / ".codex" / "AGENTS.md"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"x\r\n" * 12_000)  # 36,000 bytes; 24,000 once CRLF is folded
+    result = run("codex", "--profile", "default", "--context-id", CTX, "--agents-md", "-y")
+    assert result.exit_code == 0, result.output
+    size = len(path.read_bytes())
+    assert size > 32_768 > len(path.read_text(encoding="utf-8"))
+    assert f"is {size} bytes; Codex reads only the first 32768" in result.output
 
 
 def test_detection_command_that_cannot_run_counts_as_no_entry(on_path, monkeypatch):
