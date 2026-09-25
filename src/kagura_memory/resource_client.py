@@ -13,6 +13,7 @@ from .client import _SETUP_SUMMARY_DEPRECATED, KaguraClient
 from .exceptions import (
     KaguraAuthError,
     KaguraNotFoundError,
+    _exc_message,
 )
 from .logger import VerboseLogger, normalize_logger
 from .models import (
@@ -494,7 +495,7 @@ class ResourceClient(KaguraRestClient):
             result = self._parse(ResourceEventBatchResponse, self._json(response), "ingest_events")
         except BaseException as e:
             log.error(
-                f"Batch ingest failed: {e}",
+                f"Batch ingest failed: {_exc_message(e)}",
                 stage="complete",
                 detail={"events_attempted": len(events), "resource_id": resource_id},
             )

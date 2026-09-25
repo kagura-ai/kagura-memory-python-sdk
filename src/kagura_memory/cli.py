@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import math
 import sys
 from collections.abc import Awaitable, Callable
 from datetime import datetime
@@ -46,6 +47,20 @@ from .setup_harness import HarnessName, run_setup_harness
 from .workspace_client import WorkspaceClient
 
 _PROGRESS_CHOICES = ["rich", "json", "none"]
+
+
+class _FloatRange(click.FloatRange):
+    """``click.FloatRange`` that refuses NaN (#285).
+
+    Every comparison with NaN is false, so click's range check lets ``nan``
+    through, and it was sent as the value.
+    """
+
+    def convert(self, value: Any, param: click.Parameter | None, ctx: click.Context | None) -> Any:
+        rv = super().convert(value, param, ctx)
+        if math.isnan(rv):
+            self.fail(f"{rv} is not in the range {self._describe_range()}.", param, ctx)
+        return rv
 
 
 def _resolve_progress_logger(verbose: int, progress: str | None) -> VerboseLogger | None:
@@ -546,7 +561,7 @@ def explore(context_id, memory_id, depth, min_weight):
 @click.option(
     "--importance",
     "-i",
-    type=click.FloatRange(0.0, 1.0),
+    type=_FloatRange(0.0, 1.0),
     default=0.7,
     show_default=True,
     help="Importance 0.0-1.0 for the overview memory; sections inherit lower.",
@@ -1017,8 +1032,8 @@ def context_update(context_id, display_name, description, summary, usage_guide, 
 
 @context.command(name="search-config")
 @click.argument("context_id")
-@click.option("--semantic", type=click.FloatRange(0.0, 1.0), help="Semantic weight (0.0-1.0)")
-@click.option("--bm25", type=click.FloatRange(0.0, 1.0), help="BM25 weight (0.0-1.0)")
+@click.option("--semantic", type=_FloatRange(0.0, 1.0), help="Semantic weight (0.0-1.0)")
+@click.option("--bm25", type=_FloatRange(0.0, 1.0), help="BM25 weight (0.0-1.0)")
 @click.option("--fetch-factor", type=click.IntRange(1, 10), help="Fetch multiplier (1-10)")
 @click.option("--rerank/--no-rerank", default=None, help="Enable/disable reranking")
 @click.option(
@@ -2137,10 +2152,19 @@ def _get_kagura_client() -> KaguraClient:
 
 def _run_resource_command(
     operation: Callable[[ResourceClient], Awaitable[Any]],
+    *,
+    started: Callable[[], None] | None = None,
 ) -> None:
-    """Execute a ResourceClient operation with standard boilerplate."""
+    """Execute a ResourceClient operation with standard boilerplate.
+
+    ``started`` runs once the client is built, right before ``operation``:
+    a command that opens a progress stream there can close it in
+    ``operation``, since a config or credential failure comes before (#285).
+    """
     try:
         client = _get_resource_client()
+        if started is not None:
+            started()
 
         async def _run() -> Any:
             async with client:
@@ -2597,7 +2621,8 @@ def resource_import(resource_id, api_key, input_file, fmt, id_column, version, v
     if not rows:
         raise click.ClickException("No data found in input")
 
-    # Build events
+    # Build events. A bad row is a ClickException naming it, never a
+    # pydantic traceback (#285).
     events = []
     for i, row in enumerate(rows):
         if id_column:
@@ -2606,8 +2631,16 @@ def resource_import(resource_id, api_key, input_file, fmt, id_column, version, v
                     f"Row {i + 1}: column '{id_column}' not found. Keys: {list(row.keys())}"
                 )
             doc_id = str(row[id_column])
+            if not 1 <= len(doc_id) <= 255:
+                raise click.ClickException(
+                    f"Row {i + 1}: doc_id from column '{id_column}' must be 1-255 "
+                    f"characters, got {len(doc_id)}."
+                )
         else:
             doc_id = str(i + 1)
+        if None in row:
+            # csv.DictReader files a row's cells past the header under None.
+            raise click.ClickException(f"Row {i + 1}: more fields than the header has columns.")
         events.append(
             ResourceEventRequest(
                 op="upsert",
@@ -2618,19 +2651,22 @@ def resource_import(resource_id, api_key, input_file, fmt, id_column, version, v
         )
 
     logger = _resolve_progress_logger(verbose, progress)
-    # Pre-flight announcement: keep stdout strictly machine-readable (the
-    # JSON output below) by routing the human-readable count to stderr.
-    # Suppress entirely when progress is silent (--progress=none, or no -v
-    # and no --progress) so scripts piping stderr to /dev/null see nothing
-    # unexpected; otherwise emit it as a structured "start" action through
-    # the logger so the rich path stays consistent and json consumers get
-    # a parseable event.
-    if logger is not None:
-        logger.action(
-            "Importing events",
-            f"{len(events)} event(s)",
-            stage="import_start",
-        )
+
+    def started() -> None:
+        # Pre-flight announcement: keep stdout strictly machine-readable (the
+        # JSON output below) by routing the human-readable count to stderr.
+        # Suppress entirely when progress is silent (--progress=none, or no -v
+        # and no --progress) so scripts piping stderr to /dev/null see nothing
+        # unexpected; otherwise emit it as a structured "start" action through
+        # the logger so the rich path stays consistent and json consumers get
+        # a parseable event. Only once the client is built: from here on the
+        # stream ends with exactly one success or error (#285).
+        if logger is not None:
+            logger.action(
+                "Importing events",
+                f"{len(events)} event(s)",
+                stage="import_start",
+            )
 
     # Batch ingest (100 at a time). The CLI command is ONE user-facing
     # operation, so it must emit exactly one terminal event. ``ingest_events``
@@ -2661,7 +2697,7 @@ def resource_import(resource_id, api_key, input_file, fmt, id_column, version, v
         except BaseException as e:
             if logger is not None:
                 logger.error(
-                    f"Import failed: {e}",
+                    f"Import failed: {_exc_message(e)}",
                     stage="complete",
                     detail={
                         "created_so_far": total_created,
@@ -2685,7 +2721,7 @@ def resource_import(resource_id, api_key, input_file, fmt, id_column, version, v
             )
         return json.dumps(output, indent=2, ensure_ascii=False)
 
-    _run_resource_command(op)
+    _run_resource_command(op, started=started)
 
 
 # =============================================================================
@@ -2910,6 +2946,28 @@ async def _remember_file_object(
     return result
 
 
+class _HeldSuccessLogger(VerboseLogger):
+    """A :class:`VerboseLogger` that holds its ``success`` event until :meth:`release`.
+
+    Every other event goes out as the wrapped logger would send it.
+    """
+
+    def __init__(self, inner: VerboseLogger) -> None:
+        super().__init__(inner.level, inner._console, output_format=inner.output_format)
+        self._held: tuple[str, str | None, dict[str, Any] | None] | None = None
+
+    def success(
+        self, message: str, *, stage: str | None = None, detail: dict[str, Any] | None = None
+    ) -> None:
+        self._held = (message, stage, detail)
+
+    def release(self) -> None:
+        """Send the held ``success`` event, if there is one."""
+        if self._held is not None:
+            message, stage, detail = self._held
+            super().success(message, stage=stage, detail=detail)
+
+
 @files.command(name="upload")
 @click.argument("path", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option("--context-id", "-c", help="Target context (workspace) UUID")
@@ -2944,7 +3002,7 @@ async def _remember_file_object(
 )
 @click.option(
     "--importance",
-    type=click.FloatRange(0.0, 1.0),
+    type=_FloatRange(0.0, 1.0),
     default=0.5,
     show_default=True,
     help="Importance 0.0-1.0 for the --remember memory.",
@@ -2997,6 +3055,10 @@ def files_upload(
         raise click.UsageError("--summary and --tags require --remember.")
 
     logger = _resolve_progress_logger(verbose, progress)
+    # With --remember the upload is not the whole command: its success is
+    # held until the memory is written, so a stream that ends in success
+    # never belongs to a command that failed (#285).
+    upload_logger = _HeldSuccessLogger(logger) if remember and logger is not None else logger
 
     async def op(client: FilesClient, ctx: str) -> str:
         file_obj = await client.upload(
@@ -3004,7 +3066,7 @@ def files_upload(
             source=path,
             content_type=content_type,
             binding_context_id=binding_context_id,
-            logger=logger,
+            logger=upload_logger,
         )
         if not remember:
             return file_obj.model_dump_json(indent=2)
@@ -3015,14 +3077,25 @@ def files_upload(
         except Exception as e:
             # The upload already succeeded — surface the file_id so the user
             # knows the file_object exists and does not re-upload a duplicate.
-            raise click.ClickException(
-                _cli_error_message(
-                    e,
-                    f"File uploaded (file_id={file_obj.id}), but creating the linked "
-                    f"memory failed: {_exc_message(e)}. The file_object is stored; "
-                    f"retry the memory write separately or reference it by file_id.",
+            message = (
+                f"File uploaded (file_id={file_obj.id}), but creating the linked "
+                f"memory failed: {_exc_message(e)}. The file_object is stored; "
+                f"retry the memory write separately or reference it by file_id."
+            )
+            if logger is not None:
+                logger.error(
+                    message,
+                    stage="complete",
+                    detail={
+                        "reserved_file_id": file_obj.id,
+                        "uploaded": True,
+                        "confirm_started": True,
+                        "confirmed": True,
+                    },
                 )
-            ) from e
+            raise click.ClickException(_cli_error_message(e, message)) from e
+        if isinstance(upload_logger, _HeldSuccessLogger):
+            upload_logger.release()
         return json.dumps(
             {"file": file_obj.model_dump(mode="json"), "memory": memory},
             indent=2,

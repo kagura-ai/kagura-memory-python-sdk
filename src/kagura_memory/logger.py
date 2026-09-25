@@ -47,6 +47,7 @@ from typing import Any, Literal
 from rich.console import Console
 from rich.panel import Panel
 from rich.syntax import Syntax
+from rich.text import Text
 
 OutputFormat = Literal["rich", "json", "none"]
 """The three render targets for a :class:`VerboseLogger` instance."""
@@ -121,6 +122,12 @@ class VerboseLogger:
         the underlying SDK operation would crash because of its own
         observability stream. Matches the JSON path's
         ``except OSError`` in :meth:`_emit_json`.
+
+        Callers pass a :class:`~rich.text.Text`, never a markup string: a
+        caller's text is printed as written, with no markup or emoji codes
+        read in it (``report[bold].pdf``, ``:thumbs_up:``), and a ``[/x]`` in
+        an error message cannot raise ``MarkupError`` inside the caller's
+        except handler and replace the real error (#285).
         """
         try:
             self._console.print(*args, **kwargs)
@@ -206,9 +213,9 @@ class VerboseLogger:
             return
         if not self._should_log_rich(1):
             return
-        self._safe_rich_print(f"[bold blue]→[/bold blue] {action}", end="")
+        self._safe_rich_print(Text.assemble(("→", "bold blue"), f" {action}"), end="")
         if details:
-            self._safe_rich_print(f" [dim]{details}[/dim]")
+            self._safe_rich_print(Text.assemble(" ", (details, "dim")))
         else:
             self._safe_rich_print()
 
@@ -230,7 +237,9 @@ class VerboseLogger:
             value_str = str(value)
         except Exception:  # noqa: BLE001 — never crash the caller on a bad __str__
             value_str = f"<{type(value).__name__} __str__ raised>"
-        self._safe_rich_print(f"  [cyan]•[/cyan] {key}: [yellow]{value_str}[/yellow]")
+        self._safe_rich_print(
+            Text.assemble("  ", ("•", "cyan"), f" {key}: ", (value_str, "yellow"))
+        )
 
     def debug(
         self, title: str, data: Any, syntax: str = "json", *, stage: str | None = None
@@ -274,7 +283,8 @@ class VerboseLogger:
         self._safe_rich_print(
             Panel(
                 Syntax(data_str, syntax, theme="monokai", word_wrap=True),
-                title=f"[bold magenta]{title}[/bold magenta]",
+                # A Text, not markup: a Panel title reads emoji codes too.
+                title=Text(title, style="bold magenta"),
                 border_style="magenta",
                 expand=False,
             )
@@ -300,7 +310,7 @@ class VerboseLogger:
             return
         if not self._should_log_rich(1):
             return
-        self._safe_rich_print(f"[bold green]✓[/bold green] {message}")
+        self._safe_rich_print(Text.assemble(("✓", "bold green"), f" {message}"))
 
     def warning(self, message: str, *, stage: str | None = None) -> None:
         """Log a non-fatal warning — ``kind=warning``, level ≥ 1.
@@ -315,7 +325,7 @@ class VerboseLogger:
             return
         if not self._should_log_rich(1):
             return
-        self._safe_rich_print(f"[bold yellow]⚠[/bold yellow] {message}")
+        self._safe_rich_print(Text.assemble(("⚠", "bold yellow"), f" {message}"))
 
     def error(
         self,
@@ -337,7 +347,7 @@ class VerboseLogger:
             self._emit_json(kind="error", stage=stage, msg=message, detail=detail)
             return
         # Rich path: error always renders, regardless of self.level.
-        self._safe_rich_print(f"[bold red]✗[/bold red] {message}", style="bold red")
+        self._safe_rich_print(Text.assemble(("✗", "bold red"), f" {message}"), style="bold red")
 
 
 _NULL_LOGGER: VerboseLogger = VerboseLogger(level=0, output_format="none")

@@ -448,7 +448,7 @@ class FilesClient(KaguraRestClient):
             # response) — consumers should verify file state before retrying
             # rather than re-uploading.
             log.error(
-                f"Upload failed: {e}",
+                f"Upload failed: {_exc_message(e)}",
                 stage="complete",
                 detail={
                     "reserved_file_id": reserved_file_id,
