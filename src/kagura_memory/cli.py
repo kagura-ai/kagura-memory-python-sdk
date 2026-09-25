@@ -410,6 +410,7 @@ def remember(
     rejects string-typed lat/lon with a 422 by design. Note that updating a
     memory replaces details wholesale, so re-send location when you revise it.
 
+    \b
     Examples:
       kagura remember -s "FastAPI DI pattern" --content "Use Depends()..."
       kagura remember -c dev -s "OAuth2 setup" --content "..." --tags "auth,oauth"
@@ -463,6 +464,7 @@ def recall(query, context_id, k, rerank, trusted_only):
     config (memory-cloud v0.69.0+). --rerank applies only when the context
     enables reranking; --no-rerank always skips it.
 
+    \b
     Examples:
       kagura recall "FastAPI dependency injection"
       kagura recall "OAuth2 implementation" -k 10
@@ -488,6 +490,7 @@ def explore(context_id, memory_id, depth, min_weight):
     """
     Explore related memories via Neural Memory graph.
 
+    \b
     Examples:
       kagura explore -m "abc-123-def"
       kagura explore -c dev -m "abc-123" --depth 3
@@ -658,6 +661,7 @@ def ingest_file(
     describe_image() yet. Pass --no-vision to skip vision-provider
     configuration entirely.
 
+    \b
     Examples:
       kagura ingest https://example.com/report.pdf
       kagura ingest ./report.pdf --tags "Q1,report"
@@ -777,6 +781,7 @@ def reference(context_id, memory_id):
     """
     Get full details of a specific memory.
 
+    \b
     Examples:
       kagura reference -m "abc-123-def"
       kagura reference -c dev -m "abc-123-def"
@@ -819,6 +824,7 @@ def update_memory(
 
     Use --memory-id for in-place update, or --external-id for upsert.
 
+    \b
     Examples:
       kagura update-memory -m MEM_UUID -s "updated summary"
       kagura update-memory --external-id ext-key -s "summary" --content "..." -t note
@@ -866,6 +872,7 @@ def forget(context_id, memory_id, query, k):
     Use --memory-id for specific deletion or --query for bulk deletion.
     The server refuses --query while recall is degraded (keyword-only).
 
+    \b
     Examples:
       kagura forget -m "abc-123-def"
       kagura forget -q "outdated test data" -k 5
@@ -904,6 +911,7 @@ def context_list(name_contains, summary, details, stats):
     Rows are slim by default (id, name, is_private, is_locked, last_used_at);
     memory-cloud v0.73.0+ is needed for --name-contains/--summary/--details.
 
+    \b
     Examples:
       kagura context list
       kagura context list --name-contains auth --summary
@@ -932,6 +940,7 @@ def context_create(name, display_name, description, summary, usage_guide, public
     """
     Create a new context.
 
+    \b
     Examples:
       kagura context create -n my-project
       kagura context create -n dev -d "Development notes" -s "Project dev context"
@@ -957,6 +966,7 @@ def context_delete(context_id, yes):
     """
     Soft-delete a context and all its memories.
 
+    \b
     Examples:
       kagura context delete CTX_UUID
       kagura context delete CTX_UUID -y
@@ -982,6 +992,7 @@ def context_update(context_id, display_name, description, summary, usage_guide, 
     """
     Update a context's settings.
 
+    \b
     Examples:
       kagura context update CTX_UUID -s "Updated summary"
       kagura context update CTX_UUID --lock
@@ -1024,6 +1035,7 @@ def context_search_config(
 
     Weights must sum to 1.0.
 
+    \b
     Examples:
       kagura context search-config CTX_UUID --semantic 0.5 --bm25 0.5
       kagura context search-config CTX_UUID --rerank --reranker voyage
@@ -1093,6 +1105,7 @@ def edge_list(context_id, memory_id, min_weight, edge_types, limit):
     """
     List edges connected to a memory.
 
+    \b
     Examples:
       kagura edge list CTX_UUID MEM_UUID
       kagura edge list CTX_UUID MEM_UUID --min-weight 0.5 --type related_to
@@ -1128,6 +1141,7 @@ def edge_create(context_id, source_id, target_id, edge_type, weight, confidence)
     UPSERT semantics (existing weight is replaced only when the new weight is
     higher). Self-loops are rejected.
 
+    \b
     Examples:
       kagura edge create CTX_UUID SRC_UUID TGT_UUID
       kagura edge create CTX_UUID SRC_UUID TGT_UUID --type depends_on --weight 0.8
@@ -1159,6 +1173,7 @@ def edge_update(context_id, source_id, target_id, weight, edge_type):
 
     At least one of --weight or --type must be provided.
 
+    \b
     Examples:
       kagura edge update CTX_UUID SRC_UUID TGT_UUID --weight 0.9
       kagura edge update CTX_UUID SRC_UUID TGT_UUID --type related_to --weight 0.7
@@ -1188,6 +1203,7 @@ def edge_delete(context_id, source_id, target_id, yes):
     """
     Delete the edge between SOURCE_ID and TARGET_ID.
 
+    \b
     Examples:
       kagura edge delete CTX_UUID SRC_UUID TGT_UUID
       kagura edge delete CTX_UUID SRC_UUID TGT_UUID -y
@@ -1325,6 +1341,7 @@ def guardrails_load(context_id, cap):
     pinned_truncated / tool_triggered_truncated before trusting the set as
     complete.
 
+    \b
     Examples:
       kagura guardrails load
       kagura guardrails load CTX_UUID --cap 200
@@ -1379,6 +1396,7 @@ def guardrails_digest(context_id, target, out_path, profile, tools):
     a URL with ?profile= or ?tools=, repeat them with --profile / --tools:
     they decide which tool the truncation note names.
 
+    \b
     Examples:
       kagura guardrails digest CTX_UUID
       kagura guardrails digest CTX_UUID --out AGENTS.md
@@ -2101,6 +2119,7 @@ def tokens_list(resource_id, limit):
     """
     List resource tokens.
 
+    \b
     Examples:
       kagura resource tokens list
       kagura resource tokens list --resource-id products
@@ -2123,6 +2142,7 @@ def tokens_create(resource_id, description, quota):
 
     The token is shown ONLY once — save it immediately.
 
+    \b
     Examples:
       kagura resource tokens create -r products
       kagura resource tokens create -r slack-messages -d "Slack integration" -q 5000
@@ -2147,6 +2167,7 @@ def tokens_update(token_id, description, quota):
     """
     Update a resource token.
 
+    \b
     Examples:
       kagura resource tokens update 42 -d "New description"
       kagura resource tokens update 42 -q 2000
@@ -2171,6 +2192,7 @@ def tokens_revoke(token_id):
     """
     Revoke (soft-delete) a resource token.
 
+    \b
     Examples:
       kagura resource tokens revoke 42
     """
@@ -2194,6 +2216,7 @@ def ingest(resource_id, api_key, doc_id, op, version, payload, importance):
     """
     Ingest a single resource event.
 
+    \b
     Examples:
       kagura resource ingest -r products -k KEY --doc-id SKU-001 -p '{"name":"Widget","price":9.99}'
       kagura resource ingest -r products -k KEY --doc-id SKU-999 --op delete
@@ -2228,6 +2251,7 @@ def ingest_batch(resource_id, api_key, file):
 
     The file should contain a JSON array of event objects.
 
+    \b
     Examples:
       kagura resource ingest-batch -r products -k KEY -f events.json
     """
@@ -2254,6 +2278,7 @@ def resource_stats(resource_id):
     """
     Show resource impact statistics.
 
+    \b
     Examples:
       kagura resource stats -r products
     """
@@ -2270,6 +2295,7 @@ def resource_list():
     """
     List all resources in the workspace (owner only).
 
+    \b
     Examples:
       kagura resource list
     """
@@ -2290,6 +2316,7 @@ def resource_indexer_status(resource_id):
     The ``state`` field is null when the indexer has never run for this
     resource (this is a normal 200 response, distinct from a 404).
 
+    \b
     Examples:
       kagura resource indexer-status -r products
     """
@@ -2318,6 +2345,7 @@ def resource_events(resource_id, limit, cursor, op, doc_id, version, since):
     The response includes a ``next_cursor``; pass it back via --cursor to
     page forward (null on the last page).
 
+    \b
     Examples:
       kagura resource events products
       kagura resource events products --op upsert --limit 20
@@ -2356,6 +2384,7 @@ def resource_schema(resource_id, schema_version):
     """
     Show resource field definitions (schema).
 
+    \b
     Examples:
       kagura resource schema -r products
       kagura resource schema -r products -v 2
@@ -2401,6 +2430,7 @@ def resource_setup(resource_id, name, summary, description, quota):
     """
     One-shot resource setup: create context + set resource_id + create token.
 
+    \b
     Examples:
       kagura resource setup -r products
       kagura resource setup -r products -n product-catalog
@@ -2452,6 +2482,7 @@ def resource_import(resource_id, api_key, input_file, fmt, id_column, version, v
     Auto-detects format from file extension, or specify --format.
     Each row/object becomes a resource event with op=upsert.
 
+    \b
     Examples:
       kagura resource import -r products -k TOKEN -f products.csv
       kagura resource import -r products -k TOKEN -f data.jsonl
@@ -2900,6 +2931,7 @@ def files_upload(
     invoking an LLM — works for binaries and keyless environments. For
     LLM-extracted section memories use `kagura ingest` instead.
 
+    \b
     Examples:
       kagura files upload ./report.pdf --context-id ctx-uuid
       kagura files upload ./diagram.png --remember --tags "design,arch"
@@ -2955,6 +2987,7 @@ def files_download_url(file_id: str, context_id: str | None):
     The owning context (workspace) is required (server v0.41.0): pass
     ``--context-id`` or set it in your OAuth profile / .kagura.json.
 
+    \b
     Example:
       kagura files download-url <file_id> -c <context-id>
     """
@@ -2975,6 +3008,7 @@ def files_delete(file_id: str, context_id: str | None):
     The owning context (workspace) is required (server v0.41.0): pass
     ``--context-id`` or set it in your OAuth profile / .kagura.json.
 
+    \b
     Example:
       kagura files delete <file_id> -c <context-id>
     """
@@ -3000,6 +3034,7 @@ def files_list(context_id: str | None, limit: int, cursor: str | None):
     """
     List uploaded files in a context, newest first.
 
+    \b
     Example:
       kagura files list --context-id ctx-uuid
     """
@@ -3112,6 +3147,7 @@ def member_list(workspace_id: str | None, as_json: bool):
     """
     List workspace members with role, email, and join date.
 
+    \b
     Example:
       kagura workspace member list -w <workspace-uuid>
     """
@@ -3148,6 +3184,7 @@ def member_add(user_id: str, role: str, workspace_id: str | None):
     creates a dangling membership row. Prefer
     `kagura workspace invite create <email>` for onboarding.
 
+    \b
     Example:
       kagura workspace member add google_1234 --role member
     """
@@ -3172,6 +3209,7 @@ def member_set_role(user_id: str, role: str, workspace_id: str | None):
     """
     Change a member's role.
 
+    \b
     Example:
       kagura workspace member set-role google_1234 --role admin
     """
@@ -3193,6 +3231,7 @@ def member_remove(user_id: str, yes: bool, workspace_id: str | None):
 
     Prompts for confirmation unless --yes is passed.
 
+    \b
     Example:
       kagura workspace member remove google_1234 --yes
     """
@@ -3254,6 +3293,7 @@ def invite_create(
     The invitation URL is printed ONCE — it is a join credential and is
     never shown again (invite list returns metadata only).
 
+    \b
     Example:
       kagura workspace invite create new@example.com --role member -c <context-uuid>
     """
@@ -3306,6 +3346,7 @@ def invite_list(include_accepted: bool, as_json: bool, workspace_id: str | None)
     Tokens/URLs are never shown here — the server nulls them for API-key
     callers, and the JSON output drops the fields entirely.
 
+    \b
     Example:
       kagura workspace invite list
     """
@@ -3335,6 +3376,7 @@ def invite_revoke(invitation_id: int, workspace_id: str | None):
     """
     Revoke a pending invitation by its integer id (see `invite list`).
 
+    \b
     Example:
       kagura workspace invite revoke 7
     """
@@ -3377,6 +3419,7 @@ def auth_create_key(user_id: str, key_name: str, expires_days: int, workspace_id
     member/viewer service identities: the server rejects self-targets
     and owner/admin targets. For your own key, use the web dashboard.
 
+    \b
     Example:
       kagura auth create-key --user google_1234 --name ci-bot --expires-days 90
     """
@@ -3409,6 +3452,7 @@ def auth_list_keys(user_id: str, as_json: bool, workspace_id: str | None):
     """
     List a member's API keys — metadata only, never the plaintext.
 
+    \b
     Example:
       kagura auth list-keys --user google_1234
     """
@@ -3452,6 +3496,7 @@ def auth_revoke_key(key_id: int, user_id: str, yes: bool, workspace_id: str | No
 
     Server-side this is a soft revoke — the row is kept for audit.
 
+    \b
     Example:
       kagura auth revoke-key 42 --user google_1234 --yes
     """
