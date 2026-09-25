@@ -1844,30 +1844,27 @@ _HARNESS_KEY_ENV_HELP = {
         "Not with --oauth."
     ),
 }
-# Until a harness has signed in end to end on a /mcp/w/<workspace-id> URL (#282).
-_HARNESS_OAUTH_UNVERIFIED = (
-    "A full sign-in on a /mcp/w/<workspace-id> URL is not verified yet (see the README)."
-)
 _HARNESS_OAUTH_HELP = {
     "codex": (
         "With --url-form: a URL entry with no key. memory-cloud 0.77.0+ (setup checks first) "
         "accepts Codex's client registration, and Codex then signs in itself: `codex mcp add` "
         "starts the browser sign-in, so it runs only with a terminal and without -y; otherwise "
         "setup prints the table, and you sign in with `codex mcp login NAME` (--no-browser "
-        f"when the browser cannot reach Codex's loopback callback). {_HARNESS_OAUTH_UNVERIFIED}"
+        "when the browser cannot reach Codex's loopback callback)."
     ),
     "hermes": (
         "With --url-form: a URL entry with `auth: oauth` and no key. memory-cloud 0.77.0+ "
         "(setup checks first) accepts Hermes's client registration, and Hermes then signs in "
         "itself when `hermes mcp add` probes it (given --connect-timeout 315, which Hermes "
-        "keeps), or later with `hermes mcp login NAME`. Its device flow waits on "
-        f"memory-cloud#1671. {_HARNESS_OAUTH_UNVERIFIED}"
+        "keeps), or later with `hermes mcp login NAME`; on memory-cloud 0.78.0+, "
+        "`hermes mcp login NAME --flow device` signs in with a code and needs no loopback "
+        "callback."
     ),
     "openclaw": (
         "With --url-form: a URL entry with `auth: oauth` and no key. memory-cloud 0.77.0+ "
         "(setup checks first) accepts OpenClaw's client registration. OpenClaw saves the "
         "entry without probing; sign in with `openclaw mcp login NAME`, then run "
-        f"`openclaw mcp doctor NAME --probe`. {_HARNESS_OAUTH_UNVERIFIED}"
+        "`openclaw mcp doctor NAME --probe`."
     ),
 }
 
@@ -1986,8 +1983,7 @@ def setup_codex(**params):
     sign-in, so setup runs it only with a terminal and without -y, and
     otherwise prints the table for you to add and sign in with `codex mcp
     login NAME`. Codex keeps the token in its own store, keyed on the URL.
-    A full sign-in on a /mcp/w/<workspace-id> URL is not verified yet (see
-    the README). The stdio entry stays the default.
+    The stdio entry stays the default.
 
     \b
     Examples:
@@ -2028,9 +2024,8 @@ def setup_hermes(**params):
     add` probes it (setup gives the add --connect-timeout 315, the bound
     `hermes mcp login` uses, which Hermes keeps as the entry's
     connect_timeout), or later with `hermes mcp login NAME` (the browser
-    flow: its device flow waits on memory-cloud#1671). A full sign-in on a
-    /mcp/w/<workspace-id> URL is not verified yet (see the README). The
-    stdio entry stays the default.
+    flow, or --flow device on memory-cloud 0.78.0+). The stdio entry stays
+    the default.
 
     \b
     Examples:
@@ -2068,9 +2063,8 @@ def setup_openclaw(**params):
     accepts OpenClaw; setup checks the version first), the entry is a URL
     with `auth: "oauth"` and no header, which OpenClaw saves without
     probing: sign in with `openclaw mcp login NAME`, then check it with
-    `openclaw mcp doctor NAME --probe`. A full sign-in on a
-    /mcp/w/<workspace-id> URL is not verified yet (see the README). The
-    stdio entry stays the default.
+    `openclaw mcp doctor NAME --probe`. The stdio entry stays the
+    default.
 
     \b
     Examples:

@@ -1828,7 +1828,7 @@ class TestOAuthHermes:
         assert "with --connect-timeout 315" in out
         assert "keeps as the entry's connect_timeout" in out
         assert "`hermes mcp login kagura-memory`" in out
-        assert "memory-cloud#1671" in out
+        assert "`hermes mcp login kagura-memory --flow device`" in out
         assert "paste the redirect URL at Hermes's prompt" in out
         assert "~/.hermes/mcp-tokens/kagura-memory.json" in out
         assert "MCP_KAGURA_MEMORY_API_KEY" not in out
@@ -1935,6 +1935,7 @@ class TestOAuthHermes:
         out = flat(result.output)
         assert "Hermes saved kagura-memory disabled" in out
         assert "Sign in with `hermes mcp login kagura-memory`" in out
+        assert "add --flow device on memory-cloud 0.78.0+" in out
         assert "`hermes config set mcp_servers.kagura-memory.enabled true`" in out
         assert "setup skipped the AGENTS.md export" in out
         assert "Done:" not in out
@@ -2039,8 +2040,8 @@ def test_help_documents_the_oauth_form_and_its_login(harness, login):
     assert "memory-cloud 0.77.0+" in out
     assert "client registration" in out
     assert login in out
-    # Until a harness has signed in end to end on a /mcp/w/<workspace-id> URL (#282).
-    assert "A full sign-in on a /mcp/w/<workspace-id> URL is not verified yet" in out
+    # Each harness has signed in end to end on a /mcp/w/<workspace-id> URL (#284).
+    assert "not verified" not in out
 
 
 @pytest.mark.parametrize(

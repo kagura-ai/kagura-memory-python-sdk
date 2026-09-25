@@ -12,11 +12,13 @@ when its name carries a known keyword. From memory-cloud 0.77.0 the keywords
 include Codex, Hermes Agent and OpenClaw (memory-cloud#1657), so their own
 OAuth client registration is accepted there; before 0.77.0 it is rejected.
 The stdio entry stays the default all the same: that needs no per-harness
-browser sign-in and works on older servers, and Hermes's device-flow sign-in
-still waits on memory-cloud#1671. The opt-in ``--url-form --oauth`` writes a
-URL entry with no key, which the harness then signs in to itself; setup first
-checks that the entry's server is memory-cloud 0.77.0+. A full sign-in by a
-harness on a ``/mcp/w/<workspace-id>`` URL has not been verified yet.
+browser sign-in and works on older servers. The opt-in ``--url-form --oauth`` writes a
+URL entry with no key, which the harness then signs in to itself (from memory-cloud
+0.78.0, memory-cloud#1671, Hermes can also do so with its device flow, which needs
+no loopback callback); setup first
+checks that the entry's server is memory-cloud 0.77.0+. Each harness has
+signed in end to end on a ``/mcp/w/<workspace-id>`` URL against memory-cloud
+0.78.0 (#284).
 
 Rules the three commands share:
 
@@ -873,7 +875,8 @@ class _Hermes(_Harness):
             return _wrap(
                 f"Hermes saved {name} disabled, since its sign-in or connection check did not "
                 "finish, and it never connects to a disabled entry. Sign in with `hermes mcp "
-                f"login {name}`, then turn the entry on with {turn_on}"
+                f"login {name}` (add --flow device on memory-cloud 0.78.0+ when the browser "
+                f"cannot reach this host), then turn the entry on with {turn_on}"
             )
         return _wrap(
             f"Hermes saved {name} disabled, since its connection check did not pass, and it "
@@ -1005,10 +1008,10 @@ class _Hermes(_Harness):
         else:
             first = f"Once the entry is in config.yaml, sign in with `{login}`"
         return (
-            f"{first} (the browser flow: its --flow device waits on memory-cloud#1671). The "
-            "sign-in redirects the browser to Hermes's loopback callback on this host; when "
-            "the browser cannot reach it (a remote host), paste the redirect URL at Hermes's "
-            "prompt."
+            f"{first} (the browser flow). The sign-in redirects the browser to Hermes's "
+            "loopback callback on this host; when the browser cannot reach it (a remote host), "
+            "paste the redirect URL at Hermes's prompt, or (memory-cloud 0.78.0+) run "
+            f"`{login} --flow device`, which signs in with a code at the server's /device page."
         )
 
     def token_store(self, name: str) -> str:
