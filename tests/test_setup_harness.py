@@ -1828,11 +1828,7 @@ class TestOAuthHermes:
         assert "with --connect-timeout 315" in out
         assert "keeps as the entry's connect_timeout" in out
         assert "`hermes mcp login kagura-memory`" in out
-        assert (
-            "on memory-cloud 0.78.0+, sign in with `hermes mcp login kagura-memory --flow device`"
-            in out
-        )
-        assert "needs no callback" in out
+        assert "`hermes mcp login kagura-memory --flow device`" in out
         assert "paste the redirect URL at Hermes's prompt" in out
         assert "~/.hermes/mcp-tokens/kagura-memory.json" in out
         assert "MCP_KAGURA_MEMORY_API_KEY" not in out

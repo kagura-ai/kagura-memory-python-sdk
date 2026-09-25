@@ -12,10 +12,10 @@ when its name carries a known keyword. From memory-cloud 0.77.0 the keywords
 include Codex, Hermes Agent and OpenClaw (memory-cloud#1657), so their own
 OAuth client registration is accepted there; before 0.77.0 it is rejected.
 The stdio entry stays the default all the same: that needs no per-harness
-browser sign-in and works on older servers. (From memory-cloud 0.78.0,
-memory-cloud#1671, Hermes can also sign in with its device flow, which needs no
-loopback callback.) The opt-in ``--url-form --oauth`` writes a
-URL entry with no key, which the harness then signs in to itself; setup first
+browser sign-in and works on older servers. The opt-in ``--url-form --oauth`` writes a
+URL entry with no key, which the harness then signs in to itself (from memory-cloud
+0.78.0, memory-cloud#1671, Hermes can also do so with its device flow, which needs
+no loopback callback); setup first
 checks that the entry's server is memory-cloud 0.77.0+. A full sign-in by a
 harness on a ``/mcp/w/<workspace-id>`` URL has not been verified yet.
 
@@ -1009,9 +1009,8 @@ class _Hermes(_Harness):
         return (
             f"{first} (the browser flow). The sign-in redirects the browser to Hermes's "
             "loopback callback on this host; when the browser cannot reach it (a remote host), "
-            "paste the redirect URL at Hermes's prompt, or, on memory-cloud 0.78.0+, sign in "
-            f"with `{login} --flow device`: it shows a code to enter at the server's /device "
-            "page and needs no callback."
+            "paste the redirect URL at Hermes's prompt, or (memory-cloud 0.78.0+) run "
+            f"`{login} --flow device`, which signs in with a code at the server's /device page."
         )
 
     def token_store(self, name: str) -> str:

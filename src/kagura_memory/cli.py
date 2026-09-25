@@ -2029,8 +2029,7 @@ def setup_hermes(**params):
     add` probes it (setup gives the add --connect-timeout 315, the bound
     `hermes mcp login` uses, which Hermes keeps as the entry's
     connect_timeout), or later with `hermes mcp login NAME` (the browser
-    flow; on memory-cloud 0.78.0+, --flow device signs in with a code and
-    needs no loopback callback). A full sign-in on a
+    flow, or --flow device on memory-cloud 0.78.0+). A full sign-in on a
     /mcp/w/<workspace-id> URL is not verified yet (see the README). The
     stdio entry stays the default.
 
