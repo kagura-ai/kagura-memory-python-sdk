@@ -5,8 +5,8 @@ description: Store and search memories with the `kagura` CLI — `kagura remembe
 
 # kagura memory — remember and recall
 
-Drive the core memory verbs of the installed `kagura` CLI. Every command prints
-one JSON object to stdout. Thin wrapper around the installed `kagura` CLI.
+Drive the core memory verbs — every command prints one JSON object to stdout.
+Thin wrapper around the installed `kagura` CLI.
 
 ## Preflight
 
@@ -15,10 +15,11 @@ one JSON object to stdout. Thin wrapper around the installed `kagura` CLI.
 - Requires authentication. Run `kagura auth status`; if not authed, run the
   `auth` skill first.
 - Requires a target context: `-c/--context-id <id>` on the command, else the
-  `context_id` in `.kagura.json` in the working directory. Without either the
-  CLI stops with "context_id required" — ask the user which context or run
-  `kagura context list`. Never read `.kagura.json` yourself: it may hold an
-  API key.
+  `context_id` in `.kagura.json` (the working directory's, else
+  `~/.kagura.json`), else `KAGURA_CONTEXT_ID` when neither file exists.
+  Without any of these the CLI stops with "context_id required" — ask the user
+  which context or run `kagura context list`. Never read `.kagura.json`
+  yourself: it may hold an API key.
 
 ## Run
 
@@ -54,9 +55,11 @@ Guardrails for `--details` / `--location` (`remember`; `--details` also on
   comma-separated fields); it is a shorthand for `details.location`.
 - `--location` together with a `location` key inside `--details` is a usage
   error, not a silent merge — pick one.
-- A blank or whitespace-only `--details`, `--location` or `--tags` means
-  *unset*, not an error (an empty shell variable is safe). Invalid JSON, or
-  JSON that is not an object, in `--details` is a usage error.
+- A blank or whitespace-only `--details`, `--location` or `--tags` is treated
+  as if the flag were omitted — nothing is sent, so an empty shell variable is
+  safe; on `update-memory` the stored value is left unchanged (the CLI cannot
+  clear tags). Invalid JSON, or JSON that is not an object, in `--details` is a
+  usage error.
 - `update-memory --details` **replaces** the memory's `details` wholesale —
   the server does not deep-merge. Re-send `location` (and every other key to
   keep) or the memory drops off the WHERE axis. `update-memory` has no
@@ -83,9 +86,15 @@ Search options:
   so an empty result means "search impaired", not "nothing stored" — retry
   later.
 - `reference` → the full memory under `memory` (`summary`, `content`, …).
-- `update-memory` → `memory_id`, `operation`, `re_embedded`;
+- `update-memory` → `memory_id`, `operation`, `re_embedded`, `scope`, plus the
+  same optional `lint` as `remember` (re-check it after fixing a hint);
   `supersede_candidate_dismissed` is the only confirmation that
-  `--dismiss-supersede-candidate` applied (absent on older servers).
-- `forget` → `deleted_count` and `memory_ids`. Deletion is soft and stays
-  recoverable until the deployment's retention window passes; `-q` is refused
-  while recall is degraded. Confirm with the user before a `-q` bulk delete.
+  `--dismiss-supersede-candidate` applied — absent when the memory had no live
+  candidate or the server predates v0.65.0.
+- `forget` → `deleted_count` and `memory_ids`. `deleted_count` is the outcome,
+  not the request: `0` after `-m` means the server skipped it (a memory the
+  credential may not delete, such as a tool guardrail) — report it as not
+  deleted; a `-q` sweep can delete fewer than `-k` for the same reason.
+  Deletion is soft and stays recoverable until the deployment's retention
+  window passes; `-q` is refused while recall is degraded. Confirm with the
+  user before a `-q` bulk delete.
