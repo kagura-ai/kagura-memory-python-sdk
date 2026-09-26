@@ -40,13 +40,13 @@ kagura recall "latency-sensitive lookup" --no-rerank
 # one memory in full / revise / delete
 kagura reference -m <uuid>
 kagura update-memory -m <uuid> -s "updated summary" --tags "auth,oauth"
-kagura update-memory -m <uuid> --details '{"location": {"lat": 35.68, "lon": 139.76}}'
+kagura update-memory -m <uuid> --location "35.68,139.76,Tokyo HQ" --merge-details   # keeps the other details keys
+kagura update-memory -m <uuid> --details '{"location": {"lat": 35.68, "lon": 139.76}, "client": "acme"}'   # replaces them all
 kagura forget -m <uuid>                                    # soft delete, one memory
 kagura forget -q "outdated test data" -k 5                 # bulk delete by search
 ```
 
-Guardrails for `--details` / `--location` (`remember`; `--details` also on
-`update-memory`):
+Guardrails for `--details` / `--location` (`remember` and `update-memory`):
 
 - `lat` / `lon` inside `--details` must be JSON **numbers** — `{"lat": 35.68}`,
   never `{"lat": "35.68"}`. The server rejects string-typed coordinates with a
@@ -60,10 +60,16 @@ Guardrails for `--details` / `--location` (`remember`; `--details` also on
   safe; on `update-memory` the stored value is left unchanged (the CLI cannot
   clear tags). Invalid JSON, or JSON that is not an object, in `--details` is a
   usage error.
-- `update-memory --details` **replaces** the memory's `details` wholesale —
-  the server does not deep-merge. Re-send `location` (and every other key to
-  keep) or the memory drops off the WHERE axis. `update-memory` has no
-  `--location` shorthand: write the object as in the example above.
+- On `update-memory`, `--details` / `--location` **replace** the memory's
+  `details` wholesale — the server does not deep-merge — so a bare `--location`
+  drops every other key (the memory keeps its place on the WHERE axis, but
+  loses the rest) and `--details '{}'` clears them. Add `--merge-details` to
+  keep the keys you do not mention: it reads the memory first (`reference`, so
+  two calls, not one atomic update) and shallow-merges the top-level keys. It
+  needs `-m`, cannot remove a key, and writes nothing when the server's bounded
+  `reference` reply left `details` out (memory-cloud 0.78.0+ on a large
+  memory) — then re-send the complete object with `--details` and without
+  `--merge-details`.
 
 Search options:
 
