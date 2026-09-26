@@ -475,6 +475,23 @@ def _update_memory_cli(mock_client_cls, mock_config, *args, reference=None, refe
     return result, mock_client
 
 
+def test_update_memory_help_states_wholesale_replace():
+    """The wholesale-replace semantic and the --merge-details caveats are in --help.
+
+    Acceptance criterion (2) of #247: a user reading the help must learn that
+    --details replaces details wholesale, that --merge-details keeps the
+    other top-level keys, and that the merge is two calls, not one atomic
+    update.
+    """
+    result = CliRunner().invoke(main, ["update-memory", "--help"])
+    assert result.exit_code == 0
+    text = " ".join(result.output.split())
+    assert "REPLACES the memory's details wholesale" in text
+    assert "--merge-details" in text
+    assert "top-level keys" in text
+    assert "two calls, not one atomic update" in text
+
+
 @patch("kagura_memory.cli.load_config")
 @patch("kagura_memory.cli.KaguraClient")
 def test_update_memory_parses_details_json(mock_client_cls, mock_config):
