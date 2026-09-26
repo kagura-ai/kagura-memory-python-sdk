@@ -30,9 +30,11 @@ from kagura_memory import (
     IndexerJobStatus,
     IndexerSkippedReason,
     IndexerStatusResponse,
+    KaguraAuthError,
     KaguraClient,
     KaguraConnectionError,
     KaguraError,
+    KaguraRateLimitError,
     KaguraResponseError,
     ResourceClient,
     RollbackResult,
@@ -519,20 +521,25 @@ async def test_rest_model_paths_wrap_drift(operation, cls, call, body):
 
 
 # ---------------------------------------------------------------------------
-# KaguraClient REST: list_memories wraps drift, the other _rest_get methods
-# keep KaguraConnectionError (#254)
+# KaguraClient REST: list_memories wraps drift (#254), and since #277 so do
+# the other REST-backed methods
 # ---------------------------------------------------------------------------
 
 _LIST_MEMORIES_OP = "KaguraClient.list_memories"
 
 
+def _kagura_client_answering(
+    handler: Callable[[httpx.Request], httpx.Response],
+) -> KaguraClient:
+    """A KaguraClient whose REST GETs are all answered by ``handler``."""
+    client = KaguraClient(api_key="test", mcp_url="https://test.com/mcp")
+    client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    return client
+
+
 def _kagura_client(**response_kwargs: Any) -> KaguraClient:
     """A KaguraClient whose REST GETs all answer 200 with ``response_kwargs``."""
-    client = KaguraClient(api_key="test", mcp_url="https://test.com/mcp")
-    client._client = httpx.AsyncClient(
-        transport=httpx.MockTransport(lambda _request: httpx.Response(200, **response_kwargs))
-    )
-    return client
+    return _kagura_client_answering(lambda _request: httpx.Response(200, **response_kwargs))
 
 
 def _memory_list_body(**item_overrides: Any) -> dict[str, Any]:
@@ -594,26 +601,144 @@ async def test_list_memories_drift_message_omits_payload_values():
         await client.close()
 
 
+# Every REST-backed KaguraClient method, on the one _rest_get path (#254 for
+# list_memories, #277 for the rest): name → (call, the operation reported).
+# check_server_version parses through get_server_info.
+_REST_METHODS: dict[str, tuple[Callable[[KaguraClient], Awaitable[Any]], str]] = {
+    "get_server_info": (lambda c: c.get_server_info(), "KaguraClient.get_server_info"),
+    "check_server_version": (lambda c: c.check_server_version(), "KaguraClient.get_server_info"),
+    "get_embedding_status": (
+        lambda c: c.get_embedding_status(),
+        "KaguraClient.get_embedding_status",
+    ),
+    "get_memory_stats": (lambda c: c.get_memory_stats("ctx-1"), "KaguraClient.get_memory_stats"),
+    "find_duplicates": (lambda c: c.find_duplicates("ctx-1"), "KaguraClient.find_duplicates"),
+    "list_memories": (lambda c: c.list_memories(), _LIST_MEMORIES_OP),
+    "list_embedding_models": (
+        lambda c: c.list_embedding_models(),
+        "KaguraClient.list_embedding_models",
+    ),
+}
+
+
 @pytest.mark.asyncio
-async def test_list_memories_non_json_body_stays_a_connection_error():
-    # A proxy's HTML maintenance page is a transport problem, not drift.
-    client = _kagura_client(text="<html>maintenance</html>")
+@pytest.mark.parametrize("name", list(_REST_METHODS))
+async def test_rest_methods_wrap_drift(name):
+    call, operation = _REST_METHODS[name]
+    client = _kagura_client(json={"unexpected": "schema"})
     try:
-        with pytest.raises(KaguraConnectionError, match="Invalid response format"):
-            await client.list_memories()
+        with pytest.raises(KaguraResponseError) as exc_info:
+            await call(client)
+        err = exc_info.value
+        assert err.operation == operation
+        assert str(err).startswith(f"{operation}: ")
+        assert isinstance(err.__cause__, ValidationError)
     finally:
         await client.close()
 
 
+def _memory_stats_body_without_use_count() -> dict[str, Any]:
+    """#277's repro: a memory-stats row that has no ``use_count``."""
+    row = {
+        "id": "m1",
+        "summary": "private-summary-xyz",
+        "type": "note",
+        "importance": 0.7,
+        "scope": "persistent",
+        "access_count": 4,
+        "embedding_status": "done",
+        "created_at": "2026-01-01T00:00:00Z",
+    }
+    return {"memories": [row], "total": 1, "sort_by": "use_count", "sort_order": "desc"}
+
+
 @pytest.mark.asyncio
-async def test_other_rest_get_methods_keep_connection_error_on_drift():
-    # #250 left these on KaguraConnectionError (kagura doctor catches it on
-    # check_server_version); only list_memories moved to KaguraResponseError.
-    client = _kagura_client(json={"unexpected": "schema"})
+@pytest.mark.parametrize(
+    ("body", "call"),
+    [
+        (_memory_stats_body_without_use_count(), lambda c: c.get_memory_stats("ctx-1")),
+        (
+            {
+                "pairs": [
+                    {
+                        "memory_a": {"id": "a", "summary": "private-summary-xyz", "type": "note"},
+                        "memory_b": {"id": "b", "summary": "other", "type": "note"},
+                        "similarity": 0.95,
+                    }
+                ],
+                "total_pairs": 1,
+                "threshold": 0.9,
+                "memories_scanned": 2,
+            },
+            lambda c: c.find_duplicates("ctx-1"),
+        ),
+        (
+            {
+                "total": 1,
+                "by_status": {"failed": 1},
+                "failed_memories": [{"id": "m1", "summary": "private-summary-xyz"}],
+            },
+            lambda c: c.get_embedding_status(),
+        ),
+    ],
+    ids=["memory-stats-row", "duplicate-pair", "failed-memory"],
+)
+async def test_rest_methods_drift_message_omits_payload_values(body, call):
+    # These rows carry memory summaries. The old _rest_get path echoed
+    # pydantic's text, `input_value=` reprs included (pydantic truncates
+    # them, so the summary itself is not always visible in it); the drift
+    # message now names the field only.
+    client = _kagura_client(json=body)
     try:
-        with pytest.raises(KaguraConnectionError, match="Invalid response format"):
-            await client.get_memory_stats("ctx-1")
-        with pytest.raises(KaguraConnectionError, match="Invalid response format"):
-            await client.get_server_info()
+        with pytest.raises(KaguraResponseError) as exc_info:
+            await call(client)
+        message = str(exc_info.value)
+        assert "private-summary-xyz" not in message
+        assert "input_value" not in message and "input_type" not in message
+    finally:
+        await client.close()
+
+
+def _raise(exc: Exception) -> Callable[[httpx.Request], httpx.Response]:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        raise exc
+
+    return handler
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", list(_REST_METHODS))
+@pytest.mark.parametrize(
+    ("handler", "expected", "match"),
+    [
+        (
+            lambda _r: httpx.Response(200, text="<html>maintenance</html>"),
+            KaguraConnectionError,
+            "Invalid response format",
+        ),
+        (lambda _r: httpx.Response(500, text="boom"), KaguraConnectionError, "HTTP 500"),
+        (
+            lambda _r: httpx.Response(401, json={"detail": "nope"}),
+            KaguraAuthError,
+            "Authentication",
+        ),
+        (
+            lambda _r: httpx.Response(429, json={"detail": "slow down"}),
+            KaguraRateLimitError,
+            "HTTP 429",
+        ),
+        (_raise(httpx.ConnectError("refused")), KaguraConnectionError, "Connection failed"),
+    ],
+    ids=["non-json-2xx", "http-500", "http-401", "http-429", "network"],
+)
+async def test_rest_methods_keep_transport_errors(name, handler, expected, match):
+    # Only drift moved to KaguraResponseError (#277): a proxy's HTML page, a
+    # non-2xx status and a network failure are still what they were.
+    call, _operation = _REST_METHODS[name]
+    client = _kagura_client_answering(handler)
+    try:
+        with pytest.raises(expected, match=match) as exc_info:
+            await call(client)
+        assert not isinstance(exc_info.value, KaguraResponseError)
     finally:
         await client.close()

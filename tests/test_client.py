@@ -2285,7 +2285,9 @@ async def test_list_embedding_models_http_error():
 
 @pytest.mark.asyncio
 async def test_list_embedding_models_invalid_response():
-    """list_embedding_models() should raise KaguraConnectionError on invalid JSON schema."""
+    """list_embedding_models() raises KaguraResponseError on a body its model rejects (#277)."""
+    from kagura_memory import KaguraResponseError
+
     client = _make_initialized_client()
 
     mock_response = MagicMock()
@@ -2295,8 +2297,9 @@ async def test_list_embedding_models_invalid_response():
 
     with patch.object(client._client, "get", new_callable=AsyncMock) as mock_get:
         mock_get.return_value = mock_response
-        with pytest.raises(KaguraConnectionError, match="Invalid response format"):
+        with pytest.raises(KaguraResponseError, match="EmbeddingModelsResponse") as exc:
             await client.list_embedding_models()
+    assert exc.value.operation == "KaguraClient.list_embedding_models"
 
     await client.close()
 

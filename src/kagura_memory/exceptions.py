@@ -65,7 +65,8 @@ class KaguraResponseError(KaguraError):
     shape the SDK does not know yet; upgrading ``kagura-memory`` is the
     likely fix. ``operation`` names the call whose response failed to
     parse — the MCP tool name, or ``<Client>.<method>`` on the REST
-    clients — and prefixes the message.
+    clients and on ``KaguraClient``'s REST-backed methods (#277) — and
+    prefixes the message.
 
     The message describes the failing fields or the envelope shape, not
     payload values. When a model rejected the payload, the
