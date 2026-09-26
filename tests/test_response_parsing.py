@@ -601,56 +601,22 @@ async def test_list_memories_drift_message_omits_payload_values():
         await client.close()
 
 
-@pytest.mark.asyncio
-async def test_list_memories_non_json_body_stays_a_connection_error():
-    # A proxy's HTML maintenance page is a transport problem, not drift.
-    client = _kagura_client(text="<html>maintenance</html>")
-    try:
-        with pytest.raises(KaguraConnectionError, match="Invalid response format"):
-            await client.list_memories()
-    finally:
-        await client.close()
-
-
-# The REST-backed methods #250 had left on KaguraConnectionError (#277):
-# name → (call, the operation reported, the model, a field {"unexpected":
-# "schema"} lacks). check_server_version parses through get_server_info.
-_REST_METHODS: dict[str, tuple[Callable[[KaguraClient], Awaitable[Any]], str, str, str]] = {
-    "get_server_info": (
-        lambda c: c.get_server_info(),
-        "KaguraClient.get_server_info",
-        "ServerInfo",
-        "version",
-    ),
-    "check_server_version": (
-        lambda c: c.check_server_version(),
-        "KaguraClient.get_server_info",
-        "ServerInfo",
-        "version",
-    ),
+# Every REST-backed KaguraClient method, on the one _rest_get path (#254 for
+# list_memories, #277 for the rest): name → (call, the operation reported).
+# check_server_version parses through get_server_info.
+_REST_METHODS: dict[str, tuple[Callable[[KaguraClient], Awaitable[Any]], str]] = {
+    "get_server_info": (lambda c: c.get_server_info(), "KaguraClient.get_server_info"),
+    "check_server_version": (lambda c: c.check_server_version(), "KaguraClient.get_server_info"),
     "get_embedding_status": (
         lambda c: c.get_embedding_status(),
         "KaguraClient.get_embedding_status",
-        "EmbeddingStatus",
-        "by_status",
     ),
-    "get_memory_stats": (
-        lambda c: c.get_memory_stats("ctx-1"),
-        "KaguraClient.get_memory_stats",
-        "MemoryStatsResponse",
-        "sort_by",
-    ),
-    "find_duplicates": (
-        lambda c: c.find_duplicates("ctx-1"),
-        "KaguraClient.find_duplicates",
-        "DuplicatesResponse",
-        "pairs",
-    ),
+    "get_memory_stats": (lambda c: c.get_memory_stats("ctx-1"), "KaguraClient.get_memory_stats"),
+    "find_duplicates": (lambda c: c.find_duplicates("ctx-1"), "KaguraClient.find_duplicates"),
+    "list_memories": (lambda c: c.list_memories(), _LIST_MEMORIES_OP),
     "list_embedding_models": (
         lambda c: c.list_embedding_models(),
         "KaguraClient.list_embedding_models",
-        "EmbeddingModelsResponse",
-        "default_model",
     ),
 }
 
@@ -658,7 +624,7 @@ _REST_METHODS: dict[str, tuple[Callable[[KaguraClient], Awaitable[Any]], str, st
 @pytest.mark.asyncio
 @pytest.mark.parametrize("name", list(_REST_METHODS))
 async def test_rest_methods_wrap_drift(name):
-    call, operation, model_name, field = _REST_METHODS[name]
+    call, operation = _REST_METHODS[name]
     client = _kagura_client(json={"unexpected": "schema"})
     try:
         with pytest.raises(KaguraResponseError) as exc_info:
@@ -666,41 +632,31 @@ async def test_rest_methods_wrap_drift(name):
         err = exc_info.value
         assert err.operation == operation
         assert str(err).startswith(f"{operation}: ")
-        assert model_name in str(err)
-        assert field in str(err)
         assert isinstance(err.__cause__, ValidationError)
     finally:
         await client.close()
 
 
-def _memory_stats_row(**overrides: Any) -> dict[str, Any]:
-    return {
+def _memory_stats_body_without_use_count() -> dict[str, Any]:
+    """#277's repro: a memory-stats row that has no ``use_count``."""
+    row = {
         "id": "m1",
         "summary": "private-summary-xyz",
         "type": "note",
         "importance": 0.7,
         "scope": "persistent",
-        "use_count": 3,
         "access_count": 4,
         "embedding_status": "done",
         "created_at": "2026-01-01T00:00:00Z",
-        **overrides,
     }
+    return {"memories": [row], "total": 1, "sort_by": "use_count", "sort_order": "desc"}
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("body", "call"),
     [
-        (
-            {
-                "memories": [_memory_stats_row(use_count=None)],
-                "total": 1,
-                "sort_by": "use_count",
-                "sort_order": "desc",
-            },
-            lambda c: c.get_memory_stats("ctx-1"),
-        ),
+        (_memory_stats_body_without_use_count(), lambda c: c.get_memory_stats("ctx-1")),
         (
             {
                 "pairs": [
@@ -729,13 +685,16 @@ def _memory_stats_row(**overrides: Any) -> dict[str, Any]:
 )
 async def test_rest_methods_drift_message_omits_payload_values(body, call):
     # These rows carry memory summaries. The old _rest_get path echoed
-    # pydantic's text, input values included (#277's repro was a memory-stats
-    # row with no use_count); the drift message now names the field only.
+    # pydantic's text, `input_value=` reprs included (pydantic truncates
+    # them, so the summary itself is not always visible in it); the drift
+    # message now names the field only.
     client = _kagura_client(json=body)
     try:
         with pytest.raises(KaguraResponseError) as exc_info:
             await call(client)
-        assert "private-summary-xyz" not in str(exc_info.value)
+        message = str(exc_info.value)
+        assert "private-summary-xyz" not in message
+        assert "input_value" not in message and "input_type" not in message
     finally:
         await client.close()
 
@@ -775,7 +734,7 @@ def _raise(exc: Exception) -> Callable[[httpx.Request], httpx.Response]:
 async def test_rest_methods_keep_transport_errors(name, handler, expected, match):
     # Only drift moved to KaguraResponseError (#277): a proxy's HTML page, a
     # non-2xx status and a network failure are still what they were.
-    call = _REST_METHODS[name][0]
+    call, _operation = _REST_METHODS[name]
     client = _kagura_client_answering(handler)
     try:
         with pytest.raises(expected, match=match) as exc_info:

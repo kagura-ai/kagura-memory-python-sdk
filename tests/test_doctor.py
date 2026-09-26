@@ -9,6 +9,7 @@ import pytest
 from click.testing import CliRunner
 
 from kagura_memory._auth import _OAuthAuth, _StaticAuth
+from kagura_memory._http import _UPGRADE_HINT, parse_response
 from kagura_memory.auth.credentials import CredentialsFile, reset_state_cache, save_credentials_file
 from kagura_memory.claude_code import McpEntry, claude_json_label
 from kagura_memory.cli import main
@@ -883,27 +884,31 @@ def test_check_server_agrees_with_check_server_version(
     assert warned is (expected_status == "fail")
 
 
+def _drift_on_system_info() -> KaguraResponseError:
+    """What get_server_info raises on a body ServerInfo rejects — the real producer."""
+    with pytest.raises(KaguraResponseError) as exc_info:
+        parse_response(
+            ServerInfo, {"unexpected": "schema"}, operation="KaguraClient.get_server_info"
+        )
+    return exc_info.value
+
+
 @pytest.mark.parametrize(
-    ("exc", "message"),
+    ("exc", "prefix"),
     [
-        (KaguraAuthError("bad token"), "bad token"),
-        (KaguraConnectionError("offline"), "Server unreachable"),
+        (KaguraAuthError("bad token"), ""),
+        (KaguraConnectionError("offline"), "Server unreachable: "),
         # Drift on /system/info (#277): the server answered, so not "unreachable".
         (
-            KaguraResponseError(
-                "KaguraClient.get_server_info: unexpected server response for ServerInfo "
-                "(version: Field required). The server may be newer than this SDK; "
-                "upgrading kagura-memory may help.",
-                operation="KaguraClient.get_server_info",
-            ),
-            "could not read /api/v1/system/info",
+            _drift_on_system_info(),
+            "Server answered, but the SDK could not read /api/v1/system/info: ",
         ),
         # Not a KaguraConnectionError; used to escape _check_server as a traceback.
-        (KaguraRateLimitError("Rate limit exceeded (HTTP 429): slow down"), "HTTP 429"),
+        (KaguraRateLimitError("Rate limit exceeded (HTTP 429): slow down"), ""),
     ],
     ids=["auth", "connection", "drift", "rate-limit"],
 )
-def test_check_server_failure_branches(monkeypatch, exc, message):
+def test_check_server_failure_branches(monkeypatch, exc, prefix):
     from kagura_memory.doctor import _check_server
 
     class FakeClient:
@@ -932,10 +937,11 @@ def test_check_server_failure_branches(monkeypatch, exc, message):
 
     assert len(checks) == 1
     assert checks[0].status == "fail"
-    assert message in checks[0].message
-    assert ("Server unreachable" in checks[0].message) is isinstance(exc, KaguraConnectionError)
+    assert checks[0].message == f"{prefix}{exc}"
     if isinstance(exc, KaguraResponseError):
-        assert "upgrading kagura-memory" in checks[0].message
+        # The upgrade suggestion is parse_response's, passed through whole.
+        assert _UPGRADE_HINT in checks[0].message
+        assert "Server unreachable" not in checks[0].message
 
 
 def test_check_server_oauth_auth_error_is_informational(monkeypatch):

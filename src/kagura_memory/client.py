@@ -399,7 +399,7 @@ class KaguraClient:
         path: str,
         params: dict[str, Any] | None = None,
         *,
-        operation: str | None = None,
+        mcp_tool: str | None = None,
     ) -> Any:
         """GET a REST endpoint and return its decoded JSON body.
 
@@ -408,7 +408,7 @@ class KaguraClient:
             params: Optional query parameters. A list value is sent as one
                 repeated key per item (``?k=a&k=b``), which is how FastAPI
                 reads a ``list[str]`` query.
-            operation: The MCP tool this call stands in for. When set, a
+            mcp_tool: The MCP tool this call stands in for. When set, a
                 ``404`` and a ``422`` raise what that tool's
                 ``context_not_found`` and ``invalid_argument`` errors raise
                 (:meth:`_raise_for_mcp_error`), so a method moved from MCP to
@@ -418,7 +418,7 @@ class KaguraClient:
             KaguraAuthError / KaguraRateLimitError / KaguraConnectionError: A
                 non-2xx status (see :func:`raise_for_kagura_status`).
             KaguraNotFoundError / KaguraError: A ``404`` / ``422`` when
-                ``operation`` is set.
+                ``mcp_tool`` is set.
             KaguraConnectionError: A network failure, or a 2xx body that is
                 not JSON.
         """
@@ -429,11 +429,11 @@ class KaguraClient:
             return response.json()
         except httpx.HTTPStatusError as e:
             code = {404: "context_not_found", 422: "invalid_argument"}.get(e.response.status_code)
-            if operation is not None and code is not None:
+            if mcp_tool is not None and code is not None:
                 message = extract_detail(e.response) or f"HTTP {e.response.status_code}"
                 try:
                     self._raise_for_mcp_error(
-                        {"status": "error", "error": code, "message": message}, operation
+                        {"status": "error", "error": code, "message": message}, mcp_tool
                     )
                 except KaguraError as mapped:
                     # Chained explicitly, as raise_for_kagura_status chains it.
@@ -451,6 +451,7 @@ class KaguraClient:
         params: dict[str, Any] | None = None,
         *,
         operation: str,
+        mcp_tool: str | None = None,
     ) -> _T:
         """GET a REST endpoint and parse its body into ``model``.
 
@@ -458,26 +459,30 @@ class KaguraClient:
         the body, so drift raises :class:`KaguraResponseError` naming
         ``operation`` (#277; until 0.41.x these methods raised
         ``KaguraConnectionError("Invalid response format")``, with pydantic's
-        text and the payload values in it). The 404/422 remapping of
-        :meth:`_rest_get_json` is not applied: a non-2xx status stays what
-        :func:`raise_for_kagura_status` makes of it.
+        text and the payload values in it).
 
         Args:
             path: URL path (appended to ``_base_url``).
             model: Pydantic model class for response validation.
             params: Optional query parameters.
-            operation: ``KaguraClient.<method>`` — the exception's
-                ``operation`` and its message prefix.
+            operation: The exception's ``operation`` and its message prefix:
+                ``KaguraClient.<method>``, or the MCP tool's name when the
+                call stands in for one.
+            mcp_tool: Passed on to :meth:`_rest_get_json`: only with it does
+                a ``404`` / ``422`` become that tool's error. Without it a
+                non-2xx status stays what :func:`raise_for_kagura_status`
+                makes of it.
 
         Returns:
             Validated model instance.
 
         Raises:
-            KaguraAuthError / KaguraRateLimitError / KaguraConnectionError:
+            KaguraAuthError / KaguraRateLimitError / KaguraConnectionError /
+            KaguraNotFoundError / KaguraError:
                 As :meth:`_rest_get_json` raises them.
             KaguraResponseError: The 2xx body does not match ``model``.
         """
-        data = await self._rest_get_json(path, params)
+        data = await self._rest_get_json(path, params, mcp_tool=mcp_tool)
         return parse_response(model, data, operation=operation)
 
     async def _call_tool(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -1811,8 +1816,9 @@ class KaguraClient:
         """
         # Quoted, so a caller's id cannot add segments to the request path.
         path = f"/api/v1/contexts/{quote(context_id, safe='')}/tags"
-        data = await self._rest_get_json(path, params, operation="list_tags")
-        body = parse_response(ContextTagsResponse, data, operation="list_tags")
+        body = await self._rest_get(
+            path, ContextTagsResponse, params, operation="list_tags", mcp_tool="list_tags"
+        )
         # Only after the REST call, so its error is the one a caller sees.
         context_name = body.context_name or await self._context_name_for(body.context_id)
         return self._remember_context_name(
