@@ -182,6 +182,62 @@ def _build_details(details: str | None, location: str | None) -> dict[str, Any] 
     return {**(parsed or {}), "location": loc}
 
 
+async def _current_details_for_merge(
+    client: KaguraClient, context_id: str, memory_id: str
+) -> dict[str, Any]:
+    """Read the memory's current ``details`` for ``update-memory --merge-details``.
+
+    ``null`` or absent details are ``{}``. Anything short of the whole object is
+    refused, because merging onto a partial read would silently drop the keys
+    that were not returned: memory-cloud 0.78.0+ bounds a reference reply, so a
+    large ``details`` is left out with ``details_omitted``/``details_total_chars``
+    markers in place of the key (a paging caller gets ``details_json`` slices
+    instead). Any of those markers refuses the merge — a truthy
+    ``details_omitted``, a ``details_json`` page, or a ``details_total_chars``
+    size without the ``details`` key itself — since a marker without the object
+    can only mean a bounded read.
+
+    Raises:
+        click.ClickException: If the reply carries no memory object, its
+            details were omitted or paged, or they are not a JSON object.
+    """
+    result = await client.reference(context_id=context_id, memory_id=memory_id)
+    memory = result.get("memory") if isinstance(result, dict) else None
+    if not isinstance(memory, dict):
+        raise click.ClickException("--merge-details: the reference reply carried no memory object")
+    if (
+        memory.get("details_omitted")
+        or "details_json" in memory
+        or ("details" not in memory and "details_total_chars" in memory)
+    ):
+        total = memory.get("details_total_chars")
+        size = (
+            f" ({total} characters)"
+            if isinstance(total, int) and not isinstance(total, bool)
+            else ""
+        )
+        raise click.ClickException(
+            f"--merge-details: the memory's current details could not be read in full{size}; "
+            "the server bounds a reference reply and this CLI cannot page it yet. Send the "
+            "complete object with --details and without --merge-details (the MCP reference "
+            "tool returns the whole object with max_chars up to 100000 or details_offset "
+            "paging)."
+        )
+    current = memory.get("details")
+    # An absent key with no marker is null details only because reference()
+    # sends no ``fields`` selection: the server then returns ``details`` whole
+    # or with the markers above (memory-cloud 0.78.0+, #1685). A future
+    # ``fields=`` on reference() must keep "details" in it, or this would
+    # merge onto {}.
+    if current is None:
+        return {}
+    if not isinstance(current, dict):
+        raise click.ClickException(
+            "--merge-details: the memory's current details are not a JSON object"
+        )
+    return current
+
+
 def _require_context_id(context_id: str | None, config: dict[str, Any]) -> str:
     """Return the context from the command line, else ``.kagura.json``.
 
@@ -422,8 +478,9 @@ def remember(
     Store a memory directly (without AI analysis).
 
     Coordinates in --details must be JSON numbers, not strings: the server
-    rejects string-typed lat/lon with a 422 by design. Note that updating a
-    memory replaces details wholesale, so re-send location when you revise it.
+    rejects string-typed lat/lon with a 422 by design. Updating a memory
+    replaces details wholesale; `kagura update-memory --merge-details` revises
+    location while keeping the other keys (or re-send them yourself).
 
     \b
     Examples:
@@ -823,6 +880,28 @@ def reference(context_id, memory_id):
     help="Reject this memory's supersede_candidate suggestion (needs --memory-id; "
     "server v0.65.0+, older servers drop it silently)",
 )
+@click.option(
+    "--details",
+    help="Structured details as an inline JSON object. Coordinates live under "
+    "the 'location' key and must be JSON numbers, not strings: "
+    '\'{"location": {"lat": 35.68, "lon": 139.76}}\'. Without --merge-details '
+    "this REPLACES the memory's details wholesale ('{}' clears them).",
+)
+@click.option(
+    "--location",
+    help="Shorthand for details.location: 'lat,lon' or 'lat,lon,label'. Without "
+    "--merge-details this replaces the memory's details with just the location. "
+    "The location object is always replaced whole, label included: re-send "
+    "'lat,lon,label' to keep one.",
+)
+@click.option(
+    "--merge-details",
+    is_flag=True,
+    default=False,
+    help="Read the memory first (reference) and merge --details/--location over its "
+    "current details, top-level keys only, so unmentioned keys are kept. Needs "
+    "--memory-id and one of --details/--location; two calls, not one atomic update.",
+)
 def update_memory(
     context_id,
     memory_id,
@@ -833,17 +912,39 @@ def update_memory(
     importance,
     tags,
     dismiss_supersede_candidate,
+    details,
+    location,
+    merge_details,
 ):
     """
     Update an existing memory or upsert by external ID.
 
     Use --memory-id for in-place update, or --external-id for upsert.
 
+    --details REPLACES the memory's details wholesale — the server does not
+    deep-merge — so a bare --location without --merge-details drops every
+    other details key (including the resource_id an --external-id upsert
+    stores there: without it the next upsert of that id creates a new memory
+    instead of replacing this one), and '{}' clears them. --merge-details
+    reads the memory first with reference() and merges the top-level keys of
+    --details/--location
+    over its current details, so unmentioned keys are kept, and it is two
+    calls, not one atomic update (the read is a reference() of the memory and
+    counts in its access stats). It cannot remove a key (for that, send the full
+    object without --merge-details), except '"tool_trigger": null', which the
+    server treats as unmark; '"location": null' is rejected by the server (422).
+    Coordinates must be JSON numbers, not strings: the server rejects
+    string-typed lat/lon with a 422 by design.
+
     \b
     Examples:
       kagura update-memory -m MEM_UUID -s "updated summary"
       kagura update-memory --external-id ext-key -s "summary" --content "..." -t note
       kagura update-memory -m MEM_UUID --dismiss-supersede-candidate
+      kagura update-memory -m MEM_UUID \\
+        --details '{"location": {"lat": 35.68, "lon": 139.76}, "client": "acme"}'
+      kagura update-memory -m MEM_UUID --merge-details \\
+        --location "35.68,139.76,Tokyo HQ"
     """
     if not memory_id and not external_id:
         raise click.ClickException("Either --memory-id or --external-id is required")
@@ -853,11 +954,21 @@ def update_memory(
         raise click.ClickException(
             "--dismiss-supersede-candidate requires --memory-id (not --external-id)"
         )
+    if merge_details and external_id:
+        raise click.ClickException("--merge-details requires --memory-id (not --external-id)")
 
     tag_list = _parse_tags(tags)
+    details_payload = _build_details(details, location)
+    if merge_details and details_payload is None:
+        raise click.ClickException("--merge-details needs --details or --location")
 
-    _run_client_command(
-        lambda client, ctx: client.update_memory(
+    async def op(client: KaguraClient, ctx: str) -> dict[str, Any]:
+        payload = details_payload
+        # ``payload is not None`` only narrows for pyright: None was rejected above.
+        if merge_details and payload is not None:
+            current = await _current_details_for_merge(client, ctx, memory_id)
+            payload = {**current, **payload}
+        return await client.update_memory(
             context_id=ctx,
             memory_id=memory_id,
             external_id=external_id,
@@ -866,10 +977,11 @@ def update_memory(
             type=memory_type,
             importance=importance,
             tags=tag_list,
+            details=payload,
             dismiss_supersede_candidate=dismiss_supersede_candidate,
-        ),
-        context_id,
-    )
+        )
+
+    _run_client_command(op, context_id)
 
 
 @main.command()
