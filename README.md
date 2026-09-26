@@ -883,7 +883,7 @@ hooks need their own API key — see the coexistence note in
 
 This repo also ships a thin **Claude Code plugin** under
 [`.claude-plugin/`](.claude-plugin/plugin.json) + [`skills/`](skills/) that wraps
-the high-value CLI commands as skills (`doctor`, `auth`, `setup`, `ingest`,
+the high-value CLI commands as skills (`doctor`, `auth`, `setup`, `memory`, `ingest`,
 `resource`, `files`, `secret`) — each shells out to the installed `kagura` CLI and returns
 clear guidance when it is not installed/authenticated. The plugin is named
 **`kagura-cli`** (distinct from the `kagura-memory` SDK package and the existing
