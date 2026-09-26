@@ -8,6 +8,7 @@ from click.testing import CliRunner
 
 from kagura_memory.auth.credentials import reset_state_cache
 from kagura_memory.cli import _parse_tags, main
+from kagura_memory.exceptions import KaguraConnectionError, KaguraNotFoundError
 from tests.conftest import (
     indexer_status_dict,
     measurement_dict,
@@ -443,13 +444,14 @@ def test_update_memory_dismiss_rejects_external_id(mock_client_cls):
 # ---------------------------------------------------------------------------
 
 
-def _update_memory_cli(mock_client_cls, mock_config, *args, reference=None):
+def _update_memory_cli(mock_client_cls, mock_config, *args, reference=None, reference_exc=None):
     """Invoke `kagura update-memory` with a wired mock client and return (result, client).
 
     ``args`` is the full argument list after ``update-memory`` (the id flag
     included, so a test can choose --memory-id or --external-id). ``reference``
     is the reply the mock's ``reference`` returns for --merge-details; by
-    default a memory whose details are ``null``.
+    default a memory whose details are ``null``. ``reference_exc`` makes that
+    read raise instead (a failed reference() call).
     """
     mock_config.return_value = {
         "api_key": "key",
@@ -463,6 +465,8 @@ def _update_memory_cli(mock_client_cls, mock_config, *args, reference=None):
         if reference is None
         else reference
     )
+    if reference_exc is not None:
+        mock_client.reference.side_effect = reference_exc
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=None)
     mock_client_cls.return_value = mock_client
@@ -868,6 +872,43 @@ def test_update_memory_merge_details_requires_memory_object(
     )
     assert result.exit_code == 1, result.output
     assert "carried no memory object" in result.output
+    mock_client.update_memory.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        KaguraNotFoundError("reference: Memory not found or you don't have access: mem-1"),
+        KaguraConnectionError("timed out"),
+    ],
+    ids=["not-found", "transport"],
+)
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_update_memory_merge_details_failed_read_never_writes(mock_client_cls, mock_config, exc):
+    """A reference() that RAISES under --merge-details fails the command; nothing is sent.
+
+    ``_call_tool_checked`` turns a memory_not_found / permission_denied
+    envelope into ``KaguraNotFoundError`` / ``KaguraError`` and a transport
+    failure is ``KaguraConnectionError``. Either must surface as the
+    command's error (exit 1, the message printed), never be swallowed into
+    a merge onto ``{}`` — that would send a wholesale replace after a
+    transient read failure, the exact data loss --merge-details exists to
+    prevent.
+    """
+    result, mock_client = _update_memory_cli(
+        mock_client_cls,
+        mock_config,
+        "-m",
+        "mem-1",
+        "--location",
+        "35.68,139.76",
+        "--merge-details",
+        reference_exc=exc,
+    )
+    assert result.exit_code == 1, result.output
+    assert str(exc) in result.output
+    mock_client.reference.assert_awaited_once_with(context_id="ctx", memory_id="mem-1")
     mock_client.update_memory.assert_not_called()
 
 
