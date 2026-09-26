@@ -471,9 +471,9 @@ def remember(
     Store a memory directly (without AI analysis).
 
     Coordinates in --details must be JSON numbers, not strings: the server
-    rejects string-typed lat/lon with a 422 by design. Note that updating a
-    memory replaces details wholesale, so revise it with
-    `kagura update-memory --merge-details` (or re-send location yourself).
+    rejects string-typed lat/lon with a 422 by design. Updating a memory
+    replaces details wholesale; `kagura update-memory --merge-details` revises
+    location while keeping the other keys (or re-send them yourself).
 
     \b
     Examples:
@@ -883,7 +883,9 @@ def reference(context_id, memory_id):
 @click.option(
     "--location",
     help="Shorthand for details.location: 'lat,lon' or 'lat,lon,label'. Without "
-    "--merge-details this replaces the memory's details with just the location.",
+    "--merge-details this replaces the memory's details with just the location. "
+    "The location object is always replaced whole, label included: re-send "
+    "'lat,lon,label' to keep one.",
 )
 @click.option(
     "--merge-details",
@@ -918,7 +920,8 @@ def update_memory(
     first with reference() and merges the top-level keys of --details/--location
     over its current details, so unmentioned keys are kept; it cannot remove a
     key (send the full object without --merge-details for that) and it is two
-    calls, not one atomic update. Coordinates must be JSON numbers, not strings:
+    calls, not one atomic update (the read is a reference() of the memory and
+    counts in its access stats). Coordinates must be JSON numbers, not strings:
     the server rejects string-typed lat/lon with a 422 by design.
 
     \b
@@ -928,7 +931,8 @@ def update_memory(
       kagura update-memory -m MEM_UUID --dismiss-supersede-candidate
       kagura update-memory -m MEM_UUID \\
         --details '{"location": {"lat": 35.68, "lon": 139.76}, "client": "acme"}'
-      kagura update-memory -m MEM_UUID --location "35.68,139.76,Tokyo HQ" --merge-details
+      kagura update-memory -m MEM_UUID --merge-details \\
+        --location "35.68,139.76,Tokyo HQ"
     """
     if not memory_id and not external_id:
         raise click.ClickException("Either --memory-id or --external-id is required")
@@ -948,6 +952,7 @@ def update_memory(
 
     async def op(client: KaguraClient, ctx: str) -> dict[str, Any]:
         payload = details_payload
+        # ``payload is not None`` only narrows for pyright: None was rejected above.
         if merge_details and payload is not None:
             current = await _current_details_for_merge(client, ctx, memory_id)
             payload = {**current, **payload}
