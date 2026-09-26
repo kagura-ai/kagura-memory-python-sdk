@@ -65,11 +65,14 @@ Guardrails for `--details` / `--location` (`remember` and `update-memory`):
   drops every other key (the memory keeps its place on the WHERE axis, but
   loses the rest) and `--details '{}'` clears them. Add `--merge-details` to
   keep the keys you do not mention: it reads the memory first (`reference`, so
-  two calls, not one atomic update) and shallow-merges the top-level keys. It
-  needs `-m`, cannot remove a key, and writes nothing when the server's bounded
-  `reference` reply left `details` out (memory-cloud 0.78.0+ on a large
-  memory) — then re-send the complete object with `--details` and without
-  `--merge-details`.
+  two calls, not one atomic update) and shallow-merges the top-level keys —
+  `location` itself is replaced whole, label included, so re-send
+  `lat,lon,label` to keep a label. It needs `-m`, cannot remove a key (the one
+  exception is `"tool_trigger": null`, which unmarks a guardrail; `"location":
+  null` is a server 422 — to drop a key, send the full object without
+  `--merge-details`), and writes nothing when the server's bounded `reference`
+  reply left `details` out (memory-cloud 0.78.0+ on a large memory) — then
+  re-send the complete object with `--details` and without `--merge-details`.
 
 Search options:
 
@@ -91,7 +94,12 @@ Search options:
   semantic half of search was unavailable and the results are keyword-only,
   so an empty result means "search impaired", not "nothing stored" — retry
   later.
-- `reference` → the full memory under `memory` (`summary`, `content`, …).
+- `reference` → the memory under `memory` (`summary`, `content`, `details`, …).
+  On memory-cloud 0.78.0+ a large memory comes back bounded (about 20,000
+  characters by default): check `content_truncated` / `content_omitted` /
+  `details_omitted` before treating `content` or `details` as complete. The
+  CLI cannot page the rest; the MCP `reference` tool can (`max_chars`,
+  `*_offset`).
 - `update-memory` → `memory_id`, `operation`, `re_embedded`, `scope`, plus the
   same optional `lint` as `remember` (re-check it after fixing a hint);
   `supersede_candidate_dismissed` is the only confirmation that
