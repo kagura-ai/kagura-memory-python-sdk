@@ -779,7 +779,7 @@ def test_update_memory_merge_details_empty_object_resends_current(mock_client_cl
 @pytest.mark.parametrize(
     ("reference", "expected"),
     [
-        # The two shapes memory-cloud 0.80.0 produces (no ``details`` key at all).
+        # The two shapes memory-cloud 0.78.0+ (#1685) produces (no ``details`` key at all).
         (
             _bounded_reference_reply(
                 details_omitted=True, details_total_chars=24000, details_next_offset=0
