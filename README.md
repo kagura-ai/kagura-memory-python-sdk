@@ -677,8 +677,9 @@ kagura recall "project context" --trusted-only     # exclude connector-ingested 
 kagura explore -m "memory-uuid" --depth 3
 kagura forget -m "memory-uuid"
 kagura update-memory -m "memory-uuid" --dismiss-supersede-candidate   # server v0.65.0+
-kagura update-memory -m "memory-uuid" --details '{"location": {"lat": 35.68, "lon": 139.76}, "client": "acme"}'   # replaces details wholesale
-kagura update-memory -m "memory-uuid" --location "35.68,139.76,Tokyo HQ" --merge-details   # reference() round-trip keeps the other keys
+# --details replaces details wholesale; --merge-details does a reference() round-trip and keeps the other keys
+kagura update-memory -m "memory-uuid" --details '{"location": {"lat": 35.68, "lon": 139.76}, "client": "acme"}'
+kagura update-memory -m "memory-uuid" --location "35.68,139.76,Tokyo HQ" --merge-details
 kagura contexts
 kagura context list --name-contains auth --summary   # server v0.73.0+; --details, --stats
 
