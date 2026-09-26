@@ -28,7 +28,13 @@ from .claude_code import (
 )
 from .client import _MIN_SERVER_VERSION_TUPLE, MIN_SERVER_VERSION, KaguraClient
 from .config import load_config
-from .exceptions import KaguraAuthError, KaguraConnectionError, _exc_message
+from .exceptions import (
+    KaguraAuthError,
+    KaguraConnectionError,
+    KaguraError,
+    KaguraResponseError,
+    _exc_message,
+)
 from .setup_claude import _kagura_mcp_on_path
 
 DoctorStatus = Literal["pass", "warn", "fail", "info"]
@@ -633,6 +639,23 @@ async def _check_server(
                     message=f"Server unreachable: {exc}",
                 )
             ]
+        except KaguraResponseError as exc:
+            # A 200 whose body this SDK cannot parse (a newer server): the
+            # server answered, so not "unreachable" (#277). The message
+            # names the fields and suggests the upgrade.
+            return [
+                DoctorCheck(
+                    section="server",
+                    status="fail",
+                    message=(
+                        f"Server answered, but the SDK could not read /api/v1/system/info: {exc}"
+                    ),
+                )
+            ]
+        except KaguraError as exc:
+            # e.g. KaguraRateLimitError (HTTP 429) is no KaguraConnectionError
+            # and used to escape as a traceback.
+            return [DoctorCheck(section="server", status="fail", message=str(exc))]
 
     checks.append(DoctorCheck(section="server", status="pass", message="Server reachable"))
 

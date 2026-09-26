@@ -170,12 +170,12 @@ class KaguraClient:
     inspecting ``result["status"]``. On the tool methods that return a
     model, a success payload that does not match it (a server newer than
     the SDK) raises :class:`KaguraResponseError` naming the tool (#250).
-    :meth:`list_memories` does the same with
-    ``operation="KaguraClient.list_memories"``. The other REST-backed methods
-    (``get_server_info``, ``check_server_version``, ``get_embedding_status``,
-    ``get_memory_stats``, ``find_duplicates``, ``list_embedding_models``)
-    still raise :class:`KaguraConnectionError` ("Invalid response format") on
-    drift; catch :class:`KaguraError` to cover both.
+    The REST-backed methods (``get_server_info``, ``check_server_version``,
+    ``get_embedding_status``, ``get_memory_stats``, ``find_duplicates``,
+    ``list_memories``, ``list_embedding_models``) do the same with
+    ``operation="KaguraClient.<method>"`` (#254, #277); from them a network
+    failure, a non-JSON 2xx body and a non-2xx status other than 401/429
+    raise :class:`KaguraConnectionError`.
     """
 
     def __init__(
@@ -449,29 +449,36 @@ class KaguraClient:
         path: str,
         model: type[_T],
         params: dict[str, Any] | None = None,
+        *,
+        operation: str,
     ) -> _T:
-        """GET a REST endpoint and parse into a Pydantic model.
+        """GET a REST endpoint and parse its body into ``model``.
 
-        Drift raises :class:`KaguraConnectionError` ("Invalid response
-        format"), not :class:`KaguraResponseError` — the contract #250 kept
-        for these methods (``kagura doctor`` catches it on
-        ``check_server_version``). A new REST method should instead call
-        :meth:`_rest_get_json` and :func:`parse_response`, as
-        :meth:`list_memories` does.
+        :meth:`_rest_get_json` for the transport, :func:`parse_response` for
+        the body, so drift raises :class:`KaguraResponseError` naming
+        ``operation`` (#277; until 0.41.x these methods raised
+        ``KaguraConnectionError("Invalid response format")``, with pydantic's
+        text and the payload values in it). The 404/422 remapping of
+        :meth:`_rest_get_json` is not applied: a non-2xx status stays what
+        :func:`raise_for_kagura_status` makes of it.
 
         Args:
             path: URL path (appended to ``_base_url``).
             model: Pydantic model class for response validation.
             params: Optional query parameters.
+            operation: ``KaguraClient.<method>`` — the exception's
+                ``operation`` and its message prefix.
 
         Returns:
             Validated model instance.
+
+        Raises:
+            KaguraAuthError / KaguraRateLimitError / KaguraConnectionError:
+                As :meth:`_rest_get_json` raises them.
+            KaguraResponseError: The 2xx body does not match ``model``.
         """
         data = await self._rest_get_json(path, params)
-        try:
-            return model.model_validate(data)
-        except (ValueError, TypeError) as e:
-            raise KaguraConnectionError(f"Invalid response format: {_exc_message(e)}") from e
+        return parse_response(model, data, operation=operation)
 
     async def _call_tool(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         """
@@ -2686,16 +2693,28 @@ class KaguraClient:
             (v0.77.0+): the terms-of-service version, ``None`` when the
             deployment does not record acceptance. Accepting the terms is a
             web sign-in step that never gates API or MCP calls.
+
+        Raises:
+            KaguraAuthError: HTTP 401.
+            KaguraRateLimitError: HTTP 429.
+            KaguraConnectionError: Network failure, non-JSON body or any
+                other non-2xx status.
+            KaguraResponseError: The 2xx body does not match
+                :class:`ServerInfo`; ``operation`` is
+                ``"KaguraClient.get_server_info"`` (#277 — SDKs before
+                0.42.0 raised ``KaguraConnectionError`` here).
         """
-        return await self._rest_get("/api/v1/system/info", ServerInfo)
+        return await self._rest_get(
+            "/api/v1/system/info", ServerInfo, operation="KaguraClient.get_server_info"
+        )
 
     async def check_server_version(self) -> ServerInfo:
         """Check the connected server's version against the SDK's tested minimum.
 
         Advisory only — calls ``get_server_info()`` and logs a warning
         via :mod:`logging` when the server version is below
-        :data:`MIN_SERVER_VERSION`. Does not raise. Older servers may
-        silently ignore unknown parameters.
+        :data:`MIN_SERVER_VERSION`. An old version does not raise. Older
+        servers may silently ignore unknown parameters.
 
         A ``v`` prefix, build metadata and pre-release suffixes are read,
         so ``"v0.16.0"`` and ``"0.17.1-rc1"`` (a pre-release of the minimum)
@@ -2705,6 +2724,17 @@ class KaguraClient:
 
         Returns:
             ServerInfo from the server.
+
+        Raises:
+            KaguraAuthError: HTTP 401.
+            KaguraRateLimitError: HTTP 429.
+            KaguraConnectionError: Network failure, non-JSON body or any
+                other non-2xx status.
+            KaguraResponseError: The 2xx body does not match
+                :class:`ServerInfo`; ``operation`` is
+                ``"KaguraClient.get_server_info"``, the call this makes
+                (#277 — SDKs before 0.42.0 raised ``KaguraConnectionError``
+                here, which ``kagura doctor`` reported as unreachable).
         """
         info = await self.get_server_info()
         if meets_minimum(info.version, _MIN_SERVER_VERSION_TUPLE) is False:
@@ -2727,8 +2757,22 @@ class KaguraClient:
 
         Returns:
             EmbeddingStatus with total, by_status breakdown, and failed memories.
+
+        Raises:
+            KaguraAuthError: HTTP 401.
+            KaguraRateLimitError: HTTP 429.
+            KaguraConnectionError: Network failure, non-JSON body or any
+                other non-2xx status.
+            KaguraResponseError: The 2xx body does not match
+                :class:`EmbeddingStatus`; ``operation`` is
+                ``"KaguraClient.get_embedding_status"`` (#277 — SDKs before
+                0.42.0 raised ``KaguraConnectionError`` here).
         """
-        return await self._rest_get("/api/v1/workspace/embedding-status", EmbeddingStatus)
+        return await self._rest_get(
+            "/api/v1/workspace/embedding-status",
+            EmbeddingStatus,
+            operation="KaguraClient.get_embedding_status",
+        )
 
     async def get_memory_stats(
         self,
@@ -2751,6 +2795,17 @@ class KaguraClient:
 
         Returns:
             MemoryStatsResponse with per-memory stats and pagination info.
+
+        Raises:
+            KaguraAuthError: HTTP 401.
+            KaguraRateLimitError: HTTP 429.
+            KaguraConnectionError: Network failure, non-JSON body or any
+                other non-2xx status (an unknown or inaccessible
+                ``context_id`` is an HTTP 404).
+            KaguraResponseError: The 2xx body does not match
+                :class:`MemoryStatsResponse`; ``operation`` is
+                ``"KaguraClient.get_memory_stats"`` (#277 — SDKs before
+                0.42.0 raised ``KaguraConnectionError`` here).
         """
         params = {
             "sort_by": sort_by,
@@ -2759,7 +2814,10 @@ class KaguraClient:
             "offset": offset,
         }
         return await self._rest_get(
-            f"/api/v1/contexts/{context_id}/memory-stats", MemoryStatsResponse, params=params
+            f"/api/v1/contexts/{context_id}/memory-stats",
+            MemoryStatsResponse,
+            params=params,
+            operation="KaguraClient.get_memory_stats",
         )
 
     async def find_duplicates(
@@ -2779,10 +2837,24 @@ class KaguraClient:
 
         Returns:
             DuplicatesResponse with duplicate pairs and similarity scores.
+
+        Raises:
+            KaguraAuthError: HTTP 401.
+            KaguraRateLimitError: HTTP 429.
+            KaguraConnectionError: Network failure, non-JSON body or any
+                other non-2xx status (an unknown or inaccessible
+                ``context_id`` is an HTTP 404).
+            KaguraResponseError: The 2xx body does not match
+                :class:`DuplicatesResponse`; ``operation`` is
+                ``"KaguraClient.find_duplicates"`` (#277 — SDKs before
+                0.42.0 raised ``KaguraConnectionError`` here).
         """
         params = {"threshold": threshold, "limit": limit}
         return await self._rest_get(
-            f"/api/v1/contexts/{context_id}/duplicates", DuplicatesResponse, params=params
+            f"/api/v1/contexts/{context_id}/duplicates",
+            DuplicatesResponse,
+            params=params,
+            operation="KaguraClient.find_duplicates",
         )
 
     async def list_memories(
@@ -2869,8 +2941,7 @@ class KaguraClient:
             KaguraResponseError: The 2xx body does not match
                 :class:`MemoryListResponse` (a server newer than the SDK), with
                 ``operation="KaguraClient.list_memories"``. SDKs before 0.40.0
-                raised ``KaguraConnectionError`` here, as the other
-                REST-backed methods still do.
+                raised ``KaguraConnectionError`` here.
         """
         params: dict[str, Any] = {"limit": limit, "offset": offset}
         if context_id is not None:
@@ -2902,8 +2973,12 @@ class KaguraClient:
             if bound is not None:
                 validate_coordinate(key, bound, max_abs)
                 params[key] = bound
-        data = await self._rest_get_json("/api/v1/memory/list", params)
-        return parse_response(MemoryListResponse, data, operation="KaguraClient.list_memories")
+        return await self._rest_get(
+            "/api/v1/memory/list",
+            MemoryListResponse,
+            params=params,
+            operation="KaguraClient.list_memories",
+        )
 
     @staticmethod
     def _raise_for_mcp_error(result: dict[str, Any], operation: str) -> None:
@@ -3073,8 +3148,22 @@ class KaguraClient:
 
         Returns:
             EmbeddingModelsResponse with models list and default_model.
+
+        Raises:
+            KaguraAuthError: HTTP 401.
+            KaguraRateLimitError: HTTP 429.
+            KaguraConnectionError: Network failure, non-JSON body or any
+                other non-2xx status.
+            KaguraResponseError: The 2xx body does not match
+                :class:`EmbeddingModelsResponse`; ``operation`` is
+                ``"KaguraClient.list_embedding_models"`` (#277 — SDKs before
+                0.42.0 raised ``KaguraConnectionError`` here).
         """
-        return await self._rest_get("/api/v1/system/embedding/models", EmbeddingModelsResponse)
+        return await self._rest_get(
+            "/api/v1/system/embedding/models",
+            EmbeddingModelsResponse,
+            operation="KaguraClient.list_embedding_models",
+        )
 
     async def close(self) -> None:
         """Close the HTTP client."""

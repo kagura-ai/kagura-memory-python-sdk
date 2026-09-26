@@ -13,7 +13,12 @@ from kagura_memory.auth.credentials import CredentialsFile, reset_state_cache, s
 from kagura_memory.claude_code import McpEntry, claude_json_label
 from kagura_memory.cli import main
 from kagura_memory.doctor import DoctorCheck, DoctorReport
-from kagura_memory.exceptions import KaguraAuthError, KaguraConnectionError
+from kagura_memory.exceptions import (
+    KaguraAuthError,
+    KaguraConnectionError,
+    KaguraRateLimitError,
+    KaguraResponseError,
+)
 from kagura_memory.models import ServerInfo
 from tests.conftest import make_oauth_creds
 
@@ -883,7 +888,20 @@ def test_check_server_agrees_with_check_server_version(
     [
         (KaguraAuthError("bad token"), "bad token"),
         (KaguraConnectionError("offline"), "Server unreachable"),
+        # Drift on /system/info (#277): the server answered, so not "unreachable".
+        (
+            KaguraResponseError(
+                "KaguraClient.get_server_info: unexpected server response for ServerInfo "
+                "(version: Field required). The server may be newer than this SDK; "
+                "upgrading kagura-memory may help.",
+                operation="KaguraClient.get_server_info",
+            ),
+            "could not read /api/v1/system/info",
+        ),
+        # Not a KaguraConnectionError; used to escape _check_server as a traceback.
+        (KaguraRateLimitError("Rate limit exceeded (HTTP 429): slow down"), "HTTP 429"),
     ],
+    ids=["auth", "connection", "drift", "rate-limit"],
 )
 def test_check_server_failure_branches(monkeypatch, exc, message):
     from kagura_memory.doctor import _check_server
@@ -912,8 +930,12 @@ def test_check_server_failure_branches(monkeypatch, exc, message):
 
     checks = asyncio.run(_check_server(resolved))
 
+    assert len(checks) == 1
     assert checks[0].status == "fail"
     assert message in checks[0].message
+    assert ("Server unreachable" in checks[0].message) is isinstance(exc, KaguraConnectionError)
+    if isinstance(exc, KaguraResponseError):
+        assert "upgrading kagura-memory" in checks[0].message
 
 
 def test_check_server_oauth_auth_error_is_informational(monkeypatch):
