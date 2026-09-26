@@ -217,7 +217,8 @@ async with KaguraClient(api_key="kagura_...", mcp_url="https://...") as client:
                           details={"location": {"lat": 35.68, "lon": 139.76, "label": "Tokyo HQ"}})
     nearby = await client.recall_nearby(context_id="dev", lat=35.68, lon=139.76, radius_m=500)
     # update_memory(details=...) REPLACES details wholesale — no deep-merge. Read the
-    # current value with reference() and re-send location, or this drops off the map.
+    # current value with reference() and re-send location, or this drops off the map
+    # (the CLI's `kagura update-memory --merge-details` does that round-trip).
     # Map viewport over the REST list (SDK v0.40.0, server v0.54.0+): keyword-only,
     # one-sided bounds OK, any bound keeps only located memories (item.location).
     page = await client.list_memories(context_id="dev", lat_min=35.5, lat_max=35.9,
@@ -296,7 +297,8 @@ async with MemoryClient.from_mcp_url() as memory:  # REST twin for API-key hooks
 ```
 
 - `update_memory(details=...)` replaces `details` wholesale: re-send `tool_trigger` with
-  any other details you change, or the memory stops being a guardrail. Passing both
+  any other details you change, or the memory stops being a guardrail (the CLI's
+  `kagura update-memory --merge-details` does that reference() round-trip). Passing both
   `tool_trigger=` and `details["tool_trigger"]` raises `ValueError`.
 - `forget` silently skips a guardrail the caller may not delete (below context editor,
   or an agent-bound key), so `deleted_count` can be `0` with no error.
@@ -675,6 +677,8 @@ kagura recall "project context" --trusted-only     # exclude connector-ingested 
 kagura explore -m "memory-uuid" --depth 3
 kagura forget -m "memory-uuid"
 kagura update-memory -m "memory-uuid" --dismiss-supersede-candidate   # server v0.65.0+
+kagura update-memory -m "memory-uuid" --details '{"location": {"lat": 35.68, "lon": 139.76}, "client": "acme"}'   # replaces details wholesale
+kagura update-memory -m "memory-uuid" --location "35.68,139.76,Tokyo HQ" --merge-details   # reference() round-trip keeps the other keys
 kagura contexts
 kagura context list --name-contains auth --summary   # server v0.73.0+; --details, --stats
 
