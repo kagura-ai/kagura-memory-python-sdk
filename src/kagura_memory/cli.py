@@ -226,8 +226,9 @@ async def _current_details_for_merge(
     current = memory.get("details")
     # An absent key with no marker is null details only because reference()
     # sends no ``fields`` selection: the server then returns ``details`` whole
-    # or with the markers above (memory-cloud 0.80.0). A future ``fields=`` on
-    # reference() must keep "details" in it, or this would merge onto {}.
+    # or with the markers above (memory-cloud 0.78.0+, #1685). A future
+    # ``fields=`` on reference() must keep "details" in it, or this would
+    # merge onto {}.
     if current is None:
         return {}
     if not isinstance(current, dict):
@@ -899,7 +900,7 @@ def reference(context_id, memory_id):
     default=False,
     help="Read the memory first (reference) and merge --details/--location over its "
     "current details, top-level keys only, so unmentioned keys are kept. Needs "
-    "--memory-id; two calls, not one atomic update.",
+    "--memory-id and one of --details/--location; two calls, not one atomic update.",
 )
 def update_memory(
     context_id,
