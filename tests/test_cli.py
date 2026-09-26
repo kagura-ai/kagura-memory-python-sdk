@@ -624,6 +624,16 @@ def _reference_reply(details, **extra):
     return {"status": "success", "memory": {"memory_id": "mem-1", "details": details, **extra}}
 
 
+def _bounded_reference_reply(**markers):
+    """A bounded `reference` reply as memory-cloud 0.78.0+ sends it: markers, no ``details`` key.
+
+    The server places ``{"details": <whole object>}`` OR the marker dict —
+    ``details_omitted``/``details_total_chars``/``details_next_offset``, or a
+    ``details_json`` page with its offsets — never the key next to the markers.
+    """
+    return {"status": "success", "memory": {"memory_id": "mem-1", **markers}}
+
+
 @patch("kagura_memory.cli.load_config")
 @patch("kagura_memory.cli.KaguraClient")
 def test_update_memory_merge_details(mock_client_cls, mock_config):
@@ -711,17 +721,43 @@ def test_update_memory_merge_details_empty_object_resends_current(mock_client_cl
 @pytest.mark.parametrize(
     ("reference", "expected"),
     [
+        # The two shapes memory-cloud 0.80.0 produces (no ``details`` key at all).
         (
-            _reference_reply(None, details_omitted=True, details_total_chars=24000),
+            _bounded_reference_reply(
+                details_omitted=True, details_total_chars=24000, details_next_offset=0
+            ),
             "24000 characters",
         ),
-        (_reference_reply(None, details_omitted=True), "could not be read in full"),
+        (
+            _bounded_reference_reply(
+                details_json='{"client": "ac',
+                details_offset=0,
+                details_total_chars=1000,
+                details_truncated=True,
+                details_next_offset=14,
+            ),
+            "1000 characters",
+        ),
+        # Drift no server produces today, still a bounded read: a truthy
+        # non-bool flag, and the size marker without the flag.
+        (_bounded_reference_reply(details_omitted=1, details_total_chars=100), "100 characters"),
+        (_bounded_reference_reply(details_total_chars=100), "100 characters"),
+        # The marker wins even when a ``details`` key rides along, and a
+        # missing size leaves the count out of the message.
+        (_reference_reply(None, details_omitted=True), "could not be read in full;"),
         (
             _reference_reply(None, details_json='{"client": "ac', details_next_offset=14),
-            "could not be read in full",
+            "could not be read in full;",
         ),
     ],
-    ids=["omitted-with-size", "omitted-no-size", "paged-details-json"],
+    ids=[
+        "omitted",
+        "paged-details-json",
+        "omitted-truthy-marker",
+        "total-chars-only",
+        "omitted-next-to-null-details",
+        "paged-next-to-null-details",
+    ],
 )
 @patch("kagura_memory.cli.load_config")
 @patch("kagura_memory.cli.KaguraClient")
@@ -732,7 +768,10 @@ def test_update_memory_merge_details_refuses_partial_read(
 
     Merging onto a partial read would silently drop the keys that were not
     returned, so the CLI stops before sending anything and points at the
-    full-object path (--details without --merge-details).
+    full-object path (--details without --merge-details). The first cases use
+    the server's real shape — markers in place of the ``details`` key — so a
+    guard that treats an absent key as "no details" before checking the
+    markers would merge onto ``{}`` and fail here.
     """
     result, mock_client = _update_memory_cli(
         mock_client_cls,

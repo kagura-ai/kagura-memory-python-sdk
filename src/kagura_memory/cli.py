@@ -191,7 +191,11 @@ async def _current_details_for_merge(
     refused, because merging onto a partial read would silently drop the keys
     that were not returned: memory-cloud 0.78.0+ bounds a reference reply, so a
     large ``details`` is left out with ``details_omitted``/``details_total_chars``
-    markers (a paging caller gets ``details_json`` slices instead).
+    markers in place of the key (a paging caller gets ``details_json`` slices
+    instead). Any of those markers refuses the merge — a truthy
+    ``details_omitted``, a ``details_json`` page, or a ``details_total_chars``
+    size without the ``details`` key itself — since a marker without the object
+    can only mean a bounded read.
 
     Raises:
         click.ClickException: If the reply carries no memory object, its
@@ -201,7 +205,11 @@ async def _current_details_for_merge(
     memory = result.get("memory") if isinstance(result, dict) else None
     if not isinstance(memory, dict):
         raise click.ClickException("--merge-details: the reference reply carried no memory object")
-    if memory.get("details_omitted") is True or "details_json" in memory:
+    if (
+        memory.get("details_omitted")
+        or "details_json" in memory
+        or ("details" not in memory and "details_total_chars" in memory)
+    ):
         total = memory.get("details_total_chars")
         size = (
             f" ({total} characters)"
