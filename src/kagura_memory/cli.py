@@ -222,6 +222,10 @@ async def _current_details_for_merge(
             "and without --merge-details."
         )
     current = memory.get("details")
+    # An absent key with no marker is null details only because reference()
+    # sends no ``fields`` selection: the server then returns ``details`` whole
+    # or with the markers above (memory-cloud 0.80.0). A future ``fields=`` on
+    # reference() must keep "details" in it, or this would merge onto {}.
     if current is None:
         return {}
     if not isinstance(current, dict):
@@ -918,11 +922,13 @@ def update_memory(
     deep-merge — so a bare --location without --merge-details drops every
     other details key, and '{}' clears them. --merge-details reads the memory
     first with reference() and merges the top-level keys of --details/--location
-    over its current details, so unmentioned keys are kept; it cannot remove a
-    key (send the full object without --merge-details for that) and it is two
+    over its current details, so unmentioned keys are kept, and it is two
     calls, not one atomic update (the read is a reference() of the memory and
-    counts in its access stats). Coordinates must be JSON numbers, not strings:
-    the server rejects string-typed lat/lon with a 422 by design.
+    counts in its access stats). It cannot remove a key (for that, send the full
+    object without --merge-details), except '"tool_trigger": null', which the
+    server treats as unmark; '"location": null' is rejected by the server (422).
+    Coordinates must be JSON numbers, not strings: the server rejects
+    string-typed lat/lon with a 422 by design.
 
     \b
     Examples:
