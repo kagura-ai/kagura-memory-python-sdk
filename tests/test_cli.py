@@ -438,6 +438,403 @@ def test_update_memory_dismiss_rejects_external_id(mock_client_cls):
     mock_client_cls.assert_not_called()
 
 
+# ---------------------------------------------------------------------------
+# update-memory --details / --location / --merge-details (Issue #247)
+# ---------------------------------------------------------------------------
+
+
+def _update_memory_cli(mock_client_cls, mock_config, *args, reference=None):
+    """Invoke `kagura update-memory` with a wired mock client and return (result, client).
+
+    ``args`` is the full argument list after ``update-memory`` (the id flag
+    included, so a test can choose --memory-id or --external-id). ``reference``
+    is the reply the mock's ``reference`` returns for --merge-details; by
+    default a memory whose details are ``null``.
+    """
+    mock_config.return_value = {
+        "api_key": "key",
+        "mcp_url": "https://test.com/mcp",
+        "context_id": "ctx",
+    }
+    mock_client = AsyncMock()
+    mock_client.update_memory.return_value = {"status": "success", "memory_id": "mem-1"}
+    mock_client.reference.return_value = (
+        {"status": "success", "memory": {"memory_id": "mem-1", "details": None}}
+        if reference is None
+        else reference
+    )
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    mock_client_cls.return_value = mock_client
+    runner = CliRunner()
+    result = runner.invoke(main, ["update-memory", *args])
+    return result, mock_client
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_update_memory_parses_details_json(mock_client_cls, mock_config):
+    """--details accepts inline JSON and forwards it as a dict under details=."""
+    result, mock_client = _update_memory_cli(
+        mock_client_cls,
+        mock_config,
+        "-m",
+        "mem-1",
+        "--details",
+        '{"location": {"lat": 35.68, "lon": 139.76}, "client": "acme"}',
+    )
+    assert result.exit_code == 0, result.output
+    kwargs = mock_client.update_memory.await_args.kwargs
+    assert kwargs["memory_id"] == "mem-1"
+    assert kwargs["details"] == {"location": {"lat": 35.68, "lon": 139.76}, "client": "acme"}
+    mock_client.reference.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        (),
+        ("--details", ""),
+        ("--location", ""),
+        ("--details", "   "),
+        ("--location", "  "),
+    ],
+    ids=[
+        "neither-flag",
+        "empty-details",
+        "empty-location",
+        "blank-details",
+        "blank-location",
+    ],
+)
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_update_memory_details_none_when_unset(mock_client_cls, mock_config, args):
+    """No flag — or a blank value, as remember treats it — means details=None (unchanged).
+
+    Only ``None`` leaves the memory's details alone; ``{}`` would clear them,
+    so an empty shell variable expanding must not become a clear.
+    """
+    result, mock_client = _update_memory_cli(
+        mock_client_cls, mock_config, "-m", "mem-1", "-s", "updated summary", *args
+    )
+    assert result.exit_code == 0, result.output
+    assert mock_client.update_memory.await_args.kwargs["details"] is None
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_update_memory_rejects_invalid_details_json(mock_client_cls, mock_config):
+    """Malformed --details is a usage error, not a traceback, and nothing is sent."""
+    result, mock_client = _update_memory_cli(
+        mock_client_cls, mock_config, "-m", "mem-1", "--details", "{not json"
+    )
+    assert result.exit_code != 0
+    assert "Invalid JSON" in result.output
+    mock_client.update_memory.assert_not_called()
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_update_memory_rejects_non_object_details(mock_client_cls, mock_config):
+    """--details must be a JSON object — a list or scalar cannot carry named fields."""
+    result, mock_client = _update_memory_cli(
+        mock_client_cls, mock_config, "-m", "mem-1", "--details", "[1, 2]"
+    )
+    assert result.exit_code != 0
+    assert "JSON object" in result.output
+    mock_client.update_memory.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("location", "expected"),
+    [
+        ("35.68,139.76", {"lat": 35.68, "lon": 139.76}),
+        ("35.68, 139.76, Tokyo HQ", {"lat": 35.68, "lon": 139.76, "label": "Tokyo HQ"}),
+    ],
+    ids=["lat-lon", "lat-lon-label"],
+)
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_update_memory_location_shorthand(mock_client_cls, mock_config, location, expected):
+    """--location lat,lon[,label] builds details.location with numeric coordinates."""
+    result, mock_client = _update_memory_cli(
+        mock_client_cls, mock_config, "-m", "mem-1", "--location", location
+    )
+    assert result.exit_code == 0, result.output
+    details = mock_client.update_memory.await_args.kwargs["details"]
+    assert details["location"] == expected
+    assert isinstance(details["location"]["lat"], float)
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_update_memory_bare_location_replaces_details(mock_client_cls, mock_config):
+    """A bare --location without --merge-details sends ONLY the location.
+
+    This is the destructive replace path the --help warns about: the server
+    replaces ``details`` wholesale, so every other key the memory carried is
+    dropped. The CLI does not read the memory first unless --merge-details is
+    given, so ``reference`` is never called here.
+    """
+    result, mock_client = _update_memory_cli(
+        mock_client_cls, mock_config, "-m", "mem-1", "--location", "35.68,139.76"
+    )
+    assert result.exit_code == 0, result.output
+    assert mock_client.update_memory.await_args.kwargs["details"] == {
+        "location": {"lat": 35.68, "lon": 139.76}
+    }
+    mock_client.reference.assert_not_called()
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_update_memory_rejects_conflicting_location(mock_client_cls, mock_config):
+    """location in --details plus --location is ambiguous — fail, don't silently drop one."""
+    result, mock_client = _update_memory_cli(
+        mock_client_cls,
+        mock_config,
+        "-m",
+        "mem-1",
+        "--details",
+        '{"location": {"lat": 1.0, "lon": 2.0}}',
+        "--location",
+        "35.68,139.76",
+    )
+    assert result.exit_code != 0
+    assert "--location conflicts" in result.output
+    mock_client.update_memory.assert_not_called()
+
+
+@pytest.mark.parametrize("bad", ["35.68", "abc,139.76", "91.0,139.76"])
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_update_memory_rejects_malformed_location(mock_client_cls, mock_config, bad):
+    """--location rejects wrong arity, non-numeric, and out-of-range coordinates."""
+    result, mock_client = _update_memory_cli(
+        mock_client_cls, mock_config, "-m", "mem-1", "--location", bad
+    )
+    assert result.exit_code != 0
+    assert "--location" in result.output
+    mock_client.update_memory.assert_not_called()
+
+
+def _reference_reply(details, **extra):
+    """A `reference` reply whose memory carries ``details`` plus any bound markers."""
+    return {"status": "success", "memory": {"memory_id": "mem-1", "details": details, **extra}}
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_update_memory_merge_details(mock_client_cls, mock_config):
+    """--merge-details reads the memory with reference() and merges top-level keys.
+
+    Keys the payload does not mention are kept, a key present in both takes the
+    new value, and the merged dict is what goes under ``details=``. The other
+    flags compose with it: --dismiss-supersede-candidate still rides along.
+    """
+    current = {"location": {"lat": 1.0, "lon": 2.0, "label": "old"}, "client": "acme", "n": 1}
+    result, mock_client = _update_memory_cli(
+        mock_client_cls,
+        mock_config,
+        "-m",
+        "mem-1",
+        "--location",
+        "35.68,139.76,Tokyo HQ",
+        "--details",
+        '{"n": 2}',
+        "--merge-details",
+        "--dismiss-supersede-candidate",
+        reference=_reference_reply(current),
+    )
+    assert result.exit_code == 0, result.output
+    mock_client.reference.assert_awaited_once_with(context_id="ctx", memory_id="mem-1")
+    kwargs = mock_client.update_memory.await_args.kwargs
+    assert kwargs["memory_id"] == "mem-1"
+    assert kwargs["details"] == {
+        "location": {"lat": 35.68, "lon": 139.76, "label": "Tokyo HQ"},
+        "client": "acme",
+        "n": 2,
+    }
+    assert kwargs["dismiss_supersede_candidate"] is True
+    # The read is not mutated in place: the merge builds a new dict.
+    assert current["n"] == 1
+
+
+@pytest.mark.parametrize(
+    "reference",
+    [_reference_reply(None), {"status": "success", "memory": {"memory_id": "mem-1"}}],
+    ids=["details-null", "details-key-absent"],
+)
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_update_memory_merge_details_onto_none(mock_client_cls, mock_config, reference):
+    """A memory with null (or no) details merges onto ``{}``: the payload is sent as-is."""
+    result, mock_client = _update_memory_cli(
+        mock_client_cls,
+        mock_config,
+        "-m",
+        "mem-1",
+        "--location",
+        "35.68,139.76",
+        "--merge-details",
+        reference=reference,
+    )
+    assert result.exit_code == 0, result.output
+    assert mock_client.update_memory.await_args.kwargs["details"] == {
+        "location": {"lat": 35.68, "lon": 139.76}
+    }
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_update_memory_merge_details_empty_object_resends_current(mock_client_cls, mock_config):
+    """--details '{}' under --merge-details is a no-op merge: the current details go back.
+
+    Without --merge-details the same '{}' clears details, as the client documents.
+    """
+    current = {"location": {"lat": 1.0, "lon": 2.0}, "client": "acme"}
+    result, mock_client = _update_memory_cli(
+        mock_client_cls,
+        mock_config,
+        "-m",
+        "mem-1",
+        "--details",
+        "{}",
+        "--merge-details",
+        reference=_reference_reply(current),
+    )
+    assert result.exit_code == 0, result.output
+    assert mock_client.update_memory.await_args.kwargs["details"] == current
+
+
+@pytest.mark.parametrize(
+    ("reference", "expected"),
+    [
+        (
+            _reference_reply(None, details_omitted=True, details_total_chars=24000),
+            "24000 characters",
+        ),
+        (_reference_reply(None, details_omitted=True), "could not be read in full"),
+        (
+            _reference_reply(None, details_json='{"client": "ac', details_next_offset=14),
+            "could not be read in full",
+        ),
+    ],
+    ids=["omitted-with-size", "omitted-no-size", "paged-details-json"],
+)
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_update_memory_merge_details_refuses_partial_read(
+    mock_client_cls, mock_config, reference, expected
+):
+    """A bounded reference reply (memory-cloud 0.78.0+) that left details out is refused.
+
+    Merging onto a partial read would silently drop the keys that were not
+    returned, so the CLI stops before sending anything and points at the
+    full-object path (--details without --merge-details).
+    """
+    result, mock_client = _update_memory_cli(
+        mock_client_cls,
+        mock_config,
+        "-m",
+        "mem-1",
+        "--location",
+        "35.68,139.76",
+        "--merge-details",
+        reference=reference,
+    )
+    assert result.exit_code == 1, result.output
+    assert expected in result.output
+    assert "without --merge-details" in result.output
+    mock_client.update_memory.assert_not_called()
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_update_memory_merge_details_rejects_non_object_current(mock_client_cls, mock_config):
+    """Current details that are not a JSON object cannot be merged onto — nothing is sent."""
+    result, mock_client = _update_memory_cli(
+        mock_client_cls,
+        mock_config,
+        "-m",
+        "mem-1",
+        "--location",
+        "35.68,139.76",
+        "--merge-details",
+        reference=_reference_reply(["not", "an", "object"]),
+    )
+    assert result.exit_code == 1, result.output
+    assert "current details are not a JSON object" in result.output
+    mock_client.update_memory.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "reference",
+    [{"status": "success"}, {"status": "success", "memory": "mem-1"}, ["not", "a", "dict"]],
+    ids=["memory-missing", "memory-not-a-dict", "reply-not-a-dict"],
+)
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_update_memory_merge_details_requires_memory_object(
+    mock_client_cls, mock_config, reference
+):
+    """A reference reply without a memory object is an error, never a merge onto nothing."""
+    result, mock_client = _update_memory_cli(
+        mock_client_cls,
+        mock_config,
+        "-m",
+        "mem-1",
+        "--location",
+        "35.68,139.76",
+        "--merge-details",
+        reference=reference,
+    )
+    assert result.exit_code == 1, result.output
+    assert "carried no memory object" in result.output
+    mock_client.update_memory.assert_not_called()
+
+
+@patch("kagura_memory.cli.KaguraClient")
+def test_update_memory_merge_details_rejects_external_id(mock_client_cls):
+    """--merge-details needs --memory-id (reference takes a memory id); with --external-id
+    the CLI fails before building a client."""
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        [
+            "update-memory",
+            "--external-id",
+            "ext-1",
+            "--location",
+            "35.68,139.76",
+            "--merge-details",
+        ],
+    )
+    assert result.exit_code == 1, result.output
+    assert "--merge-details requires --memory-id" in result.output
+    mock_client_cls.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "args",
+    [(), ("--details", "  "), ("--location", "")],
+    ids=["no-payload", "blank-details", "blank-location"],
+)
+@patch("kagura_memory.cli.KaguraClient")
+def test_update_memory_merge_details_needs_payload(mock_client_cls, args):
+    """--merge-details with nothing to merge is an error before any client call.
+
+    A blank --details/--location is unset (details=None), and merging nothing
+    would be a pointless reference() round-trip that changes no details.
+    """
+    runner = CliRunner()
+    result = runner.invoke(main, ["update-memory", "-m", "mem-1", "--merge-details", *args])
+    assert result.exit_code == 1, result.output
+    assert "--merge-details needs --details or --location" in result.output
+    mock_client_cls.assert_not_called()
+
+
 @patch("kagura_memory.cli.load_config")
 @patch("kagura_memory.cli.KaguraClient")
 def test_context_delete(mock_client_cls, mock_config):
