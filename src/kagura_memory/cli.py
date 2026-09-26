@@ -218,8 +218,10 @@ async def _current_details_for_merge(
         )
         raise click.ClickException(
             f"--merge-details: the memory's current details could not be read in full{size}; "
-            "the server bounds a reference reply. Send the complete object with --details "
-            "and without --merge-details."
+            "the server bounds a reference reply and this CLI cannot page it yet. Send the "
+            "complete object with --details and without --merge-details (the MCP reference "
+            "tool returns the whole object with max_chars up to 100000 or details_offset "
+            "paging)."
         )
     current = memory.get("details")
     # An absent key with no marker is null details only because reference()
@@ -881,8 +883,8 @@ def reference(context_id, memory_id):
     "--details",
     help="Structured details as an inline JSON object. Coordinates live under "
     "the 'location' key and must be JSON numbers, not strings: "
-    '\'{"location": {"lat": 35.68, "lon": 139.76}}\'. REPLACES the memory\'s '
-    "details wholesale ('{}' clears them) unless --merge-details is given.",
+    '\'{"location": {"lat": 35.68, "lon": 139.76}}\'. Without --merge-details '
+    "this REPLACES the memory's details wholesale ('{}' clears them).",
 )
 @click.option(
     "--location",
@@ -920,8 +922,11 @@ def update_memory(
 
     --details REPLACES the memory's details wholesale — the server does not
     deep-merge — so a bare --location without --merge-details drops every
-    other details key, and '{}' clears them. --merge-details reads the memory
-    first with reference() and merges the top-level keys of --details/--location
+    other details key (including the resource_id an --external-id upsert
+    stores there: without it the next upsert of that id creates a new memory
+    instead of replacing this one), and '{}' clears them. --merge-details
+    reads the memory first with reference() and merges the top-level keys of
+    --details/--location
     over its current details, so unmentioned keys are kept, and it is two
     calls, not one atomic update (the read is a reference() of the memory and
     counts in its access stats). It cannot remove a key (for that, send the full
