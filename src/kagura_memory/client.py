@@ -1967,7 +1967,8 @@ class KaguraClient:
                 want to keep (notably ``location``, which otherwise drops off
                 :meth:`recall_nearby`, and ``tool_trigger``, which otherwise
                 unmarks a guardrail). ``{}`` clears it; omit to leave details
-                unchanged.
+                unchanged. The CLI's ``kagura update-memory --merge-details``
+                does that round-trip for top-level keys.
             dismiss_supersede_candidate: Reject this memory's current
                 ``supersede_candidate`` (the older near-duplicate that
                 :meth:`recall` / :meth:`reference` suggest it replaces), for two
