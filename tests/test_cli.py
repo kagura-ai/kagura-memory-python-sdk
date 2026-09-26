@@ -619,6 +619,43 @@ def test_update_memory_rejects_malformed_location(mock_client_cls, mock_config, 
     mock_client.update_memory.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    ("args", "expected"),
+    [
+        (("--details", '{"a": 1}'), {"a": 1}),
+        (("--location", "35.68,139.76"), {"location": {"lat": 35.68, "lon": 139.76}}),
+    ],
+    ids=["details", "location"],
+)
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_update_memory_details_with_external_id(mock_client_cls, mock_config, args, expected):
+    """--details/--location ride along on the --external-id upsert path.
+
+    Without --merge-details the payload is forwarded next to ``external_id``
+    as-is: no read first, so ``reference`` is never called.
+    """
+    result, mock_client = _update_memory_cli(
+        mock_client_cls,
+        mock_config,
+        "--external-id",
+        "ext-1",
+        "-s",
+        "sum",
+        "--content",
+        "c",
+        "-t",
+        "note",
+        *args,
+    )
+    assert result.exit_code == 0, result.output
+    kwargs = mock_client.update_memory.await_args.kwargs
+    assert kwargs["external_id"] == "ext-1"
+    assert kwargs["memory_id"] is None
+    assert kwargs["details"] == expected
+    mock_client.reference.assert_not_called()
+
+
 def _reference_reply(details, **extra):
     """A `reference` reply whose memory carries ``details`` plus any bound markers."""
     return {"status": "success", "memory": {"memory_id": "mem-1", "details": details, **extra}}
