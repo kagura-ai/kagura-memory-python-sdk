@@ -138,8 +138,8 @@ def test_revoke_key_yes_skips_prompt(mock_cls, mock_config):
     inst = _mock_client(mock_cls, revoke_member_key=None)
     result = CliRunner().invoke(main, ["auth", "revoke-key", "42", "--user", "google_2", "--yes"])
     assert result.exit_code == 0, result.output
-    assert "Revoked key #42" in result.output
-    inst.revoke_member_key.assert_awaited_once_with(WS, "google_2", 42)
+    assert "Revoked key 42" in result.output
+    inst.revoke_member_key.assert_awaited_once_with(WS, "google_2", "42")
 
 
 @pytest.mark.parametrize("user_id", ["", ".", ".."])
@@ -179,3 +179,47 @@ def test_revoke_key_refuses_an_invalid_workspace_before_the_prompt(mock_cls, moc
     assert "workspace_id must be a UUID" in result.output
     assert "Revoke key" not in result.output
     inst.revoke_member_key.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Opaque string key ids (memory-cloud#1008, server v0.89.0+)
+# ---------------------------------------------------------------------------
+
+AKEY = "akey_0123456789abcdefABCDEF"
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.WorkspaceClient")
+def test_revoke_key_accepts_string_id(mock_cls, mock_config):
+    mock_config.return_value = CONFIG
+    inst = _mock_client(mock_cls, revoke_member_key=None)
+    result = CliRunner().invoke(main, ["auth", "revoke-key", AKEY, "--user", "google_2", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert f"Revoked key {AKEY} of google_2" in result.output
+    inst.revoke_member_key.assert_awaited_once_with(WS, "google_2", AKEY)
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.WorkspaceClient")
+def test_create_key_prints_string_id(mock_cls, mock_config):
+    mock_config.return_value = CONFIG
+    _mock_client(mock_cls, mint_member_key=_key(id=AKEY))
+    result = CliRunner().invoke(
+        main,
+        ["auth", "create-key", "--user", "google_2", "--name", "ci-bot", "--expires-days", "90"],
+    )
+    assert result.exit_code == 0, result.output
+    assert f"Key {AKEY} 'ci-bot'" in result.output
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.WorkspaceClient")
+def test_list_keys_aligns_string_ids(mock_cls, mock_config):
+    mock_config.return_value = CONFIG
+    _mock_client(mock_cls, list_member_keys=[_key(id=AKEY), _key(id=7, name="other")])
+    result = CliRunner().invoke(main, ["auth", "list-keys", "--user", "google_2"])
+    assert result.exit_code == 0, result.output
+    header, first, second = result.output.strip().splitlines()
+    col = header.index("NAME")
+    assert first.startswith(AKEY)
+    assert first[col:].startswith("ci-bot") and second[col:].startswith("other")

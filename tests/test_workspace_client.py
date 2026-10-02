@@ -18,7 +18,7 @@ from kagura_memory.exceptions import (
     KaguraQuotaError,
     KaguraResponseError,
 )
-from kagura_memory.models import WorkspaceInvitation, WorkspaceMember
+from kagura_memory.models import MemberAPIKey, WorkspaceInvitation, WorkspaceMember
 from kagura_memory.workspace_client import (
     VALID_ASSIGNABLE_ROLES,
     VALID_INVITE_EXPIRES,
@@ -630,12 +630,16 @@ async def test_workspace_id_normalized_to_canonical():
 
 
 @pytest.mark.asyncio
-async def test_destructive_ids_require_strict_int():
+async def test_destructive_ids_require_int_or_string():
     async with make_client(lambda r: httpx.Response(500)) as c:
-        with pytest.raises(ValueError, match="invitation_id must be an integer"):
+        with pytest.raises(ValueError, match="invitation_id must be"):
             await c.revoke_invitation(WS, 7.9)  # type: ignore[arg-type]
-        with pytest.raises(ValueError, match="key_id must be an integer"):
+        with pytest.raises(ValueError, match="invitation_id must be"):
+            await c.revoke_invitation(WS, True)  # type: ignore[arg-type]
+        with pytest.raises(ValueError, match="key_id must be"):
             await c.revoke_member_key(WS, "u2", 42.9)  # type: ignore[arg-type]
+        with pytest.raises(ValueError, match="key_id must be"):
+            await c.revoke_member_key(WS, "u2", None)  # type: ignore[arg-type]
         with pytest.raises(ValueError, match="expires_days must be an integer"):
             await c.mint_member_key(WS, "u2", "x", 90.5)  # type: ignore[arg-type]
 
@@ -798,3 +802,79 @@ async def test_list_member_keys_rejects_null_or_non_list_api_keys_field():
     async with make_client(lambda r: httpx.Response(200, json={"api_keys": {"oops": 1}})) as c:
         with pytest.raises(KaguraResponseError, match="api_keys"):
             await c.list_member_keys(WS, "u2")
+
+
+# ---------------------------------------------------------------------------
+# Opaque string public ids (memory-cloud#1008, server v0.89.0+)
+# ---------------------------------------------------------------------------
+
+
+def test_invitation_and_key_models_accept_string_ids():
+    inv = WorkspaceInvitation.model_validate(
+        {"id": "winv_0123456789abcdefABCDEF", "role": "member"}
+    )
+    assert inv.id == "winv_0123456789abcdefABCDEF"
+    key = MemberAPIKey.model_validate(
+        {"id": "akey_0123456789abcdefABCDEF", "name": "ci", "key_prefix": "kagura_ab"}
+    )
+    assert key.id == "akey_0123456789abcdefABCDEF"
+    # Integer ids from pre-v0.89.0 servers still parse unchanged.
+    assert WorkspaceInvitation.model_validate({"id": 7, "role": "member"}).id == 7
+
+
+@pytest.mark.asyncio
+async def test_revoke_invitation_accepts_string_id():
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        return httpx.Response(200, json={"success": True})
+
+    async with make_client(handler) as c:
+        await c.revoke_invitation(WS, "winv_0123456789abcdefABCDEF")
+    assert seen["path"] == f"/api/v1/workspaces/{WS}/invitations/winv_0123456789abcdefABCDEF"
+
+
+@pytest.mark.asyncio
+async def test_revoke_member_key_accepts_string_id():
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        return httpx.Response(200, json={"status": "revoked"})
+
+    async with make_client(handler) as c:
+        await c.revoke_member_key(WS, "google_2", "akey_0123456789abcdefABCDEF")
+    assert seen["path"] == (
+        f"/api/v1/workspaces/{WS}/members/google_2/credentials/api-keys/akey_0123456789abcdefABCDEF"
+    )
+
+
+@pytest.mark.parametrize("bad", ["", "   ", ".", ".."])
+@pytest.mark.asyncio
+async def test_empty_or_dot_string_ids_are_refused_before_the_wire(bad):
+    sent = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(request)
+        return httpx.Response(200, json={"success": True})
+
+    async with make_client(handler) as c:
+        with pytest.raises(ValueError, match="invitation_id"):
+            await c.revoke_invitation(WS, bad)
+        with pytest.raises(ValueError, match="key_id"):
+            await c.revoke_member_key(WS, "google_2", bad)
+    assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_string_id_is_encoded_as_one_segment():
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.raw_path.decode()
+        return httpx.Response(200, json={"success": True})
+
+    async with make_client(handler) as c:
+        await c.revoke_invitation(WS, "a/b")
+    assert seen["path"].endswith("/invitations/a%2Fb")

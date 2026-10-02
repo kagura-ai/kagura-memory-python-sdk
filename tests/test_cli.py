@@ -2659,3 +2659,21 @@ def test_float_range_refuses_nan(argv, tmp_path):
     assert result.exit_code == 2, result.output
     assert "nan is not in the range 0.0<=x<=1.0." in result.output
     config.assert_not_called()
+
+
+def test_resource_tokens_revoke_and_update_accept_string_ids(monkeypatch):
+    """Server v0.89.0+ token ids are opaque ``rtok_…`` strings (memory-cloud#1008)."""
+    rtok = "rtok_0123456789abcdefABCDEF"
+    client = AsyncMock()
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=None)
+    client.update_token.return_value = MagicMock(model_dump_json=lambda indent=None: "{}")
+    monkeypatch.setattr("kagura_memory.cli._get_resource_client", lambda: client)
+
+    result = CliRunner().invoke(main, ["resource", "tokens", "revoke", rtok])
+    assert result.exit_code == 0, result.output
+    client.revoke_token.assert_awaited_once_with(rtok)
+
+    result = CliRunner().invoke(main, ["resource", "tokens", "update", rtok, "-q", "5"])
+    assert result.exit_code == 0, result.output
+    assert client.update_token.await_args.kwargs["token_id"] == rtok

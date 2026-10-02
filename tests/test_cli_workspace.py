@@ -249,8 +249,8 @@ def test_invite_revoke(mock_cls, mock_config):
     inst = _mock_client(mock_cls, revoke_invitation=None)
     result = CliRunner().invoke(main, ["workspace", "invite", "revoke", "7"])
     assert result.exit_code == 0, result.output
-    assert "Revoked invitation #7" in result.output
-    inst.revoke_invitation.assert_awaited_once_with(WS, 7)
+    assert "Revoked invitation 7" in result.output
+    inst.revoke_invitation.assert_awaited_once_with(WS, "7")
 
 
 # ---------------------------------------------------------------------------
@@ -410,7 +410,7 @@ def test_invite_create_prints_a_dash_for_a_null_email(mock_cls, mock_config):
         main, ["workspace", "invite", "create", "new@x.com", "--role", "admin"]
     )
     assert result.exit_code == 0, result.output
-    assert "Invitation #7 → - (role=admin" in result.output
+    assert "Invitation 7 → - (role=admin" in result.output
     assert "None" not in result.output
 
 
@@ -449,3 +449,38 @@ def test_non_string_config_context_id_leaves_no_hint(mock_cls, mock_config):
     result = CliRunner().invoke(main, ["workspace", "member", "list", "-w", WS])
     assert result.exit_code == 0, result.output
     assert mock_cls._from_resolved_auth.call_args.kwargs["workspace_id_hint"] is None
+
+
+# ---------------------------------------------------------------------------
+# Opaque string invitation ids (memory-cloud#1008, server v0.89.0+)
+# ---------------------------------------------------------------------------
+
+WINV = "winv_0123456789abcdefABCDEF"
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.WorkspaceClient")
+def test_invite_revoke_accepts_string_id(mock_cls, mock_config):
+    mock_config.return_value = CONFIG
+    inst = _mock_client(mock_cls, revoke_invitation=None)
+    result = CliRunner().invoke(main, ["workspace", "invite", "revoke", WINV])
+    assert result.exit_code == 0, result.output
+    assert f"Revoked invitation {WINV}" in result.output
+    inst.revoke_invitation.assert_awaited_once_with(WS, WINV)
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.WorkspaceClient")
+def test_invite_list_aligns_string_ids(mock_cls, mock_config):
+    mock_config.return_value = CONFIG
+    _mock_client(
+        mock_cls,
+        list_invitations=[_invitation(id=WINV), _invitation(id=8, email="b@x.com")],
+    )
+    result = CliRunner().invoke(main, ["workspace", "invite", "list"])
+    assert result.exit_code == 0, result.output
+    header, first, second = result.output.strip().splitlines()
+    assert first.startswith(f"{WINV} new@x.com")
+    # Every row's EMAIL column starts where the header's does.
+    col = header.index("EMAIL")
+    assert first[col:].startswith("new@x.com") and second[col:].startswith("b@x.com")

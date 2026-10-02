@@ -1340,3 +1340,62 @@ def test_resource_event_record_importance_zero_preserved():
     data["importance"] = 0.0
     rec = ResourceEventRecord.model_validate(data)
     assert rec.importance == 0.0
+
+
+# ============================================================================
+# Opaque string token ids (memory-cloud#1008, server v0.89.0+)
+# ============================================================================
+
+RTOK = "rtok_0123456789abcdefABCDEF"
+
+
+@pytest.mark.asyncio
+async def test_update_and_revoke_token_accept_string_id():
+    client = ResourceClient(api_key="test", base_url="https://test.com")
+    response_data = {
+        "id": RTOK,
+        "resource_id": "products",
+        "quota_events_per_hour": 2000,
+        "created_at": "2026-03-29T00:00:00Z",
+        "is_active": True,
+        "status": "active",
+    }
+    with patch.object(client._client, "request", new_callable=AsyncMock) as mock_req:
+        mock_req.return_value = _mock_response(200, response_data)
+        result = await client.update_token(token_id=RTOK, quota_events_per_hour=2000)
+        assert result.id == RTOK
+        assert mock_req.call_args[0][1].endswith(f"/api/v1/resource-tokens/{RTOK}")
+
+        mock_req.return_value = _mock_response(204)
+        await client.revoke_token(RTOK)
+        assert mock_req.call_args[0][0] == "DELETE"
+        assert mock_req.call_args[0][1].endswith(f"/api/v1/resource-tokens/{RTOK}")
+    await client.close()
+
+
+@pytest.mark.parametrize("bad", ["", "  ", "..", 1.5, True, None])
+@pytest.mark.asyncio
+async def test_invalid_token_ids_are_refused_before_the_wire(bad):
+    client = ResourceClient(api_key="test", base_url="https://test.com")
+    with patch.object(client._client, "request", new_callable=AsyncMock) as mock_req:
+        with pytest.raises(ValueError, match="token_id"):
+            await client.revoke_token(bad)
+        with pytest.raises(ValueError, match="token_id"):
+            await client.update_token(bad, description="x")
+        mock_req.assert_not_called()
+    await client.close()
+
+
+def test_setup_response_accepts_string_token_id():
+    from kagura_memory.models import ResourceSetupResponse
+
+    r = ResourceSetupResponse.model_validate(
+        {
+            "context_id": "c",
+            "context_name": "n",
+            "resource_id": "r",
+            "token": "t",
+            "token_id": RTOK,
+        }
+    )
+    assert r.token_id == RTOK

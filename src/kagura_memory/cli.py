@@ -4,7 +4,7 @@ import asyncio
 import json
 import math
 import sys
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from datetime import datetime
 from pathlib import Path
 from typing import Any, get_args
@@ -2332,7 +2332,7 @@ def tokens_create(resource_id, description, quota):
 
 
 @resource_tokens.command(name="update")
-@click.argument("token_id", type=int)
+@click.argument("token_id")
 @click.option("--description", "-d", help="Updated description")
 @click.option("--quota", "-q", type=int, help="Updated events per hour (1-10000)")
 def tokens_update(token_id, description, quota):
@@ -2341,8 +2341,8 @@ def tokens_update(token_id, description, quota):
 
     \b
     Examples:
-      kagura resource tokens update 42 -d "New description"
-      kagura resource tokens update 42 -q 2000
+      kagura resource tokens update rtok_0123456789abcdefABCDEF -d "New description"
+      kagura resource tokens update 42 -q 2000   # integer id (server < v0.89.0)
     """
     if description is None and quota is None:
         raise click.ClickException("At least --description or --quota is required")
@@ -2359,14 +2359,14 @@ def tokens_update(token_id, description, quota):
 
 
 @resource_tokens.command(name="revoke")
-@click.argument("token_id", type=int)
+@click.argument("token_id")
 def tokens_revoke(token_id):
     """
     Revoke (soft-delete) a resource token.
 
     \b
     Examples:
-      kagura resource tokens revoke 42
+      kagura resource tokens revoke rtok_0123456789abcdefABCDEF
     """
 
     async def op(client: ResourceClient) -> str:
@@ -3553,11 +3553,16 @@ def invite_create(
         )
         expires = inv.expires_at.date().isoformat() if inv.expires_at else "never"
         return (
-            f"Invitation #{inv.id} → {inv.email or '-'} (role={inv.role}, expires={expires})\n"
+            f"Invitation {inv.id} → {inv.email or '-'} (role={inv.role}, expires={expires})\n"
             f"{inv.invitation_url or inv.token or '(no url returned)'}"
         )
 
     _run_workspace_command(op, workspace_id)
+
+
+def _id_column_width(ids: Iterable[int | str]) -> int:
+    """Width of a table's ID column: 6 as before, wider for string ids (#1008)."""
+    return max([6, *(len(str(i)) for i in ids)])
 
 
 @invite.command(name="list")
@@ -3584,31 +3589,32 @@ def invite_list(include_accepted: bool, as_json: bool, workspace_id: str | None)
                 indent=2,
                 ensure_ascii=False,
             )
-        lines = [f"{'ID':<6} {'EMAIL':<30} {'ROLE':<8} {'STATE':<9} EXPIRES"]
+        w = _id_column_width(i.id for i in invs)
+        lines = [f"{'ID':<{w}} {'EMAIL':<30} {'ROLE':<8} {'STATE':<9} EXPIRES"]
         for i in invs:
             state = "accepted" if i.is_accepted else ("expired" if i.is_expired else "pending")
             expires = i.expires_at.date().isoformat() if i.expires_at else "never"
-            lines.append(f"{i.id:<6} {i.email or '-':<30} {i.role:<8} {state:<9} {expires}")
+            lines.append(f"{i.id!s:<{w}} {i.email or '-':<30} {i.role:<8} {state:<9} {expires}")
         return "\n".join(lines)
 
     _run_workspace_command(op, workspace_id)
 
 
 @invite.command(name="revoke")
-@click.argument("invitation_id", type=int)
+@click.argument("invitation_id")
 @click.option("--workspace", "-w", "workspace_id", help=_WORKSPACE_OPT_HELP)
-def invite_revoke(invitation_id: int, workspace_id: str | None):
+def invite_revoke(invitation_id: str, workspace_id: str | None):
     """
-    Revoke a pending invitation by its integer id (see `invite list`).
+    Revoke a pending invitation by its id (see `invite list`).
 
     \b
     Example:
-      kagura workspace invite revoke 7
+      kagura workspace invite revoke winv_0123456789abcdefABCDEF
     """
 
     async def op(client: WorkspaceClient, ws: str) -> str:
         await client.revoke_invitation(ws, invitation_id)
-        return f"Revoked invitation #{invitation_id}"
+        return f"Revoked invitation {invitation_id}"
 
     _run_workspace_command(op, workspace_id)
 
@@ -3654,7 +3660,7 @@ def auth_create_key(user_id: str, key_name: str, expires_days: int, workspace_id
         click.echo("⚠ Save this key now — it cannot be shown again.", err=True)
         expires = key.expires_at.date().isoformat() if key.expires_at else "never"
         return (
-            f"Key #{key.id} '{key.name}' for {user_id} "
+            f"Key {key.id} '{key.name}' for {user_id} "
             f"(prefix={key.key_prefix}, expires={expires})\n"
             f"{key.plaintext_key or '(no plaintext returned)'}"
         )
@@ -3690,13 +3696,15 @@ def auth_list_keys(user_id: str, as_json: bool, workspace_id: str | None):
                 indent=2,
                 ensure_ascii=False,
             )
-        lines = [f"{'ID':<6} {'NAME':<24} {'PREFIX':<18} {'CREATED':<12} {'EXPIRES':<12} REVOKED"]
+        w = _id_column_width(k.id for k in keys)
+        lines = [f"{'ID':<{w}} {'NAME':<24} {'PREFIX':<18} {'CREATED':<12} {'EXPIRES':<12} REVOKED"]
         for k in keys:
             created = k.created_at.date().isoformat() if k.created_at else "-"
             expires = k.expires_at.date().isoformat() if k.expires_at else "never"
             revoked = k.revoked_at.date().isoformat() if k.revoked_at else "-"
             lines.append(
-                f"{k.id:<6} {k.name:<24} {k.key_prefix:<18} {created:<12} {expires:<12} {revoked}"
+                f"{k.id!s:<{w}} {k.name:<24} {k.key_prefix:<18} "
+                f"{created:<12} {expires:<12} {revoked}"
             )
         return "\n".join(lines)
 
@@ -3704,7 +3712,7 @@ def auth_list_keys(user_id: str, as_json: bool, workspace_id: str | None):
 
 
 @click.command(name="revoke-key")
-@click.argument("key_id", type=int)
+@click.argument("key_id")
 @click.option(
     "--user",
     "-u",
@@ -3715,24 +3723,24 @@ def auth_list_keys(user_id: str, as_json: bool, workspace_id: str | None):
 )
 @click.option("--yes", "-y", is_flag=True, default=False, help="Skip confirmation")
 @click.option("--workspace", "-w", "workspace_id", help=_WORKSPACE_OPT_HELP)
-def auth_revoke_key(key_id: int, user_id: str, yes: bool, workspace_id: str | None):
+def auth_revoke_key(key_id: str, user_id: str, yes: bool, workspace_id: str | None):
     """
-    Revoke a member's API key by its integer id (see `list-keys`).
+    Revoke a member's API key by its id (see `list-keys`).
 
     Server-side this is a soft revoke — the row is kept for audit.
 
     \b
     Example:
-      kagura auth revoke-key 42 --user google_1234 --yes
+      kagura auth revoke-key akey_0123456789abcdefABCDEF --user google_1234 --yes
     """
 
     async def op(client: WorkspaceClient, ws: str) -> str:
         await client.revoke_member_key(ws, user_id, key_id)
-        return f"Revoked key #{key_id} of {user_id}"
+        return f"Revoked key {key_id} of {user_id}"
 
     def confirm(ws: str) -> None:
         # Prompt names the RESOLVED workspace UUID, not the raw flag value.
-        click.confirm(f"Revoke key #{key_id} of {user_id} in workspace {ws}?", abort=True)
+        click.confirm(f"Revoke key {key_id} of {user_id} in workspace {ws}?", abort=True)
 
     _run_workspace_command(op, workspace_id, confirm=None if yes else confirm)
 
