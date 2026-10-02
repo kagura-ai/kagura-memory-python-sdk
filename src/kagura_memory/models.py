@@ -461,9 +461,13 @@ class ResourceTokenUpdate(BaseModel):
 
 
 class ResourceTokenResponse(BaseModel):
-    """Resource token metadata (no plaintext token)."""
+    """Resource token metadata (no plaintext token).
 
-    id: int
+    ``id`` is an int before server v0.89.0 and an opaque ``rtok_…`` string
+    from v0.89.0 on (memory-cloud#1008).
+    """
+
+    id: int | str
     resource_id: str
     description: str | None = None
     quota_events_per_hour: int
@@ -502,7 +506,7 @@ class ResourceSetupResponse(BaseModel):
     context_name: str
     resource_id: str
     token: str
-    token_id: int
+    token_id: int | str  # opaque ``rtok_…`` string from server v0.89.0
     warning: str | None = None
 
 
@@ -1135,8 +1139,9 @@ class WorkspaceMember(BaseModel):
 class WorkspaceInvitation(BaseModel):
     """A workspace invitation (#225). Non-strict like :class:`WorkspaceMember`.
 
-    Server shape (``WorkspaceInvitationResponse``): ``id`` is an INTEGER PK
-    and there is no ``status`` field — pending is derived from
+    Server shape (``WorkspaceInvitationResponse``): ``id`` is an integer
+    before server v0.89.0 and an opaque ``winv_…`` string from v0.89.0 on
+    (memory-cloud#1008); there is no ``status`` field — pending is derived from
     ``is_accepted``/``is_expired``. ``token``/``invitation_url`` are bearer
     join-credentials: the server nulls them on programmatic LIST responses,
     so they are optional here and the CLI prints them only on create.
@@ -1144,7 +1149,7 @@ class WorkspaceInvitation(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
-    id: int
+    id: int | str
     email: str | None = None
     role: str
     token: str | None = None
@@ -1159,15 +1164,16 @@ class WorkspaceInvitation(BaseModel):
 class MemberAPIKey(BaseModel):
     """A member API key row (#201, server v0.42.0+). Non-strict.
 
-    Server shape (``MemberAPIKeyResponse``): ``id`` is an INTEGER PK and
-    the plaintext field is named ``plaintext_key`` — non-null ONLY in the
+    Server shape (``MemberAPIKeyResponse``): ``id`` is an integer before
+    server v0.89.0 and an opaque ``akey_…`` string from v0.89.0 on
+    (memory-cloud#1008); the plaintext field is named ``plaintext_key`` — non-null ONLY in the
     mint 201 response. Owner-provisioned keys are force-hidden at
     creation, so no later call ever returns the plaintext.
     """
 
     model_config = ConfigDict(extra="ignore")
 
-    id: int
+    id: int | str
     name: str
     key_prefix: str
     plaintext_key: str | None = None

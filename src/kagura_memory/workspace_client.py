@@ -25,6 +25,7 @@ from ._http import (
     extract_detail,
     normalize_uuid,
     path_segment,
+    public_id_segment,
     sanitize_server_detail,
 )
 from ._rest_base import KaguraRestClient
@@ -70,9 +71,9 @@ def _user_id_segment(user_id: str) -> str:
 def _require_int(value: object, label: str) -> int:
     """Strictly require an int — no bool, no float truncation, no str parse.
 
-    ``int(7.9)`` would silently target a DIFFERENT resource id on a
-    destructive endpoint, and ``int("7a")`` raises a bare ValueError with
-    no context; both are worth failing loudly instead.
+    ``int(7.9)`` would silently target a DIFFERENT value, and ``int("7a")``
+    raises a bare ValueError with no context; both are worth failing loudly
+    instead. Resource ids use :func:`public_id_segment` (int or str).
     """
     if isinstance(value, bool) or not isinstance(value, int):
         raise ValueError(f"{label} must be an integer, got {value!r}")
@@ -232,13 +233,18 @@ class WorkspaceClient(KaguraRestClient):
             for row in self._expect_list(resp, "list_invitations")
         ]
 
-    async def revoke_invitation(self, workspace_id: str, invitation_id: int) -> None:
-        """Revoke a pending invitation (server returns 200 {"success": true})."""
+    async def revoke_invitation(self, workspace_id: str, invitation_id: int | str) -> None:
+        """Revoke a pending invitation (server returns 200 {"success": true}).
+
+        ``invitation_id`` is an int on servers before v0.89.0 and an opaque
+        ``winv_…`` string from v0.89.0 on — pass whatever ``list_invitations``
+        returned.
+        """
         workspace_id = _normalize_workspace_id(workspace_id)
         await self._request(
             "DELETE",
             f"/api/v1/workspaces/{workspace_id}/invitations/"
-            f"{_require_int(invitation_id, 'invitation_id')}",
+            f"{public_id_segment(invitation_id, label='invitation_id')}",
         )
 
     # -------------------------------------------------------------------
@@ -308,19 +314,21 @@ class WorkspaceClient(KaguraRestClient):
             for row in self._expect_wrapped_list(resp, "api_keys", "list_member_keys")
         ]
 
-    async def revoke_member_key(self, workspace_id: str, user_id: str, key_id: int) -> None:
+    async def revoke_member_key(self, workspace_id: str, user_id: str, key_id: int | str) -> None:
         """Revoke a member's API key.
 
         Owner-provisioned revocations are SOFT server-side (``revoked_at``
         set, row retained for forensics); success is 200 with a status
         body, and an already-revoked key surfaces as a uniform 404.
+        ``key_id`` is an int before server v0.89.0 and an opaque ``akey_…``
+        string from v0.89.0 on.
         """
         workspace_id = _normalize_workspace_id(workspace_id)
         await self._request(
             "DELETE",
             f"/api/v1/workspaces/{workspace_id}/members/"
             f"{_user_id_segment(user_id)}/credentials/api-keys/"
-            f"{_require_int(key_id, 'key_id')}",
+            f"{public_id_segment(key_id, label='key_id')}",
         )
 
     # -------------------------------------------------------------------

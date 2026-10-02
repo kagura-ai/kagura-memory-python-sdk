@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 
 from ._auth import _AuthSource, _OAuthAuth, _StaticAuth
+from ._http import public_id_segment
 from ._rest_base import KaguraRestClient
 from .auth.credentials import KaguraOAuth
 from .client import _SETUP_SUMMARY_DEPRECATED, KaguraClient
@@ -173,35 +174,39 @@ class ResourceClient(KaguraRestClient):
 
     async def update_token(
         self,
-        token_id: int,
+        token_id: int | str,
         description: str | None = None,
         quota_events_per_hour: int | None = None,
     ) -> ResourceTokenResponse:
         """Update a resource token's metadata.
 
         Args:
-            token_id: Token database ID.
+            token_id: Token id — an int before server v0.89.0, an opaque
+                ``rtok_…`` string from v0.89.0 on.
             description: Updated description.
             quota_events_per_hour: Updated quota (1-10000).
 
         Returns:
             Updated token metadata.
         """
+        segment = public_id_segment(token_id, label="token_id")
         body = ResourceTokenUpdate(
             description=description,
             quota_events_per_hour=quota_events_per_hour,
         ).model_dump(exclude_none=True)
 
-        response = await self._request("PATCH", f"/api/v1/resource-tokens/{token_id}", json=body)
+        response = await self._request("PATCH", f"/api/v1/resource-tokens/{segment}", json=body)
         return self._parse(ResourceTokenResponse, self._json(response), "update_token")
 
-    async def revoke_token(self, token_id: int) -> None:
+    async def revoke_token(self, token_id: int | str) -> None:
         """Revoke (soft-delete) a resource token.
 
         Args:
-            token_id: Token database ID.
+            token_id: Token id — an int before server v0.89.0, an opaque
+                ``rtok_…`` string from v0.89.0 on.
         """
-        await self._request("DELETE", f"/api/v1/resource-tokens/{token_id}")
+        segment = public_id_segment(token_id, label="token_id")
+        await self._request("DELETE", f"/api/v1/resource-tokens/{segment}")
 
     # -------------------------------------------------------------------
     # Setup helper

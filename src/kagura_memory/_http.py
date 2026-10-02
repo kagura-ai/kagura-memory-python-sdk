@@ -666,6 +666,28 @@ def path_segment(value: str, *, label: str) -> str:
     return quote(value, safe="")
 
 
+def public_id_segment(value: object, *, label: str) -> str:
+    """A resource id (``int`` or opaque ``str``) as ONE REST path segment.
+
+    memory-cloud v0.89.0 (#1008) replaces the integer ids of API keys,
+    resource tokens and workspace invitations with opaque prefixed strings
+    (``akey_…``, ``rtok_…``, ``winv_…``) and answers integer path ids with
+    422; older servers still use integers. Both are accepted. A ``bool`` or
+    ``float`` is refused instead of coerced — ``int(7.9)`` would silently
+    target a DIFFERENT resource on a destructive endpoint — and a string is
+    encoded by :func:`path_segment`, so a blank, ``.`` or ``..`` id is
+    refused and a ``/`` cannot reach another endpoint.
+
+    Raises:
+        ValueError: If ``value`` is not an int or a non-blank string.
+    """
+    if isinstance(value, int) and not isinstance(value, bool):
+        return str(value)
+    if isinstance(value, str) and value.strip():
+        return path_segment(value, label=label)
+    raise ValueError(f"{label} must be an integer or a non-empty string id, got {value!r}")
+
+
 def validate_coordinate(label: str, value: object, limit: int) -> None:
     """Reject one coordinate the server would reject anyway.
 
