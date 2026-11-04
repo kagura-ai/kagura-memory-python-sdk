@@ -1186,7 +1186,10 @@ def _next_page_footer(result: dict[str, Any]) -> str | None:
 @click.option(
     "--cursor",
     default=None,
-    help="next_cursor of the previous page, with the same other options (memory-cloud 0.82.0+).",
+    help=(
+        "next_cursor of the previous page, with the same other options; a blank one "
+        "is ignored (memory-cloud 0.82.0+)."
+    ),
 )
 def context_list(name_contains, summary, details, stats, limit, cursor):
     """
@@ -1208,6 +1211,10 @@ def context_list(name_contains, summary, details, stats, limit, cursor):
       kagura context list --stats
       kagura context list --limit 50 --cursor 50
     """
+    if cursor is not None and not cursor.strip():
+        # Blank is unset, as for --name-contains: a script feeding back the
+        # last page's next_cursor (jq -r '.next_cursor // empty') passes "".
+        cursor = None
     if _details_page_over_cap(details, name_contains, limit):
         raise click.UsageError(
             "--details returns full summaries: pass --name-contains or "

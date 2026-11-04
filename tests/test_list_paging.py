@@ -374,6 +374,16 @@ def test_context_list_forwards_the_paging_flags_with_the_filters():
     ]
 
 
+@pytest.mark.parametrize("cursor", ["", "   "])
+def test_context_list_blank_cursor_is_unset(cursor: str):
+    """A blank --cursor (e.g. an empty next_cursor fed back from a script) is not sent."""
+    server = _Server(_directory([_context(n) for n in range(3)]))
+    result = _invoke(server, "--limit", "2", "--cursor", cursor)
+    assert result.exit_code == 0, result.output
+    assert server.arguments == [{"limit": 2}]
+    assert [c["name"] for c in json.loads(result.stdout)["contexts"]] == ["ctx-0", "ctx-1"]
+
+
 def test_context_list_from_an_older_server_prints_no_footer():
     """Before 0.82.0 the reply has no has_more / next_cursor and nothing is paged."""
     server = _Server({"status": "success", "contexts": [_context(1)], "count": 1})
