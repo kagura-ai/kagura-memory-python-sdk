@@ -820,8 +820,13 @@ def test_add_tools_under_a_tools_allowlist_warns(connection, tmp_path: Path) -> 
 
 @pytest.mark.parametrize(
     "flags",
-    [("--context", "my-project"), ("--add-tools", " , "), ("--add-tools", "a", "--add-tools", "")],
-    ids=["context-not-uuid", "blank-add-tools", "one-blank-add-tools"],
+    [
+        ("--context", "my-project"),
+        ("--add-tools", " , "),
+        ("--add-tools", "a", "--add-tools", ""),
+        ("--add-tools", "explore,-x"),  # kagura-mcp would read it as a flag
+    ],
+    ids=["context-not-uuid", "blank-add-tools", "one-blank-add-tools", "dashed-name"],
 )
 def test_bad_add_tools_or_context_is_a_usage_error(tmp_path: Path, flags) -> None:
     result = run_setup(tmp_path, *flags)

@@ -122,7 +122,7 @@ class MemoryClient(KaguraRestClient):
         Raises:
             TypeError: ``add_tools`` is a ``str``, or holds a non-``str`` item.
             ValueError: ``context_id`` is not a UUID, or ``add_tools`` names
-                more than 100 tools.
+                more than 100 tools or one starting with ``-``.
         """
         ctx = normalize_uuid(context_id, label="context_id")
         added = normalize_add_tools(add_tools) if add_tools is not None else ""

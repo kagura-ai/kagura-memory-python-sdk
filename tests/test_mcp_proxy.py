@@ -893,12 +893,21 @@ def test_amain_refuses_an_invalid_session_id_from_the_environment(monkeypatch, c
     [
         (["--add-tools", " , "], "--add-tools"),
         (["--add-tools", ",".join(f"t{i}" for i in range(101))], "--add-tools"),
+        (["--add-tools=-x"], "--add-tools"),
         (["--context", "my-context"], "--context"),
         (["--session-id", "a/b"], "--session-id"),
         (["--session-id", "x" * 129], "--session-id"),
         (["--session-id", ""], "--session-id"),
     ],
-    ids=["blank-add-tools", "over-100", "context-not-uuid", "slash", "too-long", "empty"],
+    ids=[
+        "blank-add-tools",
+        "over-100",
+        "dashed-name",
+        "context-not-uuid",
+        "slash",
+        "too-long",
+        "empty",
+    ],
 )
 def test_parser_rejects_bad_view_and_session_values(argv: list[str], flag: str, capsys):
     """The server ignores or drops such values silently, so the proxy refuses to start."""

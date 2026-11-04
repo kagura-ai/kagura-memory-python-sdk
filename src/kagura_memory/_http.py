@@ -85,8 +85,8 @@ def mcp_url_with_query(
 
     Raises:
         TypeError: ``add_tools`` is a ``str``, or holds a non-``str`` item.
-        ValueError: ``add_tools`` names more than 100 tools, or ``context``
-            is not a UUID.
+        ValueError: ``add_tools`` names more than 100 tools or one starting
+            with ``-``, or ``context`` is not a UUID.
     """
     added = normalize_add_tools(add_tools) if add_tools is not None else ""
     default_context = normalize_uuid(context, label="context") if context is not None else None
@@ -210,7 +210,9 @@ def normalize_add_tools(names: Sequence[str]) -> str:
     the URL lists. It trims them, compares them case-sensitively, ignores an
     unknown one, and reads at most 100. An item may itself be comma-separated
     (``"explore,list_edges"``, as the CLI flags take them); blank names are
-    dropped and duplicates removed, keeping the order.
+    dropped and duplicates removed, keeping the order. A name starting with
+    ``-`` is refused: no tool has one, and ``kagura-mcp --add-tools -x`` in a
+    stored entry would stop the proxy from starting.
 
     Args:
         names: Tool names, e.g. ``["explore"]``.
@@ -221,7 +223,8 @@ def normalize_add_tools(names: Sequence[str]) -> str:
     Raises:
         TypeError: ``names`` is a ``str`` (it would be read one character at
             a time), or an item is not a ``str``.
-        ValueError: More than 100 names, which the server would cut off.
+        ValueError: More than 100 names, which the server would cut off, or a
+            name starting with ``-``.
     """
     if isinstance(names, str):
         raise TypeError("add_tools must be a list of tool names, not a str")
@@ -231,6 +234,8 @@ def normalize_add_tools(names: Sequence[str]) -> str:
             raise TypeError(f"add_tools items must be str, got {type(item).__name__}")
         found.extend(name for part in item.split(",") if (name := part.strip()))
     unique = list(dict.fromkeys(found))
+    if dashed := next((name for name in unique if name.startswith("-")), None):
+        raise ValueError(f"add_tools names cannot start with '-': {dashed!r}")
     if len(unique) > MAX_ADD_TOOLS:
         raise ValueError(f"add_tools accepts at most {MAX_ADD_TOOLS} tool names, got {len(unique)}")
     return ",".join(unique)

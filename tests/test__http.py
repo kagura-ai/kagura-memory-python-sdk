@@ -677,9 +677,10 @@ def test_mcp_url_with_query_add_tools_naming_no_tool_leaves_the_key(add_tools):
         ({"add_tools": "explore"}, TypeError),
         ({"add_tools": ["explore", None]}, TypeError),
         ({"add_tools": [f"t{i}" for i in range(101)]}, ValueError),
+        ({"add_tools": ["explore", " -x"]}, ValueError),  # would be read as a kagura-mcp flag
         ({"context": "my-context"}, ValueError),
     ],
-    ids=["bare-str", "non-str-item", "over-100", "context-not-uuid"],
+    ids=["bare-str", "non-str-item", "over-100", "dashed-name", "context-not-uuid"],
 )
 def test_mcp_url_with_query_rejects_bad_add_tools_and_context(kwargs, error):
     with pytest.raises(error):
