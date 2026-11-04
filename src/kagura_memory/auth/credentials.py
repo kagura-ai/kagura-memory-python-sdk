@@ -21,6 +21,16 @@ inside :meth:`KaguraOAuth._refresh_locked`) re-reads the on-disk token
 after locking and skips the ``/oauth2/token`` round-trip when another
 process already rotated it — so only one process hits the token endpoint
 per cycle (issue #158).
+
+That matters because memory-cloud v0.79.0+ (#1686) issues one token per
+refresh token, also under concurrent requests: a second refresh with the
+same token gets ``invalid_grant``. Every :class:`KaguraOAuth` refresh —
+``KaguraClient``, the REST clients and the ``kagura-mcp`` proxy — takes both
+locks and re-reads the file first, so two of them never send the same
+refresh token. ``kagura auth refresh`` and ``kagura auth token`` refresh
+outside the cross-process lock (they only lock the write), so one of them
+running while a proxy refreshes the same profile can get ``invalid_grant``;
+the profile the winner wrote stays valid.
 """
 
 from __future__ import annotations

@@ -36,14 +36,24 @@ Options (all optional; the defaults write the same files as before):
   starts Claude Code. Claude Code uses the entry from the
   strongest scope (local > project > user), so setup warns when a stronger one
   would hide the new entry, and with `-y` exits 1 without writing.
-- `--guardrails off|<context-uuid>` (server v0.74.0+) and `--tool-profile <name>`
-  (server v0.73.0+: `full` or `core`) — put `?guardrails=` / `?profile=` on the
-  upstream MCP URL (as `kagura-mcp` args for `--profile`). `off` also removes the
-  `guardrails` block from `get_context_info`: use it only once hooks (such as the
-  memory-cloud `kagura-memory` plugin's) deliver guardrails. Changing either never
-  forces a re-login; a re-run without them drops them, so pass them again.
+- `--guardrails off|<context-uuid>` (server v0.74.0+), `--tool-profile <name>`
+  (server v0.73.0+: `full` or `core`), `--add-tools <name>[,<name>…]` (server
+  v0.129.0+) and `--context <context-uuid>` (server v0.114.0+) — put
+  `?guardrails=` / `?profile=` / `?add_tools=` / `?context=` on the upstream MCP
+  URL (as `kagura-mcp` args for `--profile`). Since memory-cloud v0.93.0 a bare
+  URL lists the `core` profile (21 tools on v0.141.0); `--tool-profile full`
+  lists every tool (72) and `--add-tools` lists more on top, e.g. `explore` for
+  `recall`'s explore hints. A profile is a view, not a permission: unlisted tools
+  still answer `tools/call`. `--context` sets the default context for tools
+  called without `context_id` (a UUID, unlike `--context-id`). `off` also removes
+  the `guardrails` block from `get_context_info`: use it only once hooks (such as
+  the memory-cloud `kagura-memory` plugin's) deliver guardrails. Changing any of
+  them never forces a re-login; a re-run without them drops them, so pass them
+  again.
 - `--no-session-hook`, `--no-sync-hook`, `--no-commands` — skip the SessionStart
-  recall hook (trusted memories only), the `.claude/memory` sync hook, or
+  recall hook (`kagura recall --trusted-only --verbosity full --full 0`: trusted
+  memories, uncut summaries with tags, no content, at most 5000 bytes), the
+  `.claude/memory` sync hook, or
   `/kagura-recall` · `/kagura-remember`. Re-running with one removes only what
   setup itself wrote. With the `kagura-memory` plugin installed, an interactive
   run offers to skip the commands it duplicates, asks separately about the
@@ -90,6 +100,9 @@ file and edits nothing. Options:
   the user's own file keeps loading; with only Cursor rules there, setup stops
   and asks for `--agents-md PATH`. A context with no guardrails removes an
   earlier block.
+- `--tool-profile <name>` / `--add-tools <name>[,<name>…]` — the tool view, as
+  for `setup claude`: `kagura-mcp` args on the stdio entry, `?profile=` /
+  `?add_tools=` (server v0.129.0+) on the URL with `--url-form`.
 - `--url-form --mcp-url <url> [--api-key-env VAR]` — a URL entry that reads a
   long-lived API key from an environment variable; setup never sees the key.
 - `--url-form --oauth --mcp-url <url>` (memory-cloud 0.77.0+) — a URL entry with

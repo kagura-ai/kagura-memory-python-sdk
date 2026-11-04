@@ -40,8 +40,9 @@ Design (see issue #101, gate1 review):
   Streamable HTTP), and Claude Code, which only talks stdio to us, can neither
   see that nor re-initialize. On that ``404`` we replay the downstream's own
   cached ``initialize`` and retry the message once, mirroring the one-shot
-  ``401`` refresh. (memory-cloud v0.75.0 as deployed re-adopts an unknown
-  session id instead of 404ing; see ``mcp_session_expired``.)
+  ``401`` refresh. (memory-cloud re-adopts a session id it minted after an
+  idle cleanup or a restart, and since v0.82.0 answers ``404`` for any other
+  unknown id or an ended one; see ``mcp_session_expired``.)
 - **Upstream JSON-RPC errors pass through.** A non-2xx whose body is a
   JSON-RPC ``error`` (``-32600``, ``-32022`` …) is forwarded with its own
   code/message/data rather than flattened into ``-32000``. Only the ``401``

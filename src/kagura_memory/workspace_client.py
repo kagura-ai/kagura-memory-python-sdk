@@ -88,6 +88,25 @@ class WorkspaceClient(KaguraRestClient):
     this surface — resolve a static owner key (``KAGURA_API_KEY`` env or
     ``.kagura.json``) instead.
 
+    Context access (memory-cloud v0.126.0+): an owner or admin reaches every
+    shared context of the workspace. A member or viewer reaches exactly the
+    contexts its ``allowed_context_ids`` list names. With no list, a viewer
+    reaches every shared context and a member **none**, writes included.
+    Older servers refused only a member's reads there. A private context
+    stays its creator's (or a linked account's), whatever the role or the
+    list. A context outside the list answers not-found (REST 404, MCP
+    ``context_not_found``, :class:`KaguraNotFoundError`) where some paths
+    answered 403. A workspace viewer is read-only everywhere, including a
+    private context it created. A role change keeps the list, except that
+    a ``member`` with no list who becomes a ``viewer`` gets an empty one,
+    so the change never widens its reach.
+
+    The list is set by :meth:`create_invitation` (``allowed_context_ids``).
+    memory-cloud's ``PUT /api/v1/workspaces/{workspace_id}/members/{user_id}
+    /context-access`` changes it, but at v0.141.0 that route takes a
+    browser session only and answers an API key with 401, so this client
+    does not wrap it: set the list on the web members page.
+
     All methods may raise:
         KaguraAuthError: Authentication failed (401)
         KaguraConnectionError: Access denied (403 — non-owner key, OAuth
@@ -145,6 +164,15 @@ class WorkspaceClient(KaguraRestClient):
         :meth:`create_invitation`: a plan without the ``team_invitations``
         feature raises :class:`KaguraFeatureNotAvailableError` and a full
         seat cap :class:`KaguraQuotaError` (``quota_type="members"``).
+
+        The server takes ``user_id`` and ``role`` only, so the member gets
+        no context access list. Since memory-cloud v0.126.0 a ``member``
+        without a list reaches **no** context, writes included, and a
+        ``viewer`` every shared context (see the class docstring). An admin
+        reaches every shared context either way. This client cannot set the list
+        afterwards: the server's context-access route takes a browser
+        session only. Set it on the web members page, or onboard the user
+        with :meth:`create_invitation` and ``allowed_context_ids`` instead.
         """
         workspace_id = _normalize_workspace_id(workspace_id)
         _user_id_segment(user_id)
@@ -159,7 +187,15 @@ class WorkspaceClient(KaguraRestClient):
     async def update_member_role(
         self, workspace_id: str, user_id: str, role: str
     ) -> WorkspaceMember:
-        """Change a member's role (member/admin/viewer only)."""
+        """Change a member's role (member/admin/viewer only).
+
+        The member's context access list is kept (memory-cloud v0.126.0+),
+        except that a ``member`` with no list who becomes a ``viewer`` gets
+        an empty one: a viewer with no list would reach every shared
+        context, so the change never widens reach. The list applies to the
+        member and viewer roles; an admin reaches every shared context
+        whatever it says.
+        """
         workspace_id = _normalize_workspace_id(workspace_id)
         self._validate_role(role)
         resp = await self._request(
@@ -213,6 +249,9 @@ class WorkspaceClient(KaguraRestClient):
             allowed_context_ids: Context grant — required (min 1) for
                 member/viewer invitations, ignored for admin. Each must be
                 a UUID (``ValueError`` otherwise); sent in canonical form.
+                It becomes the member's context access list: since
+                memory-cloud v0.126.0 a member or viewer reaches exactly
+                these contexts on every path.
             expires_in_days: One of 7/30/90/365, or None = never expires.
         """
         workspace_id = _normalize_workspace_id(workspace_id)
@@ -229,7 +268,9 @@ class WorkspaceClient(KaguraRestClient):
             )
         body: dict[str, Any] = {"email": email, "role": role}
         if allowed_context_ids is not None:
-            # The server answers a non-UUID here with an HTTP 500 (#285).
+            # Checked locally on every server: memory-cloud before v0.80.0
+            # answered a non-UUID here with an HTTP 500 (#285), and from
+            # v0.80.0 (#1693) answers 422 VAL-001.
             body["allowed_context_ids"] = [
                 normalize_uuid(c, label="allowed_context_ids") for c in allowed_context_ids
             ]
@@ -285,6 +326,9 @@ class WorkspaceClient(KaguraRestClient):
         mints (never-expiring CI keys are not allowed). The returned
         ``plaintext_key`` is shown exactly once — owner-provisioned keys
         are force-hidden at creation, so no later call returns it.
+        Since memory-cloud v0.83.0 (#1752) the target member gets a
+        security email, at a verified address, for every key minted for
+        them; it never carries the key.
         """
         workspace_id = _normalize_workspace_id(workspace_id)
         expires_days = _require_int(expires_days, "expires_days")

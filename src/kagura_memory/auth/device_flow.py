@@ -363,7 +363,13 @@ async def refresh_access_token(
 
     Raises:
         KaguraAuthExpiredError: refresh token is invalid or expired
-            (server returns ``invalid_grant``).
+            (server returns ``invalid_grant``). Also when it was already
+            used: memory-cloud v0.79.0+ (#1686) issues one token per refresh
+            token, also under concurrent requests, so of two refreshes with
+            the same token one gets ``invalid_grant``. And after a password
+            reset, which revokes every access and refresh token and device
+            code of the account (v0.83.0+, #1738): only ``kagura auth login``
+            recovers then.
         KaguraAuthError: any other OAuth error.
         KaguraConnectionError: network failure.
     """
@@ -419,6 +425,13 @@ async def revoke_token(
     (``kagura auth logout``) deletes the local profile regardless of
     the return value, on the principle that local logout must succeed
     even when the server is unreachable.
+
+    ``client_id`` is always sent: memory-cloud v0.82.0+ (#1741) requires it,
+    leaves a token issued to another client alone (answered ``200`` like an
+    unknown token) and, for a refresh token, revokes the access token
+    issued with it too. Revoking an access token alone leaves its refresh
+    token valid, so ``kagura auth logout`` sends the profile's refresh
+    token (its access token when it has none).
     """
     url = f"{server.rstrip('/')}{_PATH_REVOKE}"
     try:

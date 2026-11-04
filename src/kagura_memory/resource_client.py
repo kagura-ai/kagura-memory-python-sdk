@@ -64,6 +64,12 @@ class ResourceClient(KaguraRestClient):
     - Token CRUD: ``Authorization: Bearer <api_key>`` (set once in constructor)
     - Event ingestion: ``X-Resource-API-Key`` (passed per-call, never stored)
 
+    Token management is workspace-scoped (memory-cloud v0.94.0+, #1863): an
+    owner lists, updates and revokes every token of the workspace, whoever
+    minted it, and a token stays reachable after its resource's contexts
+    are deleted. A token of another workspace answers 404 uniformly since
+    v0.97.0 (#1919); older servers answered some of those 403.
+
     All methods may raise:
         KaguraAuthError: Authentication failed (401)
         KaguraNotFoundError: Resource not found (404)
@@ -132,6 +138,11 @@ class ResourceClient(KaguraRestClient):
     ) -> ResourceTokenCreateResponse:
         """Create a new resource token.
 
+        The active-token cap (``max_resource_tokens``) counts the
+        workspace's active, non-connector tokens, whoever minted them
+        (memory-cloud v0.97.0+, #1919; per creator before). Minting needs a
+        live context for the resource.
+
         Args:
             resource_id: Resource identifier this token is scoped to.
             description: Human-readable description.
@@ -156,6 +167,11 @@ class ResourceClient(KaguraRestClient):
         offset: int = 0,
     ) -> PaginatedResourceTokensResponse:
         """List resource tokens with optional filtering.
+
+        Since memory-cloud v0.94.0 (#1863) this lists the workspace's tokens,
+        whoever minted them (the caller's own before), including tokens whose
+        resource's contexts were all deleted. Legacy tokens with no resource
+        are listed too.
 
         Args:
             resource_id: Filter by resource ID.
@@ -188,6 +204,13 @@ class ResourceClient(KaguraRestClient):
 
         Returns:
             Updated token metadata.
+
+        Raises:
+            KaguraNotFoundError: No such token in the caller's workspace.
+                Since memory-cloud v0.94.0 (#1863) any token of the workspace
+                can be updated; a token of another workspace answers 404
+                uniformly since v0.97.0 (#1919), where older servers answered
+                some of those 403, raised as :class:`KaguraConnectionError`.
         """
         segment = public_id_segment(token_id, label="token_id")
         body = ResourceTokenUpdate(
@@ -201,9 +224,19 @@ class ResourceClient(KaguraRestClient):
     async def revoke_token(self, token_id: int | str) -> None:
         """Revoke (soft-delete) a resource token.
 
+        Any token of the workspace can be revoked, whoever minted it, also
+        after its resource's contexts were deleted (memory-cloud v0.94.0+,
+        #1863).
+
         Args:
             token_id: Token id — an int before server v0.89.0, an opaque
                 ``rtok_…`` string from v0.89.0 on.
+
+        Raises:
+            KaguraNotFoundError: No such token in the caller's workspace (a
+                token of another workspace: 404 uniformly since v0.97.0,
+                #1919; older servers answered some of those 403, raised as
+                :class:`KaguraConnectionError`).
         """
         segment = public_id_segment(token_id, label="token_id")
         await self._request("DELETE", f"/api/v1/resource-tokens/{segment}")
@@ -228,7 +261,11 @@ class ResourceClient(KaguraRestClient):
         be created via ``from_mcp_url()``.
 
         Args:
-            resource_id: Resource identifier for data ingestion.
+            resource_id: Resource identifier for data ingestion: lowercase
+                letters, digits, ``_`` and ``-``, at most 255 characters. It
+                is unique on the server, so a slug another workspace's
+                context uses conflicts too (``resource_id_conflict``; the
+                message says so since memory-cloud v0.129.0, #2284).
             context_name: Context name, which the server requires. Defaults
                 to ``resource_id``; pass one when the id is over 100
                 characters or already names a context in the workspace (see

@@ -3586,7 +3586,11 @@ def _user_id_param(_ctx: click.Context, _param: click.Parameter, value: str) -> 
 def _context_uuids_param(
     _ctx: click.Context, _param: click.Parameter, value: tuple[str, ...]
 ) -> tuple[str, ...]:
-    """``--context`` values as canonical UUIDs: a non-UUID got HTTP 500 from the server (#285)."""
+    """``--context`` values as canonical UUIDs, checked locally on every server.
+
+    memory-cloud answers a non-UUID context id with 422 ``VAL-001`` since
+    v0.80.0 (#1693) and failed on it before (#285).
+    """
     canonical = []
     for c in value:
         try:
@@ -3655,6 +3659,12 @@ def member_add(user_id: str, role: str, workspace_id: str | None):
     The server does not validate that USER_ID exists (v0.42.0) — a typo
     creates a dangling membership row. Prefer
     `kagura workspace invite create <email>` for onboarding.
+
+    The new member has no context access list. On memory-cloud v0.126.0+
+    a member without one reaches no context and a viewer every shared
+    context, until the list is set on the web members page (the server
+    takes it from a browser session only). `invite create --context`
+    sets it at invitation time.
 
     \b
     Example:
