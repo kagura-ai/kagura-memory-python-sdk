@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -28,7 +29,14 @@ from urllib.parse import quote, urlsplit
 
 import httpx
 
-from .._http import SDK_VERSION, _retry_after_seconds, extract_detail, validate_https_url
+from .._http import (
+    SDK_VERSION,
+    _retry_after_seconds,
+    annotate_server_error,
+    extract_detail,
+    server_error_fields,
+    validate_https_url,
+)
 from .._version import meets_minimum
 from ..exceptions import (
     KaguraAuthDeniedError,
@@ -174,7 +182,7 @@ async def authorize_device(
             to wait, from ``Retry-After``. An RFC 6749 refusal (memory-cloud
             v0.78.0+, #1671: ``invalid_request``, ``invalid_client``,
             ``invalid_scope``) has the OAuth ``error`` as ``code`` and its
-            ``error_description`` in the message and in
+            ``error_description``, when sent, in the message and in
             ``details["error_description"]``.
         KaguraConnectionError: network failure.
     """
@@ -241,8 +249,8 @@ async def poll_for_token(
     #1770, uses it for a grant that waited too long on a locked account)
     is transient: polling goes on until ``expires_at``, after the
     ``Retry-After`` wait when the server sent one (never less than the poll
-    interval), else the interval. Each such retry is logged at INFO on the
-    ``kagura_memory`` logger.
+    interval, never past ``expires_at``), else the interval. Each such retry
+    is logged at INFO on the ``kagura_memory`` logger.
 
     Raises:
         KaguraAuthDeniedError: user clicked "Deny" at the consent screen
@@ -300,6 +308,10 @@ async def poll_for_token(
         if error == "temporarily_unavailable":
             retry_after = _retry_after_seconds(response)
             wait = current_interval if retry_after is None else max(retry_after, current_interval)
+            # Never sleep past the device code's lifetime: the next round then
+            # polls once more, or raises the expiry.
+            left = math.ceil((expires_at - datetime.now(UTC)).total_seconds())
+            wait = max(0, min(wait, left))
             _logger.info(
                 "Token endpoint temporarily unavailable (HTTP %s); polling again in %s s",
                 response.status_code,
@@ -723,18 +735,20 @@ def _oauth_refusal(response: httpx.Response, client_id: str) -> KaguraAuthError 
     memory-cloud v0.78.0+ (#1671) answers ``{"error": ..., "error_description":
     ...}``: ``invalid_request`` (a missing or malformed body or Content-Type),
     ``invalid_client`` (an unknown ``client_id``) or ``invalid_scope``. The
-    OAuth ``error`` becomes the exception's ``code`` and the description goes
-    into its message and ``details``. ``None`` for any other body.
+    OAuth ``error`` becomes the exception's ``code``; the description, which
+    RFC 6749 makes optional, goes into its message and ``details``. ``None``
+    for a body that names no error code.
     """
-    body = _safe_json(response)
-    error, description = body.get("error"), body.get("error_description")
-    if not isinstance(error, str) or not isinstance(description, str):
+    fields = server_error_fields(response)
+    if fields is None:
         return None
-    message = f"Device authorization failed (HTTP {response.status_code} {error}): {description}"
+    error, details = fields
+    message = f"Device authorization failed (HTTP {response.status_code} {error})"
+    if description := extract_detail(response):
+        message += f": {description}"
     hint = _DEVICE_AUTHORIZE_HINTS.get(error)
     if hint is not None:
         message += "\n  " + hint.format(client_id=client_id)
     err = KaguraAuthError(message)
-    err.code = error
-    err.details = {"error_description": description}
+    annotate_server_error(err, error, details)
     return err

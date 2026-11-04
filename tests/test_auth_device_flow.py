@@ -712,3 +712,27 @@ async def test_poll_temporarily_unavailable_honours_retry_after():
         ]
     )
     assert sleeps == [12, 5, 5]
+
+
+@pytest.mark.asyncio
+async def test_poll_temporarily_unavailable_never_sleeps_past_the_device_code():
+    """A Retry-After longer than the code's lifetime is cut to what is left of it."""
+    sleeps = await _poll_with(
+        [
+            httpx.Response(503, json=_UNAVAILABLE, headers={"Retry-After": "3600"}),
+            httpx.Response(200, json=_TOKEN_OK),
+        ]
+    )
+    [wait] = sleeps
+    assert 590 < wait <= 600  # _poll_with's code lives 10 minutes
+
+
+@pytest.mark.asyncio
+async def test_authorize_device_refusal_without_a_description_keeps_the_code():
+    """RFC 6749 §5.2 makes ``error_description`` optional."""
+    err = await _authorize_against(httpx.Response(400, json={"error": "invalid_client"}))
+    assert str(err) == (
+        "Device authorization failed (HTTP 400 invalid_client)\n"
+        f"  Verify the server URL and that '{DEFAULT_CLIENT_ID}' is registered."
+    )
+    assert (err.code, err.details) == ("invalid_client", {})
