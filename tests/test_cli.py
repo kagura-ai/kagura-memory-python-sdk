@@ -1211,7 +1211,7 @@ def test_update_memory_merge_details_falls_back_when_refused(mock_client_cls, mo
         update_side_effect=[_patch_refused("details_patch"), {"status": "success", "version": 5}],
     )
     assert result.exit_code == 0, result.output
-    assert "refused details_patch" in result.stderr
+    assert "this server refused it, merging via reference() instead" in result.stderr
     mock_client.reference.assert_awaited_once_with(context_id="ctx", memory_id="mem-1")
     first, second = mock_client.update_memory.await_args_list
     assert "details_patch" in first.kwargs
@@ -1248,7 +1248,7 @@ def test_update_memory_merge_details_falls_back_when_ignored(mock_client_cls, mo
         update_side_effect=[{"status": "success"}, {"status": "success", "memory_id": "mem-1"}],
     )
     assert result.exit_code == 0, result.output
-    assert "ignored details_patch" in result.stderr
+    assert "this server ignored it (before 0.82.0)" in result.stderr
     first, second = mock_client.update_memory.await_args_list
     assert first.kwargs["summary"] == "updated summary"
     assert second.kwargs == {

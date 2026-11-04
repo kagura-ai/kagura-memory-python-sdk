@@ -1271,33 +1271,39 @@ def update_memory(
     async def op(client: KaguraClient, ctx: str) -> dict[str, Any]:
         if patch is None:
             return await client.update_memory(context_id=ctx, details=details_payload, **edit)
+        one_call_patch: dict[str, Any] = patch
+
+        async def _merge_via_reference(note: str, **write: Any) -> dict[str, Any]:
+            """Read the details, merge the patch as the server would, write the whole object."""
+            click.echo(
+                "note: --details-patch/--merge-details in one call needs memory-cloud "
+                f"0.140.0+; this server {note}",
+                err=True,
+            )
+            current = await _current_details_for_merge(client, ctx, memory_id, flag)
+            merged = _apply_details_patch(current, one_call_patch, edit["observed_at"])
+            return await client.update_memory(context_id=ctx, details=merged, **write)
+
         try:
-            result = await client.update_memory(context_id=ctx, details_patch=patch, **edit)
+            result = await client.update_memory(
+                context_id=ctx, details_patch=one_call_patch, **edit
+            )
         except KaguraError as e:
             if not _details_patch_refused(e):
                 raise
             # 0.82.0-0.139.x refused the call: nothing was written.
-            click.echo(
-                "note: the server refused details_patch (memory-cloud 0.140.0+); "
-                "merged onto a reference() read instead.",
-                err=True,
+            return await _merge_via_reference(
+                "refused it, merging via reference() instead.", **edit
             )
-            current = await _current_details_for_merge(client, ctx, memory_id, flag)
-            merged = _apply_details_patch(current, patch, edit["observed_at"])
-            return await client.update_memory(context_id=ctx, details=merged, **edit)
         if "version" in result:
             return result
         # Only a server before 0.82.0 (which ignores an argument it does not
         # declare) succeeds without a version (0.113.0+): the other edits were
         # applied and the details were not, so write them now.
-        click.echo(
-            "note: the server ignored details_patch (memory-cloud before 0.82.0); "
-            "merged onto a reference() read in a second call.",
-            err=True,
+        return await _merge_via_reference(
+            "ignored it (before 0.82.0), merging via reference() in a second call.",
+            memory_id=memory_id,
         )
-        current = await _current_details_for_merge(client, ctx, memory_id, flag)
-        merged = _apply_details_patch(current, patch, edit["observed_at"])
-        return await client.update_memory(context_id=ctx, memory_id=memory_id, details=merged)
 
     _run_client_command(op, context_id)
 
