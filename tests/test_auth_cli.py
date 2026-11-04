@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
+import os
+import sys
+import threading
+from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -25,6 +30,16 @@ from kagura_memory.auth.device_flow import (
 )
 from kagura_memory.claude_code import claude_json_label
 from kagura_memory.cli import main
+from kagura_memory.exceptions import KaguraAuthError
+
+# `auth refresh` / `auth token` refresh through credentials.refresh_profile_locked,
+# which resolves these two from device_flow at call time — patch them there.
+_DF = "kagura_memory.auth.device_flow"
+
+# The lock-contention tests rely on fcntl serializing two open descriptions of
+# the same lock file within one process (the msvcrt backend is unit-tested in
+# test_filelock.py).
+_POSIX_ONLY = pytest.mark.skipif(sys.platform == "win32", reason="POSIX fcntl lock semantics")
 
 
 def _make_creds(
@@ -127,8 +142,9 @@ def test_login_happy_path(
     assert "user@example.com" in output
     mock_browser.assert_called_once()
     # Credentials persisted.
-    cf = load_credentials_file(patched_default_path)
-    assert cf.get_profile("default").access_token == "atok-fresh"
+    stored = load_credentials_file(patched_default_path).get_profile("default")
+    assert stored is not None
+    assert stored.access_token == "atok-fresh"
 
 
 @patch("kagura_memory.auth.cli._try_open_browser")
@@ -922,8 +938,8 @@ def test_logout_no_credentials_errors(patched_default_path: Path):
 # ---------------------------------------------------------------------------
 
 
-@patch("kagura_memory.auth.cli.refresh_access_token", new_callable=AsyncMock)
-@patch("kagura_memory.auth.cli.make_oauth_client")
+@patch(f"{_DF}.refresh_access_token", new_callable=AsyncMock)
+@patch(f"{_DF}.make_oauth_client")
 def test_refresh_rotates_access_token(
     mock_client_factory,
     mock_refresh,
@@ -936,34 +952,67 @@ def test_refresh_rotates_access_token(
     result = CliRunner().invoke(main, ["auth", "refresh"])
     assert result.exit_code == 0, result.output
     assert "Refreshed" in result.output
-    cf = load_credentials_file(patched_default_path)
-    assert cf.get_profile("default").access_token == "atok-rotated"
+    stored = load_credentials_file(patched_default_path).get_profile("default")
+    assert stored is not None
+    assert stored.access_token == "atok-rotated"
 
 
+def _lock_is_free(credentials_path: Path) -> bool:
+    """Whether nobody holds the cross-process lock on ``credentials_path`` right now."""
+    import kagura_memory._filelock as fl
+
+    backend, mod = fl._detect_backend()
+    fd = os.open(str(fl._lock_path(credentials_path)), os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        if not fl._try_lock_fd(backend, mod, fd, exclusive=True):
+            return False
+        fl._unlock_fd(backend, mod, fd)
+        return True
+    finally:
+        os.close(fd)
+
+
+@_POSIX_ONLY
 @patch("kagura_memory.auth.cli.poll_for_token", new_callable=AsyncMock)
 @patch("kagura_memory.auth.cli.authorize_device", new_callable=AsyncMock)
-@patch("kagura_memory.auth.cli.refresh_access_token", new_callable=AsyncMock)
+@patch(f"{_DF}.refresh_access_token", new_callable=AsyncMock)
+@patch(f"{_DF}.make_oauth_client")
 @patch("kagura_memory.auth.cli._try_open_browser", return_value=True)
 @patch("kagura_memory.auth.cli.make_oauth_client")
 def test_refresh_scope_widening_triggers_device_flow(
     mock_client_factory,
     mock_browser,
+    mock_refresh_client_factory,
     mock_refresh,
     mock_authorize,
     mock_poll,
     patched_default_path: Path,
 ):
-    """Wider scope → refresh fails with insufficient_scope → device flow runs."""
-    from kagura_memory.exceptions import KaguraAuthError
+    """Wider scope → refresh fails with insufficient_scope → device flow runs.
+
+    The refresh runs under the cross-process lock; the device flow, which waits
+    on the user for minutes, runs after it is released (#313) so `kagura-mcp`
+    refreshes of the same file are not stalled meanwhile.
+    """
+    lock_free: dict[str, bool] = {}
+
+    def refuse_scope(*_args, **_kwargs):
+        lock_free["refresh"] = _lock_is_free(patched_default_path)
+        raise KaguraAuthError("Refresh failed: insufficient_scope")
+
+    def authorize(*_args, **_kwargs):
+        lock_free["authorize"] = _lock_is_free(patched_default_path)
+        return _mock_device_response()
+
+    def poll(*_args, **_kwargs):
+        lock_free["poll"] = _lock_is_free(patched_default_path)
+        return _mock_token_response(scope="memory:read memory:write", access_token="atok-write")
 
     mock_client_factory.return_value = _async_ctx()
-    # First call (refresh) raises insufficient_scope.
-    mock_refresh.side_effect = KaguraAuthError("insufficient_scope")
-    mock_authorize.return_value = _mock_device_response()
-    mock_poll.return_value = _mock_token_response(
-        scope="memory:read memory:write",
-        access_token="atok-write",
-    )
+    mock_refresh_client_factory.return_value = _async_ctx()
+    mock_refresh.side_effect = refuse_scope
+    mock_authorize.side_effect = authorize
+    mock_poll.side_effect = poll
     _seed_credentials(patched_default_path.parent.parent, _make_creds())
 
     result = CliRunner().invoke(main, ["auth", "refresh", "--scope", "memory:read memory:write"])
@@ -971,9 +1020,241 @@ def test_refresh_scope_widening_triggers_device_flow(
     assert "re-running the device flow" in result.output
     mock_authorize.assert_called_once()
     mock_poll.assert_called_once()
-    cf = load_credentials_file(patched_default_path)
-    assert cf.get_profile("default").access_token == "atok-write"
-    assert "memory:write" in cf.get_profile("default").scope
+    # The probe sees a held lock (positive control), then a free one.
+    assert lock_free == {"refresh": False, "authorize": True, "poll": True}
+    stored = load_credentials_file(patched_default_path).get_profile("default")
+    assert stored is not None
+    assert stored.access_token == "atok-write"
+    assert "memory:write" in stored.scope
+
+
+def _scope_refusal(code: str | None, message: str) -> KaguraAuthError:
+    err = KaguraAuthError(message)
+    err.code = code
+    return err
+
+
+@pytest.mark.parametrize(
+    ("refusal", "device_flow"),
+    [
+        # The OAuth code decides, whatever the message says.
+        pytest.param(_scope_refusal("invalid_scope", "Refresh failed"), True, id="code"),
+        pytest.param(
+            _scope_refusal("invalid_request", "Refresh failed: invalid_scope in the body"),
+            False,
+            id="other-code",
+        ),
+        # No code (a body without an OAuth error field): the message decides.
+        pytest.param(_scope_refusal(None, "HTTP 400 ... insufficient_scope"), True, id="no-code"),
+        pytest.param(_scope_refusal(None, "HTTP 400 bad request"), False, id="no-code-other"),
+    ],
+)
+@patch("kagura_memory.auth.cli.poll_for_token", new_callable=AsyncMock)
+@patch("kagura_memory.auth.cli.authorize_device", new_callable=AsyncMock)
+@patch("kagura_memory.auth.cli._try_open_browser", return_value=True)
+@patch("kagura_memory.auth.cli.make_oauth_client")
+def test_refresh_scope_widening_branches_on_the_oauth_error_code(
+    mock_client_factory,
+    mock_browser,
+    mock_authorize,
+    mock_poll,
+    refusal: KaguraAuthError,
+    device_flow: bool,
+    patched_default_path: Path,
+):
+    """Only a refused scope runs the device flow: by ``code``, else by message."""
+    mock_client_factory.return_value = _async_ctx()
+    mock_authorize.return_value = _mock_device_response()
+    mock_poll.return_value = _mock_token_response(scope="memory:read memory:write")
+    _seed_credentials(patched_default_path.parent.parent, _make_creds())
+
+    with (
+        patch(f"{_DF}.refresh_access_token", new=AsyncMock(side_effect=refusal)),
+        patch(f"{_DF}.make_oauth_client", return_value=_async_ctx()),
+    ):
+        result = CliRunner().invoke(main, ["auth", "refresh", "--scope", "memory:write"])
+
+    if device_flow:
+        assert result.exit_code == 0, result.output
+        mock_authorize.assert_awaited_once()
+    else:
+        assert result.exit_code == 1
+        assert str(refusal) in result.output
+        mock_authorize.assert_not_awaited()
+
+
+@contextlib.contextmanager
+def _peer_rotates_while_cli_waits(
+    credentials_path: Path, rotated: OAuthCredentials, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[None]:
+    """Stand in for a `kagura-mcp` process that refreshes while the CLI waits on the lock.
+
+    A thread takes the cross-process lock first. The CLI reads the file, then
+    finds the lock held; only after that first failed attempt does the peer save
+    ``rotated`` (consuming the refresh token the CLI read) and release. So the
+    CLI can only see the rotation by re-reading the file under the lock.
+    """
+    import kagura_memory._filelock as fl
+
+    cli_waiting = threading.Event()
+    waited: list[bool] = []
+    real_try_lock_fd = fl._try_lock_fd
+
+    def spy_try_lock_fd(backend, mod, fd, *, exclusive):
+        acquired = real_try_lock_fd(backend, mod, fd, exclusive=exclusive)
+        if not acquired:
+            waited.append(True)
+            cli_waiting.set()
+        return acquired
+
+    monkeypatch.setattr(fl, "_try_lock_fd", spy_try_lock_fd)
+    peer_holds = threading.Event()
+
+    def peer() -> None:
+        with fl.file_lock(credentials_path, exclusive=True):
+            peer_holds.set()
+            cli_waiting.wait(timeout=10)
+            if waited:
+                # Holding the lock: write directly (update_profile would re-lock).
+                cf = load_credentials_file(credentials_path)
+                cf.set_profile("default", rotated)
+                save_credentials_file(cf, credentials_path)
+
+    thread = threading.Thread(target=peer)
+    thread.start()
+    try:
+        assert peer_holds.wait(timeout=10)
+        yield
+    finally:
+        cli_waiting.set()  # never leave the peer waiting
+        thread.join(timeout=10)
+    assert waited, "the CLI never waited on the lock the peer held"
+
+
+@_POSIX_ONLY
+def test_refresh_adopts_the_token_another_process_rotated_while_it_waited(
+    patched_default_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """#313: `auth refresh` racing a kagura-mcp refresh sends no used refresh token.
+
+    It re-reads the file under the lock, sees the token it read is gone, and
+    keeps the peer's profile instead of earning `invalid_grant`.
+    """
+    _seed_credentials(patched_default_path.parent.parent, _make_creds(access_token="atok-1"))
+    rotated = _make_creds(
+        access_token="atok-peer",
+        refresh_token="rtok-peer",
+        expires_at=datetime.now(UTC) + timedelta(hours=2),
+        scope="memory:read memory:write",
+    )
+    refresh = AsyncMock(side_effect=AssertionError("must not refresh again"))
+
+    with (
+        _peer_rotates_while_cli_waits(patched_default_path, rotated, monkeypatch),
+        patch(f"{_DF}.refresh_access_token", new=refresh),
+        patch(f"{_DF}.make_oauth_client", return_value=_async_ctx()),
+    ):
+        result = CliRunner().invoke(main, ["auth", "refresh"])
+
+    assert result.exit_code == 0, result.output
+    refresh.assert_not_awaited()
+    assert "✓ Profile 'default' was already refreshed by another process." in result.output
+    assert "Refreshed profile" not in result.output
+    assert "Scope: memory:read memory:write" in result.output
+    assert rotated.expires_at.astimezone(UTC).replace(microsecond=0).isoformat() in result.output
+    on_disk = load_credentials_file(patched_default_path).get_profile("default")
+    assert on_disk is not None
+    assert (on_disk.access_token, on_disk.refresh_token) == ("atok-peer", "rtok-peer")
+
+
+@_POSIX_ONLY
+def test_token_adopts_the_token_another_process_refreshed_while_it_waited(
+    patched_default_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """#313: `auth token` (skew path) prints the peer's fresh token without a refresh."""
+    near_expiry = datetime.now(UTC) + timedelta(minutes=2)  # < REFRESH_SKEW_SEC
+    _seed_credentials(
+        patched_default_path.parent.parent,
+        _make_creds(access_token="atok-old", expires_at=near_expiry),
+    )
+    rotated = _make_creds(access_token="atok-peer", refresh_token="rtok-peer")
+    refresh = AsyncMock(side_effect=AssertionError("must not refresh again"))
+
+    with (
+        _peer_rotates_while_cli_waits(patched_default_path, rotated, monkeypatch),
+        patch(f"{_DF}.refresh_access_token", new=refresh),
+        patch(f"{_DF}.make_oauth_client", return_value=_async_ctx()),
+    ):
+        result = CliRunner().invoke(main, ["auth", "token"])
+
+    assert result.exit_code == 0, result.output
+    refresh.assert_not_awaited()
+    assert result.stdout.strip().splitlines()[0] == "atok-peer"
+    on_disk = load_credentials_file(patched_default_path).get_profile("default")
+    assert on_disk is not None
+    assert on_disk.refresh_token == "rtok-peer"
+
+
+@pytest.mark.parametrize("command", ["refresh", "token"])
+def test_refresh_and_token_refuse_a_profile_without_a_refresh_token(
+    command: str, patched_default_path: Path
+):
+    """A profile with no refresh token fails before any network call, naming why."""
+    _seed_credentials(
+        patched_default_path.parent.parent,
+        _make_creds(refresh_token="", expires_at=datetime.now(UTC) - timedelta(seconds=1)),
+    )
+    refresh = AsyncMock()
+
+    with (
+        patch(f"{_DF}.refresh_access_token", new=refresh),
+        patch(f"{_DF}.make_oauth_client", return_value=_async_ctx()),
+    ):
+        result = CliRunner().invoke(main, ["auth", command])
+
+    assert result.exit_code != 0
+    assert "This profile was stored without a refresh token" in result.output
+    assert "kagura auth login" in result.output
+    refresh.assert_not_awaited()
+
+
+@pytest.mark.parametrize("command", ["refresh", "token"])
+def test_refresh_and_token_name_a_save_failure_after_the_server_rotated(
+    command: str, patched_default_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """credentials.json unwritable after the refresh → a clear error and exit 1, no traceback.
+
+    The server has rotated by then, so the message says the profile cannot be
+    refreshed again and to log in; the token it lost is never printed.
+    """
+    import errno
+
+    import kagura_memory.auth.credentials as creds_mod
+
+    _seed_credentials(
+        patched_default_path.parent.parent,
+        _make_creds(expires_at=datetime.now(UTC) + timedelta(minutes=2)),  # in the skew window
+    )
+
+    def read_only(*_args, **_kwargs):
+        raise OSError(errno.EROFS, "Read-only file system")
+
+    monkeypatch.setattr(creds_mod, "save_credentials_file", read_only)
+    with (
+        patch(
+            f"{_DF}.refresh_access_token",
+            new=AsyncMock(return_value=_mock_token_response(access_token="atok-rotated")),
+        ),
+        patch(f"{_DF}.make_oauth_client", return_value=_async_ctx()),
+    ):
+        result = CliRunner().invoke(main, ["auth", command])
+
+    assert result.exit_code == 1, result.output
+    assert isinstance(result.exception, SystemExit)  # a ClickException, not a traceback
+    assert "could not save it" in result.output
+    assert "Read-only file system" in result.output
+    assert "kagura auth login" in result.output
+    assert "atok-rotated" not in result.output
 
 
 # ---------------------------------------------------------------------------
@@ -1164,8 +1445,8 @@ def test_refresh_no_profile_errors(patched_default_path: Path):
     assert "kagura auth login" in result.output
 
 
-@patch("kagura_memory.auth.cli.refresh_access_token", new_callable=AsyncMock)
-@patch("kagura_memory.auth.cli.make_oauth_client")
+@patch(f"{_DF}.refresh_access_token", new_callable=AsyncMock)
+@patch(f"{_DF}.make_oauth_client")
 def test_refresh_expired_error_propagates(
     mock_client_factory,
     mock_refresh,
@@ -1229,8 +1510,8 @@ def test_login_unmessaged_exception_falls_back_to_class_name(
     assert "Error: \n" not in result.output
 
 
-@patch("kagura_memory.auth.cli.refresh_access_token", new_callable=AsyncMock)
-@patch("kagura_memory.auth.cli.make_oauth_client")
+@patch(f"{_DF}.refresh_access_token", new_callable=AsyncMock)
+@patch(f"{_DF}.make_oauth_client")
 def test_refresh_connection_error_surfaces(
     mock_client_factory,
     mock_refresh,
@@ -1248,8 +1529,8 @@ def test_refresh_connection_error_surfaces(
     assert "Unable to reach OAuth server" in result.output
 
 
-@patch("kagura_memory.auth.cli.refresh_access_token", new_callable=AsyncMock)
-@patch("kagura_memory.auth.cli.make_oauth_client")
+@patch(f"{_DF}.refresh_access_token", new_callable=AsyncMock)
+@patch(f"{_DF}.make_oauth_client")
 def test_refresh_unmessaged_exception_falls_back_to_class_name(
     mock_client_factory,
     mock_refresh,
@@ -1266,8 +1547,8 @@ def test_refresh_unmessaged_exception_falls_back_to_class_name(
     assert "Error: \n" not in result.output
 
 
-@patch("kagura_memory.auth.cli.refresh_access_token", new_callable=AsyncMock)
-@patch("kagura_memory.auth.cli.make_oauth_client")
+@patch(f"{_DF}.refresh_access_token", new_callable=AsyncMock)
+@patch(f"{_DF}.make_oauth_client")
 def test_token_auto_refresh_unmessaged_exception_falls_back_to_class_name(
     mock_client_factory,
     mock_refresh,
@@ -1309,8 +1590,8 @@ def test_token_auto_refresh_unmessaged_exception_falls_back_to_class_name(
         ),
     ],
 )
-@patch("kagura_memory.auth.cli.refresh_access_token", new_callable=AsyncMock)
-@patch("kagura_memory.auth.cli.make_oauth_client")
+@patch(f"{_DF}.refresh_access_token", new_callable=AsyncMock)
+@patch(f"{_DF}.make_oauth_client")
 def test_token_auto_refresh_typed_errors_surface(
     mock_client_factory,
     mock_refresh,
@@ -1332,8 +1613,8 @@ def test_token_auto_refresh_typed_errors_surface(
     assert expected_substr in result.output
 
 
-@patch("kagura_memory.auth.cli.refresh_access_token", new_callable=AsyncMock)
-@patch("kagura_memory.auth.cli.make_oauth_client")
+@patch(f"{_DF}.refresh_access_token", new_callable=AsyncMock)
+@patch(f"{_DF}.make_oauth_client")
 def test_token_refreshes_when_near_expiry(
     mock_client_factory,
     mock_refresh,
@@ -1397,11 +1678,11 @@ def test_refresh_success_echo_survives_cp932_stdout(patched_default_path: Path, 
     """`auth refresh` prints a check glyph absent from cp932; on a Japanese
     Windows console (cp932 stdout) that raised UnicodeEncodeError. The CLI must
     reconfigure stdout to UTF-8 so the success path completes cleanly."""
-    from kagura_memory.auth import cli as cli_mod
+    from kagura_memory.auth import device_flow
 
-    monkeypatch.setattr(cli_mod, "make_oauth_client", lambda *a, **k: _async_ctx())
+    monkeypatch.setattr(device_flow, "make_oauth_client", lambda *a, **k: _async_ctx())
     monkeypatch.setattr(
-        cli_mod,
+        device_flow,
         "refresh_access_token",
         AsyncMock(return_value=_mock_token_response(access_token="atok-rotated")),
     )

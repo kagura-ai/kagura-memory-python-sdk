@@ -26,12 +26,13 @@ from kagura_memory.auth.credentials import (
     delete_profile,
     get_shared_state,
     load_credentials_file,
+    refresh_profile_locked,
     reset_state_cache,
     save_credentials_file,
     update_profile,
 )
 from kagura_memory.auth.device_flow import TokenResponse
-from kagura_memory.exceptions import KaguraAuthExpiredError
+from kagura_memory.exceptions import KaguraAuthError, KaguraAuthExpiredError
 
 # Gate POSIX-specific behaviour to non-Windows (CI runs Linux):
 #   - the cross-process refresh-dedup tests rely on fcntl serializing two
@@ -860,6 +861,595 @@ async def test_force_refresh_hits_network_when_token_unchanged(tmp_path: Path):
     assert calls == 1, "nobody rotated; the 401 must force a real refresh"
     assert auth._state.credentials.access_token == "forced-new"
     assert load_credentials_file(path).get_profile().access_token == "forced-new"
+
+
+# ---------------------------------------------------------------------------
+# refresh_profile_locked — the one refresh path, shared with `kagura auth` (#313)
+# ---------------------------------------------------------------------------
+
+
+def _single_use_token_endpoint(calls: list[str]):
+    """A fake ``refresh_access_token`` that, like memory-cloud v0.79.0+, honours a
+    refresh token once: a second use earns ``invalid_grant`` (the #313 failure)."""
+
+    async def fake_refresh(_client, server, *, client_id, refresh_token, scope=None):
+        if refresh_token in calls:
+            raise KaguraAuthExpiredError("Your login expired (refresh token is no longer valid).")
+        calls.append(refresh_token)
+        await asyncio.sleep(0.02)  # hold the lock so the other refresher waits on it
+        return _fresh_token(f"fresh-from-{refresh_token}")
+
+    return fake_refresh
+
+
+@_POSIX_ONLY_CREDS
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cli_first", [True, False])
+async def test_cli_and_proxy_refresh_race_makes_one_token_call(tmp_path: Path, cli_first: bool):
+    """`kagura auth refresh` racing a `kagura-mcp` refresh of one profile → one /oauth2/token.
+
+    Both start from the same stale token. Whichever takes the cross-process lock
+    second re-reads the file, sees the rotation and adopts it, so the single-use
+    refresh token is sent once and neither ends with "login expired" (#313).
+    """
+    reset_state_cache()
+    path = tmp_path / "creds.json"
+    stale = _sample_creds(access_token="old", refresh_token="rtok-old")
+    cf = CredentialsFile()
+    cf.set_profile("default", stale)
+    save_credentials_file(cf, path)
+
+    proxy = KaguraOAuth(_independent_state(path, stale))
+    calls: list[str] = []
+
+    async def cli_refresh() -> OAuthCredentials:
+        # What `kagura auth refresh` does: the forced path, from the token it read.
+        result = await refresh_profile_locked(
+            "default", expected_stale_token="old", fallback=stale, path=path
+        )
+        # Second to the lock → it adopts the proxy's rotation; first → it refreshes.
+        assert result.refreshed is cli_first
+        return result.credentials
+
+    async def proxy_refresh() -> OAuthCredentials:
+        await proxy.force_refresh()  # an upstream 401 on the stale token
+        return proxy._state.credentials
+
+    with (
+        patch(
+            "kagura_memory.auth.device_flow.refresh_access_token",
+            new=_single_use_token_endpoint(calls),
+        ),
+        patch("kagura_memory.auth.device_flow.make_oauth_client", return_value=_AsyncContextStub()),
+    ):
+        first, second = (cli_refresh, proxy_refresh) if cli_first else (proxy_refresh, cli_refresh)
+        results = await asyncio.gather(first(), second())
+
+    assert calls == ["rtok-old"], f"expected one token call, got {calls}"
+    assert [r.access_token for r in results] == ["fresh-from-rtok-old"] * 2
+    on_disk = load_credentials_file(path).get_profile()
+    assert on_disk is not None
+    assert (on_disk.access_token, on_disk.refresh_token) == ("fresh-from-rtok-old", "new-rtok")
+
+
+@_POSIX_ONLY_CREDS
+@pytest.mark.asyncio
+async def test_cli_and_proxy_refresh_race_without_the_lock_reproduces_313(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Negative control: with the cross-process lock off, the race sends the
+    refresh token twice and the loser gets "login expired" — the #313 failure."""
+    import contextlib
+
+    import kagura_memory._filelock as fl
+
+    @contextlib.asynccontextmanager
+    async def noop_lock(target, *, exclusive=True):
+        yield
+
+    monkeypatch.setattr(fl, "async_file_lock", noop_lock)
+
+    reset_state_cache()
+    path = tmp_path / "creds.json"
+    stale = _sample_creds(access_token="old", refresh_token="rtok-old")
+    cf = CredentialsFile()
+    cf.set_profile("default", stale)
+    save_credentials_file(cf, path)
+    proxy = KaguraOAuth(_independent_state(path, stale))
+
+    with (
+        patch(
+            "kagura_memory.auth.device_flow.refresh_access_token",
+            new=_single_use_token_endpoint([]),
+        ),
+        patch("kagura_memory.auth.device_flow.make_oauth_client", return_value=_AsyncContextStub()),
+        pytest.raises(KaguraAuthExpiredError, match="login expired"),
+    ):
+        await asyncio.gather(
+            refresh_profile_locked(
+                "default", expected_stale_token="old", fallback=stale, path=path
+            ),
+            proxy.force_refresh(),
+        )
+
+
+@_POSIX_ONLY_CREDS
+@pytest.mark.asyncio
+async def test_refresh_profile_locked_skew_path_adopts_a_fresh_disk_token(tmp_path: Path):
+    """Skew path: a token on disk outside the skew window is returned as is."""
+    path = tmp_path / "creds.json"
+    cf = CredentialsFile()
+    cf.set_profile("default", _sample_creds(access_token="peer-fresh"))
+    save_credentials_file(cf, path)
+    stale = _sample_creds(access_token="old", expires_at=datetime.now(UTC) + timedelta(seconds=10))
+
+    refresh = AsyncMock()
+    with patch("kagura_memory.auth.device_flow.refresh_access_token", new=refresh):
+        result = await refresh_profile_locked(
+            "default", expected_stale_token=None, fallback=stale, path=path
+        )
+
+    refresh.assert_not_awaited()
+    assert (result.credentials.access_token, result.refreshed) == ("peer-fresh", False)
+
+
+@_POSIX_ONLY_CREDS
+@pytest.mark.asyncio
+async def test_refresh_profile_locked_with_scope_refreshes_from_the_token_on_disk(tmp_path: Path):
+    """A requested scope always reaches the server, even after a peer rotated.
+
+    The peer's token carries the grant it had, not the one asked for, so it is
+    not adopted; the refresh uses the peer's (current) refresh token, never the
+    caller's used one.
+    """
+    path = tmp_path / "creds.json"
+    cf = CredentialsFile()
+    cf.set_profile("default", _sample_creds(access_token="peer", refresh_token="rtok-peer"))
+    save_credentials_file(cf, path)
+    stale = _sample_creds(access_token="old", refresh_token="rtok-old")
+
+    refresh = AsyncMock(return_value=_fresh_token("narrowed"))
+    with (
+        patch("kagura_memory.auth.device_flow.refresh_access_token", new=refresh),
+        patch("kagura_memory.auth.device_flow.make_oauth_client", return_value=_AsyncContextStub()),
+    ):
+        result = await refresh_profile_locked(
+            "default",
+            expected_stale_token="old",
+            fallback=stale,
+            scope="memory:read",
+            path=path,
+        )
+
+    refresh.assert_awaited_once()
+    assert refresh.await_args is not None
+    assert refresh.await_args.kwargs["refresh_token"] == "rtok-peer"
+    assert refresh.await_args.kwargs["scope"] == "memory:read"
+    assert (result.credentials.access_token, result.refreshed) == ("narrowed", True)
+    on_disk = load_credentials_file(path).get_profile()
+    assert on_disk is not None
+    assert on_disk.access_token == "narrowed"
+
+
+@_POSIX_ONLY_CREDS
+@pytest.mark.asyncio
+async def test_refresh_profile_locked_refreshes_the_fallback_when_the_profile_is_gone(
+    tmp_path: Path,
+):
+    """A profile no longer in the file is refreshed from the caller's copy and saved,
+    keeping every other profile (the behaviour KaguraOAuth always had)."""
+    path = tmp_path / "creds.json"
+    cf = CredentialsFile()
+    cf.set_profile("other", _sample_creds(access_token="other-token"))
+    save_credentials_file(cf, path)
+
+    refresh = AsyncMock(return_value=_fresh_token("fresh"))
+    with (
+        patch("kagura_memory.auth.device_flow.refresh_access_token", new=refresh),
+        patch("kagura_memory.auth.device_flow.make_oauth_client", return_value=_AsyncContextStub()),
+    ):
+        result = await refresh_profile_locked(
+            "default",
+            expected_stale_token="old",
+            fallback=_sample_creds(access_token="old", refresh_token="rtok-mine"),
+            path=path,
+        )
+
+    assert refresh.await_args is not None
+    assert refresh.await_args.kwargs["refresh_token"] == "rtok-mine"
+    assert (result.credentials.access_token, result.refreshed) == ("fresh", True)
+    on_disk = load_credentials_file(path)
+    mine, other = on_disk.get_profile("default"), on_disk.get_profile("other")
+    assert mine is not None and other is not None
+    assert (mine.access_token, other.access_token) == ("fresh", "other-token")
+
+
+@_POSIX_ONLY_CREDS
+@pytest.mark.asyncio
+async def test_refresh_profile_locked_saves_before_it_releases_the_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The refreshed profile is on disk when the lock is released.
+
+    The next holder re-reads the file under the lock; a save after the release
+    would let a peer in between read the used refresh token and send it again.
+    One event loop has no await between the release and the save, so the race
+    tests cannot show this — the release itself is observed instead.
+    """
+    import kagura_memory._filelock as fl
+
+    path = tmp_path / "creds.json"
+    stale = _sample_creds(access_token="old", refresh_token="rtok-old")
+    cf = CredentialsFile()
+    cf.set_profile("default", stale)
+    save_credentials_file(cf, path)
+
+    on_disk_at_release: list[str | None] = []
+    real_unlock_fd = fl._unlock_fd
+
+    def spy_unlock_fd(backend, mod, fd):
+        profile = load_credentials_file(path).get_profile()
+        on_disk_at_release.append(profile.access_token if profile else None)
+        real_unlock_fd(backend, mod, fd)
+
+    monkeypatch.setattr(fl, "_unlock_fd", spy_unlock_fd)
+    with (
+        patch(
+            "kagura_memory.auth.device_flow.refresh_access_token",
+            new=AsyncMock(return_value=_fresh_token("fresh")),
+        ),
+        patch("kagura_memory.auth.device_flow.make_oauth_client", return_value=_AsyncContextStub()),
+    ):
+        await refresh_profile_locked(
+            "default", expected_stale_token="old", fallback=stale, path=path
+        )
+
+    assert on_disk_at_release == ["fresh"]
+
+
+@pytest.mark.asyncio
+async def test_refresh_not_saved_is_typed_and_keeps_the_new_token_in_memory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """credentials.json unwritable after the server rotated → KaguraAuthError, OSError chained.
+
+    The rotation revoked the token on file and used up its refresh token, so the
+    refreshed profile exists only in memory: KaguraOAuth keeps it (the process
+    stays usable until it expires) and the error says to log in again.
+    """
+    import errno
+
+    import kagura_memory.auth.credentials as creds_mod
+
+    reset_state_cache()
+    path = tmp_path / "creds.json"
+    stale = _sample_creds(access_token="old", refresh_token="rtok-old")
+    cf = CredentialsFile()
+    cf.set_profile("default", stale)
+    save_credentials_file(cf, path)
+    auth = KaguraOAuth(_independent_state(path, stale))
+
+    def disk_full(*_args, **_kwargs):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(creds_mod, "save_credentials_file", disk_full)
+    with (
+        patch(
+            "kagura_memory.auth.device_flow.refresh_access_token",
+            new=AsyncMock(return_value=_fresh_token("fresh")),
+        ),
+        patch("kagura_memory.auth.device_flow.make_oauth_client", return_value=_AsyncContextStub()),
+        pytest.raises(KaguraAuthError, match="could not save it") as excinfo,
+    ):
+        await auth.force_refresh()
+
+    assert isinstance(excinfo.value.__cause__, OSError)
+    assert "kagura auth login" in str(excinfo.value)
+    assert auth._state.credentials.access_token == "fresh"
+    on_disk = load_credentials_file(path).get_profile()
+    assert on_disk is not None
+    assert on_disk.access_token == "old"
+
+
+def _single_use_endpoint_issuing(sent: list[str], issued: dict[str, tuple[str, str, int]]):
+    """A single-use token endpoint: refresh token → (access, refresh, ttl seconds)."""
+
+    async def single_use(_client, server, *, client_id, refresh_token, scope=None):
+        if refresh_token in sent:
+            raise KaguraAuthExpiredError("Your login expired (refresh token is no longer valid).")
+        sent.append(refresh_token)
+        access, refresh, ttl = issued[refresh_token]
+        return TokenResponse(
+            access_token=access,
+            refresh_token=refresh,
+            token_type="Bearer",
+            expires_at=datetime.now(UTC) + timedelta(seconds=ttl),
+            scope="memory:read",
+        )
+
+    return single_use
+
+
+def _save_fails_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    import kagura_memory.auth.credentials as creds_mod
+
+    real_save = creds_mod.save_credentials_file
+    failures = [OSError(28, "No space left on device")]
+
+    def save(cf, path=None):
+        if failures:
+            raise failures.pop()
+        real_save(cf, path)
+
+    monkeypatch.setattr(creds_mod, "save_credentials_file", save)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path_kind", ["skew", "401"])
+async def test_refresh_after_a_failed_save_sends_the_refresh_token_held_in_memory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, path_kind: str
+):
+    """After a save failed, the next refresh sends the refresh token held in memory.
+
+    The file still holds the profile the first refresh rotated away: its access
+    token is revoked and its refresh token used up. Refreshing from it, or (401
+    path) adopting it because it differs from the rejected token, would end in
+    "login expired".
+    """
+    reset_state_cache()
+    path = tmp_path / "creds.json"
+    soon = datetime.now(UTC) + timedelta(seconds=5)  # within REFRESH_SKEW_SEC
+    stale = _sample_creds(access_token="t1", refresh_token="r1", expires_at=soon)
+    cf = CredentialsFile()
+    cf.set_profile("default", stale)
+    save_credentials_file(cf, path)
+    auth = KaguraOAuth(_independent_state(path, stale))
+    sent: list[str] = []
+    # t2 is issued inside the skew window too, so the skew path refreshes again.
+    issued = {"r1": ("t2", "r2", 10), "r2": ("t3", "r3", 3600)}
+
+    _save_fails_once(monkeypatch)
+    with (
+        patch(
+            "kagura_memory.auth.device_flow.refresh_access_token",
+            new=_single_use_endpoint_issuing(sent, issued),
+        ),
+        patch("kagura_memory.auth.device_flow.make_oauth_client", return_value=_AsyncContextStub()),
+    ):
+        with pytest.raises(KaguraAuthError, match="could not save it"):
+            await auth._maybe_refresh()
+        assert auth._state.credentials.access_token == "t2"
+        if path_kind == "skew":
+            await auth._maybe_refresh()
+        else:
+            await auth.force_refresh()  # t2 rejected upstream
+
+    assert sent == ["r1", "r2"]
+    assert auth._state.credentials.access_token == "t3"
+    assert auth._state.used_refresh_token is None
+    on_disk = load_credentials_file(path).get_profile()
+    assert on_disk is not None
+    assert (on_disk.access_token, on_disk.refresh_token) == ("t3", "r3")
+
+
+@pytest.mark.asyncio
+async def test_after_a_failed_save_a_profile_saved_since_wins(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Once another process saved the profile (here a new login), the file wins
+    again: its fresh token is adopted and the in-memory refresh token is not sent."""
+    reset_state_cache()
+    path = tmp_path / "creds.json"
+    soon = datetime.now(UTC) + timedelta(seconds=5)
+    stale = _sample_creds(access_token="t1", refresh_token="r1", expires_at=soon)
+    cf = CredentialsFile()
+    cf.set_profile("default", stale)
+    save_credentials_file(cf, path)
+    auth = KaguraOAuth(_independent_state(path, stale))
+    sent: list[str] = []
+
+    _save_fails_once(monkeypatch)
+    with (
+        patch(
+            "kagura_memory.auth.device_flow.refresh_access_token",
+            new=_single_use_endpoint_issuing(sent, {"r1": ("t2", "r2", 10)}),
+        ),
+        patch("kagura_memory.auth.device_flow.make_oauth_client", return_value=_AsyncContextStub()),
+    ):
+        with pytest.raises(KaguraAuthError, match="could not save it"):
+            await auth._maybe_refresh()
+        update_profile(
+            "default", _sample_creds(access_token="t-login", refresh_token="r-login"), path
+        )
+        await auth._maybe_refresh()
+
+    assert sent == ["r1"]
+    assert auth._state.credentials.access_token == "t-login"
+    assert auth._state.used_refresh_token is None
+
+
+@pytest.mark.asyncio
+async def test_force_refresh_coalesces_with_an_in_flight_skew_refresh(tmp_path: Path):
+    """A 401 force_refresh queued behind a skew refresh of one state → one token call.
+
+    force_refresh captures the rejected token before it waits on the in-process
+    lock, so it finds the file already rotated and adopts it (kagura-mcp's 401
+    path racing a request that entered the skew window).
+    """
+    reset_state_cache()
+    path = tmp_path / "creds.json"
+    near = datetime.now(UTC) + timedelta(seconds=10)  # within REFRESH_SKEW_SEC
+    cf = CredentialsFile()
+    cf.set_profile("default", _sample_creds(access_token="old", expires_at=near))
+    save_credentials_file(cf, path)
+    auth = KaguraOAuth(_independent_state(path, _sample_creds(access_token="old", expires_at=near)))
+
+    calls = 0
+
+    async def fake_refresh(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(0.02)  # the 401 arrives while this refresh is in flight
+        return _fresh_token(f"fresh-{calls}")
+
+    with (
+        patch("kagura_memory.auth.device_flow.refresh_access_token", new=fake_refresh),
+        patch("kagura_memory.auth.device_flow.make_oauth_client", return_value=_AsyncContextStub()),
+    ):
+        await asyncio.gather(auth._maybe_refresh(), auth.force_refresh())
+
+    assert calls == 1, f"expected one token call, got {calls}"
+    assert auth._state.credentials.access_token == "fresh-1"
+
+
+_UNREADABLE_FILES = [
+    pytest.param("not json {{{", id="not-json"),
+    pytest.param("\udcff", id="not-utf8"),
+    pytest.param('["an", "array"]', id="not-an-object"),
+    pytest.param('{"profiles": []}', id="profiles-not-a-map"),
+    pytest.param('{"profiles": {"default": {"server": "x"}}}', id="profile-missing-fields"),
+]
+
+
+def _write_unreadable(path: Path, text: str) -> bytes:
+    raw = text.encode("utf-8", "surrogateescape")
+    path.write_bytes(raw)
+    return raw
+
+
+@pytest.mark.parametrize("text", _UNREADABLE_FILES)
+def test_load_returns_empty_on_any_unreadable_file(tmp_path: Path, text: str):
+    """The lenient reader still treats every unreadable shape as empty."""
+    path = tmp_path / "creds.json"
+    _write_unreadable(path, text)
+    assert load_credentials_file(path).profiles == {}
+
+
+@pytest.mark.parametrize("text", _UNREADABLE_FILES)
+@pytest.mark.parametrize("write", ["update", "set_default", "delete"])
+def test_read_modify_write_refuses_a_file_it_cannot_read(tmp_path: Path, text: str, write: str):
+    """update_profile / set_default_profile / delete_profile raise, naming the file.
+
+    Loading it as empty and saving would rewrite it with one profile (or none),
+    dropping every other profile and the default.
+    """
+    from kagura_memory.auth.credentials import delete_profile, set_default_profile
+
+    path = tmp_path / "creds.json"
+    raw = _write_unreadable(path, text)
+    calls = {
+        "update": lambda: update_profile("default", _sample_creds(), path),
+        "set_default": lambda: set_default_profile("default", path),
+        "delete": lambda: delete_profile("default", path),
+    }
+
+    with pytest.raises(KaguraAuthError, match="Cannot update") as excinfo:
+        calls[write]()
+
+    assert str(path) in str(excinfo.value)
+    assert "kagura auth login" in str(excinfo.value)
+    assert path.read_bytes() == raw
+
+
+def test_update_profile_starts_a_missing_file(tmp_path: Path):
+    """Only an existing file that cannot be read is refused; a missing one starts empty."""
+    path = tmp_path / "sub" / "creds.json"
+    update_profile("work", _sample_creds(access_token="first"), path)
+    cf = load_credentials_file(path)
+    assert cf.default_profile == "work"
+    assert list(cf.profiles) == ["work"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("text", _UNREADABLE_FILES)
+async def test_refresh_profile_locked_refuses_a_file_it_cannot_read(tmp_path: Path, text: str):
+    """The refresh fails before the network on a file it cannot read, leaving it as is.
+
+    Refreshing from the caller's copy and saving would consume the refresh token
+    and rewrite the file with that one profile.
+    """
+    path = tmp_path / "creds.json"
+    raw = _write_unreadable(path, text)
+    refresh = AsyncMock(return_value=_fresh_token("fresh"))
+
+    with (
+        patch("kagura_memory.auth.device_flow.refresh_access_token", new=refresh),
+        patch("kagura_memory.auth.device_flow.make_oauth_client", return_value=_AsyncContextStub()),
+        pytest.raises(KaguraAuthError, match="Cannot update"),
+    ):
+        await refresh_profile_locked(
+            "default", expected_stale_token="old", fallback=_sample_creds(), path=path
+        )
+
+    refresh.assert_not_awaited()
+    assert path.read_bytes() == raw
+
+
+@pytest.mark.asyncio
+async def test_refresh_profile_locked_keeps_every_other_profile_and_the_default(tmp_path: Path):
+    """The refresh saves the file it loaded under the lock: other profiles and the
+    default survive (the second load it used to make could come back empty)."""
+    path = tmp_path / "creds.json"
+    cf = CredentialsFile(default_profile="work")
+    cf.set_profile("work", _sample_creds(access_token="work-token"))
+    cf.set_profile("default", _sample_creds(access_token="old", refresh_token="rtok-old"))
+    save_credentials_file(cf, path)
+    loads: list[Path] = []
+    import kagura_memory.auth.credentials as creds_mod
+
+    real_read = creds_mod._read_credentials_file
+
+    def counting_read(p: Path) -> CredentialsFile:
+        loads.append(p)
+        return real_read(p)
+
+    with (
+        patch.object(creds_mod, "_read_credentials_file", counting_read),
+        patch(
+            "kagura_memory.auth.device_flow.refresh_access_token",
+            new=AsyncMock(return_value=_fresh_token("fresh")),
+        ),
+        patch("kagura_memory.auth.device_flow.make_oauth_client", return_value=_AsyncContextStub()),
+    ):
+        await refresh_profile_locked(
+            "default",
+            expected_stale_token="old",
+            fallback=_sample_creds(access_token="old", refresh_token="rtok-old"),
+            path=path,
+        )
+
+    assert len(loads) == 1, "the file is read once under the lock"
+    after = load_credentials_file(path)
+    assert after.default_profile == "work"
+    assert {name: p.access_token for name, p in after.profiles.items()} == {
+        "work": "work-token",
+        "default": "fresh",
+    }
+
+
+def test_delete_credentials_file_is_file_lock_guarded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """logout --all unlinks under the lock, so a refresh holding it cannot save
+    the profiles back right after."""
+    import kagura_memory._filelock as fl
+
+    path = tmp_path / "creds.json"
+    cf = CredentialsFile()
+    cf.set_profile("default", _sample_creds())
+    save_credentials_file(cf, path)
+    seen: list[bool] = []
+    real_file_lock = fl.file_lock
+
+    def spy_file_lock(target: Path, *, exclusive: bool = True):
+        seen.append(path.exists())  # the file is still there when the lock is taken
+        return real_file_lock(target, exclusive=exclusive)
+
+    monkeypatch.setattr(fl, "file_lock", spy_file_lock)
+    delete_credentials_file(path)
+
+    assert seen == [True]
+    assert not path.exists()
 
 
 def test_update_profile_is_file_lock_guarded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

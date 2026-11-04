@@ -565,7 +565,10 @@ def test_context_list(mock_client_cls, mock_config):
         include_summary=False,
         include_details=False,
         include_stats=False,
+        cursor=None,
+        limit=None,
     )
+    assert result.stderr == ""  # no has_more, no footer
 
 
 @patch("kagura_memory.cli.load_config")
@@ -591,6 +594,8 @@ def test_context_list_forwards_filter_and_detail_flags(mock_client_cls, mock_con
         include_summary=True,
         include_details=True,
         include_stats=True,
+        cursor=None,
+        limit=None,
     )
 
 

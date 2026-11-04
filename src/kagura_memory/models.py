@@ -1900,9 +1900,10 @@ def _validate_int_range(name: str, value: object, lo: int, hi: int) -> None:
 def _validate_max_chars(max_chars: object) -> None:
     """Reject a response budget the server would refuse (memory-cloud #1743).
 
-    ``recall``, ``load_pinned``, ``load_guardrails`` and ``get_agent_bootstrap``
-    (MCP, and the REST bootstrap) take ``max_chars`` — characters of the
-    reply, not tokens — as an integer in [10,000, 100,000].
+    ``recall``, ``load_pinned``, ``load_guardrails``, ``get_agent_bootstrap``
+    (MCP, and the REST bootstrap) and ``get_state`` in list mode take
+    ``max_chars`` — characters of the reply, not tokens — as an integer in
+    [10,000, 100,000].
 
     Raises:
         ValueError: If ``max_chars`` is not an ``int`` in that range.

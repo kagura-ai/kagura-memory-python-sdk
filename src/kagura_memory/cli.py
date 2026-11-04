@@ -28,7 +28,12 @@ from ._http import (
 )
 from .auth.cli import auth as _auth_group
 from .claude_code import MCP_SERVER_NAME
-from .client import KaguraClient
+from .client import (
+    _LIST_CONTEXTS_DETAILS_MAX_LIMIT,
+    _LIST_CONTEXTS_MAX_LIMIT,
+    KaguraClient,
+    _details_page_over_cap,
+)
 from .config import load_config
 from .doctor import run_doctor
 from .exceptions import (
@@ -305,6 +310,7 @@ def _run_client_command(
     context_id: str | None,
     *,
     needs_context: bool = True,
+    footer: Callable[[dict[str, Any]], str | None] | None = None,
 ) -> None:
     """
     Execute a client operation with standard boilerplate.
@@ -314,6 +320,9 @@ def _run_client_command(
     itself runs the full credential resolution chain (env → OAuth
     profile → .kagura.json), so commands work seamlessly after a
     ``kagura auth login`` even if .kagura.json is absent.
+
+    ``footer`` builds an optional line from the result, printed on stderr
+    after the JSON so stdout stays parseable.
     """
     try:
         config = load_config()
@@ -331,6 +340,9 @@ def _run_client_command(
 
         result = asyncio.run(_run())
         click.echo(json.dumps(result, indent=2, ensure_ascii=False))
+        note = footer(result) if footer is not None else None
+        if note:
+            click.echo(note, err=True)
 
     except click.ClickException:
         raise
@@ -1128,6 +1140,41 @@ def context():
     pass
 
 
+def _page_footer(result: dict[str, Any], rerun: str) -> str | None:
+    """The stderr line after a cut ``list_contexts`` page (memory-cloud 0.82.0+, #1743).
+
+    ``rerun`` is what to run for the next page, up to its ``--cursor`` flag.
+    ``None`` on the last page, and from a server before 0.82.0, which sends
+    no ``has_more``. The line is a command to paste into a shell, so the
+    cursor is shown only in the form the server takes back as ``cursor``
+    (ASCII digits): nothing a shell expands inside double quotes (``$``, a
+    backtick) and no control character reaches the terminal. Any other
+    ``next_cursor`` is left to the JSON on stdout.
+    """
+    cursor = result.get("next_cursor")
+    if result.get("has_more") is not True or not isinstance(cursor, str) or not cursor:
+        return None
+    if not (cursor.isascii() and cursor.isdigit()):
+        return (
+            f"has_more: true. For the next page, run {rerun} --cursor set to next_cursor "
+            "from the JSON."
+        )
+    return (
+        f'has_more: true; next_cursor: "{cursor}". For the next page, run {rerun} '
+        f'--cursor "{cursor}".'
+    )
+
+
+def _next_page_footer(result: dict[str, Any]) -> str | None:
+    """The ``kagura context list`` footer: the same command, with the next cursor."""
+    return _page_footer(result, "the command again with the same options and")
+
+
+def _contexts_footer(result: dict[str, Any]) -> str | None:
+    """The ``kagura contexts`` footer: the shortcut takes no cursor, ``context list`` does."""
+    return _page_footer(result, "kagura context list")
+
+
 @context.command(name="list")
 @click.option(
     "--name-contains",
@@ -1139,28 +1186,71 @@ def context():
     "--details", is_flag=True, default=False, help="Add full summaries and embedding_model"
 )
 @click.option("--stats", is_flag=True, default=False, help="Add memory_count per context")
-def context_list(name_contains, summary, details, stats):
+@click.option(
+    "--limit",
+    type=click.IntRange(1, _LIST_CONTEXTS_MAX_LIMIT),
+    default=None,
+    help=(
+        "Contexts per page, 1-200 (server default 100; with --details and no "
+        "--name-contains at most 20, the default there; memory-cloud 0.82.0+)."
+    ),
+)
+@click.option(
+    "--cursor",
+    default=None,
+    help=(
+        "next_cursor of the previous page, with the same other options; a blank one "
+        "is ignored (memory-cloud 0.82.0+)."
+    ),
+)
+def context_list(
+    name_contains: str | None,
+    summary: bool,
+    details: bool,
+    stats: bool,
+    limit: int | None,
+    cursor: str | None,
+) -> None:
     """
     List available contexts.
 
     Rows are slim by default (id, name, is_private, is_locked, last_used_at);
     memory-cloud v0.73.0+ is needed for --name-contains/--summary/--details.
 
+    From memory-cloud 0.82.0 the list comes a page at a time (100 contexts by
+    default, and a page also stops at 20,000 characters). When a page was cut,
+    has_more and next_cursor follow the JSON on stderr: pass next_cursor as
+    --cursor, with the same other options, for the next page. Older servers
+    return every context and ignore --limit and --cursor.
+
     \b
     Examples:
       kagura context list
       kagura context list --name-contains auth --summary
       kagura context list --stats
+      kagura context list --limit 50 --cursor 50
     """
+    if cursor is not None and not cursor.strip():
+        # Blank is unset, as for --name-contains: a script feeding back the
+        # last page's next_cursor (jq -r '.next_cursor // empty') passes "".
+        cursor = None
+    if _details_page_over_cap(details, name_contains, limit):
+        raise click.UsageError(
+            "--details returns full summaries: pass --name-contains or "
+            f"--limit {_LIST_CONTEXTS_DETAILS_MAX_LIMIT} or less (got {limit})."
+        )
     _run_client_command(
         lambda client, _: client.list_contexts(
             name_contains=name_contains,
             include_summary=summary,
             include_details=details,
             include_stats=stats,
+            cursor=cursor,
+            limit=limit,
         ),
         context_id=None,
         needs_context=False,
+        footer=_next_page_footer,
     )
 
 
@@ -1301,15 +1391,21 @@ def context_search_config(
 
 # Keep backward compat: kagura contexts → kagura context list
 @main.command()
-def contexts():
+def contexts() -> None:
     """List available contexts (short form of 'context list', without its options).
 
-    For --name-contains/--summary/--details/--stats use 'kagura context list'.
+    Prints one page: from memory-cloud 0.82.0 that is the 100 most recently
+    used contexts. When more follow, a line on stderr names the
+    'kagura context list --cursor' call for the next page.
+
+    For --name-contains/--summary/--details/--stats/--limit/--cursor use
+    'kagura context list'.
     """
     _run_client_command(
         lambda client, _: client.list_contexts(),
         context_id=None,
         needs_context=False,
+        footer=_contexts_footer,
     )
 
 
