@@ -374,6 +374,26 @@ def test_context_list_refused_limit_is_a_clean_error():
     assert server.arguments == [{"limit": 50}]
 
 
+def test_context_list_refused_cursor_is_a_clean_error():
+    """A cursor the server did not mint: v0.142.0 answers ``validation_error``."""
+    server = _Server(
+        {
+            "status": "error",
+            "error": "validation_error",
+            "message": "'cursor' must be the next_cursor of a previous list_contexts response.",
+            "received": "abc",
+        }
+    )
+    result = _invoke(server, "--cursor", "abc")
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    assert result.stderr.startswith(
+        "Error: list_contexts failed (validation_error): 'cursor' must be the next_cursor "
+        "of a previous list_contexts response."
+    )
+    assert server.arguments == [{"cursor": "abc"}]
+
+
 def test_context_list_refuses_a_details_page_over_20_before_any_request():
     server = _Server(_directory([]))
     result = _invoke(server, "--details", "--limit", "21")
