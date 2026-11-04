@@ -1,9 +1,16 @@
 """Pydantic models for Kagura Memory SDK."""
 
 from datetime import datetime
-from typing import Any, Literal, TypeVar
+from typing import Annotated, Any, Literal, TypeVar
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+)
 
 _M = TypeVar("_M", bound=BaseModel)
 
@@ -1911,6 +1918,14 @@ def _plan_headroom_or_none(value: Any) -> list[PlanHeadroomNotice] | None:
     return notices or None
 
 
+PlanHeadroom = Annotated[list[PlanHeadroomNotice] | None, BeforeValidator(_plan_headroom_or_none)]
+"""The ``plan_headroom`` field type (memory-cloud v0.142.0+, #2615), parsed fail-open.
+
+Declare it as ``plan_headroom: PlanHeadroom = None``: absent, unreadable or
+holding no readable entry reads as ``None``, and an unreadable entry is
+dropped (:func:`_plan_headroom_or_none`)."""
+
+
 class _ContextEcho(BaseModel):
     """The ``context_*`` fields every context-scoped MCP reply echoes.
 
@@ -2075,17 +2090,12 @@ class BootstrapResponse(_ContextEcho):
     since: datetime | None = None
     generated_at: datetime | None = None
     context_summary_omitted: bool = False
-    plan_headroom: list[PlanHeadroomNotice] | None = None
+    plan_headroom: PlanHeadroom = None
 
     @field_validator("guardrails", mode="before")
     @classmethod
     def _unreadable_guardrails_is_none(cls, value: Any) -> ContextGuardrails | None:
         return _validate_or_none(ContextGuardrails, value)
-
-    @field_validator("plan_headroom", mode="before")
-    @classmethod
-    def _advisory_plan_headroom(cls, value: Any) -> list[PlanHeadroomNotice] | None:
-        return _plan_headroom_or_none(value)
 
 
 class ChangesSinceResponse(_ContextEcho):
@@ -2206,12 +2216,7 @@ class RememberBatchResult(_ContextEcho):
     committed_after_timeout: bool = False
     message: str | None = None
     session_id: str | None = None
-    plan_headroom: list[PlanHeadroomNotice] | None = None
-
-    @field_validator("plan_headroom", mode="before")
-    @classmethod
-    def _advisory_plan_headroom(cls, value: Any) -> list[PlanHeadroomNotice] | None:
-        return _plan_headroom_or_none(value)
+    plan_headroom: PlanHeadroom = None
 
 
 class ForgetIdResult(BaseModel):

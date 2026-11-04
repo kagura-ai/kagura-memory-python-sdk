@@ -94,6 +94,7 @@ from .models import (
     MemoryStatItem,
     MemoryStatsResponse,
     PaginatedResourceTokensResponse,
+    PlanHeadroom,
     PlanHeadroomNotice,
     RecallVerbosity,
     RememberBatchItemResult,
@@ -263,6 +264,7 @@ __all__ = [
     "SessionRollbackResult",
     "SessionRollbackItem",
     "SessionRollbackSummary",
+    "PlanHeadroom",
     "PlanHeadroomNotice",
     # Tool guardrails (#253, server v0.74.0+)
     "ToolTrigger",
