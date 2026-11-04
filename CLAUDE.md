@@ -11,7 +11,7 @@ Python SDK for Kagura Memory Cloud. Seven clients:
 - `AgentsClient` — REST client for the agent control plane: bootstrap (`POST /api/v1/agents/{agent_id}/bootstrap`) + registry/binding CRUD (owner/admin; server v0.49.0+)
 - `MemoryClient` — REST client for tool guardrails: `load_guardrails` (`POST /api/v1/memory/guardrails`) + the `AGENTS.md` digest (`GET /api/v1/memory/guardrails/digest`) for API-key-only hooks and scripts (server v0.74.0+)
 
-Checked against memory-cloud up to **v0.77.0**; 0.42.2 additionally verified two surfaces against **v0.141.0** — `get_sleep_report` / `rollback_sleep_run` send `report_id` only (0.82.0+ refuses undeclared arguments) and `ResourceListItem.context_id` / `context_name` may be `None` (0.94.0+). The full realignment with v0.141.0 is #299 (milestone v0.43.0). `MIN_SERVER_VERSION` stays **0.17.1** and is advisory; newer surfaces carry their own server floor (README compatibility table).
+Checked against memory-cloud up to **v0.77.0**; the full realignment with v0.141.0 is #299. `MIN_SERVER_VERSION` stays **0.17.1** and is advisory; newer surfaces carry their own server floor (README compatibility table, which also records the two surfaces 0.42.2 re-verified against v0.141.0).
 
 ## Development Workflow
 

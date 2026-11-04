@@ -694,8 +694,8 @@ kagura resource schema -r products
 
 # Sleep Maintenance — observability + rollback
 kagura sleep history <context-id> --limit 5
-kagura sleep report <context-id> <report-id>
-kagura sleep rollback <context-id> <report-id> -y    # destructive: prompts unless --yes / -y is set
+kagura sleep report <context-id> <report-id>          # <context-id> is kept for compatibility and ignored:
+kagura sleep rollback <context-id> <report-id> -y    # the server finds the run by <report-id> (destructive: prompts unless --yes / -y)
 
 # Tool guardrails (server v0.74.0+); context-id defaults to .kagura.json
 kagura guardrails load <context-id> --cap 200         # pinned + tool-triggered lanes as JSON
