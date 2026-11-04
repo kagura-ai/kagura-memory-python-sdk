@@ -427,8 +427,9 @@ class _McpPlan:
     #: The user-scope entry already matches; nothing to write.
     unchanged: bool = False
     #: Query flags (``--guardrails``, ``--tool-profile``, ``--add-tools``,
-    #: ``--context``) the replaced same-scope entry had and this run leaves
-    #: out, e.g. ``["--guardrails off"]``.
+    #: ``--context``) and a ``?tools=`` allowlist the replaced same-scope entry
+    #: had and this run leaves out, e.g. ``["--guardrails off",
+    #: "?tools=recall,remember"]``.
     dropped: list[str] = field(default_factory=list)
 
 
@@ -464,6 +465,11 @@ def _redact_entry(entry: dict[str, Any]) -> dict[str, Any]:
 _QUERY_FLAGS = ("--guardrails", "--tool-profile", "--add-tools", "--context")
 
 
+#: The key :func:`_query_flags` reports an http entry's ``?tools=`` allowlist
+#: under: no setup flag sets it, so it goes by its query parameter.
+_TOOLS_KEY = "?tools="
+
+
 def _query_flags(entry: dict[str, Any]) -> dict[str, str]:
     """The query flag values an entry puts on the upstream URL, by flag.
 
@@ -477,7 +483,10 @@ def _query_flags(entry: dict[str, Any]) -> dict[str, str]:
     ``profile``, ignores a blank ``guardrails`` (no ``instructions`` digest),
     fails a call without ``context_id`` under a blank ``context``, and adds
     nothing for a blank ``add_tools`` — but setup refuses a blank value, so
-    it is no flag to re-run with and is left out.
+    it is no flag to re-run with and is left out. An http entry's ``tools``
+    allowlist, the view key the server reads first, is reported too, under
+    :data:`_TOOLS_KEY` (its names, as the server reads them); one naming no
+    tool, which the server refuses, is left out like a blank value.
     """
     found: dict[str, str] = {}
     if classify_mcp_entry(entry) == "stdio":
@@ -503,14 +512,23 @@ def _query_flags(entry: dict[str, Any]) -> dict[str, str]:
         "--tool-profile": view.profile,
         "--add-tools": ",".join(view.add_tools),
         "--context": query.get("context", "").strip(),
+        _TOOLS_KEY: ",".join(view.tools or ()),
     }
     return {flag: value for flag, value in settings.items() if value}
 
 
 def _dropped_query_flags(old: dict[str, Any], new: dict[str, Any]) -> list[str]:
-    """Query flag settings (see :func:`_query_flags`) ``old`` has and ``new`` leaves out."""
+    """Query flag settings (see :func:`_query_flags`) ``old`` has and ``new`` leaves out.
+
+    Each as the user would give it again: ``--guardrails off``, or
+    ``?tools=recall,remember`` for an allowlist, which goes on the MCP URL.
+    """
     kept = _query_flags(new)
-    return [f"{flag} {value}" for flag, value in _query_flags(old).items() if flag not in kept]
+    return [
+        f"{flag}{value}" if flag == _TOOLS_KEY else f"{flag} {value}"
+        for flag, value in _query_flags(old).items()
+        if flag not in kept
+    ]
 
 
 def _plan_mcp_entry(
@@ -709,10 +727,15 @@ def _echo_plan_notes(plan: _McpPlan) -> None:
         )
     if plan.dropped:
         them = "them" if len(plan.dropped) > 1 else "it"
+        where = (
+            f" ({_TOOLS_KEY} on the MCP URL)"
+            if any(d.startswith(_TOOLS_KEY) for d in plan.dropped)
+            else ""
+        )
         click.echo(
             f"  Note: the previous {plan.scope}-scope entry also had "
-            f"{' and '.join(plan.dropped)}, which this run left out; re-run with {them} "
-            f"to keep {them}."
+            f"{' and '.join(plan.dropped)}, which this run left out; re-run with {them}"
+            f"{where} to keep {them}."
         )
 
 
