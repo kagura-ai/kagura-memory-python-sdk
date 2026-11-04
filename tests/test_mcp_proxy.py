@@ -879,13 +879,16 @@ async def test_amain_sends_the_session_id_header_on_every_request(
     assert [h.get("kagura-session-id") for h in headers] == [expected, expected]
 
 
-def test_amain_refuses_an_invalid_session_id_from_the_environment(monkeypatch, capsys):
-    monkeypatch.setattr(mcp_proxy, "get_shared_state", lambda profile=None: None)
+@pytest.mark.asyncio
+async def test_amain_ignores_an_invalid_session_id_from_the_environment(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, capsys
+):
+    """An ambient variable the server would drop must not stop the proxy (#300)."""
     monkeypatch.setenv(mcp_proxy.SESSION_ENV, "has space")
-    with pytest.raises(SystemExit) as exc:
-        mcp_proxy.main([])
-    assert exc.value.code == 2
-    assert f"{mcp_proxy.SESSION_ENV}: use 1-128 letters" in capsys.readouterr().err
+    headers = await _posted_headers(monkeypatch, tmp_path, [])
+    assert [h.get("kagura-session-id") for h in headers] == [None, None]
+    err = capsys.readouterr().err
+    assert f"warning: ignoring {mcp_proxy.SESSION_ENV}: use 1-128 letters" in err
 
 
 @pytest.mark.parametrize(

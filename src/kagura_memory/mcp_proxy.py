@@ -382,7 +382,8 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             f"Send NAME as the {_SESSION_HEADER} header on every upstream request "
             f"(server v0.114.0+; default: ${SESSION_ENV}), so writes are recorded under "
-            "that session for changes_since. 1-128 letters, digits, '.', '_' or '-'. "
+            "that session for changes_since. 1-128 letters, digits, '.', '_' or '-' "
+            "(an invalid variable is ignored with a warning). "
             'A tools/call\'s params._meta["ai.kagura/sessionId"] passes through and wins.'
         ),
     )
@@ -401,7 +402,9 @@ async def _amain(argv: list[str] | None = None) -> int:
         try:
             session_id = _session_id_arg(from_env)
         except argparse.ArgumentTypeError as exc:
-            parser.error(f"{SESSION_ENV}: {exc}")
+            # The variable may come from the ambient environment: a value the
+            # server would drop must not take every Kagura tool down with it.
+            print(f"kagura-mcp: warning: ignoring {SESSION_ENV}: {exc}", file=sys.stderr)
 
     state = get_shared_state(profile=args.profile)
     if state is None:

@@ -876,7 +876,8 @@ Older servers ignore the parameters they do not know.
 
 `kagura-mcp --session-id NAME` (or `KAGURA_MCP_SESSION_ID`; server v0.114.0+) sends
 `Kagura-Session-Id: NAME` on every upstream request, so the server records the
-writes under that session (`changes_since(session_id=…)`). Claude Code speaks stdio
+writes under that session (`changes_since(session_id=…)`). An invalid flag value
+stops the proxy; an invalid variable is ignored with a warning. Claude Code speaks stdio
 to the proxy, so there is no request header to pass on; a tool call's
 `params._meta["ai.kagura/sessionId"]` still passes through and wins for that call.
 `kagura doctor` reports how many tools `tools/list` returns on the CLI's MCP URL
