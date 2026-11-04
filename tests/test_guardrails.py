@@ -313,6 +313,32 @@ async def test_load_guardrails_mcp_with_cap():
 
 
 @pytest.mark.asyncio
+async def test_load_guardrails_mcp_max_chars_and_the_omitted_marker():
+    # #298 / memory-cloud #1743: over the budget the server drops the pinned
+    # items' context_summary first and says so at the top level.
+    client = _mcp_client()
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = guardrail_set_dict(context_summary_omitted=True)
+        result = await client.load_guardrails(CTX, max_chars=10_000)
+        args = mock.call_args[0][1]
+    await client.close()
+    assert args == {"context_id": CTX, "max_chars": 10_000}
+    assert result.context_summary_omitted is True
+    assert GuardrailSet.model_validate(guardrail_set_dict()).context_summary_omitted is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("max_chars", [9_999, 100_001, True])
+async def test_load_guardrails_mcp_rejects_out_of_range_max_chars(max_chars):
+    client = _mcp_client()
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        with pytest.raises(ValueError, match="max_chars"):
+            await client.load_guardrails(CTX, max_chars=max_chars)
+        mock.assert_not_awaited()
+    await client.close()
+
+
+@pytest.mark.asyncio
 async def test_load_guardrails_mcp_missing_flag_is_a_response_error():
     # Drift never reads as a complete set, and never escapes as a raw
     # pydantic ValidationError (#250).

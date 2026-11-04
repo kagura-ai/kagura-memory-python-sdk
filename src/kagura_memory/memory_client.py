@@ -66,6 +66,11 @@ class MemoryClient(KaguraRestClient):
         :class:`~kagura_memory.models.GuardrailSet`). Use this surface from a
         hook or script that holds an API key but no MCP session.
 
+        Unlike the MCP tool, the route takes no ``max_chars`` (memory-cloud
+        v0.141.0's request body is ``{context_id, cap}``), so this reply is
+        bounded by the caps alone and ``context_summary_omitted`` stays
+        ``False``.
+
         Args:
             context_id: Context UUID whose guardrail set to load.
             cap: Max tool-triggered memories returned (1-1000; the REST route

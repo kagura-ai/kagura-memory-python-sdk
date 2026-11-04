@@ -36,6 +36,8 @@ kagura recall "FastAPI dependency injection"              # top 5 (default)
 kagura recall "error handling pattern" -k 10 -c <ctx>
 kagura recall "project context" --trusted-only             # reads that steer your next actions
 kagura recall "latency-sensitive lookup" --no-rerank
+kagura recall "deploy decisions" --verbosity full          # uncut summaries + tags
+kagura recall "deploy runbook" --full 1                    # content on the top hit only
 
 # one memory in full / revise / delete
 kagura reference -m <uuid>
@@ -81,6 +83,19 @@ Search options:
 - `--rerank` / `--no-rerank` is tri-state: no flag follows the context's search
   config; `--rerank` applies only when the context enables reranking;
   `--no-rerank` always skips it.
+- `--verbosity full` returns each hit's uncut summary, `tags`,
+  `context_summary` and `scope`. Without it (memory-cloud 0.108.0+) hits are
+  compact: a 160-character summary head (`summary_cut: true` when cut), no
+  tags.
+- `--full N` puts `content` (up to 1,500 characters) on the top N hits;
+  `--full 0` returns summaries only. Without it the server's default applies
+  (3 unless the deployment changes it; memory-cloud 0.114.0+). The
+  SessionStart hook passes `--verbosity full --full 0`: uncut summaries with
+  tags, no content.
+- `--max-chars N` (10000-100000, default 20000) bounds the whole reply.
+- A server that predates one of these three flags refuses it and names it;
+  `kagura recall` then retries once without the ones named and prints a
+  `note:` on stderr (0.108.0–0.113.x keep `--verbosity full`).
 
 ## Consume the result
 
@@ -88,12 +103,15 @@ Search options:
   take it as `-m`) and `scope`. An optional `lint` list (`[{code, hint}]`, e.g.
   `summary_short`, `no_tags`) means the memory was stored but will recall
   poorly — offer an `update-memory` with a better summary or tags.
-- `recall` → `results` (ranked; each carries `memory_id` and `summary`),
-  `count`, `confidence` and `related_tags` (`[{tag, count}]`). Optional keys
-  are absent when they do not apply: `degraded` / `degraded_reason` means the
-  semantic half of search was unavailable and the results are keyword-only,
-  so an empty result means "search impaired", not "nothing stored" — retry
-  later.
+- `recall` → `confidence` (read `confidence.level` first: `none` / `low` means
+  probably not stored), `results` (ranked; each carries `memory_id` and
+  `summary`) and `count`. Optional keys are absent when they do not apply:
+  `related_tags` (`[{tag, count}]`), a hit's `tags` and `content`;
+  `content_truncated` / `content_next_offset` mean `reference` has the rest;
+  `truncated` / `context_summary_omitted` / `full_applied` mean `--max-chars`
+  cut the reply; `degraded` / `degraded_reason` means the semantic half of
+  search was unavailable and the results are keyword-only, so an empty result
+  means "search impaired", not "nothing stored" — retry later.
 - `reference` → the memory under `memory` (`summary`, `content`, `details`, …).
   On memory-cloud 0.78.0+ a large memory comes back bounded (about 20,000
   characters by default): check `content_truncated` / `content_omitted` /

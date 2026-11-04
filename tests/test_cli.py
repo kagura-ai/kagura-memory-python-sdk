@@ -1,6 +1,8 @@
 """Tests for CLI commands."""
 
 import json
+import re
+import shlex
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -8,7 +10,8 @@ from click.testing import CliRunner
 
 from kagura_memory.auth.credentials import reset_state_cache
 from kagura_memory.cli import _parse_tags, main
-from kagura_memory.exceptions import KaguraConnectionError, KaguraNotFoundError
+from kagura_memory.exceptions import KaguraConnectionError, KaguraError, KaguraNotFoundError
+from kagura_memory.setup_claude import SESSIONSTART_HOOK_COMMAND
 from tests.conftest import (
     indexer_status_dict,
     measurement_dict,
@@ -177,6 +180,349 @@ def test_recall_trusted_only_flag(mock_client_cls, mock_config, flags, expected)
     result, mock_client = _recall_cli(mock_client_cls, mock_config, *flags)
     assert result.exit_code == 0, result.output
     assert mock_client.recall.call_args.kwargs.get("filters") == expected
+
+
+@pytest.mark.parametrize(
+    ("flags", "expected"),
+    [
+        ((), {"verbosity": None, "full": None, "max_chars": None}),
+        (
+            ("--verbosity", "full", "--full", "0", "--max-chars", "10000"),
+            {"verbosity": "full", "full": 0, "max_chars": 10_000},
+        ),
+        (
+            ("--verbosity", "compact", "--full", "100", "--max-chars", "100000"),
+            {"verbosity": "compact", "full": 100, "max_chars": 100_000},
+        ),
+    ],
+    ids=["omitted", "full-low", "compact-high"],
+)
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_recall_shape_flags(mock_client_cls, mock_config, flags, expected):
+    """Issue #298: each flag reaches recall(); an omitted one is None, so it stays off the wire."""
+    result, mock_client = _recall_cli(mock_client_cls, mock_config, *flags)
+    assert result.exit_code == 0, result.output
+    kwargs = mock_client.recall.call_args.kwargs
+    assert {key: kwargs[key] for key in expected} == expected
+
+
+@pytest.mark.parametrize(
+    "flags",
+    [
+        ("--verbosity", "verbose"),
+        ("--full", "-1"),
+        ("--full", "101"),
+        ("--max-chars", "9999"),
+        ("--max-chars", "100001"),
+    ],
+)
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_recall_shape_flags_out_of_range_are_usage_errors(mock_client_cls, mock_config, flags):
+    result, mock_client = _recall_cli(mock_client_cls, mock_config, *flags)
+    assert result.exit_code == 2, result.output
+    assert flags[0] in result.output
+    mock_client.recall.assert_not_called()
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_recall_prints_content_right_after_its_summary(mock_client_cls, mock_config):
+    """Issue #298: the JSON keeps the server's key order, so content follows its summary."""
+    hit = {
+        "memory_id": "m1",
+        "summary": "Deploy target moved",
+        "summary_cut": True,
+        "content": "The latency review showed…",
+        "content_truncated": True,
+        "content_next_offset": 1500,
+        "type": "decision",
+        "score": 0.81,
+    }
+    mock_config.return_value = {
+        "api_key": "key",
+        "mcp_url": "https://test.com/mcp",
+        "context_id": "ctx",
+    }
+    mock_client = AsyncMock()
+    mock_client.recall.return_value = {"confidence": {"level": "high"}, "results": [hit]}
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    mock_client_cls.return_value = mock_client
+
+    result = CliRunner().invoke(main, ["recall", "deploy", "--full", "1"])
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["results"] == [hit]
+    out = result.output
+    assert out.index('"summary"') < out.index('"content"') < out.index('"type"')
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_session_start_hook_command_is_a_valid_recall(mock_client_cls, mock_config):
+    """The hook `kagura setup claude` writes must parse with this CLI's flags (#258, #298)."""
+    command = SESSIONSTART_HOOK_COMMAND.format(context_id="ctx")
+    argv = shlex.split(command.split(" 2>/dev/null", 1)[0])
+    assert argv[:3] == ["kagura", "recall", "project context and recent decisions"]
+
+    # _recall_cli supplies its own query; pass the hook's flags after it.
+    result, mock_client = _recall_cli(mock_client_cls, mock_config, *argv[3:])
+
+    assert result.exit_code == 0, result.output
+    kwargs = mock_client.recall.call_args.kwargs
+    assert kwargs["context_id"] == "ctx"
+    assert kwargs["k"] == 5
+    assert kwargs["filters"] == {"trust_tier": "trusted"}
+    assert kwargs["verbosity"] == "full"
+    assert kwargs["full"] == 0
+
+
+def _full_row(i: int) -> dict:
+    """A verbosity="full", full=0 recall row: 200-character summary, 140 of context_summary."""
+    return {
+        "memory_id": f"00000000-0000-0000-0000-00000000000{i}",
+        "summary": f"Decision {i}: " + "x" * 188,
+        "context_summary": "y" * 140,
+        "type": "decision",
+        "importance": 0.8,
+        "scope": "persistent",
+        "score": 0.8123,
+        "created_at": "2026-10-01T00:00:00Z",
+        "updated_at": "2026-10-02T00:00:00Z",
+        "version": 3,
+        "tags": ["architecture", "decision", f"row-{i}"],
+    }
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_session_start_hook_cap_keeps_five_full_rows_with_tags(mock_client_cls, mock_config):
+    """#298: the hook's `head -c` cap holds all five uncut-summary rows and their tags."""
+    cap = int(re.search(r"head -c (\d+)", SESSIONSTART_HOOK_COMMAND).group(1))
+    mock_config.return_value = {
+        "api_key": "key",
+        "mcp_url": "https://test.com/mcp",
+        "context_id": "ctx",
+    }
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    mock_client_cls.return_value = mock_client
+    mock_client.recall.return_value = {
+        "confidence": {
+            "level": "high",
+            "top_score": 0.71,
+            "prominence": 0.52,
+            "relative_margin": 3.1,
+            "result_count": 5,
+            "rationale": "Top hit is well above the background of the candidate pool.",
+        },
+        "status": "success",
+        "results": [_full_row(i) for i in range(5)],
+        "count": 5,
+        "context_id": "00000000-0000-0000-0000-000000000099",
+        "context_name": "dev",
+        "context_display_name": "Dev",
+        "context_is_private": False,
+        "context_is_locked": False,
+        "related_tags": [{"tag": "architecture", "count": 3}],
+    }
+
+    result = CliRunner().invoke(main, ["recall", "project context"])
+
+    assert result.exit_code == 0, result.output
+    head = result.output.encode("utf-8")[:cap].decode("utf-8", errors="ignore")
+    for i in range(5):
+        assert f'"row-{i}"\n      ]' in head  # row i's tags list, closed
+
+
+def _server_error(
+    code: str | None, message: str = "refused", unknown: list[str] | None = None
+) -> KaguraError:
+    """A KaguraError as the client raises it for an MCP error envelope with ``code``.
+
+    ``unknown`` is the envelope's ``unknown_arguments`` (memory-cloud
+    ``find_unknown_arguments``, top level since 0.82.0), which the client keeps
+    in ``KaguraError.details``; ``None`` leaves ``details`` unset.
+    """
+    err = KaguraError(f"recall failed ({code}): {message}")
+    err.code = code  # what the client's MCP error mapping sets (KaguraError.code)
+    if unknown is not None:
+        err.details = {"unknown_arguments": unknown, "allowed_arguments": ["context_id", "query"]}
+    return err
+
+
+def _recall_cli_raising(mock_client_cls, mock_config, side_effect, *args):
+    """`_recall_cli` with ``client.recall`` answering in turn from ``side_effect``."""
+    mock_config.return_value = {
+        "api_key": "key",
+        "mcp_url": "https://test.com/mcp",
+        "context_id": "ctx",
+    }
+    mock_client = AsyncMock()
+    mock_client.recall.side_effect = side_effect
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    mock_client_cls.return_value = mock_client
+    result = CliRunner().invoke(main, ["recall", "test query", *args])
+    return result, mock_client
+
+
+_HOOK_SHAPE_FLAGS = ("--trusted-only", "--verbosity", "full", "--full", "0")
+
+
+def _shape(call) -> tuple:
+    return call.kwargs["verbosity"], call.kwargs["full"], call.kwargs["max_chars"]
+
+
+@pytest.mark.parametrize(
+    ("unknown", "retried", "note"),
+    [
+        # 0.108.0-0.113.x: verbosity is declared, full is not.
+        (
+            ["full"],
+            ("full", None, None),
+            "retried without --full (--full needs memory-cloud 0.114.0+).",
+        ),
+        # 0.82.0-0.107.x: neither is declared.
+        (
+            ["full", "verbosity"],
+            (None, None, None),
+            "retried without --verbosity, --full (--verbosity needs memory-cloud 0.108.0+, "
+            "--full needs memory-cloud 0.114.0+).",
+        ),
+        # No readable list (details absent): every shape flag that was sent goes.
+        (
+            None,
+            (None, None, None),
+            "retried without --verbosity, --full (--verbosity needs memory-cloud 0.108.0+, "
+            "--full needs memory-cloud 0.114.0+).",
+        ),
+    ],
+    ids=["0.108-0.113-drops-full", "0.82-0.107-drops-both", "no-details-drops-all"],
+)
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_recall_retries_once_without_the_refused_shape_flags(
+    mock_client_cls, mock_config, unknown, retried, note
+):
+    """#298: the SessionStart hook's flags on an older server — one retry, still rows."""
+    reply = {"results": [{"memory_id": "m1", "summary": "found"}]}
+    error = _server_error("invalid_argument", unknown=unknown)
+    result, mock_client = _recall_cli_raising(
+        mock_client_cls, mock_config, [error, reply], *_HOOK_SHAPE_FLAGS
+    )
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout) == reply
+    first, second = mock_client.recall.await_args_list
+    assert _shape(first) == ("full", 0, None)
+    assert _shape(second) == retried
+    same = ("context_id", "query", "k", "use_rerank", "filters")
+    assert {key: second.kwargs[key] for key in same} == {key: first.kwargs[key] for key in same}
+    assert second.kwargs["filters"] == {"trust_tier": "trusted"}
+    assert result.stderr.count("note:") == 1
+    assert note in result.stderr
+    assert "--max-chars" not in result.stderr
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_recall_keeps_an_accepted_shape_flag_on_retry(mock_client_cls, mock_config):
+    """--max-chars is declared from 0.82.0, so a refusal of --full alone keeps it."""
+    reply = {"results": []}
+    result, mock_client = _recall_cli_raising(
+        mock_client_cls,
+        mock_config,
+        [_server_error("invalid_argument", unknown=["full"]), reply],
+        "--full",
+        "1",
+        "--max-chars",
+        "40000",
+    )
+
+    assert result.exit_code == 0, result.output
+    assert [_shape(call) for call in mock_client.recall.await_args_list] == [
+        (None, 1, 40_000),
+        (None, None, 40_000),
+    ]
+
+
+@pytest.mark.parametrize(
+    "unknown", [["k"], [], ["verbosity"]], ids=["other-arg", "empty", "unsent"]
+)
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_recall_does_not_retry_a_refusal_of_other_arguments(mock_client_cls, mock_config, unknown):
+    """A listed refusal that names none of the shape flags sent is not about them."""
+    result, mock_client = _recall_cli_raising(
+        mock_client_cls,
+        mock_config,
+        _server_error("invalid_argument", unknown=unknown),
+        "--full",
+        "0",
+    )
+
+    assert result.exit_code == 1
+    assert mock_client.recall.await_count == 1
+    assert "note:" not in result.stderr
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_recall_does_not_retry_when_no_shape_flag_was_sent(mock_client_cls, mock_config):
+    result, mock_client = _recall_cli_raising(
+        mock_client_cls, mock_config, _server_error("invalid_argument", unknown=["verbosity"])
+    )
+
+    assert result.exit_code == 1
+    assert mock_client.recall.await_count == 1
+    assert "invalid_argument" in result.output
+    assert "note:" not in result.stderr
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_recall_retry_error_propagates_unchanged(mock_client_cls, mock_config):
+    result, mock_client = _recall_cli_raising(
+        mock_client_cls,
+        mock_config,
+        [
+            _server_error("invalid_argument", unknown=["full"]),
+            _server_error("invalid_argument", "second failure", unknown=["full"]),
+        ],
+        "--full",
+        "0",
+    )
+
+    # The second refusal is not retried again, even though it names --full.
+    assert result.exit_code == 1
+    assert mock_client.recall.await_count == 2
+    assert "recall failed (invalid_argument): second failure" in result.output
+    assert result.stderr.count("note:") == 1
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        _server_error("validation_error", unknown=["verbosity"]),
+        _server_error(None),
+        KaguraNotFoundError("recall: Context not found"),
+    ],
+    ids=["other-code", "no-code", "not-found"],
+)
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_recall_does_not_retry_other_errors(mock_client_cls, mock_config, error):
+    result, mock_client = _recall_cli_raising(
+        mock_client_cls, mock_config, error, "--verbosity", "full"
+    )
+
+    assert result.exit_code == 1
+    assert mock_client.recall.await_count == 1
+    assert "note:" not in result.stderr
 
 
 def test_forget_requires_memory_id_or_query():

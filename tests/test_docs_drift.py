@@ -40,6 +40,8 @@ _STALE_PHRASES = [
     "not verified yet",
     "has not been verified yet",
     "_HARNESS_OAUTH_UNVERIFIED",
+    # memory-cloud v0.135.0 (#2470): a URL without explore gets explore_hints_omitted.
+    "present whenever ``include_explore_hints``",
 ]
 
 
@@ -64,8 +66,33 @@ def test_no_stale_server_behaviour_in_docs(phrase: str) -> None:
 @pytest.mark.parametrize(
     ("obj", "terms"),
     [
-        (KaguraClient.load_pinned, ["memories", "truncated", "total_available"]),
-        (KaguraClient.recall, ["tags_normalize", "degraded", "degraded_reason", "tag_suggestions"]),
+        (
+            KaguraClient.load_pinned,
+            ["memories", "truncated", "total_available", "max_chars", "context_summary_omitted"],
+        ),
+        (
+            KaguraClient.recall,
+            [
+                "tags_normalize",
+                "degraded",
+                "degraded_reason",
+                "tag_suggestions",
+                # #298 / #295: the v0.108.0+ compact default and what restores the rest.
+                "summary_cut",
+                '``verbosity="full"``',
+                "``content_next_offset``",
+                "``folded``",
+                "``full_applied``",
+                "``context_summary_omitted``",
+                "``selector``",
+                "``spans``",
+                "``explore_hints_omitted``",
+                "``?add_tools=explore``",
+                "``?profile=full``",
+            ],
+        ),
+        (KaguraClient.recall_nearby, ["``location``", "include_details", "details_omitted"]),
+        (KaguraClient.recall_upcoming, ["details_omitted", "details_total_chars"]),
         (KaguraClient.forget, ["CLEANUP_DELETED_MEMORIES_RETENTION_DAYS", "degraded"]),
         (KaguraClient.remember, ["persistence", "lint"]),
         (KaguraClient.update_memory, ["persistence", "lint", '``""``', "``{}``"]),
@@ -73,8 +100,14 @@ def test_no_stale_server_behaviour_in_docs(phrase: str) -> None:
         (KaguraClient.update_context, ["plan_required", "public_contexts"]),
         (KaguraClient.setup_resource, ["plan_required", "``resources``"]),
         (KaguraClient.merge_contexts, ["pending_embedding"]),
-        (KaguraClient.get_agent_bootstrap, ["``trigger``", "include_details"]),
-        (AgentsClient.bootstrap, ["``trigger``", "include_details"]),
+        (
+            KaguraClient.get_agent_bootstrap,
+            ["``trigger``", "include_details", "max_chars", "20 since memory-cloud v0.82.0"],
+        ),
+        (
+            AgentsClient.bootstrap,
+            ["``trigger``", "include_details", "max_chars", "20 since memory-cloud v0.82.0"],
+        ),
         (KaguraClient.get_server_info, ["search_defaults", "model_extra", "terms_version"]),
         (KaguraClient.__init__, ["?profile=", "?tools=", "tools/list"]),
         (TagInfo, ["sample_summary"]),

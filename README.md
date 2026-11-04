@@ -166,6 +166,25 @@ async with KaguraClient(api_key="kagura_...", mcp_url="https://...") as client:
     # Cross-context recall — search several contexts at once
     results = await client.recall(query="auth", context_ids=["ctx-1", "ctx-2"], k=10)
 
+    # Result shape. Since memory-cloud v0.108.0 hits are compact by default: a 160-char
+    # summary head (summary_cut=True when cut) without tags or context_summary.
+    # verbosity="full" adds tags, context_summary, scope, version and the uncut summary.
+    # Since v0.114.0 the top `full` hits also carry content (up to 1,500 chars each;
+    # the deployment default is 3, full=0 means summaries only), and max_chars
+    # (10,000-100,000, default 20,000; v0.82.0+) bounds the whole reply. All three are
+    # keyword-only and sent only when set; a server from 0.82.0 that predates one refuses it
+    # (KaguraError, invalid_argument) and the library does not retry: `kagura recall` does.
+    detailed = await client.recall(context_id="dev", query="OAuth2", verbosity="full", full=0)
+    for hit in detailed["results"]:
+        print(hit["summary"], hit.get("tags", []))  # empty tags are omitted, not []
+    top = await client.recall(context_id="dev", query="deploy runbook", full=1, max_chars=40_000)
+    # top["results"][0]["content"]; with content_truncated, reference() has the whole memory
+
+    # explore_hints follow the MCP URL's tool list (v0.135.0+): add ?add_tools=explore
+    # or ?profile=full to mcp_url, or the reply carries explore_hints_omitted instead.
+    hinted = await client.recall(context_id="dev", query="auth", include_explore_hints=True)
+    seeds = hinted.get("explore_hints") or []
+
     # Optional response keys (degraded, tag_suggestions, ...) are absent when they do not apply — use .get().
     # degraded=True: the semantic half was down, so results are keyword-only (v0.66.0+);
     # an empty result then means "search impaired", not "nothing stored".
@@ -214,11 +233,12 @@ async with KaguraClient(api_key="kagura_...", mcp_url="https://...") as client:
     upcoming = await client.recall_upcoming(context_id="dev", from_="now")
 
     # WHERE axis — deterministic "what's near here" query, nearest first
-    # (SDK v0.38.0, server v0.53.0+). radius_m/k are keyword-only.
+    # (SDK v0.38.0, server v0.53.0+). radius_m/k/include_details are keyword-only.
     # lat/lon must be JSON numbers; the server 422s string-typed coordinates.
     await client.remember(context_id="dev", summary="Coffee with Sato", content="...",
                           details={"location": {"lat": 35.68, "lon": 139.76, "label": "Tokyo HQ"}})
     nearby = await client.recall_nearby(context_id="dev", lat=35.68, lon=139.76, radius_m=500)
+    # Items carry `location` (server v0.82.0+); include_details=True returns `details`.
     # update_memory(details=...) REPLACES details wholesale — no deep-merge. Read the
     # current value with reference() and re-send location, or this drops off the map
     # (the CLI's `kagura update-memory --merge-details` does that round-trip).
@@ -339,7 +359,9 @@ async with KaguraClient() as client:  # MCP surface
         session_id="run-42",              # echoed in the correlation block
         query="current task",             # enables the trusted-only recall component
         include=["pinned", "recall", "state"],
+        max_chars=40_000,                 # whole-envelope budget (server v0.82.0+; default 20,000)
     )
+    # Server v0.82.0+ loads 20 pinned memories by default here (pinned_cap= raises it).
     pinned = bootstrap.components["pinned"]  # {"status": "ok", "memories": [...], ...}
 
 async with AgentsClient.from_mcp_url() as agents:  # REST companion
@@ -711,6 +733,10 @@ kagura remember -s "Coffee with Sato" --content "..." --location "35.68,139.76,T
 kagura recall "dependency injection" -k 10
 kagura recall "dependency injection" --no-rerank   # skip reranking; no flag follows the context config (v0.69.0+)
 kagura recall "project context" --trusted-only     # exclude connector-ingested memories (filters.trust_tier, v0.24.0+)
+kagura recall "project context" --verbosity full   # uncut summaries + tags; compact is the server default (v0.108.0+)
+kagura recall "deploy runbook" --full 1 --max-chars 40000   # content on the top hit only (v0.114.0+); reply budget (v0.82.0+)
+# A server that refuses one of --verbosity/--full/--max-chars (invalid_argument) gets one
+# retry without the ones it names (all three sent when it names none), with a note on stderr.
 kagura explore -m "memory-uuid" --depth 3
 kagura forget -m "memory-uuid"
 kagura update-memory -m "memory-uuid" --dismiss-supersede-candidate   # server v0.65.0+
@@ -918,8 +944,18 @@ to the proxy, so there is no request header to pass on; a tool call's
 and which profile it lists (its `tools` section).
 
 **Hooks and commands** — the SessionStart hook recalls project context with
-`kagura recall --trusted-only` (server v0.24.0+), so connector-ingested memories
-never reach the session unreviewed. `--no-session-hook`, `--no-sync-hook` (the
+`kagura recall "project context and recent decisions" -c <context> -k 5 --trusted-only
+--verbosity full --full 0 2>/dev/null | head -c 5000 || true` (`--trusted-only` needs
+server v0.24.0+), so connector-ingested memories never reach the session unreviewed,
+and on memory-cloud 0.114.0+ the five hits arrive as uncut summaries with their tags
+and without content: since 0.108.0 recall is compact unless asked, and since 0.114.0
+it puts content on the top hits. From 0.82.0 a server refuses an argument it does
+not declare and names it, and `kagura recall` retries once without the ones named,
+so the same hook gets uncut summaries with tags on every server: 0.108.0–0.113.x
+keep `--verbosity full` and drop `--full`, 0.82.0–0.107.x drop both (the full shape
+is their only one), older servers ignore both, and no server before 0.114.0 sends
+content. Re-running setup replaces an earlier SDK-written hook in
+place. `--no-session-hook`, `--no-sync-hook` (the
 `.claude/memory` sync) and `--no-commands` (`/kagura-recall` · `/kagura-remember`)
 skip them; re-running with one removes only what setup itself wrote. When the
 memory-cloud **`kagura-memory` plugin** is installed (`claude plugin list`), an

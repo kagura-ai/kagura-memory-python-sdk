@@ -67,6 +67,7 @@ class AgentsClient(KaguraRestClient):
         pinned_cap: int | None = None,
         upcoming_until: str | None = None,
         include: list[AgentBootstrapComponentName] | None = None,
+        max_chars: int | None = None,
     ) -> AgentBootstrapResponse:
         """Rehydrate an agent's cognitive state at session start.
 
@@ -87,17 +88,27 @@ class AgentsClient(KaguraRestClient):
                 trusted-only recall component; omit to skip recall.
             recall_k: Number of recall results.
             pinned_cap: Override for the pinned-set cap (clamped server-side
-                to [1, 1000]).
+                to [1, 1000]). Omit for the server default,
+                20 since memory-cloud v0.82.0 (#1743; 100 before).
             upcoming_until: ISO upper bound for upcoming time memories.
             include: Component selector — a subset of ``"pinned"``,
                 ``"recall"``, ``"upcoming"``, ``"state"``, ``"policy"``.
                 Omit for all components.
+            max_chars: Whole-envelope budget in characters, not tokens,
+                10,000-100,000 (server default 20,000), with the same
+                ``context_summary_omitted`` / per-component ``truncated``
+                rules as the MCP tool. The route takes it from memory-cloud
+                v0.82.0 (#1743); an older server ignores it.
 
         Returns:
             :class:`AgentBootstrapResponse` — the composed envelope. Since
             memory-cloud v0.73.0 the ``upcoming`` component's rows carry
             ``trigger`` in place of ``details``, with no ``include_details``
             opt-out on this path.
+
+        Raises:
+            ValueError: ``max_chars`` is not an ``int`` in range (before any
+                request).
         """
         body = _bootstrap_payload(
             context_id=context_id,
@@ -107,6 +118,7 @@ class AgentsClient(KaguraRestClient):
             pinned_cap=pinned_cap,
             upcoming_until=upcoming_until,
             include=include,
+            max_chars=max_chars,
         )
         resp = await self._request(
             "POST",

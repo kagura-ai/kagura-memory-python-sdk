@@ -43,10 +43,14 @@ from .files_client import FilesClient
 from .logger import VerboseLogger
 from .memory_client import MemoryClient
 from .models import (
+    _MAX_CHARS_MAX,
+    _MAX_CHARS_MIN,
+    _RECALL_FULL_MAX,
     FileObject,
     GuardrailDigest,
     MeasurementAggregate,
     MeasurementPeriod,
+    RecallVerbosity,
     ResourceEventRequest,
 )
 from .resource_client import ResourceClient
@@ -535,6 +539,32 @@ def remember(
     _run_client_command(op, context_id)
 
 
+# The memory-cloud release that declares each recall shape argument (#298).
+# From 0.82.0 the server refuses an argument it does not declare
+# (invalid_argument) and lists it in the envelope's ``unknown_arguments``.
+_RECALL_SHAPE_FLOORS = {"verbosity": "0.108.0", "full": "0.114.0", "max_chars": "0.82.0"}
+
+
+def _refused_shape_args(err: KaguraError, shape: dict[str, Any]) -> list[str]:
+    """The recall shape arguments to retry without after ``err``; ``[]``: no retry (#298).
+
+    Only an ``invalid_argument`` refusal of a call that sent one of them
+    counts, read from the code and never from the message. The server lists
+    what it refused in ``unknown_arguments`` (``KaguraError.details``), so
+    only those are dropped: 0.108.0-0.113.x keeps ``verbosity``. A refusal
+    that lists none of them is not about them. Without a readable list
+    (``details`` missing or without it), every one that was sent is dropped.
+    """
+    if getattr(err, "code", None) != "invalid_argument":
+        return []
+    sent = [name for name, value in shape.items() if value is not None]
+    details = getattr(err, "details", None)
+    listed = details.get("unknown_arguments") if isinstance(details, dict) else None
+    if not isinstance(listed, list):
+        return sent
+    return [name for name in sent if name in listed]
+
+
 @main.command()
 @click.argument("query")
 @click.option("--context-id", "-c", help="Context ID (or set in .kagura.json)")
@@ -552,7 +582,28 @@ def remember(
         "server v0.24.0+). Use it for reads fed back to an agent, like the SessionStart hook."
     ),
 )
-def recall(query, context_id, k, rerank, trusted_only):
+@click.option(
+    "--verbosity",
+    type=click.Choice(get_args(RecallVerbosity)),
+    help=(
+        "Result detail (server v0.108.0+). compact, the server default: 160-character "
+        "summaries without tags; full: uncut summaries, tags, context_summary and scope."
+    ),
+)
+@click.option(
+    "--full",
+    type=click.IntRange(0, _RECALL_FULL_MAX),
+    help=(
+        "How many top results carry content, up to 1,500 characters each "
+        "(server v0.114.0+; default: the server's, 3 unless set; 0: summaries only)."
+    ),
+)
+@click.option(
+    "--max-chars",
+    type=click.IntRange(_MAX_CHARS_MIN, _MAX_CHARS_MAX),
+    help="Response budget in characters, 10000-100000 (server v0.82.0+; default 20000).",
+)
+def recall(query, context_id, k, rerank, trusted_only, verbosity, full, max_chars):
     """
     Search memories directly (without AI analysis).
 
@@ -560,21 +611,53 @@ def recall(query, context_id, k, rerank, trusted_only):
     config (memory-cloud v0.69.0+). --rerank applies only when the context
     enables reranking; --no-rerank always skips it.
 
+    The reply is printed as JSON, with each hit's content (when the server
+    sends it) right after its summary. --verbosity, --full and --max-chars
+    are sent only when given. A server from v0.82.0 that predates one of
+    them refuses it (invalid_argument); the command then retries once
+    without the ones the server lists as refused (all three it sent when the
+    reply does not list them) and says so on stderr.
+
     \b
     Examples:
       kagura recall "FastAPI dependency injection"
       kagura recall "OAuth2 implementation" -k 10
       kagura recall -c dev "error handling pattern"
       kagura recall "latency-sensitive lookup" --no-rerank
-      kagura recall "project context" --trusted-only
+      kagura recall "project context" --trusted-only --verbosity full
+      kagura recall "deploy runbook" --full 1 --max-chars 40000
+      kagura recall "release notes" --full 0
     """
     filters = {"trust_tier": "trusted"} if trusted_only else None
-    _run_client_command(
-        lambda client, ctx: client.recall(
-            context_id=ctx, query=query, k=k, use_rerank=rerank, filters=filters
-        ),
-        context_id,
-    )
+    shape: dict[str, Any] = {"verbosity": verbosity, "full": full, "max_chars": max_chars}
+
+    async def op(client: KaguraClient, ctx: str) -> dict[str, Any]:
+        async def call(shape_args: dict[str, Any]) -> dict[str, Any]:
+            return await client.recall(
+                context_id=ctx, query=query, k=k, use_rerank=rerank, filters=filters, **shape_args
+            )
+
+        try:
+            return await call(shape)
+        except KaguraError as e:
+            # #298: a server below 0.114.0 refuses the SessionStart hook's
+            # --full, and below 0.108.0 its --verbosity too. One retry.
+            dropped = _refused_shape_args(e, shape)
+            if not dropped:
+                raise
+        flags = [f"--{name.replace('_', '-')}" for name in dropped]
+        needs = ", ".join(
+            f"{flag} needs memory-cloud {_RECALL_SHAPE_FLOORS[name]}+"
+            for flag, name in zip(flags, dropped, strict=True)
+        )
+        click.echo(
+            f"note: the server refused the recall (invalid_argument); "
+            f"retried without {', '.join(flags)} ({needs}).",
+            err=True,
+        )
+        return await call({**shape, **dict.fromkeys(dropped)})
+
+    _run_client_command(op, context_id)
 
 
 @main.command()

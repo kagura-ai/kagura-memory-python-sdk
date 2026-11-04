@@ -7,7 +7,7 @@ import logging
 import math
 import warnings
 from datetime import datetime
-from typing import Any, Literal, Self, TypeVar
+from typing import Any, Literal, Self, TypeVar, get_args
 from urllib.parse import quote
 
 import httpx
@@ -41,6 +41,7 @@ from .exceptions import (
     _exc_message,
 )
 from .models import (
+    _RECALL_FULL_MAX,
     Agent,
     AgentBinding,
     AgentBootstrapComponentName,
@@ -59,6 +60,7 @@ from .models import (
     MeasurementSeries,
     MemoryListResponse,
     MemoryStatsResponse,
+    RecallVerbosity,
     RollbackResult,
     RollbackSummary,
     ServerInfo,
@@ -70,6 +72,8 @@ from .models import (
     _binding_scope_payload,
     _bootstrap_payload,
     _details_with_tool_trigger,
+    _validate_int_range,
+    _validate_max_chars,
 )
 
 _T = TypeVar("_T", bound=_BaseModel)
@@ -733,9 +737,26 @@ class KaguraClient:
         context_ids: list[str] | None = None,
         include_explore_hints: bool = False,
         include_superseded: bool = False,
+        *,
+        verbosity: RecallVerbosity | None = None,
+        full: int | None = None,
+        max_chars: int | None = None,
     ) -> dict[str, Any]:
         """
         Call recall MCP tool.
+
+        Since memory-cloud v0.108.0 (#2002) a hit is **compact** unless you
+        pass ``verbosity="full"``: a 160-character summary head and no
+        ``tags`` / ``context_summary``. Since v0.114.0 (#2124) the top results
+        also carry ``content`` unless you pass ``full=0``. ``verbosity``,
+        ``full`` and ``max_chars`` are keyword-only and sent only when set.
+        From v0.82.0 (#1742) a server refuses a tool argument it does not
+        declare (``KaguraError``, code ``invalid_argument``), so ``verbosity``
+        needs v0.108.0+ and ``full`` v0.114.0+ there; a server before v0.82.0
+        ignores all three. This method never retries without them: the
+        caller decides. (The ``kagura recall`` CLI does retry, once, without
+        the ones the refusal lists in ``unknown_arguments``, so its
+        SessionStart hook works on every server.)
 
         Args:
             context_id: Context ID for single-context search.
@@ -774,24 +795,69 @@ class KaguraClient:
             search_mode: Search strategy — "hybrid" (default), "semantic", or "keyword"
             context_ids: Search across multiple contexts (2–20 IDs).
                 When provided, ``context_id`` is not required.
-            include_explore_hints: When True, the server includes up to 3
-                graph discovery hints in the response under the
-                ``explore_hints`` key — useful as seeds for a follow-up
-                :meth:`explore` call.
+            include_explore_hints: When True, ask for up to 3 graph discovery
+                hints under ``explore_hints`` — seeds for a follow-up
+                :meth:`explore` call. Since memory-cloud v0.135.0 (#2470) the
+                server makes them only when the MCP URL lists the ``explore``
+                tool, which the bare URL (the core tool profile) does not: add
+                ``?add_tools=explore`` or ``?profile=full`` to ``mcp_url`` (or
+                ``explore`` to a ``tools=`` / ``add_tools=`` list it already
+                has). On any other URL the call still succeeds and returns
+                ``explore_hints_omitted`` — a sentence naming that opt-in — in
+                place of ``explore_hints``.
             include_superseded: When True, also return memories shadowed by a
                 ``supersedes`` edge, annotated with ``superseded_by``. Default
                 recall demotes them, so this is how you read the history that
                 :meth:`remember` (``supersedes=...``) deliberately preserves —
-                without it, superseding would be a one-way door. Note this is a
-                top-level argument, **not** a ``filters`` key. Requires
-                memory-cloud server v0.45.0+ (#1208).
+                without it, superseding would be a one-way door. It also turns
+                off ``folded`` (see Returns): every version comes back as its
+                own row. Note this is a top-level argument, **not** a
+                ``filters`` key. Requires memory-cloud server v0.45.0+ (#1208).
+            verbosity: Result detail, ``"compact"`` or ``"full"``
+                (memory-cloud v0.108.0+, #2002). ``None`` (the default) omits
+                the argument, so the deployment default applies — compact
+                unless ``MCP_RECALL_DEFAULT_VERBOSITY`` says otherwise. A
+                compact hit is ``memory_id``, the first 160 characters of
+                ``summary`` (``summary_cut: True`` when it was shortened),
+                ``type``, ``importance``, ``score``, ``created_at``
+                (v0.110.0+), ``updated_at``, and the content keys below.
+                ``"full"`` adds ``context_summary``, ``scope``, ``tags``,
+                ``version`` (v0.113.0+) and the uncut ``summary``. Both shapes
+                carry ``observed_at`` (v0.127.0+), ``superseded_by``,
+                ``contradicts``, ``supersede_candidate`` and ``folded`` when
+                set.
+            full: How many of the top results carry ``content``, 0-100
+                (memory-cloud v0.114.0+, #2124). Each carries up to 1,500
+                characters; a longer one adds ``content_truncated: True`` and
+                ``content_next_offset`` (where the server's ``reference`` tool
+                continues; :meth:`reference` returns the whole memory, bounded
+                on memory-cloud 0.78.0+). ``0`` returns summaries only.
+                ``None`` omits the argument, so the deployment default applies
+                (``MCP_RECALL_DEFAULT_FULL``, 3 unless set; v0.115.0+, #2140)
+                — and a defaulted ``full`` puts content on trusted,
+                non-connector rows only, while an explicit value makes every
+                row eligible. Never more than ``k``; lowered to fit
+                ``max_chars``.
+            max_chars: Response budget in characters, not tokens,
+                10,000-100,000 (server default 20,000; memory-cloud v0.82.0+,
+                #1743). Over budget the server takes ``content`` off the
+                lowest-ranked rows first (``full_applied`` then counts the rows
+                that kept it), then ``context_summary`` off every row
+                (``context_summary_omitted: True``), then drops the
+                lowest-ranked rows (``truncated: True``; ``count`` is the rows
+                returned).
 
         Returns:
-            API response with ``results`` (ranked summaries), ``count``,
-            ``related_tags`` (``[{tag, count}]``), ``confidence`` and the
-            context fields. The optional keys below are absent when they do
-            not apply, so read them with ``.get()``:
+            API response with ``confidence`` first — ``{level, top_score,
+            prominence, relative_margin, result_count, rationale}``, where
+            ``level`` (``high`` / ``moderate`` / ``low`` / ``none``) says
+            whether the hits are worth reading — then ``status``,
+            ``results`` (ranked hits in the ``verbosity`` shape), ``count``
+            and the context fields. The optional keys below are absent when
+            they do not apply, so read them with ``.get()``:
 
+            - ``related_tags`` (``[{tag, count}]``): omitted when empty
+              since memory-cloud v0.93.0 (#1851).
             - ``degraded`` / ``degraded_reason`` (v0.66.0+): the semantic half
               of hybrid search was unavailable, so the results are
               keyword-only. An empty or weak result then means "search
@@ -799,18 +865,34 @@ class KaguraClient:
             - ``tag_suggestions`` (v0.65.0+): ``{requested_tag: ["stored-tag
               (count)", ...]}`` when a tag filter matched nothing and similar
               stored tags exist. Advisory — the filter was not widened.
-            - ``explore_hints``: present whenever ``include_explore_hints``
-              is set, possibly as an empty list.
-            - Per result, ``context_summary``, ``superseded_by``,
+            - ``explore_hints`` or ``explore_hints_omitted``: see
+              ``include_explore_hints``. ``explore_hints`` may be an empty
+              list.
+            - ``full_applied`` (v0.114.0+), ``context_summary_omitted`` and
+              ``truncated`` (v0.82.0+): see ``max_chars``.
+            - ``selector`` (v0.115.0+, #2144): only on a context with the LLM
+              selector on (``llm_selector_enabled``) — ``{applied: True,
+              model, kept, dropped, dropped_memory_ids}``, or ``{applied:
+              False, reason}`` with the unselected page. A row whose content
+              the selector cut to stored passages carries ``spans``
+              (``[{start, end}]`` offsets into its stored content).
+            - Per result, ``folded`` (v0.114.0+, #2123): ``{count,
+              memory_ids}`` — judge-verified older versions of the same fact,
+              folded under this, the newest, row.
+            - Per result, ``summary_cut``, the content keys, ``observed_at``,
+              ``tags``, ``context_summary``, ``superseded_by``,
               ``contradicts`` and ``supersede_candidate``: absent when empty
-              since memory-cloud v0.73.0; older servers send ``null`` /
-              ``[]``, so test them for truthiness.
+              (since memory-cloud v0.73.0 for the annotations; older servers
+              send ``null`` / ``[]``, so test them for truthiness).
 
         Raises:
             ValueError: If ``query`` is empty/whitespace; if neither
                 ``context_id`` nor ``context_ids`` is provided; if
-                ``context_ids`` has fewer than 2 or more than 20 IDs; or if
-                ``search_mode`` is not one of "hybrid"/"semantic"/"keyword".
+                ``context_ids`` has fewer than 2 or more than 20 IDs; if
+                ``search_mode`` is not one of "hybrid"/"semantic"/"keyword";
+                if ``verbosity`` is not ``"compact"`` / ``"full"``; or if
+                ``full`` (0-100) or ``max_chars`` (10,000-100,000) is not an
+                ``int`` in range. Checked before any request.
         """
         if not isinstance(query, str) or not query.strip():
             raise ValueError("query must be a non-empty string")
@@ -841,6 +923,16 @@ class KaguraClient:
             arguments["include_explore_hints"] = True
         if include_superseded:
             arguments["include_superseded"] = True
+        if verbosity is not None:
+            if verbosity not in get_args(RecallVerbosity):
+                raise ValueError(f"verbosity must be 'compact' or 'full', got {verbosity!r}")
+            arguments["verbosity"] = verbosity
+        if full is not None:
+            _validate_int_range("full", full, 0, _RECALL_FULL_MAX)
+            arguments["full"] = full
+        if max_chars is not None:
+            _validate_max_chars(max_chars)
+            arguments["max_chars"] = max_chars
         return await self._call_tool_checked("recall", arguments)
 
     async def recall_upcoming(
@@ -878,7 +970,12 @@ class KaguraClient:
             item is ``{memory_id, summary, type, trigger}``, where ``trigger``
             is the memory's ``details.trigger``. With ``include_details=True``
             the item carries the full ``details`` object in place of
-            ``trigger`` (``details.trigger`` is inside it).
+            ``trigger`` (``details.trigger`` is inside it). Since memory-cloud
+            v0.82.0 (#1743) the details are held to the reply budget (about
+            20,000 characters): from the last item backwards, an item that
+            does not fit carries ``details_omitted: True`` and
+            ``details_total_chars`` in place of ``details`` — read those
+            with :meth:`reference`.
         """
         # `from` is a Python reserved word, so the public param is `from_` but
         # the MCP tool expects the key `"from"`.
@@ -899,6 +996,7 @@ class KaguraClient:
         *,
         radius_m: float = 1000,
         k: int = 20,
+        include_details: bool = False,
     ) -> dict[str, Any]:
         """List memories near a geographic point, nearest first with ``distance_m``.
 
@@ -921,10 +1019,23 @@ class KaguraClient:
             radius_m: Search radius in meters (default 1000). The server clamps
                 this to [1, 1000000] rather than rejecting out-of-range values.
             k: Maximum results (default 20, server max 100).
+            include_details: Return each item's full ``details`` object in
+                place of its ``location``. Details can be large. Sent only
+                when ``True``. Requires memory-cloud v0.82.0+ (#1743); an
+                older server ignores it and always returns ``details``.
 
         Returns:
             API response with ``results`` — memories whose stored location falls
-            within the radius, nearest first, each carrying ``distance_m``.
+            within the radius, nearest first. Since memory-cloud v0.82.0 each
+            item is ``{memory_id, summary, type, location, distance_m}``, where
+            ``location`` is the memory's ``details.location``; older servers
+            send the whole ``details`` instead. With ``include_details=True``
+            the item carries ``details`` in place of ``location``
+            (``details.location`` is inside it), held to the reply budget
+            (about 20,000 characters): from the last item backwards, an item
+            that does not fit carries ``details_omitted: True`` and
+            ``details_total_chars`` instead — read those with
+            :meth:`reference`.
 
         Raises:
             ValueError: If ``lat`` or ``lon`` is not a number (strings are
@@ -939,6 +1050,8 @@ class KaguraClient:
             "radius_m": radius_m,
             "k": k,
         }
+        if include_details:
+            arguments["include_details"] = True
         return await self._call_tool_checked("recall_nearby", arguments)
 
     async def record_measurement(
@@ -1080,6 +1193,8 @@ class KaguraClient:
         self,
         context_id: str,
         cap: int | None = None,
+        *,
+        max_chars: int | None = None,
     ) -> dict[str, Any]:
         """Deterministically load a context's pinned (``delivery_mode="always"``) memories.
 
@@ -1106,13 +1221,26 @@ class KaguraClient:
         Args:
             context_id: Target context UUID.
             cap: Optional override for the maximum number returned (1-1000).
-                Omit to use the server default.
+                Omit to use the server default (100).
+            max_chars: Response budget in characters, not tokens,
+                10,000-100,000 (server default 20,000). Over budget the server
+                leaves ``context_summary`` out of every item first
+                (``context_summary_omitted: True``), then cuts items from the
+                end (``truncated: True``; ``total_available`` keeps the real
+                count). Keyword-only, sent only when set. Requires
+                memory-cloud v0.82.0+ (#1743); an older server ignores it.
 
         Returns:
             API response with ``memories`` (the pinned set — each item
             ``{memory_id, summary, context_summary, type, importance,
-            delivery_mode}``), ``truncated`` (bool), ``total_available``
-            (int), ``cap`` (the cap applied) and the context fields.
+            delivery_mode}``), ``truncated`` (bool: more exist than ``cap``
+            or ``max_chars`` allows), ``total_available`` (int), ``cap`` (the
+            cap applied) and the context fields, plus
+            ``context_summary_omitted`` when the budget forced it.
+
+        Raises:
+            ValueError: ``max_chars`` is not an ``int`` in range (before any
+                request).
 
         Example:
             >>> pinned = await client.load_pinned(context_id=ctx)
@@ -1126,9 +1254,14 @@ class KaguraClient:
         arguments: dict[str, Any] = {"context_id": context_id}
         if cap is not None:
             arguments["cap"] = cap
+        if max_chars is not None:
+            _validate_max_chars(max_chars)
+            arguments["max_chars"] = max_chars
         return await self._call_tool_checked("load_pinned", arguments)
 
-    async def load_guardrails(self, context_id: str, *, cap: int | None = None) -> GuardrailSet:
+    async def load_guardrails(
+        self, context_id: str, *, cap: int | None = None, max_chars: int | None = None
+    ) -> GuardrailSet:
         """Deterministically load a context's guardrail set for a client-side hook.
 
         Calls the ``load_guardrails`` MCP tool (memory-cloud v0.74.0+, #1619) —
@@ -1155,11 +1288,21 @@ class KaguraClient:
             cap: Max tool-triggered memories returned (1-1000; the server
                 clamps out-of-range values on this surface). Omit for the
                 server default (50). Does not bound the pinned lane.
+            max_chars: Response budget in characters, not tokens,
+                10,000-100,000 (server default 20,000). Over budget the server
+                leaves ``context_summary`` out of the pinned items first
+                (``context_summary_omitted``), then cuts pinned and then
+                tool-triggered items from the end, setting that lane's
+                ``*_truncated``. Sent only when set. Requires memory-cloud
+                v0.82.0+ (#1743); an older server ignores it. The REST twin
+                takes no ``max_chars``.
 
         Returns:
             :class:`~kagura_memory.models.GuardrailSet`.
 
         Raises:
+            ValueError: ``max_chars`` is not an ``int`` in range (before any
+                request).
             KaguraNotFoundError: Context not found (uniform — nonexistent and
                 not-yours are indistinguishable).
             KaguraResponseError: The response does not parse as a
@@ -1170,6 +1313,9 @@ class KaguraClient:
         arguments: dict[str, Any] = {"context_id": context_id}
         if cap is not None:
             arguments["cap"] = cap
+        if max_chars is not None:
+            _validate_max_chars(max_chars)
+            arguments["max_chars"] = max_chars
         result = await self._call_tool_checked("load_guardrails", arguments)
         return parse_response(GuardrailSet, result, operation="load_guardrails")
 
@@ -1340,6 +1486,7 @@ class KaguraClient:
         pinned_cap: int | None = None,
         upcoming_until: str | None = None,
         include: list[AgentBootstrapComponentName] | None = None,
+        max_chars: int | None = None,
     ) -> AgentBootstrapResponse:
         """Rehydrate an agent's cognitive state in one session-start call.
 
@@ -1376,12 +1523,21 @@ class KaguraClient:
             recall_k: Number of recall results; forwarded to recall's
                 ``k`` validation.
             pinned_cap: Override for the pinned-set cap; clamped by
-                ``load_pinned`` to [1, 1000].
+                ``load_pinned`` to [1, 1000]. Omit for the server default,
+                20 since memory-cloud v0.82.0 (#1743; 100 before, and
+                :meth:`load_pinned` still defaults to 100).
             upcoming_until: ISO upper bound for upcoming time memories
                 (the lower bound is always now).
             include: Component selector — a subset of ``"pinned"``,
                 ``"recall"``, ``"upcoming"``, ``"state"``, ``"policy"``.
                 Omit for all components.
+            max_chars: Whole-envelope budget in characters, not tokens,
+                10,000-100,000 (server default 20,000). Over budget the
+                server leaves ``context_summary`` out of every pinned, recall
+                and upcoming item first (``context_summary_omitted``), then
+                cuts those lists from the end in that priority, marking each
+                cut component ``truncated: True``. Requires memory-cloud
+                v0.82.0+ (#1743); an older server ignores it.
 
         Returns:
             :class:`AgentBootstrapResponse` — the composed envelope with
@@ -1392,9 +1548,15 @@ class KaguraClient:
             ``trigger`` in place of ``details``, as :meth:`recall_upcoming`
             does by default; bootstrap has no ``include_details`` opt-out, so
             fetch ``details`` with :meth:`reference` or
-            ``recall_upcoming(include_details=True)``.
+            ``recall_upcoming(include_details=True)``. Since v0.110.0
+            (#2013) the ``recall`` component's rows are :meth:`recall`'s
+            ``verbosity="full"`` shape without ``supersede_candidate``, and
+            they never carry ``content``, whatever the deployment's recall
+            defaults.
 
         Raises:
+            ValueError: ``max_chars`` is not an ``int`` in range (before any
+                request).
             KaguraNotFoundError: Agent or context not found (uniform 404 —
                 nonexistent and not-yours are indistinguishable by design).
             KaguraError: Invalid arguments or other server-side error.
@@ -1409,6 +1571,7 @@ class KaguraClient:
                 pinned_cap=pinned_cap,
                 upcoming_until=upcoming_until,
                 include=include,
+                max_chars=max_chars,
             ),
         }
         result = await self._call_tool_checked("get_agent_bootstrap", arguments)

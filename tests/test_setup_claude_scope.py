@@ -28,6 +28,7 @@ from kagura_memory.setup_claude import (
     _plugin_server_url,
     _query_flags,
     _remove_sdk_hook,
+    _sdk_prefix,
 )
 
 CTX = "11111111-2222-3333-4444-555555555555"
@@ -891,6 +892,57 @@ def test_rerun_upgrades_the_pre_258_session_hook_in_place(tmp_path: Path) -> Non
 
     assert hook_commands(tmp_path, "SessionStart") == [
         SESSIONSTART_HOOK_COMMAND.format(context_id=CTX)
+    ]
+
+
+_PRE_258_HOOK = (
+    'kagura recall "project context and recent decisions" '
+    f"-c {CTX} -k 5 2>/dev/null | head -c 2000 || true"
+)
+_PRE_298_HOOK = (
+    'kagura recall "project context and recent decisions" '
+    f"-c {CTX} -k 5 --trusted-only 2>/dev/null | head -c 2000 || true"
+)
+
+
+def test_session_hook_asks_for_uncut_summaries_with_tags_and_no_content(tmp_path: Path) -> None:
+    """#298: memory-cloud v0.108.0+ recall is compact, and v0.114.0+ adds content, unless asked."""
+    _install_hooks(tmp_path, CTX)
+    [command] = hook_commands(tmp_path, "SessionStart")
+    assert "--trusted-only --verbosity full --full 0 " in command
+    assert command.endswith("2>/dev/null | head -c 5000 || true")
+
+
+def test_every_session_hook_form_shares_the_sdk_prefix() -> None:
+    """Install and removal match on the prefix, so each form replaces the others."""
+    prefix = _sdk_prefix(SESSIONSTART_HOOK_COMMAND)
+    for old in (_PRE_258_HOOK, _PRE_298_HOOK):
+        assert old.startswith(prefix)
+
+
+def test_rerun_upgrades_the_pre_298_session_hook_in_place(tmp_path: Path) -> None:
+    old = _PRE_298_HOOK
+    own = {"type": "command", "command": "kagura recall 'my own query' -k 3"}
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude" / "settings.json").write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "SessionStart": [
+                        {"hooks": [{"type": "command", "command": old}]},
+                        {"hooks": [own]},
+                    ]
+                }
+            }
+        )
+    )
+
+    _install_hooks(tmp_path, CTX)
+
+    # Exactly one SDK hook, now the new command; the user's own hook is untouched.
+    assert hook_commands(tmp_path, "SessionStart") == [
+        SESSIONSTART_HOOK_COMMAND.format(context_id=CTX),
+        own["command"],
     ]
 
 

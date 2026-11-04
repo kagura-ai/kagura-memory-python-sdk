@@ -46,11 +46,24 @@ KAGURA_HOOK_MARKER = "kagura "
 _CONTEXT_ID_PATTERN = r"^[a-zA-Z0-9_-]+$"
 
 # --trusted-only (#258): the output is injected into the session unreviewed,
-# so connector-ingested memories stay out of it. Removal matches this
-# command's fixed prefix (see _sdk_prefix), which the pre-#258 form shares.
+# so connector-ingested memories stay out of it. --verbosity full --full 0
+# (#298): memory-cloud v0.108.0+ answers recall with 160-character summaries
+# and no tags unless asked, and v0.114.0+ puts up to 1,500 characters of
+# content on the top 3 hits, ahead of their tags; the hook asks for uncut
+# summaries with tags and no content. From 0.82.0 a server refuses an argument
+# it does not declare and names it; `kagura recall` then retries once without
+# the arguments named, so this one command gets uncut summaries with tags on
+# every server: 0.108.0-0.113.x keep --verbosity full and drop --full,
+# 0.82.0-0.107.x drop both (the full shape is their only one), and older
+# servers ignore both. No server before 0.114.0 sends content. 5,000
+# bytes hold five such rows (about 4,040 characters with 200-character ASCII
+# summaries; CJK text takes up to 3 bytes a character). Install and removal
+# match this command's fixed prefix (see _sdk_prefix), which every earlier
+# form shares, so re-running setup replaces them.
 SESSIONSTART_HOOK_COMMAND = (
     'kagura recall "project context and recent decisions" '
-    "-c {context_id} -k 5 --trusted-only 2>/dev/null | head -c 2000 || true"
+    "-c {context_id} -k 5 --trusted-only --verbosity full --full 0 "
+    "2>/dev/null | head -c 5000 || true"
 )
 
 POSTTOOLUSE_HOOK_COMMAND = (
@@ -1081,6 +1094,13 @@ def run_setup_claude(
     (``None``: not given, on by default). ``guardrails`` must already be
     normalized (``off`` or a canonical UUID), ``add_tools`` by
     ``normalize_add_tools`` and ``default_context`` to a canonical UUID.
+
+    The SessionStart hook runs ``kagura recall --trusted-only --verbosity full
+    --full 0``: uncut summaries with tags, no content. A server that refuses
+    one of those flags (memory-cloud 0.82.0-0.113.x) names it, and the CLI
+    retries once without the ones named, so the same hook gets that shape on
+    every server (0.108.0-0.113.x keep ``--verbosity full``; the full shape is
+    the only one before 0.108.0, and no server before 0.114.0 sends content).
     """
     if profile is not None:
         if api_key is not None:
