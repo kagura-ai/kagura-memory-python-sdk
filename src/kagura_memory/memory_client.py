@@ -43,14 +43,16 @@ class MemoryClient(KaguraRestClient):
     where memory reads and writes otherwise live.
 
     All methods may raise:
-        KaguraAuthError: Authentication failed (401)
+        KaguraAuthError: Authentication failed (401), or an OAuth token
+            without the scope (403 ``insufficient_scope``; the message names
+            it)
         KaguraNotFoundError: Context not found (404). The 404 is uniform
             (CWE-639) — unknown, other-workspace and not-yours contexts are
             indistinguishable by design. A server older than v0.74.0 also
             answers :meth:`get_guardrail_digest` with this 404.
-        KaguraConnectionError: Invalid arguments (422), an OAuth token
-            without the scope (403), a server older than v0.74.0 answering
-            :meth:`load_guardrails` (405), or any other HTTP/connection error
+        KaguraConnectionError: Invalid arguments (422), a server older than
+            v0.74.0 answering :meth:`load_guardrails` (405), or any other
+            HTTP/connection error
         KaguraResponseError: A 2xx body that does not parse as the result
             model (e.g. a ``GuardrailSet`` missing a truncation flag)
         ValueError: ``context_id`` is not a UUID (raised before any request)

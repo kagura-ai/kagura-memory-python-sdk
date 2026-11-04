@@ -940,3 +940,47 @@ def test_parser_help_warns_that_off_removes_the_context_info_block(capsys):
     with pytest.raises(SystemExit):
         mcp_proxy._build_parser().parse_args(["--help"])
     assert "get_context_info" in " ".join(capsys.readouterr().out.split())
+
+
+# ---------------------------------------------------------------------------
+# 403 insufficient_scope (memory-cloud v0.79.0+, #1686)
+# ---------------------------------------------------------------------------
+
+_SCOPE_CHALLENGE = (
+    'Bearer realm="Kagura Memory Cloud", error="insufficient_scope", '
+    'error_description="This tool needs the memory:write scope", scope="memory:read memory:write"'
+)
+_SCOPE_BODY = {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "error": {
+        "code": -32002,
+        "message": "remember needs the OAuth scope memory:write.",
+        "data": {"error": "insufficient_scope", "required_scope": "memory:write"},
+    },
+}
+
+
+@pytest.mark.asyncio
+async def test_forward_insufficient_scope_403_gets_the_relogin_hint():
+    """A read-only sign-in calling a write tool: no refresh (it keeps the scope), a hint."""
+    up, oauth = _upstream(
+        lambda request: httpx.Response(
+            403, json=_SCOPE_BODY, headers={"WWW-Authenticate": _SCOPE_CHALLENGE}
+        )
+    )
+    with pytest.raises(httpx.HTTPStatusError) as exc_info:
+        await up.forward(_tool_call(1))
+    assert oauth.force_calls == 0
+    error = _error_response(_tool_call(1), exc_info.value)
+    assert error is not None
+    message = error["error"]["message"]
+    assert message.startswith("kagura-mcp: The OAuth sign-in lacks the memory:write scope")
+    assert "kagura auth login" in message
+
+
+@pytest.mark.asyncio
+async def test_forward_other_403_jsonrpc_body_still_passes_through():
+    body = {"jsonrpc": "2.0", "id": 1, "error": {"code": -32002, "message": "denied"}}
+    up, _ = _upstream(lambda request: httpx.Response(403, json=body))
+    assert await up.forward(_tool_call(1)) == body

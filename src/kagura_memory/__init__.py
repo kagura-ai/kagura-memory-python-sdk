@@ -6,6 +6,7 @@ from .exceptions import (
     KaguraAuthDeniedError,
     KaguraAuthError,
     KaguraAuthExpiredError,
+    KaguraCapacityLockedError,
     KaguraConnectionError,
     KaguraContextError,
     KaguraError,
@@ -19,6 +20,7 @@ from .exceptions import (
     KaguraQuotaError,
     KaguraRateLimitError,
     KaguraResponseError,
+    KaguraServiceUnavailableError,
 )
 from .files_client import FilesClient
 from .ingest import FileIngestor
@@ -33,6 +35,7 @@ from .models import (
     AgentBootstrapCorrelation,
     AgentBootstrapResponse,
     AgentStatus,
+    CapacityLock,
     ContextDetail,
     ContextGuardrailItem,
     ContextGuardrails,
@@ -130,6 +133,7 @@ __all__ = [
     "UsageInfo",
     "UsageQuota",
     "UsageQuotaLimitOnly",
+    "CapacityLock",
     "SearchConfig",
     "ContextDetail",
     "WorkspaceInfo",
@@ -238,6 +242,8 @@ __all__ = [
     "KaguraResponseError",
     "KaguraQuotaError",
     "KaguraFeatureNotAvailableError",
+    "KaguraCapacityLockedError",
+    "KaguraServiceUnavailableError",
     "KaguraPartialRollbackError",
     "KaguraLLMError",
     "KaguraContextError",

@@ -627,3 +627,112 @@ async def test_revoke_token_returns_false_on_network_failure():
     client = MagicMock()
     client.post = AsyncMock(side_effect=httpx.ConnectError("drop"))
     assert await revoke_token(client, SERVER, token="atok") is False
+
+
+# ---------------------------------------------------------------------------
+# RFC 6749 refusals and temporarily_unavailable (#299)
+# ---------------------------------------------------------------------------
+
+_TOKEN_OK = {
+    "access_token": "atok",
+    "refresh_token": "rtok",
+    "token_type": "Bearer",
+    "expires_in": 3600,
+    "scope": "memory:read",
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "description", "hint"),
+    [
+        ("invalid_request", "Missing required parameter: client_id", None),
+        ("invalid_client", "Unknown client_id", "Verify the server URL"),
+        ("invalid_scope", "This client is registered without a memory scope.", "operator"),
+    ],
+)
+async def test_authorize_device_rfc6749_refusal_carries_the_description(error, description, hint):
+    """memory-cloud v0.78.0+ (#1671) answers device/authorize refusals RFC 6749 shaped."""
+    body = {"error": error, "error_description": description}
+    err = await _authorize_against(httpx.Response(400, json=body))
+    message = str(err)
+    assert message.startswith(f"Device authorization failed (HTTP 400 {error}): {description}")
+    assert err.code == error
+    assert err.details == {"error_description": description}
+    if hint is None:
+        assert "\n" not in message
+    else:
+        assert hint in message
+
+
+async def _poll_with(responses: list[httpx.Response]) -> list[float]:
+    """Poll a server answering ``responses`` in turn; return the sleeps taken."""
+    sleeps: list[float] = []
+    replies = iter(responses)
+
+    async def record_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _r: next(replies))) as c:
+        token = await poll_for_token(
+            c,
+            SERVER,
+            client_id=DEFAULT_CLIENT_ID,
+            device_code="dc",
+            interval=5,
+            expires_at=datetime.now(UTC) + timedelta(minutes=10),
+            sleep=record_sleep,
+        )
+    assert token.access_token == "atok"
+    return sleeps
+
+
+_UNAVAILABLE = {"error": "temporarily_unavailable", "error_description": "Try again."}
+
+
+@pytest.mark.asyncio
+async def test_poll_temporarily_unavailable_keeps_polling_at_the_interval(caplog):
+    caplog.set_level("INFO", logger="kagura_memory")
+    sleeps = await _poll_with(
+        [httpx.Response(503, json=_UNAVAILABLE), httpx.Response(200, json=_TOKEN_OK)]
+    )
+    assert sleeps == [5]
+    assert "temporarily unavailable (HTTP 503); polling again in 5 s" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_poll_temporarily_unavailable_honours_retry_after():
+    sleeps = await _poll_with(
+        [
+            httpx.Response(503, json=_UNAVAILABLE, headers={"Retry-After": "12"}),
+            # A Retry-After below the interval never polls faster than allowed.
+            httpx.Response(400, json=_UNAVAILABLE, headers={"Retry-After": "1"}),
+            httpx.Response(400, json={"error": "authorization_pending"}),
+            httpx.Response(200, json=_TOKEN_OK),
+        ]
+    )
+    assert sleeps == [12, 5, 5]
+
+
+@pytest.mark.asyncio
+async def test_poll_temporarily_unavailable_never_sleeps_past_the_device_code():
+    """A Retry-After longer than the code's lifetime is cut to what is left of it."""
+    sleeps = await _poll_with(
+        [
+            httpx.Response(503, json=_UNAVAILABLE, headers={"Retry-After": "3600"}),
+            httpx.Response(200, json=_TOKEN_OK),
+        ]
+    )
+    [wait] = sleeps
+    assert 590 < wait <= 600  # _poll_with's code lives 10 minutes
+
+
+@pytest.mark.asyncio
+async def test_authorize_device_refusal_without_a_description_keeps_the_code():
+    """RFC 6749 §5.2 makes ``error_description`` optional."""
+    err = await _authorize_against(httpx.Response(400, json={"error": "invalid_client"}))
+    assert str(err) == (
+        "Device authorization failed (HTTP 400 invalid_client)\n"
+        f"  Verify the server URL and that '{DEFAULT_CLIENT_ID}' is registered."
+    )
+    assert (err.code, err.details) == ("invalid_client", {})
