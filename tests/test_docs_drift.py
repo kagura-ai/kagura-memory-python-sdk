@@ -66,6 +66,16 @@ _STALE_PHRASES = [
     "narrow `tools/list` only",
     # #302: content_chunks_enabled / llm_selector_enabled need the context owner.
     "Requires owner or editor permission",
+    # #314: memory-cloud v0.142.0 (#2508) puts acceptance on every recall row
+    # with a supersede_candidate, not only on reference.
+    "Recall rows do not carry",
+    "on `reference` only, `acceptance",
+    # #313: kagura auth refresh / token refresh under the lock since SDK v0.44.0.
+    "`kagura auth refresh`/`token` do not",
+    # #321: --merge-details is one details_patch call on memory-cloud v0.140.0+.
+    "mention: it reads the memory first",
+    # #314: the SDK is checked against memory-cloud v0.142.0.
+    "Checked against memory-cloud up to **v0.141.0**",
 ]
 
 
@@ -138,6 +148,9 @@ def test_no_doc_says_a_non_uuid_is_a_500_without_the_422() -> None:
                 # #302: the event-time filter keys (memory-cloud v0.127.0).
                 "``observed_after``",
                 "``observed_before``",
+                # #314: acceptance on recall rows from memory-cloud v0.142.0.
+                "#2508",
+                "v0.142.0",
             ],
         ),
         (KaguraClient.list_memories, ["``observed_at``", "#2330"]),
@@ -160,6 +173,10 @@ def test_no_doc_says_a_non_uuid_is_a_500_without_the_422() -> None:
                 "duplicate_candidate",
                 "tag_normalized",
                 "#2330",
+                # #314: the v0.142.0 plan headroom notice on a write.
+                "``plan_headroom``",
+                "#2615",
+                "PlanHeadroomNotice",
             ],
         ),
         (
@@ -175,6 +192,12 @@ def test_no_doc_says_a_non_uuid_is_a_500_without_the_422() -> None:
                 "KaguraVersionConflictError",
                 "superseded_memory_id",
                 "edge_exists",
+                # #314: v0.142.0 plan headroom, recall-row acceptance, guardrail gate.
+                "``plan_headroom``",
+                "#2615",
+                "#2508",
+                "``not_writable``",
+                "#2614",
             ],
         ),
         (KaguraClient.create_context, ["invalid_embedding_model", "get_context_info"]),
@@ -196,6 +219,10 @@ def test_no_doc_says_a_non_uuid_is_a_500_without_the_422() -> None:
                 "#2043",
                 "``content_next_offset``",
                 "``record_access: false``",
+                # #314: recall rows too, the guardrail gate, the author-only edge read.
+                "#2508",
+                "#2614",
+                "``details.tool_trigger``",
             ],
         ),
         (KaguraClient.get_usage, ["#1946"]),
@@ -278,3 +305,29 @@ def test_merge_example_reports_pending_embedding() -> None:
     """Since server v0.65.0 ``merged`` counts rows, some not searchable yet."""
     example = (REPO_ROOT / "examples" / "client_advanced.py").read_text(encoding="utf-8")
     assert "pending_embedding" in example
+
+
+def _compat_rows() -> list[str]:
+    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    table = readme.split("## SDK ↔ memory-cloud Compatibility", 1)[1]
+    return [line for line in table.splitlines() if re.match(r"\| \d", line)]
+
+
+def test_compat_table_leads_with_the_0_44_row() -> None:
+    """#314: the newest row says what the SDK was checked against (memory-cloud v0.142.0)."""
+    row = _compat_rows()[0]
+    assert row.startswith("| 0.44.0+ | 0.17.1 — checked against memory-cloud up to **0.142.0**.")
+    issues = re.findall(r"kagura-memory-python-sdk/issues/(\d+)", row)
+    for issue in ("301", "302", "309", "311", "313", "314", "315"):
+        assert issue in issues, f"the 0.44.0+ row does not link SDK #{issue}"
+    for issue in ("2508", "2614", "2615"):
+        assert f"memory-cloud/issues/{issue})" in row, f"the row lacks memory-cloud#{issue}"
+    assert "`MIN_SERVER_VERSION` stays **0.17.1**" in row
+    # Unescaped pipes would split the three-column row.
+    assert len(re.split(r"(?<!\\)\|", row.strip()[1:-1])) == 3
+
+
+@pytest.mark.parametrize("name", ["CLAUDE.md", "AGENTS.md"])
+def test_agent_guides_name_the_checked_server(name: str) -> None:
+    text = (REPO_ROOT / name).read_text(encoding="utf-8")
+    assert "Checked against memory-cloud up to **v0.142.0** (#314; v0.44.0)" in text
