@@ -49,7 +49,10 @@ Options (all optional; the defaults write the same files as before):
   the `guardrails` block from `get_context_info`: use it only once hooks (such as
   the memory-cloud `kagura-memory` plugin's) deliver guardrails. Changing any of
   them never forces a re-login; a re-run without them drops them, so pass them
-  again.
+  again. A blank `--tool-profile` or one starting with `-` is refused (exit 2).
+- `--context-id <id|name>` — the context for the project's hooks and
+  commands. A name is matched exactly (not a display name) on every page of
+  the context list (memory-cloud 0.82.0+ pages it, at most 100 contexts a page).
 - `--no-session-hook`, `--no-sync-hook`, `--no-commands` — skip the SessionStart
   recall hook (`kagura recall --trusted-only --verbosity full --full 0`: trusted
   memories, uncut summaries with tags, no content, at most 5000 bytes), the
@@ -62,6 +65,10 @@ Options (all optional; the defaults write the same files as before):
 
 ## Consume the result
 
+- `Warning: no context named 'NAME' is visible to this credential; using it as
+  a raw context id.` — no context has that exact name for this credential, and
+  setup wrote the value as given. Relay it and offer `kagura context list
+  --name-contains NAME` to find the right one, then a re-run.
 - With `--scope user` the entry lives in `~/.claude.json` (via `claude mcp
   add-json`), not in `.mcp.json`. For an API key, relay setup's
   `KAGURA_MCP_API_KEY` note, and never print or ask for the key yourself: the
@@ -87,7 +94,9 @@ only from 0.77.0 (memory-cloud#1657). Setup writes it only through the harness C
 file and edits nothing. Options:
 
 - `--context-id <id|name>` — Codex: the entry runs `kagura-mcp --guardrails <uuid>`,
-  so that context's tool guardrail digest arrives in the MCP instructions.
+  so that context's tool guardrail digest arrives in the MCP instructions. A
+  name is matched exactly on every page of the context list; one that matches
+  no context stops setup ("No context") before it writes anything.
   Hermes/OpenClaw do not read instructions; `--guardrails off` is refused for
   them (exit 2) because it would also remove the `get_context_info` guardrails
   block, their only guardrail lane.

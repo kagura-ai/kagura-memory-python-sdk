@@ -1,6 +1,6 @@
 ---
 name: memory
-description: Store and search memories with the `kagura` CLI — `kagura remember` (with `--tags`, `--details`, `--location`) and `kagura recall` (`--trusted-only`, `--rerank/--no-rerank`, `--verbosity`, `--full`, `--max-chars`), plus `reference`, `update-memory` and `forget`. Use when the user wants to save a fact, decision or note to Kagura Memory, or search what is already stored.
+description: Store and search memories with the `kagura` CLI — `kagura remember` (with `--tags`, `--details`, `--location`) and `kagura recall` (`--trusted-only`, `--rerank/--no-rerank`, `--verbosity`, `--full`, `--max-chars`), plus `reference`, `update-memory` and `forget` (`--ids` for several), and `bootstrap` / `changes` to open a session. Use when the user wants to save a fact, decision or note to Kagura Memory, or search what is already stored.
 ---
 
 # kagura memory — remember and recall
@@ -44,8 +44,14 @@ kagura reference -m <uuid>
 kagura update-memory -m <uuid> -s "updated summary" --tags "auth,oauth"
 kagura update-memory -m <uuid> --location "35.68,139.76,Tokyo HQ" --merge-details   # keeps the other details keys
 kagura update-memory -m <uuid> --details '{"location": {"lat": 35.68, "lon": 139.76}, "client": "acme"}'   # replaces them all
+kagura update-memory -m <uuid> --add-tag status:done --remove-tag status:open --expected-version 3
 kagura forget -m <uuid>                                    # soft delete, one memory
+kagura forget --ids "<uuid>,<uuid>"                        # up to 50, one result row per id
 kagura forget -q "outdated test data" -k 5                 # bulk delete by search
+
+# session start and what changed (read-only, no search)
+kagura bootstrap --since 7d --format index --max-chars 5000
+kagura changes 2026-11-01T00:00:00Z --by-me
 ```
 
 Guardrails for `--details` / `--location` (`remember` and `update-memory`):
@@ -66,15 +72,22 @@ Guardrails for `--details` / `--location` (`remember` and `update-memory`):
   `details` wholesale — the server does not deep-merge — so a bare `--location`
   drops every other key (the memory keeps its place on the WHERE axis, but
   loses the rest) and `--details '{}'` clears them. Add `--merge-details` to
-  keep the keys you do not mention: it reads the memory first (`reference`, so
-  two calls, not one atomic update) and shallow-merges the top-level keys —
+  keep the keys you do not mention: it sends them as a `details_patch`, so the
+  server merges the top-level keys in one call (memory-cloud 0.140.0+) —
   `location` itself is replaced whole, label included, so re-send
-  `lat,lon,label` to keep a label. It needs `-m`, cannot remove a key (the one
-  exception is `"tool_trigger": null`, which unmarks a guardrail; `"location":
-  null` is a server 422 — to drop a key, send the full object without
-  `--merge-details`), and writes nothing when the server's bounded `reference`
-  reply left `details` out (memory-cloud 0.78.0+ on a large memory) — then
-  re-send the complete object with `--details` and without `--merge-details`.
+  `lat,lon,label` to keep a label — and a key given as `null` is deleted. It
+  needs `-m`. `--details-patch '<json>'` sends a patch you write yourself.
+  An older server gets a fallback with a `note:` on stderr: the CLI reads the
+  memory first (`reference`, so two calls, not one atomic update) and writes
+  the merged object; it writes nothing when the bounded `reference` reply left
+  `details` out (memory-cloud 0.78.0+ on a large memory) — then re-send the
+  complete object with `--details` and without `--merge-details`. When it
+  exits 1 saying the server ignored other flags, relay which ones.
+- `--add-tag` / `--remove-tag` (repeatable, memory-cloud 0.140.0+) edit the
+  stored tags without resending them; `--tags` replaces the whole list.
+  `--expected-version N` (0.113.0+) writes nothing when another edit landed
+  since you read the memory, and prints the `Current version`: read it again
+  (`reference`) and ask before retrying.
 
 Search options:
 
@@ -118,8 +131,9 @@ Search options:
   `details_omitted` before treating `content` or `details` as complete. The
   CLI cannot page the rest; the MCP `reference` tool can (`max_chars`,
   `*_offset`).
-- `update-memory` → `memory_id`, `operation`, `re_embedded`, `scope`, plus the
-  same optional `lint` as `remember` (re-check it after fixing a hint);
+- `update-memory` → `memory_id`, `operation`, `re_embedded`, `scope`,
+  `version` (memory-cloud 0.113.0+), plus the same optional `lint` as
+  `remember` (re-check it after fixing a hint);
   `supersede_candidate_dismissed` is the only confirmation that
   `--dismiss-supersede-candidate` applied — absent when the memory had no live
   candidate or the server predates v0.65.0.
@@ -129,4 +143,15 @@ Search options:
   deleted; a `-q` sweep can delete fewer than `-k` for the same reason.
   Deletion is soft and stays recoverable until the deployment's retention
   window passes; `-q` is refused while recall is degraded. Confirm with the
-  user before a `-q` bulk delete.
+  user before a `-q` bulk delete. `--ids` → `succeeded` and one row per id
+  (`deleted`, `skipped`: not found or not yours, or `error`); resend only the
+  ids whose `error` is `not_attempted`. When every id failed the command exits
+  1 and prints those rows on stderr.
+- `remember` / `update-memory` (memory-cloud 0.142.0+) may carry
+  `plan_headroom`: a plan cap at 80 % (`warning`) or 95 % (`critical`) of its
+  limit, with a `help` sentence. Relay a `critical` one to the user; it is
+  shown at most hourly, so its absence does not mean there is room.
+- `bootstrap` → `context`, `guardrails` and `components` (`pinned`,
+  `upcoming`, `changes`, each with its own `status`); `degraded: true` means
+  a lane failed. `changes` → `changes` (oldest first), `has_more` and
+  `next_cursor` (pass it as `--cursor`).
