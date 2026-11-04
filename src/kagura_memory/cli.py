@@ -1304,7 +1304,12 @@ def forget(context_id, memory_id, query, k, memory_ids):
             raise click.ClickException("-k applies to --query only, not to --ids")
 
         async def forget_ids(client: KaguraClient, ctx: str) -> dict[str, Any]:
-            result = await client.forget(context_id=ctx, memory_ids=ids)
+            try:
+                result = await client.forget(context_id=ctx, memory_ids=ids)
+            except KaguraError as e:
+                # batch_failed: every id failed, and the rows say which to resend.
+                _echo_forget_rows(e.details.get("results"))
+                raise
             return result.model_dump(mode="json")
 
         _run_client_command(forget_ids, context_id)
@@ -1318,6 +1323,24 @@ def forget(context_id, memory_id, query, k, memory_ids):
         ),
         context_id,
     )
+
+
+def _echo_forget_rows(rows: Any) -> None:
+    """Print one ``<memory_id> <status> [<error>]`` line per row on stderr.
+
+    For a ``forget --ids`` that raised with the per-id rows in its details
+    (``batch_failed``), so the ids whose error is ``not_attempted`` can be
+    resent. Anything that is not a list of rows prints nothing.
+    """
+    if not isinstance(rows, list):
+        return
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        line = f"{row.get('memory_id')} {row.get('status')}"
+        if row.get("error"):
+            line += f" {row['error']}"
+        click.echo(line, err=True)
 
 
 @main.group()

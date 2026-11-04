@@ -18,6 +18,7 @@ from kagura_memory import (
     BootstrapResponse,
     ChangesSinceResponse,
     ForgetBatchResult,
+    KaguraError,
     ListMatchingResponse,
 )
 from kagura_memory.cli import main
@@ -68,6 +69,50 @@ def test_forget_ids_sends_the_list_and_prints_the_rows():
     client.forget.assert_awaited_once_with(context_id=CTX, memory_ids=[MEM_A, MEM_B])
     printed = json.loads(result.output)
     assert printed["results"][1]["error"] == "not_attempted"
+
+
+def test_forget_ids_batch_failed_prints_the_rows_on_stderr():
+    """Every id failed: one line per id, then the error, so not_attempted can be resent."""
+    error = KaguraError("forget failed (batch_failed): No id was deleted; see results.")
+    error.code = "batch_failed"
+    error.details = {
+        "results": [
+            {"memory_id": MEM_A, "status": "error", "error": "not_attempted", "message": "x"},
+            {"memory_id": MEM_B, "status": "error", "error": "permission_denied"},
+        ],
+        "failed": 2,
+    }
+    client = AsyncMock()
+    client.forget.side_effect = error
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=None)
+    config = {"api_key": "key", "mcp_url": "https://test.com/mcp", "context_id": CTX}
+    with (
+        patch("kagura_memory.cli.load_config", return_value=config),
+        patch("kagura_memory.cli.KaguraClient", return_value=client),
+    ):
+        result = CliRunner().invoke(main, ["forget", "--ids", f"{MEM_A},{MEM_B}"])
+
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    lines = result.stderr.splitlines()
+    assert lines[:2] == [f"{MEM_A} error not_attempted", f"{MEM_B} error permission_denied"]
+    assert "batch_failed" in result.stderr.split("\n", 2)[2]
+
+
+def test_forget_ids_other_errors_print_no_rows():
+    client = AsyncMock()
+    client.forget.side_effect = KaguraError("forget failed (invalid_argument): bad")
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=None)
+    config = {"api_key": "key", "mcp_url": "https://test.com/mcp", "context_id": CTX}
+    with (
+        patch("kagura_memory.cli.load_config", return_value=config),
+        patch("kagura_memory.cli.KaguraClient", return_value=client),
+    ):
+        result = CliRunner().invoke(main, ["forget", "--ids", MEM_A])
+    assert result.exit_code == 1
+    assert result.stderr.startswith("Error: forget failed (invalid_argument)")
 
 
 def test_forget_ids_refuses_another_target_and_an_empty_list():
