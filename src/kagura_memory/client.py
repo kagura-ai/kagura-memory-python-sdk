@@ -1464,6 +1464,8 @@ class KaguraClient:
         key: str | None = None,
         *,
         cursor: str | None = None,
+        limit: int | None = None,
+        max_chars: int | None = None,
     ) -> dict[str, Any]:
         """Read ephemeral agent run-state.
 
@@ -1473,18 +1475,28 @@ class KaguraClient:
         returned. This lane is excluded from :meth:`recall` by design.
 
         Since memory-cloud v0.82.0 (#1743) the list is paged in key order:
-        50 entries a page within the server's 20,000-character budget. The
-        reply then carries ``has_more`` and ``next_cursor``; pass
-        ``next_cursor`` back as ``cursor`` for the next page. A value too
-        large for the page is named in ``omitted_keys`` instead (read it by
-        ``key``). Older servers return every entry and no paging fields.
+        50 entries a page by default (``limit``) within a 20,000-character
+        budget by default (``max_chars``). The reply then carries
+        ``has_more`` and ``next_cursor``; pass ``next_cursor`` back as
+        ``cursor`` for the next page. A value too large for the page is named
+        in ``omitted_keys`` instead (read it by ``key``). Older servers return
+        every entry and no paging fields, and ignore ``cursor``, ``limit``
+        and ``max_chars``.
 
         Args:
             context_id: Target context UUID.
             key: Optional state key. Omit to list the live ``(key, value)``
                 entries for the context.
             cursor: List mode only: the ``next_cursor`` of the previous page.
-                Sent only when set (memory-cloud v0.82.0+). Keyword-only.
+                Sent only when set (memory-cloud v0.82.0+). Keyword-only, like
+                the two below.
+            limit: List mode only: entries per page, 1-200 (server default
+                50). Sent only when set and checked before any request.
+                Requires memory-cloud v0.82.0+ (#1743).
+            max_chars: List mode only: the page's budget in characters, not
+                tokens, 10,000-100,000 (server default 20,000). Sent only when
+                set and checked before any request. Requires memory-cloud
+                v0.82.0+ (#1743).
 
         Returns:
             API response with the value for ``key``, or one page of live
@@ -1493,17 +1505,24 @@ class KaguraClient:
             left out, ``omitted_keys``.
 
         Raises:
-            ValueError: ``cursor`` is given together with ``key``.
+            ValueError: ``cursor``, ``limit`` or ``max_chars`` is given
+                together with ``key``, or ``limit`` / ``max_chars`` is not an
+                ``int`` in range.
             KaguraNotFoundError: Context not found.
             KaguraError: Other server-side error.
         """
-        if key is not None and cursor is not None:
-            raise ValueError("cursor pages the list of entries; omit key to list them")
+        paging = {"cursor": cursor, "limit": limit, "max_chars": max_chars}
+        sent = [name for name, value in paging.items() if value is not None]
+        if key is not None and sent:
+            raise ValueError(f"{', '.join(sent)}: list mode only; omit key to list the entries")
+        if limit is not None:
+            _validate_int_range("limit", limit, 1, _STATE_LIST_MAX_LIMIT)
+        if max_chars is not None:
+            _validate_max_chars(max_chars)
         arguments: dict[str, Any] = {"context_id": context_id}
         if key is not None:
             arguments["key"] = key
-        if cursor is not None:
-            arguments["cursor"] = cursor
+        arguments.update({name: paging[name] for name in sent})
         return await self._call_tool_checked("get_state", arguments)
 
     async def get_agent_bootstrap(
@@ -1930,6 +1949,7 @@ class KaguraClient:
         include_details: bool = False,
         include_stats: bool = False,
         cursor: str | None = None,
+        limit: int | None = None,
     ) -> dict[str, Any]:
         """List the contexts you can access, most recently used first.
 
@@ -1947,10 +1967,14 @@ class KaguraClient:
         needs v0.75.0+. ``include_stats`` works on any server.
 
         Since memory-cloud v0.82.0 (#1743) the directory is paged: 100
-        contexts a page (20 with ``include_details`` and no
-        ``name_contains``), and a page also stops at the server's
-        20,000-character budget. ``has_more`` says more contexts follow;
-        pass ``next_cursor`` back as ``cursor`` for the next page.
+        contexts a page by default (20 with ``include_details`` and no
+        ``name_contains``), or ``limit``, and a page also stops at the
+        server's 20,000-character budget. That budget is fixed: unlike
+        :meth:`get_state`, ``list_contexts`` declares no ``max_chars``, and a
+        server from v0.82.0 refuses an argument its schema does not declare
+        (``invalid_argument``, #1742). ``has_more`` says more contexts follow;
+        pass ``next_cursor`` back as ``cursor`` for the next page, with the
+        same ``name_contains`` (the cursor counts rows of the filtered list).
 
         Args:
             name_contains: Only contexts whose name or display name contains
@@ -1964,6 +1988,13 @@ class KaguraClient:
             include_stats: Add ``memory_count`` per context.
             cursor: The ``next_cursor`` of the previous page. Sent only when
                 set (memory-cloud v0.82.0+).
+            limit: Contexts per page, 1-200 (server default 100). With
+                ``include_details`` and no ``name_contains`` the server allows
+                at most 20 (and defaults to 20). A page can hold fewer: it
+                also stops at 20,000 characters. Keyword-only, sent only when
+                set, and checked before any request. Requires memory-cloud
+                v0.82.0+ (#1743); an older server ignores it and returns every
+                context.
 
         Returns:
             The envelope ``{status, contexts, count, total, limit, can_create,
@@ -1990,6 +2021,14 @@ class KaguraClient:
               select a workspace in the web UI. A ``name_contains`` that
               matches nothing does not produce it, and neither does a failed
               access lookup (which also answers with an empty list).
+
+            The envelope's ``limit`` is the plan's context maximum, not the
+            page size argument of the same name.
+
+        Raises:
+            ValueError: ``limit`` is not an ``int`` in 1-200, or is above 20
+                with ``include_details`` and no ``name_contains`` (the server
+                refuses that page with ``validation_error``).
         """
         arguments: dict[str, Any] = {}
         if name_contains:
@@ -2002,6 +2041,16 @@ class KaguraClient:
             arguments["include_stats"] = True
         if cursor is not None:
             arguments["cursor"] = cursor
+        if limit is not None:
+            _validate_int_range("limit", limit, 1, _LIST_CONTEXTS_MAX_LIMIT)
+            # The server trims name_contains, so a blank one is no filter there.
+            filtered = bool(name_contains and name_contains.strip())
+            if include_details and not filtered and limit > _LIST_CONTEXTS_DETAILS_MAX_LIMIT:
+                raise ValueError(
+                    "include_details returns full summaries: pass name_contains or a limit "
+                    f"of at most {_LIST_CONTEXTS_DETAILS_MAX_LIMIT}, got {limit}"
+                )
+            arguments["limit"] = limit
         return await self._call_tool_checked("list_contexts", arguments)
 
     async def list_tags(
@@ -3704,6 +3753,13 @@ _STATE_VALUE_MAX_CHARS = 16_384
 _MAX_AUTO_PAGES = 50
 # list_edges per-direction clamp (server ``LIST_EDGES_MAX_LIMIT``).
 _LIST_EDGES_MAX_LIMIT = 200
+# list_contexts page sizes (server ``_LIST_CONTEXTS_MAX_LIMIT``, and
+# ``_LIST_CONTEXTS_DETAILS_MAX_LIMIT`` for include_details without
+# name_contains). Out of range the server clamps the first and refuses the second.
+_LIST_CONTEXTS_MAX_LIMIT = 200
+_LIST_CONTEXTS_DETAILS_MAX_LIMIT = 20
+# get_state list-mode page size (server ``STATE_LIST_MAX_LIMIT``, clamped there).
+_STATE_LIST_MAX_LIMIT = 200
 # get_sleep_report envelope keys merged into the flattened report.
 _SLEEP_REPORT_ENVELOPE_KEYS = (
     "actions",
