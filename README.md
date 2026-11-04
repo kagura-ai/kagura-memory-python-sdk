@@ -699,8 +699,7 @@ kagura resource schema -r products
 
 # Sleep Maintenance — observability + rollback
 kagura sleep history <context-id> --limit 5 --source all  # sleep (default) | analysis | all (server 0.138.0+)
-kagura sleep report <context-id> <report-id> --actions-limit 100  # page on with --actions-cursor (0.82.0+)
-kagura sleep report <context-id> <report-id>          # <context-id> is kept for compatibility and ignored:
+kagura sleep report <context-id> <report-id> [--actions-limit 100] [--actions-cursor C]  # <context-id> is kept for compatibility and ignored:
 kagura sleep rollback <context-id> <report-id> -y    # the server finds the run by <report-id> (destructive: prompts unless --yes / -y)
 
 # Tool guardrails (server v0.74.0+); context-id defaults to .kagura.json
