@@ -99,7 +99,11 @@ class WorkspaceClient(KaguraRestClient):
             here does NOT prove the resource is absent.
         KaguraFeatureNotAvailableError: The plan lacks team invitations
             (``FEAT-001``, server v0.75.0+; older servers answer a plain
-            403, raised as KaguraConnectionError)
+            403, raised as KaguraConnectionError), or — on every route,
+            server v0.100.0+ (memory-cloud#1943) — the caller is a member
+            without a seat after the plan dropped below the workspace's
+            members (``feature == "members"``, with ``limit`` / ``current``
+            in ``details``)
         KaguraQuotaError: Member seat cap (``quota_type="members"`` on
             server v0.75.0+) or rate limit exceeded (429)
     """
@@ -136,6 +140,11 @@ class WorkspaceClient(KaguraRestClient):
         Duplicate members are rejected with 422. ``.``, ``..`` and an
         empty id are refused (``ValueError``): no other method could
         address such a member afterwards.
+
+        Since memory-cloud v0.99.0 (#1939) this checks the plan like
+        :meth:`create_invitation`: a plan without the ``team_invitations``
+        feature raises :class:`KaguraFeatureNotAvailableError` and a full
+        seat cap :class:`KaguraQuotaError` (``quota_type="members"``).
         """
         workspace_id = _normalize_workspace_id(workspace_id)
         _user_id_segment(user_id)

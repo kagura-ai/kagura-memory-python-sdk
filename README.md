@@ -389,10 +389,29 @@ subclass; `.operation` names the MCP tool or `<Client>.<method>`, e.g.
 `KaguraClient.get_server_info`, which `check_server_version` reports too) instead of a raw
 pydantic `ValidationError` or `KeyError`. The message names the failing fields, not their
 values. Upgrading `kagura-memory` is the likely fix. A network failure, a non-JSON 2xx body and
-a non-2xx status other than 401/429 raise `KaguraConnectionError` instead.
+a non-2xx status other than 401, 429 and a 403 `insufficient_scope` raise `KaguraConnectionError`
+instead (a 503 its subclass `KaguraServiceUnavailableError`).
 
-Plan and quota refusals raise typed errors, from the `KaguraClient` MCP tool methods and the
-REST clients alike. All three are `KaguraError` subclasses:
+Every error the server reported keeps what it sent: `code` is its error code (the MCP envelope's
+`error`, e.g. `payload_too_large` or `version_conflict`, or the REST `error`, e.g. `FEAT-001`) and
+`details` its other fields. Branch on `code`, never on the message. Since memory-cloud 0.78.0 an
+MCP refusal carries `help`, the next step, and a server failure `cause` (`timeout`,
+`service_unavailable`, `internal_error`), `correlation_id`, `retryable` and, for a write,
+`outcome: "unknown"` with the read that shows whether it took effect; `KaguraError` exposes
+these as the `help`, `cause`, `correlation_id`, `retryable` and `outcome` properties. A memory
+over 1 MB is a plain `KaguraError` with `code == "payload_too_large"` and `limit` / `actual` in
+`details` (memory-cloud 0.108.0+; REST keeps `429 QUOTA-001`).
+
+An OAuth token without the scope a call needs (HTTP 403 `insufficient_scope`, memory-cloud
+0.79.0+) raises `KaguraAuthError` naming the scope: `memory:read` for the read-only tools,
+`recall` and `get_agent_bootstrap`, `memory:write` for every other tool, so a
+`kagura auth login --read-only` profile gets it on every write. An HTTP 503 raises
+`KaguraServiceUnavailableError`, a `KaguraConnectionError` with `retry_after` (from
+`Retry-After`) and `reason` (REST `DB-002`'s `details.reason`, the MCP `cause`, or
+`temporarily_unavailable` when `/mcp` could not verify the credential).
+
+Plan, quota and capacity refusals raise typed errors, from the `KaguraClient` MCP tool methods
+and the REST clients alike. All four are `KaguraError` subclasses:
 
 - `KaguraQuotaError` — a quota or cap was reached: `remember` past the daily memory quota, a
   tool call past the daily MCP call cap, `create_context` at the context cap, the
@@ -410,7 +429,16 @@ REST clients alike. All three are `KaguraError` subclasses:
   runs.
 - `KaguraFeatureNotAvailableError` — the workspace cannot use the feature. `gate` says why:
   `"plan"` means an upgrade lifts it (`required_plan` / `required_plan_display`), while
-  `"allowlist"` and `"deployment"` have no upgrade path.
+  `"allowlist"` and `"deployment"` have no upgrade path. Since memory-cloud 0.100.0 a plan that
+  dropped below what the workspace holds raises it too: `feature == "members"` on every
+  workspace route for a member without a seat, `feature == "contexts"` on a content write into
+  a context without a writable slot. Resource ingest raises it when the plan's allowance is 0.
+- `KaguraCapacityLockedError` — a Free workspace over its capacity is locked (memory-cloud
+  0.99.0+): search and saving are refused until it is cleaned up or re-subscribed, while
+  listing, deleting, export and `get_usage` keep working. `cleanup_url` is the page to do it,
+  and `over_memories` / `over_bytes` (with `memory_count`, `memory_limit`, `used_bytes`,
+  `storage_limit_bytes`) say how far over it is. It is neither a quota nor a plan gate.
+  `get_usage().capacity_lock` reports the same figures while the lock holds.
 - `KaguraPartialRollbackError` — `rollback_sleep_run` reversed only part of the run.
   `.summary` is the `RollbackSummary` of what was reversed, with the failed steps in `errors`.
   It is `None` when the server's summary could not be read.
@@ -419,8 +447,9 @@ Against memory-cloud 0.75.0+ the SDK types a refusal by its `gate` descriptor
 ([#1644](https://github.com/kagura-ai/memory-cloud/issues/1644)). Against older servers it
 falls back to the error code and the legacy fields. A `quota_exceeded` refusal that names no
 quota, such as the 1 MB memory-size guard, stays a plain `KaguraError`, because no plan lifts it
-and waiting does not help. `kagura` commands print the reset time and the required plan under
-the error message.
+and waiting does not help. `kagura` commands print the reset time, the required plan, the
+cleanup page, the 503 retry window and the server's `help` and correlation id under the error
+message.
 
 ```python
 from kagura_memory import KaguraFeatureNotAvailableError, KaguraQuotaError

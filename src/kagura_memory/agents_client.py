@@ -52,6 +52,8 @@ class AgentsClient(KaguraRestClient):
             indistinguishable by design, so a 404 does NOT prove the
             resource is absent.
         KaguraQuotaError: Rate limit or agent quota exceeded (429)
+        KaguraCapacityLockedError: :meth:`bootstrap` on a Free workspace
+            over its capacity (403 ``CAPACITY-001``, server v0.99.0+)
     """
 
     async def bootstrap(
