@@ -774,12 +774,12 @@ async def refresh_profile_locked(
     Raises:
         KaguraAuthExpiredError: The profile holds no refresh token, or the
             server answered ``invalid_grant``.
-        KaguraAuthError: Any other OAuth refusal (e.g. ``invalid_scope``), or
-            the refreshed profile could not be saved (an ``OSError``, chained).
+        KaguraAuthError: Any other OAuth refusal (``code`` is the OAuth
+            error, e.g. ``invalid_scope``); the file exists but cannot be
+            read or parsed (checked before any network call); or the
+            refreshed profile could not be saved (an ``OSError``, chained).
             The server has rotated by then, so the profile on file can no
             longer be refreshed and the message says to log in again.
-        KaguraAuthError: Also when the file exists but cannot be read or
-            parsed (checked before any network call).
         KaguraConnectionError: Network failure.
         TimeoutError: Another holder kept the lock past the acquire timeout.
     """
@@ -810,7 +810,7 @@ async def refresh_profile_locked(
                 f"Refreshed profile '{profile_name}', but could not save it to {path}: "
                 f"{_exc_message(e)}\n"
                 "  The refresh used up the refresh token on file, so the profile "
-                "cannot be refreshed again.\n"
+                "on file cannot be refreshed again.\n"
                 "  Fix the cause, then run: kagura auth login",
                 refreshed,
                 on_file.refresh_token if on_file is not None else None,
