@@ -6,17 +6,26 @@ import os
 import re
 import shlex
 import subprocess
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import aclosing, contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qsl, urlsplit, urlunsplit
+from urllib.parse import urlsplit, urlunsplit
 
 import click
 
 from . import claude_code
 from ._auth import _resolve_profile_auth
-from ._http import mcp_url_guardrails_off, mcp_url_has_tools_allowlist, mcp_url_with_query
+from ._http import (
+    is_canonical_uuid,
+    mcp_query_tool_view,
+    mcp_url_guardrails_off,
+    mcp_url_has_tools_allowlist,
+    mcp_url_query_values,
+    mcp_url_with_query,
+    uuid_or_none,
+)
 from .auth.credentials import CredentialsFile, OAuthCredentials
 from .claude_code import (
     MCP_API_KEY_ENV,
@@ -35,10 +44,15 @@ from .claude_code import (
 
 # Re-exported: the detector lived here before #258, and callers import it from here.
 from .claude_code import detect_mcp_json_mode as detect_mcp_json_mode
-from .client import KaguraClient
+from .client import KaguraClient, _iter_pages
 from .exceptions import KaguraAuthError, KaguraConnectionError, _exc_message
 
 DEFAULT_MCP_URL = "http://localhost:8080/mcp"
+
+# The longest ``name_contains`` list_contexts takes (memory-cloud
+# ``_LIST_CONTEXTS_NAME_FILTER_MAX_LENGTH``), which is also the longest
+# context name the server creates.
+_CONTEXT_NAME_MAX_CHARS = 100
 
 # Trailing space distinguishes "kagura recall/remember" from "kagura-memory" in MCP config
 KAGURA_HOOK_MARKER = "kagura "
@@ -182,9 +196,148 @@ async def _test_connection(
     *,
     profile: str | None = None,
 ) -> dict[str, Any]:
-    """Test connection and return contexts list."""
+    """Test the connection; return the first page of ``list_contexts``.
+
+    A connectivity check, so one page is enough: from memory-cloud 0.82.0
+    (#1743) it holds at most the 100 most recently used contexts (fewer when
+    the page reaches the server's character budget), with ``has_more`` when
+    more follow (an older server returns every context). The
+    suggested context and the pick lists offer this page only; a context
+    given by name is also looked up past it (:func:`_lookup_context`).
+    """
     async with _make_client(api_key, mcp_url, profile) as client:
         return await client.list_contexts()
+
+
+def _connection_error(
+    e: KaguraAuthError | KaguraConnectionError, server: str | None, profile: str | None
+) -> click.ClickException:
+    """Setup's error for a failed request, with the hint for its credential.
+
+    ``profile`` set: the OAuth profile's (sign in again); otherwise the API
+    key's. ``server`` is the URL the message names.
+    """
+    if isinstance(e, KaguraAuthError):
+        hint = (
+            f"Your token may have expired — re-run: kagura auth login --profile {profile}"
+            if profile is not None
+            else "Check your API key at: Kagura Web UI > Integrations > API Keys"
+        )
+        return click.ClickException(f"Authentication failed: {_exc_message(e)}\n  {hint}")
+    hint = "" if profile is not None else "\n  Is the server running? Try: docker compose up -d"
+    return click.ClickException(f"Cannot connect to {server}: {_exc_message(e)}{hint}")
+
+
+@contextmanager
+def _connection_hints(server: str | None, profile: str | None) -> Iterator[None]:
+    """Raise an auth or connection failure in the block as the connection check does.
+
+    For the requests setup sends after the check on the same credential (the
+    context lookup, creating a context), so their failures carry the same
+    hints (:func:`_connection_error`). Any other exception propagates.
+    """
+    try:
+        yield
+    except (KaguraAuthError, KaguraConnectionError) as e:
+        raise _connection_error(e, server, profile) from e
+
+
+async def _find_context_by_name(
+    name: str,
+    api_key: str | None = None,
+    mcp_url: str | None = None,
+    *,
+    profile: str | None = None,
+) -> dict[str, Any] | None:
+    """The context named exactly ``name``, from ``list_contexts(name_contains=name)``.
+
+    ``name_contains`` is the server's case-insensitive substring match on the
+    name or the display name (memory-cloud 0.73.0+), so a page can hold
+    other contexts too: only a row whose ``name`` equals ``name`` as the
+    server stores it is taken, as on the first page; a display name never
+    counts (list rows do not carry it). Pages are followed with ``cursor``
+    while ``has_more`` says more match (0.82.0+), at most 50, the bound
+    :meth:`KaguraClient.list_agents` uses. The first match in the server's
+    most-recently-used order wins.
+
+    Returns:
+        The matching ``list_contexts`` row, or None when no page has one.
+
+    Raises:
+        KaguraResponseError: A page says ``has_more`` without a usable
+            ``next_cursor`` or repeats an earlier one, or the matches do
+            not end within 50 pages.
+    """
+    async with _make_client(api_key, mcp_url, profile) as client:
+        pages = _iter_pages(client, "list_contexts", {"name_contains": name})
+        async with aclosing(pages):
+            async for page in pages:
+                for ctx in page.get("contexts") or []:
+                    if isinstance(ctx, dict) and ctx.get("id") and ctx.get("name") == name:
+                        return ctx
+    return None
+
+
+@dataclass(frozen=True)
+class _ContextLookup:
+    """What :func:`_lookup_context` found for a context id or name: one of three.
+
+    - Matched: ``context`` is the row whose id or exact name ``value`` is.
+    - Unknown (``unknown``): ``value`` names no context the credential can
+      see. It is not a UUID, and either every page was searched for the
+      name or it is longer than any context name.
+    - Neither: ``value`` is used as given. It is a UUID (the dashed form is
+      not looked up by name; another spelling matched no name), or blank.
+
+    ``value`` is the value looked up, trimmed: what is compared, sent and
+    used.
+    """
+
+    value: str
+    context: dict[str, Any] | None = None
+    unknown: bool = False
+
+
+def _lookup_context(
+    chosen: str,
+    first_page: dict[str, Any],
+    api_key: str | None = None,
+    mcp_url: str | None = None,
+    *,
+    profile: str | None = None,
+) -> _ContextLookup:
+    """Resolve ``chosen``, a context id or an exact name, to a context.
+
+    ``chosen`` is trimmed first, as the server reads ``name_contains``.
+    ``first_page`` is the first ``list_contexts`` page
+    (:func:`_test_connection`); a row there with that id or name wins. A
+    UUID in the dashed form is an id and is not looked up further. Any
+    other value is looked up as a name: when ``first_page`` is not the
+    whole list (``has_more``, memory-cloud 0.82.0+), on every page with
+    :func:`_find_context_by_name`, on the credential ``api_key`` /
+    ``mcp_url`` / ``profile`` name (as for :func:`_make_client`). A blank
+    value, or one longer than any context name, is not sent
+    (``name_contains`` reads blank as no filter and refuses a longer one).
+
+    Raises:
+        KaguraResponseError: See :func:`_find_context_by_name`.
+        KaguraAuthError: The lookup's credential was refused.
+        KaguraConnectionError: The lookup could not reach the server.
+    """
+    value = chosen.strip()
+    for ctx in first_page.get("contexts") or []:
+        if isinstance(ctx, dict) and ctx.get("id") and value in (ctx["id"], ctx.get("name")):
+            return _ContextLookup(value, context=ctx)
+    if not value or is_canonical_uuid(value):
+        return _ContextLookup(value)
+    if len(value) > _CONTEXT_NAME_MAX_CHARS:  # longer than any context name, or UUID
+        return _ContextLookup(value, unknown=True)
+    if first_page.get("has_more") is True:
+        ctx = asyncio.run(_find_context_by_name(value, api_key, mcp_url, profile=profile))
+        if ctx is not None:
+            return _ContextLookup(value, context=ctx)
+    # Every page was searched for the name; another spelling of a UUID is still an id.
+    return _ContextLookup(value, unknown=uuid_or_none(value) is None)
 
 
 async def _create_context(
@@ -246,20 +399,39 @@ def _select_or_create_context(
 ) -> str:
     """Select existing context or create a new one. Returns context_id.
 
-    When ``profile`` is set, any context creation authenticates via the OAuth
-    profile instead of ``api_key`` / ``mcp_url``.
+    ``contexts_response`` is the first ``list_contexts`` page. A
+    ``preselected`` id or exact name is matched there, and a name outside
+    that page on every page (:func:`_lookup_context`); a value no page
+    matches is used as given, trimmed. A value that names no context this
+    credential can see (:class:`_ContextLookup`'s ``unknown``: not a UUID,
+    and every page was searched, or it is longer than any context name)
+    gets a warning on stderr first. When ``profile`` is set, the lookup and
+    any context creation authenticate via the OAuth profile instead of
+    ``api_key`` / ``mcp_url``.
+
+    Raises:
+        KaguraAuthError: The name lookup or creating the context was
+            refused the credential (the setup flows add their hints with
+            :func:`_connection_hints`).
+        KaguraConnectionError: The same, unable to reach the server.
+        KaguraResponseError: The name lookup's pages do not add up.
     """
     contexts = contexts_response.get("contexts", [])
 
     if preselected:
-        for ctx in contexts:
-            if ctx.get("id") == preselected or ctx.get("name") == preselected:
-                ctx_id = ctx.get("id", preselected)
-                click.echo(f"  Using context: {ctx.get('name', '?')} ({ctx_id[:8]}...)")
-                return ctx_id
-        # Treat as raw UUID if not found in context list
-        click.echo(f"  Using context: {preselected}")
-        return preselected
+        found = _lookup_context(preselected, contexts_response, api_key, mcp_url, profile=profile)
+        if found.context is not None:
+            ctx_id = str(found.context["id"])
+            click.echo(f"  Using context: {found.context.get('name', '?')} ({ctx_id[:8]}...)")
+            return ctx_id
+        if found.unknown:
+            click.echo(
+                f"  Warning: no context named {found.value!r} is visible to this "
+                "credential; using it as a raw context id.",
+                err=True,
+            )
+        click.echo(f"  Using context: {found.value}")
+        return found.value
 
     default_name = project_dir.name.lower().replace(" ", "-")
 
@@ -345,7 +517,9 @@ def _stdio_entry(
     make the proxy put ``?guardrails=`` / ``?profile=`` / ``?add_tools=`` /
     ``?context=`` on the upstream URL at run time (#258, #300), so the entry
     never copies the profile's URL and changing them never forces a re-login.
-    ``add_tools`` must already be normalized (``normalize_add_tools``).
+    ``tool_profile`` and ``add_tools`` must already be normalized
+    (``normalize_tool_profile`` / ``normalize_add_tools``): each value is its
+    own argv item, so one starting with ``-`` would read as a flag.
     """
     args = ["--profile", profile]
     if guardrails is not None:
@@ -419,8 +593,9 @@ class _McpPlan:
     #: The user-scope entry already matches; nothing to write.
     unchanged: bool = False
     #: Query flags (``--guardrails``, ``--tool-profile``, ``--add-tools``,
-    #: ``--context``) the replaced same-scope entry had and this run leaves
-    #: out, e.g. ``["--guardrails off"]``.
+    #: ``--context``) and a ``?tools=`` allowlist the replaced same-scope entry
+    #: had and this run leaves out, e.g. ``["--guardrails off",
+    #: "?tools=recall,remember"]``.
     dropped: list[str] = field(default_factory=list)
 
 
@@ -451,12 +626,14 @@ def _redact_entry(entry: dict[str, Any]) -> dict[str, Any]:
     return {**entry, "headers": masked}
 
 
-_QUERY_FLAGS = (
-    ("--guardrails", "guardrails"),
-    ("--tool-profile", "profile"),
-    ("--add-tools", "add_tools"),
-    ("--context", "context"),
-)
+#: The ``kagura-mcp`` flags that set ``?guardrails=`` / ``?profile=`` /
+#: ``?add_tools=`` / ``?context=`` on the upstream URL.
+_QUERY_FLAGS = ("--guardrails", "--tool-profile", "--add-tools", "--context")
+
+
+#: The key :func:`_query_flags` reports an http entry's ``?tools=`` allowlist
+#: under: no setup flag sets it, so it goes by its query parameter.
+_TOOLS_KEY = "?tools="
 
 
 def _query_flags(entry: dict[str, Any]) -> dict[str, str]:
@@ -464,14 +641,24 @@ def _query_flags(entry: dict[str, Any]) -> dict[str, str]:
 
     Read from the ``kagura-mcp`` args of a stdio entry (the last value of a
     repeated flag, as the proxy reads it, except ``--add-tools``, whose
-    values add up), or from the url's query (first value, as the server
-    reads it) of an http one.
+    values add up), or from the url's query of an http one, as the server
+    reads it (memory-cloud v0.142.0): the first value of a repeated key wins
+    for all four keys, even a blank one, and is trimmed; the tool view is
+    read by :func:`~kagura_memory._http.mcp_url_tool_view`. A blank first
+    value still means something to the server — it refuses a blank
+    ``profile``, ignores a blank ``guardrails`` (no ``instructions`` digest),
+    fails a call without ``context_id`` under a blank ``context``, and adds
+    nothing for a blank ``add_tools`` — but setup refuses a blank value, so
+    it is no flag to re-run with and is left out. An http entry's ``tools``
+    allowlist, the view key the server reads first, is reported too, under
+    :data:`_TOOLS_KEY` (its names, as the server reads them); one naming no
+    tool, which the server refuses, is left out like a blank value.
     """
     found: dict[str, str] = {}
     if classify_mcp_entry(entry) == "stdio":
         args = entry.get("args")
         argv = [a for a in args if isinstance(a, str)] if isinstance(args, list) else []
-        for flag, _ in _QUERY_FLAGS:
+        for flag in _QUERY_FLAGS:
             values: list[str] = []
             for i, arg in enumerate(argv):
                 if arg == flag and i + 1 < len(argv):
@@ -482,18 +669,32 @@ def _query_flags(entry: dict[str, Any]) -> dict[str, str]:
                 found[flag] = ",".join(values) if flag == "--add-tools" else values[-1]
         return found
     url = entry.get("url")
-    params = parse_qsl(urlsplit(url).query) if isinstance(url, str) else []
-    for flag, key in _QUERY_FLAGS:
-        value = next((v for k, v in params if k == key), None)
-        if value is not None:
-            found[flag] = value
-    return found
+    if not isinstance(url, str):
+        return found
+    query = mcp_url_query_values(url)
+    view = mcp_query_tool_view(query)
+    settings = {
+        "--guardrails": query.get("guardrails", "").strip(),
+        "--tool-profile": view.profile,
+        "--add-tools": ",".join(view.add_tools),
+        "--context": query.get("context", "").strip(),
+        _TOOLS_KEY: ",".join(view.tools or ()),
+    }
+    return {flag: value for flag, value in settings.items() if value}
 
 
 def _dropped_query_flags(old: dict[str, Any], new: dict[str, Any]) -> list[str]:
-    """Query flag settings (see :func:`_query_flags`) ``old`` has and ``new`` leaves out."""
+    """Query flag settings (see :func:`_query_flags`) ``old`` has and ``new`` leaves out.
+
+    Each as the user would give it again: ``--guardrails off``, or
+    ``?tools=recall,remember`` for an allowlist, which goes on the MCP URL.
+    """
     kept = _query_flags(new)
-    return [f"{flag} {value}" for flag, value in _query_flags(old).items() if flag not in kept]
+    return [
+        f"{flag}{value}" if flag == _TOOLS_KEY else f"{flag} {value}"
+        for flag, value in _query_flags(old).items()
+        if flag not in kept
+    ]
 
 
 def _plan_mcp_entry(
@@ -692,10 +893,15 @@ def _echo_plan_notes(plan: _McpPlan) -> None:
         )
     if plan.dropped:
         them = "them" if len(plan.dropped) > 1 else "it"
+        where = (
+            f" ({_TOOLS_KEY} on the MCP URL)"
+            if any(d.startswith(_TOOLS_KEY) for d in plan.dropped)
+            else ""
+        )
         click.echo(
             f"  Note: the previous {plan.scope}-scope entry also had "
-            f"{' and '.join(plan.dropped)}, which this run left out; re-run with {them} "
-            f"to keep {them}."
+            f"{' and '.join(plan.dropped)}, which this run left out; re-run with {them}"
+            f"{where} to keep {them}."
         )
 
 
@@ -1092,8 +1298,9 @@ def run_setup_claude(
     on the upstream URL, then the project's ``.kagura.json`` and the hooks and
     commands that ``session_hook`` / ``sync_hook`` / ``commands`` select
     (``None``: not given, on by default). ``guardrails`` must already be
-    normalized (``off`` or a canonical UUID), ``add_tools`` by
-    ``normalize_add_tools`` and ``default_context`` to a canonical UUID.
+    normalized (``off`` or a canonical UUID), ``tool_profile`` by
+    ``normalize_tool_profile``, ``add_tools`` by ``normalize_add_tools`` and
+    ``default_context`` to a canonical UUID.
 
     The SessionStart hook runs ``kagura recall --trusted-only --verbosity full
     --full 0``: uncut summaries with tags, no content. A server that refuses
@@ -1159,16 +1366,8 @@ def run_setup_claude(
     click.echo("\nVerifying connection...")
     try:
         contexts_response = asyncio.run(_test_connection(resolved_api_key, resolved_mcp_url))
-    except KaguraAuthError as e:
-        raise click.ClickException(
-            f"Authentication failed: {_exc_message(e)}\n"
-            "  Check your API key at: Kagura Web UI > Integrations > API Keys"
-        ) from e
-    except KaguraConnectionError as e:
-        raise click.ClickException(
-            f"Cannot connect to {resolved_mcp_url}: {_exc_message(e)}\n"
-            "  Is the server running? Try: docker compose up -d"
-        ) from e
+    except (KaguraAuthError, KaguraConnectionError) as e:
+        raise _connection_error(e, resolved_mcp_url, None) from e
     except Exception as e:
         raise click.ClickException(f"Connection failed: {_exc_message(e)}") from e
 
@@ -1177,15 +1376,16 @@ def run_setup_claude(
 
     # 5. Context selection (reuse existing if not overridden)
     effective_context_id = context_id or existing_config.get("context_id")
-    resolved_context_id = _select_or_create_context(
-        contexts_response,
-        resolved_api_key,
-        resolved_mcp_url,
-        effective_context_id,
-        project,
-        non_interactive,
-        no_auto_context,
-    )
+    with _connection_hints(resolved_mcp_url, None):
+        resolved_context_id = _select_or_create_context(
+            contexts_response,
+            resolved_api_key,
+            resolved_mcp_url,
+            effective_context_id,
+            project,
+            non_interactive,
+            no_auto_context,
+        )
 
     # 6. Validate context_id before interpolating into shell commands
     _validate_context_id(resolved_context_id)
@@ -1271,11 +1471,12 @@ def _load_profile(profile: str) -> tuple[CredentialsFile, OAuthCredentials]:
 
 
 def _verify_profile(profile: str, creds: OAuthCredentials) -> dict[str, Any]:
-    """Check that ``profile`` works with a ``list_contexts`` call; return its result.
+    """Check that ``profile`` works with a ``list_contexts`` call; return its first page.
 
     Auth and the URL come from the profile alone, even when ``KAGURA_API_KEY``
     is set (see :func:`_make_client`), so the contexts listed are the ones the
-    written ``kagura-mcp --profile`` entry can reach.
+    written ``kagura-mcp --profile`` entry can reach. One page, as
+    :func:`_test_connection` reads it.
 
     Raises:
         click.ClickException: Authentication or the connection failed.
@@ -1283,13 +1484,8 @@ def _verify_profile(profile: str, creds: OAuthCredentials) -> dict[str, Any]:
     click.echo("\nVerifying connection...")
     try:
         contexts_response = asyncio.run(_test_connection(profile=profile))
-    except KaguraAuthError as e:
-        raise click.ClickException(
-            f"Authentication failed: {_exc_message(e)}\n"
-            f"  Your token may have expired — re-run: kagura auth login --profile {profile}"
-        ) from e
-    except KaguraConnectionError as e:
-        raise click.ClickException(f"Cannot connect to {creds.server}: {_exc_message(e)}") from e
+    except (KaguraAuthError, KaguraConnectionError) as e:
+        raise _connection_error(e, creds.server, profile) from e
     except Exception as e:
         raise click.ClickException(f"Connection failed: {_exc_message(e)}") from e
 
@@ -1348,16 +1544,17 @@ def _run_setup_claude_oauth(
 
     contexts_response = _verify_profile(profile, creds)
 
-    resolved_context_id = _select_or_create_context(
-        contexts_response,
-        None,
-        creds.mcp_url,
-        context_id,
-        project,
-        non_interactive,
-        no_auto_context,
-        profile=profile,
-    )
+    with _connection_hints(creds.server, profile):
+        resolved_context_id = _select_or_create_context(
+            contexts_response,
+            None,
+            creds.mcp_url,
+            context_id,
+            project,
+            non_interactive,
+            no_auto_context,
+            profile=profile,
+        )
 
     _validate_context_id(resolved_context_id)
 

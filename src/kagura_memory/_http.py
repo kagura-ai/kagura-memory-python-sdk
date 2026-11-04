@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import copy
 import re
 import uuid
 from collections.abc import Collection, Mapping, Sequence
 from datetime import UTC, datetime, time, timedelta
+from functools import cached_property
 from importlib.metadata import version as _pkg_version
-from typing import Any, NoReturn, TypeVar
+from typing import Any, NamedTuple, NoReturn, TypeVar
 from urllib.parse import parse_qsl, quote, unquote_plus, urlencode, urlsplit, urlunsplit
 
 import httpx
@@ -23,6 +25,7 @@ from .exceptions import (
     KaguraRateLimitError,
     KaguraResponseError,
     KaguraServiceUnavailableError,
+    KaguraVersionConflictError,
     _exc_message,
 )
 
@@ -153,10 +156,9 @@ def mcp_url_has_tools_allowlist(mcp_url: str) -> bool:
         mcp_url: The MCP endpoint URL.
 
     Returns:
-        Whether its query has a ``tools`` parameter.
+        Whether its query has a ``tools`` parameter, even a blank one.
     """
-    query = urlsplit(mcp_url).query
-    return any(key == "tools" for key, _ in parse_qsl(query, keep_blank_values=True))
+    return mcp_url_tool_view(mcp_url).tools is not None
 
 
 def mcp_url_guardrails_off(mcp_url: str) -> bool:
@@ -201,8 +203,48 @@ def normalize_guardrails(value: str) -> str:
         raise ValueError(f"guardrails must be 'off' or a context UUID, got {value!r}") from None
 
 
+def normalize_tool_profile(value: str) -> str:
+    """Validate a tool profile name (``?profile=``) before it goes into an MCP entry.
+
+    memory-cloud knows ``core`` and ``full`` and fails ``tools/list`` for any
+    other name, so that list is left to the server. Refused here is what
+    breaks the entry before the server sees it: a blank name, and one
+    starting with ``-``, which ``kagura-mcp --tool-profile -x`` in a stored
+    entry would read as a flag, so the proxy would not start (as
+    :func:`normalize_add_tools` refuses such a tool name).
+
+    Args:
+        value: The profile name, e.g. ``"full"``.
+
+    Returns:
+        The name, trimmed.
+
+    Raises:
+        ValueError: The name is blank or starts with ``-``.
+    """
+    name = value.strip()
+    if not name:
+        raise ValueError("tool_profile must not be empty")
+    if name.startswith("-"):
+        raise ValueError(f"tool_profile cannot start with '-': {name!r}")
+    return name
+
+
 #: The most names memory-cloud reads from one ``add_tools`` value (``MAX_TOOL_NAMES``).
 MAX_ADD_TOOLS = 100
+
+
+def _tool_names(value: str, *, cap: int | None) -> tuple[str, ...]:
+    """The tool names in a comma-separated ``value``, by memory-cloud's ``_read_names`` rule.
+
+    Each item is trimmed, blank names are dropped and duplicates removed,
+    keeping the order. With ``cap``, only the first ``cap`` items are read
+    (blank ones count), as the server reads :data:`MAX_ADD_TOOLS` of them;
+    ``None`` reads every item, for a caller that refuses a longer list
+    instead of cutting it (:func:`normalize_add_tools`).
+    """
+    parts = value.split(",") if cap is None else value.split(",", cap)[:cap]
+    return tuple(dict.fromkeys(name for part in parts if (name := part.strip())))
 
 
 def normalize_add_tools(names: Sequence[str]) -> str:
@@ -230,12 +272,12 @@ def normalize_add_tools(names: Sequence[str]) -> str:
     """
     if isinstance(names, str):
         raise TypeError("add_tools must be a list of tool names, not a str")
-    found: list[str] = []
-    for item in names:
+    items = list(names)
+    for item in items:
         if not isinstance(item, str):
             raise TypeError(f"add_tools items must be str, got {type(item).__name__}")
-        found.extend(name for part in item.split(",") if (name := part.strip()))
-    unique = list(dict.fromkeys(found))
+    # Every name is read, not the first 100: a longer list is refused below.
+    unique = _tool_names(",".join(items), cap=None)
     if dashed := next((name for name in unique if name.startswith("-")), None):
         raise ValueError(f"add_tools names cannot start with '-': {dashed!r}")
     if len(unique) > MAX_ADD_TOOLS:
@@ -269,10 +311,19 @@ def extract_detail(response: httpx.Response) -> str:
       ``message``, or values of unexpected type — returns an empty string so
       callers can fall back to ``response.text`` or just print the status.
     """
+    return _detail_of(_json_body(response))
+
+
+def _json_body(response: httpx.Response) -> Any:
+    """``response``'s decoded JSON body; ``None`` when it is not JSON."""
     try:
-        body = response.json()
+        return response.json()
     except (ValueError, UnicodeDecodeError):
-        return ""
+        return None
+
+
+def _detail_of(body: Any) -> str:
+    """:func:`extract_detail` of an already decoded body."""
     if not isinstance(body, dict):
         return ""
     detail = body.get("detail")
@@ -315,10 +366,11 @@ def jsonrpc_error_body(response: httpx.Response) -> dict[str, Any] | None:
     Args:
         response: Any MCP endpoint response.
     """
-    try:
-        body = response.json()
-    except (ValueError, UnicodeDecodeError):
-        return None
+    return _jsonrpc_error_of(_json_body(response))
+
+
+def _jsonrpc_error_of(body: Any) -> dict[str, Any] | None:
+    """:func:`jsonrpc_error_body` of an already decoded body."""
     if isinstance(body, dict) and isinstance(body.get("error"), dict):
         return body
     return None
@@ -442,17 +494,13 @@ _TIER_QUOTA_TYPES = frozenset(
 )
 
 
-def error_envelope(response: httpx.Response) -> tuple[str, str, dict[str, Any]] | None:
-    """Return ``(error, message, details)`` of memory-cloud's canonical REST error body.
+def _envelope_of(body: Any) -> tuple[str, str, dict[str, Any]] | None:
+    """``(error, message, details)`` of memory-cloud's canonical REST error body.
 
     ``None`` when the body is not ``{"error": <str>, ...}`` — non-JSON, the
     FastAPI ``{"detail": ...}`` shape, or the JSON-RPC ``error`` object. A
     missing ``message`` reads as ``""`` and missing ``details`` as ``{}``.
     """
-    try:
-        body = response.json()
-    except (ValueError, UnicodeDecodeError):
-        return None
     if not isinstance(body, dict) or not isinstance(body.get("error"), str):
         return None
     message = body.get("message")
@@ -462,6 +510,32 @@ def error_envelope(response: httpx.Response) -> tuple[str, str, dict[str, Any]] 
         message if isinstance(message, str) else "",
         details if isinstance(details, dict) else {},
     )
+
+
+def version_conflict_error(
+    code: str, message: str, fields: Mapping[str, Any]
+) -> KaguraVersionConflictError | None:
+    """Type a refused ``expected_version`` (memory-cloud v0.113.0+, #2043; SDK #302).
+
+    MCP answers ``version_conflict``; REST answers ``RES-002`` — a code the
+    files API's sha256 dedup ``409`` shares — told apart by its
+    ``details.reason == "version_conflict"``. The caller keeps the server's
+    ``code`` and fields on the error (:func:`annotate_server_error`).
+
+    Args:
+        code: The error code — MCP ``error`` or REST ``error``.
+        message: Message for the exception.
+        fields: The MCP envelope, or the REST ``details``.
+
+    Returns:
+        :class:`KaguraVersionConflictError`, or ``None`` when the error is
+        something else.
+    """
+    if code == "version_conflict" or (
+        code == "RES-002" and fields.get("reason") == "version_conflict"
+    ):
+        return KaguraVersionConflictError(message)
+    return None
 
 
 def gate_error(
@@ -593,7 +667,7 @@ def _opt_datetime(value: object) -> datetime | None:
         return None
 
 
-def raise_for_kagura_status(e: httpx.HTTPStatusError) -> NoReturn:
+def raise_for_kagura_status(e: httpx.HTTPStatusError, body: ErrorBody | None = None) -> NoReturn:
     """Translate an httpx ``HTTPStatusError`` into the matching Kagura error.
 
     Maps ``401`` → :class:`~kagura_memory.exceptions.KaguraAuthError`, a ``403``
@@ -613,25 +687,33 @@ def raise_for_kagura_status(e: httpx.HTTPStatusError) -> NoReturn:
     the REST-backed ``KaguraClient`` methods it serves are listing and status
     reads, which memory-cloud keeps open under the Free capacity lock (#1941).
     This function always raises.
+
+    Args:
+        e: The status error.
+        body: ``e.response``'s :class:`ErrorBody`, when the caller already
+            built one to read the body itself, so the body is decoded at
+            most once between them; ``None`` builds one here.
     """
     response = e.response
     status = response.status_code
     if status == 401:
         raise KaguraAuthError("Authentication failed. Check your API key.") from e
-    if status == 403 and (scope_error := insufficient_scope_error(response)) is not None:
+    if body is None:
+        body = ErrorBody(response)
+    if status == 403 and (scope_error := insufficient_scope_error(response, body)) is not None:
         raise scope_error from e
-    detail = extract_detail(response) or _exc_message(e)
+    detail = body.detail or _exc_message(e)
     if status == 429:
         err: KaguraError = KaguraRateLimitError(
             f"Rate limit exceeded (HTTP 429): {detail}",
             retry_after=_retry_after_seconds(response),
         )
     elif status == 503:
-        err = service_unavailable_error(response, f"HTTP 503: {detail}")
+        err = service_unavailable_error(response, f"HTTP 503: {detail}", body)
     else:
         err = KaguraConnectionError(f"HTTP {status}: {detail}")
-    if (fields := server_error_fields(response)) is not None:
-        annotate_server_error(err, *fields)
+    if body.fields is not None:
+        annotate_server_error(err, *body.fields)
     raise err from e
 
 
@@ -762,6 +844,30 @@ def normalize_uuid(value: object, *, label: str) -> str:
         return str(uuid.UUID(str(value)))
     except (ValueError, TypeError) as exc:
         raise ValueError(f"{label} must be a UUID, got {value!r}") from exc
+
+
+def uuid_or_none(value: str) -> str | None:
+    """``value`` as :func:`normalize_uuid` returns it, or None when it is not a UUID."""
+    try:
+        return normalize_uuid(value, label="value")
+    except ValueError:
+        return None
+
+
+# The dashed 8-4-4-4-12 form, either case: what setup takes as a context id
+# without looking it up by name (a dashless 32-hex string can be a name too).
+_CANONICAL_UUID_RE = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.IGNORECASE | re.ASCII
+)
+
+
+def is_canonical_uuid(value: str) -> bool:
+    """Whether ``value`` is a UUID in the dashed 8-4-4-4-12 form (either case).
+
+    The other spellings :func:`normalize_uuid` accepts (dashless, ``{braces}``,
+    ``urn:uuid:``) are not.
+    """
+    return _CANONICAL_UUID_RE.fullmatch(value) is not None
 
 
 def path_segment(value: str, *, label: str) -> str:
@@ -916,6 +1022,64 @@ def mcp_url_query_values(mcp_url: str) -> dict[str, str]:
     return values
 
 
+class McpToolView(NamedTuple):
+    """The ``tools/list`` view an MCP URL's query selects (see :func:`mcp_url_tool_view`)."""
+
+    #: The first ``profile`` value, trimmed; ``""`` for a blank one, which the
+    #: server refuses; ``None`` without one (the server's default profile).
+    profile: str | None
+    #: The names in the first ``tools`` value; ``()`` when it names none, which
+    #: the server refuses; ``None`` without one. When set, the server ignores
+    #: ``profile`` and ``add_tools``.
+    tools: tuple[str, ...] | None
+    #: The names in the first ``add_tools`` value; ``()`` without one or when it
+    #: names none (it then adds nothing).
+    add_tools: tuple[str, ...]
+
+
+def mcp_url_tool_view(mcp_url: str) -> McpToolView:
+    """The ``profile`` / ``tools`` / ``add_tools`` in ``mcp_url``'s query, as the server reads them.
+
+    The one reader of a URL's tool view (#311), for ``kagura setup``'s re-run
+    notes and digest previews and for ``kagura doctor``. It follows the
+    server's ``select_tool_definitions`` (memory-cloud v0.142.0): the first
+    value of a repeated parameter wins, even a blank one
+    (:func:`mcp_url_query_values`), ``profile`` is trimmed, and a name list
+    is read as ``_read_names`` reads it — its first 100 comma-separated
+    items, trimmed, blank names dropped, duplicates removed in order. Which
+    parameter wins (``tools`` over the other two) is left to the caller.
+
+    Args:
+        mcp_url: The MCP endpoint URL.
+
+    Returns:
+        The view; every field empty for a URL without these parameters.
+    """
+    return mcp_query_tool_view(mcp_url_query_values(mcp_url))
+
+
+def mcp_query_tool_view(query: Mapping[str, str]) -> McpToolView:
+    """:func:`mcp_url_tool_view` of a query already read by :func:`mcp_url_query_values`.
+
+    For a caller that reads other parameters of the same URL too, so the
+    query is parsed once.
+
+    Args:
+        query: Parameter name → its first value, as
+            :func:`mcp_url_query_values` returns it.
+
+    Returns:
+        The view; every field empty for a query without these parameters.
+    """
+    profile = query.get("profile")
+    tools = query.get("tools")
+    return McpToolView(
+        profile=profile.strip() if profile is not None else None,
+        tools=_tool_names(tools, cap=MAX_ADD_TOOLS) if tools is not None else None,
+        add_tools=_tool_names(query.get("add_tools", ""), cap=MAX_ADD_TOOLS),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Server error fields, capacity lock, scope and 503 (memory-cloud v0.78.0+, #299)
 # ---------------------------------------------------------------------------
@@ -990,10 +1154,11 @@ def server_error_fields(response: httpx.Response) -> tuple[str, dict[str, Any]] 
     Args:
         response: A non-2xx response.
     """
-    try:
-        body = response.json()
-    except (ValueError, UnicodeDecodeError):
-        return None
+    return _fields_of(_json_body(response))
+
+
+def _fields_of(body: Any) -> tuple[str, dict[str, Any]] | None:
+    """:func:`server_error_fields` of an already decoded body."""
     if not isinstance(body, dict):
         return None
     error = body.get("error")
@@ -1008,6 +1173,61 @@ def server_error_fields(response: httpx.Response) -> tuple[str, dict[str, Any]] 
     if isinstance(details, dict):
         return error, details
     return error, {k: v for k, v in body.items() if k != "error"}
+
+
+class ErrorBody:
+    """A non-2xx response's JSON body, decoded at most once and read each way errors need it.
+
+    Built from the response without reading it: the body is decoded the
+    first time a reader asks (a ``401`` path never does) and kept. Each
+    reader is computed once, from its own copy of the decoded body, so no
+    two of them share a mutable dict — as when every reader decoded the
+    body itself. A body that is not JSON reads as nothing in every field.
+
+    ``KaguraRestClient``, :func:`raise_for_kagura_status`, ``KaguraClient``'s
+    REST reads and ``kagura-mcp`` build one per error response and pass it
+    down instead of decoding the body again in every reader (#311).
+
+    Args:
+        response: A non-2xx response.
+    """
+
+    def __init__(self, response: httpx.Response) -> None:
+        self._response = response
+
+    @cached_property
+    def _decoded(self) -> Any:
+        """The decoded JSON body; ``None`` when it is not JSON."""
+        return _json_body(self._response)
+
+    def _copy(self) -> Any:
+        """The decoded body for one reader, a deep copy of a JSON object (the only shape read)."""
+        decoded = self._decoded
+        return copy.deepcopy(decoded) if isinstance(decoded, dict) else decoded
+
+    @cached_property
+    def detail(self) -> str:
+        """What :func:`extract_detail` returns: the server's message, or ``""``."""
+        return _detail_of(self._decoded)
+
+    @cached_property
+    def envelope(self) -> tuple[str, str, dict[str, Any]] | None:
+        """The canonical REST envelope ``{"error": <str>, "message": ..., "details": {...}}``.
+
+        As ``(error, message, details)`` (``""`` / ``{}`` when missing);
+        ``None`` for any other shape.
+        """
+        return _envelope_of(self._copy())
+
+    @cached_property
+    def fields(self) -> tuple[str, dict[str, Any]] | None:
+        """What :func:`server_error_fields` returns: ``(code, fields)``."""
+        return _fields_of(self._copy())
+
+    @cached_property
+    def jsonrpc(self) -> dict[str, Any] | None:
+        """What :func:`jsonrpc_error_body` returns: the JSON-RPC error envelope."""
+        return _jsonrpc_error_of(self._copy())
 
 
 def _bearer_challenge(response: httpx.Response) -> dict[str, str]:
@@ -1036,7 +1256,7 @@ def _bearer_challenge(response: httpx.Response) -> dict[str, str]:
     return params or {}
 
 
-def insufficient_scope_error(response: httpx.Response) -> KaguraAuthError | None:
+def insufficient_scope_error(response: httpx.Response, body: ErrorBody) -> KaguraAuthError | None:
     """The :class:`KaguraAuthError` for a 403 ``insufficient_scope``, else ``None``.
 
     memory-cloud v0.79.0+ (#1686) refuses a ``tools/call`` whose OAuth token
@@ -1050,14 +1270,15 @@ def insufficient_scope_error(response: httpx.Response) -> KaguraAuthError | None
     value to re-authorize with.
 
     Args:
-        response: A 403 response.
+        response: A 403 response, for its ``WWW-Authenticate`` challenge.
+        body: Its body, as :class:`ErrorBody` reads it.
 
     Returns:
         The error, with ``code`` ``"insufficient_scope"`` and
         ``details["required_scope"]`` when the scope is known; ``None`` for
         any other 403.
     """
-    fields = server_error_fields(response)
+    fields = body.fields
     data = fields[1] if fields is not None and fields[0] == _INSUFFICIENT_SCOPE else None
     challenge = _bearer_challenge(response)
     if data is None and challenge.get("error") != _INSUFFICIENT_SCOPE:
@@ -1076,7 +1297,7 @@ def insufficient_scope_error(response: httpx.Response) -> KaguraAuthError | None
 
 
 def service_unavailable_error(
-    response: httpx.Response, message: str
+    response: httpx.Response, message: str, body: ErrorBody
 ) -> KaguraServiceUnavailableError:
     """The :class:`KaguraServiceUnavailableError` for an HTTP 503 ``response``.
 
@@ -1086,10 +1307,11 @@ def service_unavailable_error(
     error code (``/mcp``'s ``temporarily_unavailable``, v0.82.0+).
 
     Args:
-        response: The 503 response.
+        response: The 503 response, for its ``Retry-After`` header.
         message: Message for the exception.
+        body: Its body, as :class:`ErrorBody` reads it.
     """
-    fields = server_error_fields(response)
+    fields = body.fields
     code, data = fields if fields is not None else (None, {})
     retry_after = _retry_after_seconds(response)
     if retry_after is None:

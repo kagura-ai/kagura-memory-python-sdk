@@ -67,15 +67,15 @@ import httpx
 
 from ._http import (
     SDK_VERSION,
-    extract_detail,
+    ErrorBody,
     insufficient_scope_error,
-    jsonrpc_error_body,
     mcp_session_expired,
     mcp_session_header,
     mcp_url_has_tools_allowlist,
     mcp_url_with_query,
     normalize_add_tools,
     normalize_guardrails,
+    normalize_tool_profile,
     normalize_uuid,
     validate_https_url,
 )
@@ -173,6 +173,25 @@ class _Upstream:
         return resp
 
 
+class _UpstreamError(httpx.HTTPStatusError):
+    """A non-2xx upstream reply with nothing to forward, and its body as already read.
+
+    :func:`_error_response` words the reply from :attr:`body`, so the
+    upstream's error body is decoded at most once per message (#311).
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        request: httpx.Request,
+        response: httpx.Response,
+        body: ErrorBody,
+    ) -> None:
+        super().__init__(message, request=request, response=response)
+        self.body = body
+
+
 def _downstream_response(message: dict[str, Any], resp: httpx.Response) -> dict[str, Any] | None:
     """Turn the upstream reply to ``message`` into the line to write back, if any.
 
@@ -180,21 +199,24 @@ def _downstream_response(message: dict[str, Any], resp: httpx.Response) -> dict[
     ``null`` id (the server could not read one) is replaced with the
     downstream's. A ``401`` and a ``403`` ``insufficient_scope`` (memory-cloud
     v0.79.0+: the OAuth sign-in lacks the tool's scope) always raise so
-    :func:`_error_response` can attach the re-login hint.
+    :func:`_error_response` can attach the re-login hint; a ``401``'s body is
+    never read.
 
     Raises:
-        httpx.HTTPStatusError: A non-2xx with nothing to forward.
+        _UpstreamError: A non-2xx with nothing to forward (an
+            ``httpx.HTTPStatusError`` with httpx's message, carrying the body).
     """
-    if not resp.is_success and not _needs_login(resp):
-        body = jsonrpc_error_body(resp)
-        if body is not None:
+    if not resp.is_success:
+        error = ErrorBody(resp)
+        if not _needs_login(resp, error) and (body := error.jsonrpc) is not None:
             msg_id = message.get("id")
             if msg_id is None:  # a notification never gets a reply, not even an error
                 return None
-            if body.get("id") is None:
-                body["id"] = msg_id
-            return body
-    resp.raise_for_status()
+            return {**body, "id": msg_id} if body.get("id") is None else body
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise _UpstreamError(str(exc), request=exc.request, response=resp, body=error) from None
     if resp.status_code == 202 or not resp.content:
         return None
     return resp.json()
@@ -215,16 +237,19 @@ def _error_response(message: dict[str, Any], exc: Exception) -> dict[str, Any] |
     detail = str(exc)
     if isinstance(exc, httpx.HTTPStatusError):
         status = exc.response.status_code
-        scope_error = insufficient_scope_error(exc.response) if status == 403 else None
         if status == 401:
             detail = (
                 "Kagura authentication failed and the token could not be refreshed. "
                 "Run `kagura auth login` to re-authenticate."
             )
-        elif scope_error is not None:
-            detail = str(scope_error)
-        elif server_detail := extract_detail(exc.response):
-            detail = f"HTTP {status}: {server_detail}"
+        else:
+            # The body _downstream_response already read, when it raised.
+            body = exc.body if isinstance(exc, _UpstreamError) else ErrorBody(exc.response)
+            scope_error = insufficient_scope_error(exc.response, body) if status == 403 else None
+            if scope_error is not None:
+                detail = str(scope_error)
+            elif body.detail:
+                detail = f"HTTP {status}: {body.detail}"
     return {
         "jsonrpc": "2.0",
         "id": msg_id,
@@ -274,9 +299,10 @@ def _guardrails_arg(value: str) -> str:
 
 
 def _tool_profile_arg(value: str) -> str:
-    if not value.strip():
-        raise argparse.ArgumentTypeError("must not be empty")
-    return value.strip()
+    try:
+        return normalize_tool_profile(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from None
 
 
 def _add_tools_arg(value: str) -> str:
@@ -477,17 +503,18 @@ def main(argv: list[str] | None = None) -> int:
         return 130
 
 
-def _needs_login(resp: httpx.Response) -> bool:
+def _needs_login(resp: httpx.Response, body: ErrorBody) -> bool:
     """Whether ``resp`` is answered with the proxy's re-login hint, not forwarded.
 
     A ``401`` (the token was rejected even after the forced refresh) and a
     ``403`` ``insufficient_scope`` (the sign-in lacks the tool's scope, e.g. a
     ``kagura auth login --read-only`` profile calling a write tool; a refresh
-    keeps the same scope, so only a new sign-in helps).
+    keeps the same scope, so only a new sign-in helps). ``body`` is ``resp``'s
+    body, as :class:`~kagura_memory._http.ErrorBody` reads it.
     """
     if resp.status_code == 401:
         return True
-    return resp.status_code == 403 and insufficient_scope_error(resp) is not None
+    return resp.status_code == 403 and insufficient_scope_error(resp, body) is not None
 
 
 if __name__ == "__main__":  # pragma: no cover

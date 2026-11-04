@@ -7,7 +7,7 @@ import sys
 from collections.abc import Awaitable, Callable, Iterable
 from datetime import datetime
 from pathlib import Path
-from typing import Any, get_args
+from typing import Any, Literal, get_args
 
 import click
 
@@ -21,10 +21,12 @@ from ._guardrail_export import write_guardrail_block
 from ._http import (
     normalize_add_tools,
     normalize_guardrails,
+    normalize_tool_profile,
     normalize_uuid,
     path_segment,
     validate_lat_lon,
 )
+from ._version import meets_minimum
 from .auth.cli import auth as _auth_group
 from .claude_code import MCP_SERVER_NAME
 from .client import (
@@ -42,6 +44,7 @@ from .exceptions import (
     KaguraPartialRollbackError,
     KaguraQuotaError,
     KaguraServiceUnavailableError,
+    KaguraVersionConflictError,
     _exc_message,
 )
 from .files_client import FilesClient
@@ -53,6 +56,7 @@ from .models import (
     _MAX_CHARS_MIN,
     _RECALL_FULL_MAX,
     BootstrapFormat,
+    DedupeMode,
     FileObject,
     GuardrailDigest,
     ListOrderBy,
@@ -127,26 +131,33 @@ def _parse_tags(tags: str | None) -> list[str] | None:
     return parsed or None
 
 
-def _parse_details(details: str | None) -> dict[str, Any] | None:
-    """Parse a --details JSON object string into a dict, or None if empty.
+def _blank_to_none(value: str | None) -> str | None:
+    """``None`` for an unset or blank option value, as :func:`_parse_tags` treats one."""
+    return value if value is not None and value.strip() else None
 
-    Blank (or whitespace-only) means unset, matching :func:`_parse_tags` — a
-    shell expansion of an empty variable should not be a usage error.
+
+_DETAILS_EXAMPLE = '\'{"location": {"lat": 35.68, "lon": 139.76}}\''
+
+
+def _parse_json_object(
+    value: str | None, flag: str = "--details", example: str = _DETAILS_EXAMPLE
+) -> dict[str, Any] | None:
+    """Parse a JSON object option (``--details`` by default) into a dict, or None if blank.
+
+    One parser for every JSON-object flag: ``--details``, ``--details-patch``
+    and ``kagura list --filters``. Blank (or whitespace-only) means unset,
+    matching :func:`_parse_tags` — a shell expansion of an empty variable
+    should not be a usage error.
+
+    Args:
+        value: The option's string, or ``None``.
+        flag: The flag named in the error message.
+        example: A valid value shown after ``flag`` in the error message.
 
     Raises:
         click.UsageError: If the string is not valid JSON, or is valid JSON but
-            not an object (the MCP tool's ``details`` is typed ``object``).
-    """
-    return _parse_json_object(
-        details, "--details", '\'{"location": {"lat": 35.68, "lon": 139.76}}\''
-    )
-
-
-def _parse_json_object(value: str | None, flag: str, example: str) -> dict[str, Any] | None:
-    """Parse the JSON object option ``flag`` into a dict, or None if blank.
-
-    Raises:
-        click.UsageError: If the string is not valid JSON, or is not an object.
+            not an object (the MCP arguments these flags fill are typed
+            ``object``).
     """
     if value is None or not value.strip():
         return None
@@ -165,7 +176,7 @@ def _parse_location(location: str | None) -> dict[str, Any] | None:
     """Parse ``lat,lon[,label]`` into a ``details.location`` payload, or None.
 
     Blank (or whitespace-only) means unset, matching :func:`_parse_tags` and
-    :func:`_parse_details`, rather than failing with a confusing arity error.
+    :func:`_parse_json_object`, rather than failing with a confusing arity error.
 
     Raises:
         click.UsageError: On wrong arity, non-numeric coordinates, or
@@ -201,7 +212,7 @@ def _build_details(details: str | None, location: str | None) -> dict[str, Any] 
     both a ``location`` key in --details and --location is rejected rather than
     silently resolved, so neither value is quietly dropped.
     """
-    parsed = _parse_details(details)
+    parsed = _parse_json_object(details)
     loc = _parse_location(location)
     if loc is None:
         return parsed
@@ -213,9 +224,12 @@ def _build_details(details: str | None, location: str | None) -> dict[str, Any] 
 
 
 async def _current_details_for_merge(
-    client: KaguraClient, context_id: str, memory_id: str
+    client: KaguraClient, context_id: str, memory_id: str, flag: str = "--merge-details"
 ) -> dict[str, Any]:
-    """Read the memory's current ``details`` for ``update-memory --merge-details``.
+    """Read the memory's current ``details`` for ``update-memory``'s merge fallback.
+
+    Only on a server without ``details_patch`` (before memory-cloud 0.140.0);
+    a newer one merges ``--merge-details`` / ``--details-patch`` in one call.
 
     ``null`` or absent details are ``{}``. Anything short of the whole object is
     refused, because merging onto a partial read would silently drop the keys
@@ -225,7 +239,7 @@ async def _current_details_for_merge(
     instead). Any of those markers refuses the merge — a truthy
     ``details_omitted``, a ``details_json`` page, or a ``details_total_chars``
     size without the ``details`` key itself — since a marker without the object
-    can only mean a bounded read.
+    can only mean a bounded read. ``flag`` names the option the messages are about.
 
     Raises:
         click.ClickException: If the reply carries no memory object, its
@@ -234,7 +248,7 @@ async def _current_details_for_merge(
     result = await client.reference(context_id=context_id, memory_id=memory_id)
     memory = result.get("memory") if isinstance(result, dict) else None
     if not isinstance(memory, dict):
-        raise click.ClickException("--merge-details: the reference reply carried no memory object")
+        raise click.ClickException(f"{flag}: the reference reply carried no memory object")
     if (
         memory.get("details_omitted")
         or "details_json" in memory
@@ -247,9 +261,9 @@ async def _current_details_for_merge(
             else ""
         )
         raise click.ClickException(
-            f"--merge-details: the memory's current details could not be read in full{size}; "
+            f"{flag}: the memory's current details could not be read in full{size}; "
             "the server bounds a reference reply and this CLI cannot page it yet. Send the "
-            "complete object with --details and without --merge-details (the MCP reference "
+            f"complete object with --details and without {flag} (the MCP reference "
             "tool returns the whole object with max_chars up to 100000 or details_offset "
             "paging)."
         )
@@ -262,9 +276,7 @@ async def _current_details_for_merge(
     if current is None:
         return {}
     if not isinstance(current, dict):
-        raise click.ClickException(
-            "--merge-details: the memory's current details are not a JSON object"
-        )
+        raise click.ClickException(f"{flag}: the memory's current details are not a JSON object")
     return current
 
 
@@ -289,8 +301,9 @@ def _cli_error_message(e: BaseException, message: str | None = None) -> str:
     plan that lifts it (``display (key)`` when the server sent both), so the
     operator does not have to dig them out of the prose. The capacity lock
     adds its cleanup page (unless the server's ``help`` already names it), a
-    503 how long to wait, and any server error its ``help`` and
-    ``correlation_id`` (#299). ``message`` replaces the first line when a
+    503 how long to wait, a refused ``expected_version`` the memory's current
+    version (#302), and any server error its ``help`` and ``correlation_id``
+    (#299). ``message`` replaces the first line when a
     command words the failure itself.
     """
     lines = [_exc_message(e) if message is None else message]
@@ -309,6 +322,8 @@ def _cli_error_message(e: BaseException, message: str | None = None) -> str:
         lines.append(f"  Clean up or re-subscribe: {e.cleanup_url}")
     if isinstance(e, KaguraServiceUnavailableError) and e.retry_after is not None:
         lines.append(f"  Retry after: {e.retry_after:g} s")
+    if isinstance(e, KaguraVersionConflictError) and e.current_version is not None:
+        lines.append(f"  Current version: {e.current_version}")
     if isinstance(e, KaguraError):
         if e.help:
             lines.append(f"  Help: {e.help}")
@@ -513,20 +528,43 @@ def doctor(profile, json_output):
     "--location",
     help="Shorthand for details.location: 'lat,lon' or 'lat,lon,label'",
 )
+@click.option(
+    "--observed-at",
+    help="When the fact held, not the write time: YYYY-MM-DD or an ISO 8601 datetime "
+    "(naive = UTC). Stored as details.observed_at (server v0.127.0+).",
+)
+@click.option(
+    "--dedupe",
+    type=click.Choice(get_args(DedupeMode)),
+    help="suggest (server default); check: write nothing when a near-duplicate exists "
+    "and print it (status duplicate_candidate, exit 0: a result, not an error); off: "
+    "never suggest a supersede for this memory, permanently (server v0.93.0+).",
+)
+@click.option(
+    "--tags-normalize",
+    is_flag=True,
+    default=False,
+    help="Store each tag under the context's established spelling; lint reports each "
+    "mapping as tag_normalized (server v0.93.0+).",
+)
 def remember(
-    context_id,
-    summary,
-    content,
-    memory_type,
-    importance,
-    tags,
-    source_uri,
-    source_type,
-    linked_memory_ids,
-    linked_source_uris,
-    details,
-    location,
-):
+    context_id: str | None,
+    summary: str,
+    content: str,
+    memory_type: str,
+    importance: float,
+    tags: str | None,
+    source_uri: str | None,
+    # click.Choice(case_sensitive=False) returns the choice as listed.
+    source_type: Literal["file", "url", "vault", "api", "manual"] | None,
+    linked_memory_ids: str | None,
+    linked_source_uris: str | None,
+    details: str | None,
+    location: str | None,
+    observed_at: str | None,
+    dedupe: DedupeMode | None,
+    tags_normalize: bool,
+) -> None:
     """
     Store a memory directly (without AI analysis).
 
@@ -543,6 +581,8 @@ def remember(
         --source-uri file:///spec.md --source-type file
       kagura remember -s "Coffee with Sato" --content "..." \\
         --location "35.68,139.76,Tokyo HQ"
+      kagura remember -s "Release 2.0 shipped" --content "..." --observed-at 2026-11-01
+      kagura remember -s "Deploy key rotated" --content "..." --dedupe check
     """
     details_payload = _build_details(details, location)
 
@@ -559,6 +599,9 @@ def remember(
             linked_memory_ids=_parse_tags(linked_memory_ids),
             linked_source_uris=_parse_tags(linked_source_uris),
             details=details_payload,
+            observed_at=_blank_to_none(observed_at),
+            dedupe=dedupe,
+            tags_normalize=tags_normalize,
         )
 
     _run_client_command(op, context_id)
@@ -568,6 +611,22 @@ def remember(
 # From 0.82.0 the server refuses an argument it does not declare
 # (invalid_argument) and lists it in the envelope's ``unknown_arguments``.
 _RECALL_SHAPE_FLOORS = {"verbosity": "0.108.0", "full": "0.114.0", "max_chars": "0.82.0"}
+
+
+def _unknown_arguments(err: BaseException) -> list[str] | None:
+    """The argument names an ``invalid_argument`` refusal lists, else ``None`` (#1742).
+
+    From memory-cloud 0.82.0 a tool refuses an argument it does not declare
+    and names it in the envelope's ``unknown_arguments``, which the client
+    keeps in ``KaguraError.details``. Read from there, never from the
+    message. ``None`` when ``err`` carries no such list (another error, an
+    older server, or a ``details`` that is not an object).
+    """
+    details = getattr(err, "details", None)
+    listed = details.get("unknown_arguments") if isinstance(details, dict) else None
+    if not isinstance(listed, list):
+        return None
+    return [name for name in listed if isinstance(name, str)]
 
 
 def _refused_shape_args(err: KaguraError, shape: dict[str, Any]) -> list[str]:
@@ -583,9 +642,8 @@ def _refused_shape_args(err: KaguraError, shape: dict[str, Any]) -> list[str]:
     if getattr(err, "code", None) != "invalid_argument":
         return []
     sent = [name for name, value in shape.items() if value is not None]
-    details = getattr(err, "details", None)
-    listed = details.get("unknown_arguments") if isinstance(details, dict) else None
-    if not isinstance(listed, list):
+    listed = _unknown_arguments(err)
+    if listed is None:
         return sent
     return [name for name in sent if name in listed]
 
@@ -1155,6 +1213,47 @@ def list_command(
     _run_client_command(op, context_id)
 
 
+def _apply_details_patch(
+    current: dict[str, Any], patch: dict[str, Any], observed_at: str | None
+) -> dict[str, Any]:
+    """What ``details_patch`` makes of ``current``: a shallow merge, ``None`` deleting a key.
+
+    The server's rule (``MemoryService._merge_details_patch``, memory-cloud
+    v0.140.0), for the read-then-write fallback on a server without it. A
+    top-level ``observed_at`` lands in the merged details, as the server folds
+    it into the patch, so a stored ``observed_at`` cannot contradict it.
+    """
+    merged = dict(current)
+    for key, value in patch.items():
+        if value is None:
+            merged.pop(key, None)
+        else:
+            merged[key] = value
+    if observed_at is not None:
+        merged["observed_at"] = observed_at
+    return merged
+
+
+# memory-cloud refuses an undeclared argument from 0.82.0 (#1742); an older
+# server ignores it.
+_REFUSES_UNKNOWN_ARGUMENTS_SINCE = (0, 82, 0)
+
+
+def _details_patch_refused(err: KaguraError) -> bool:
+    """Whether ``err`` is a server refusing ``details_patch``, and nothing else, as unknown.
+
+    memory-cloud 0.82.0-0.139.x answers ``invalid_argument`` and lists the
+    arguments it does not declare in ``unknown_arguments`` (#1742); read from
+    the code and that list, never the message. Without the list, or with
+    another argument in it (which the fallback would send again), the error
+    stands, so a write is never retried on a guess.
+    """
+    if getattr(err, "code", None) != "invalid_argument":
+        return False
+    listed = _unknown_arguments(err)
+    return listed is not None and set(listed) == {"details_patch"}
+
+
 @main.command(name="update-memory")
 @click.option("--context-id", "-c", help="Context ID (or set in .kagura.json)")
 @click.option("--memory-id", "-m", help="Memory UUID to update in-place")
@@ -1163,13 +1262,47 @@ def list_command(
 @click.option("--content", help="Updated content")
 @click.option("--type", "-t", "memory_type", help="Updated memory type")
 @click.option("--importance", "-i", type=float, help="Updated importance 0.0-1.0")
-@click.option("--tags", help="Comma-separated tags")
+@click.option("--tags", help="Comma-separated tags (replaces the whole list)")
+@click.option(
+    "--add-tag",
+    "add_tags",
+    multiple=True,
+    help="Tag to add to the stored list, keeping the others (repeatable; not with --tags; "
+    "server v0.140.0+)",
+)
+@click.option(
+    "--remove-tag",
+    "remove_tags",
+    multiple=True,
+    help="Tag to remove from the stored list; one that is not there is ignored "
+    "(repeatable; not with --tags; server v0.140.0+)",
+)
 @click.option(
     "--dismiss-supersede-candidate",
     is_flag=True,
     default=False,
     help="Reject this memory's supersede_candidate suggestion (needs --memory-id; "
     "server v0.65.0+, older servers drop it silently)",
+)
+@click.option(
+    "--accept-supersede-candidate",
+    is_flag=True,
+    default=False,
+    help="Accept this memory's supersede_candidate: the candidate is shadowed by a "
+    "supersedes edge. Needs --memory-id and no field edits in the same call "
+    "(server v0.126.0+)",
+)
+@click.option(
+    "--expected-version",
+    type=click.IntRange(min=1),
+    help="Apply the update only while the memory is at this version (the 'version' "
+    "that reference prints); else nothing is written and the current version is "
+    "printed (server v0.113.0+)",
+)
+@click.option(
+    "--observed-at",
+    help="When the fact held: YYYY-MM-DD or an ISO 8601 datetime (naive = UTC). "
+    "Alone it changes only details.observed_at (server v0.127.0+)",
 )
 @click.option(
     "--details",
@@ -1189,24 +1322,37 @@ def list_command(
     "--merge-details",
     is_flag=True,
     default=False,
-    help="Read the memory first (reference) and merge --details/--location over its "
-    "current details, top-level keys only, so unmentioned keys are kept. Needs "
-    "--memory-id and one of --details/--location; two calls, not one atomic update.",
+    help="Merge --details/--location into the memory's current details, top-level "
+    "keys only, so unmentioned keys are kept; a null value deletes a key. One call "
+    "(details_patch, server v0.140.0+). Needs --memory-id and one of "
+    "--details/--location.",
+)
+@click.option(
+    "--details-patch",
+    help="JSON object merged into the stored details, top-level keys only; a null "
+    'value deletes the key: \'{"status": "done", "assignee": null}\'. Needs '
+    "--memory-id; not with --details/--location/--merge-details (server v0.140.0+)",
 )
 def update_memory(
-    context_id,
-    memory_id,
-    external_id,
-    summary,
-    content,
-    memory_type,
-    importance,
-    tags,
-    dismiss_supersede_candidate,
-    details,
-    location,
-    merge_details,
-):
+    context_id: str | None,
+    memory_id: str | None,
+    external_id: str | None,
+    summary: str | None,
+    content: str | None,
+    memory_type: str | None,
+    importance: float | None,
+    tags: str | None,
+    add_tags: tuple[str, ...],
+    remove_tags: tuple[str, ...],
+    dismiss_supersede_candidate: bool,
+    accept_supersede_candidate: bool,
+    expected_version: int | None,
+    observed_at: str | None,
+    details: str | None,
+    location: str | None,
+    merge_details: bool,
+    details_patch: str | None,
+) -> None:
     """
     Update an existing memory or upsert by external ID.
 
@@ -1217,21 +1363,32 @@ def update_memory(
     other details key (including the resource_id an --external-id upsert
     stores there: without it the next upsert of that id creates a new memory
     instead of replacing this one), and '{}' clears them. --merge-details
-    reads the memory first with reference() and merges the top-level keys of
-    --details/--location
-    over its current details, so unmentioned keys are kept, and it is two
-    calls, not one atomic update (the read is a reference() of the memory and
-    counts in its access stats). It cannot remove a key (for that, send the full
-    object without --merge-details), except '"tool_trigger": null', which the
-    server treats as unmark; '"location": null' is rejected by the server (422).
-    Coordinates must be JSON numbers, not strings: the server rejects
-    string-typed lat/lon with a 422 by design.
+    sends --details/--location as a details_patch: the server merges their
+    top-level keys over the current details in one call, keeps the keys they
+    do not mention, and deletes a key given as null ('"location": null'
+    too). --details-patch sends a patch you write yourself. On a server
+    before memory-cloud 0.140.0 either falls back to reading the memory
+    first with reference() and writing the merged object: two calls, not one
+    atomic update (--expected-version still guards the write on 0.113.0+),
+    and the read counts in the memory's access stats. A server before 0.82.0
+    ignores the patch instead of refusing it; the command confirms that
+    version first, writes the merged details in a second call, and exits 1
+    naming any other new flag that server ignored (--add-tag, --remove-tag,
+    --expected-version, --observed-at). Coordinates must be JSON numbers, not
+    strings: the server rejects string-typed lat/lon with a 422 by design.
+
+    --add-tag/--remove-tag edit the stored tags without resending them, and
+    --expected-version makes the update fail, writing nothing, when another
+    edit landed since you read the memory.
 
     \b
     Examples:
       kagura update-memory -m MEM_UUID -s "updated summary"
       kagura update-memory --external-id ext-key -s "summary" --content "..." -t note
       kagura update-memory -m MEM_UUID --dismiss-supersede-candidate
+      kagura update-memory -m MEM_UUID --accept-supersede-candidate
+      kagura update-memory -m MEM_UUID --add-tag status:done --remove-tag status:open \\
+        --details-patch '{"status": "done"}' --expected-version 3
       kagura update-memory -m MEM_UUID \\
         --details '{"location": {"lat": 35.68, "lon": 139.76}, "client": "acme"}'
       kagura update-memory -m MEM_UUID --merge-details \\
@@ -1241,36 +1398,144 @@ def update_memory(
         raise click.ClickException("Either --memory-id or --external-id is required")
     if memory_id and external_id:
         raise click.ClickException("Provide only one of --memory-id or --external-id")
-    if dismiss_supersede_candidate and external_id:
-        raise click.ClickException(
-            "--dismiss-supersede-candidate requires --memory-id (not --external-id)"
-        )
-    if merge_details and external_id:
-        raise click.ClickException("--merge-details requires --memory-id (not --external-id)")
+    add_tag_list = [tag.strip() for tag in add_tags if tag.strip()] or None
+    remove_tag_list = [tag.strip() for tag in remove_tags if tag.strip()] or None
+    patch = _parse_json_object(details_patch, "--details-patch")
+    if external_id:
+        in_place_only = [
+            flag
+            for flag, given in (
+                ("--dismiss-supersede-candidate", dismiss_supersede_candidate),
+                ("--accept-supersede-candidate", accept_supersede_candidate),
+                ("--merge-details", merge_details),
+                ("--details-patch", patch is not None),
+                ("--add-tag", add_tag_list is not None),
+                ("--remove-tag", remove_tag_list is not None),
+                ("--expected-version", expected_version is not None),
+            )
+            if given
+        ]
+        if in_place_only:
+            verb = "requires" if len(in_place_only) == 1 else "require"
+            raise click.ClickException(
+                f"{', '.join(in_place_only)} {verb} --memory-id (not --external-id)"
+            )
 
     tag_list = _parse_tags(tags)
+    if tag_list is not None and (add_tag_list or remove_tag_list):
+        raise click.ClickException(
+            "--tags replaces the whole list; --add-tag/--remove-tag edit it. Use one or the other."
+        )
     details_payload = _build_details(details, location)
-    if merge_details and details_payload is None:
-        raise click.ClickException("--merge-details needs --details or --location")
+    if patch is not None and (details_payload is not None or merge_details):
+        raise click.ClickException(
+            "--details-patch cannot be combined with --details/--location/--merge-details"
+        )
+    flag = "--details-patch"
+    if merge_details:
+        if details_payload is None:
+            raise click.ClickException("--merge-details needs --details or --location")
+        patch, details_payload, flag = details_payload, None, "--merge-details"
+
+    edit: dict[str, Any] = {
+        "memory_id": memory_id,
+        "external_id": external_id,
+        "summary": summary,
+        "content": content,
+        "type": memory_type,
+        "importance": importance,
+        "tags": tag_list,
+        "add_tags": add_tag_list,
+        "remove_tags": remove_tag_list,
+        "dismiss_supersede_candidate": dismiss_supersede_candidate,
+        "accept_supersede_candidate": accept_supersede_candidate,
+        "expected_version": expected_version,
+        "observed_at": _blank_to_none(observed_at),
+    }
 
     async def op(client: KaguraClient, ctx: str) -> dict[str, Any]:
-        payload = details_payload
-        # ``payload is not None`` only narrows for pyright: None was rejected above.
-        if merge_details and payload is not None:
-            current = await _current_details_for_merge(client, ctx, memory_id)
-            payload = {**current, **payload}
-        return await client.update_memory(
-            context_id=ctx,
-            memory_id=memory_id,
-            external_id=external_id,
-            summary=summary,
-            content=content,
-            type=memory_type,
-            importance=importance,
-            tags=tag_list,
-            details=payload,
-            dismiss_supersede_candidate=dismiss_supersede_candidate,
+        if patch is None:
+            return await client.update_memory(context_id=ctx, details=details_payload, **edit)
+        # A patch without --memory-id was refused above.
+        assert memory_id is not None
+        target: str = memory_id
+        one_call_patch: dict[str, Any] = patch
+
+        async def _merge_via_reference(note: str, **write: Any) -> dict[str, Any]:
+            """Read the details, merge the patch as the server would, write the whole object."""
+            click.echo(
+                "note: --details-patch/--merge-details in one call needs memory-cloud "
+                f"0.140.0+; this server {note}",
+                err=True,
+            )
+            current = await _current_details_for_merge(client, ctx, target, flag)
+            merged = _apply_details_patch(current, one_call_patch, edit["observed_at"])
+            return await client.update_memory(context_id=ctx, details=merged, **write)
+
+        try:
+            result = await client.update_memory(
+                context_id=ctx, details_patch=one_call_patch, **edit
+            )
+        except KaguraError as e:
+            if not _details_patch_refused(e):
+                raise
+            # 0.82.0-0.139.x refused the call: nothing was written.
+            return await _merge_via_reference(
+                "refused it, merging via reference() instead.", **edit
+            )
+        if "version" in result:
+            return result
+        # Only a server before 0.82.0 (which ignores an argument it does not
+        # declare) succeeds without a version (0.113.0+): the other edits were
+        # applied and the details were not. Confirm the version before
+        # writing again: a reply without one from any other server is not
+        # understood, and merging onto it could undo what it did.
+        try:
+            info = await client.get_server_info()
+        except KaguraError as e:
+            older, probe = None, f"its version could not be read ({_exc_message(e)})"
+        else:
+            older = meets_minimum(info.version, _REFUSES_UNKNOWN_ARGUMENTS_SINCE)
+            older, probe = older is False, f"reports version {info.version}"
+        if not older:
+            raise click.ClickException(
+                f"the server answered update_memory without 'version' and {probe}, "
+                f"so whether it applied {flag} cannot be confirmed. Nothing more was "
+                "written, but the call's other changes may have been: read the "
+                "memory with `kagura reference` before trying again."
+            )
+        merged_reply = await _merge_via_reference(
+            "ignored it (before 0.82.0), merging via reference() in a second call.",
+            memory_id=target,
         )
+        # The same server ignored the other arguments it does not know too.
+        dropped = [
+            name
+            for name, given in (
+                ("--add-tag", edit["add_tags"] is not None),
+                ("--remove-tag", edit["remove_tags"] is not None),
+                ("--expected-version", edit["expected_version"] is not None),
+                ("--accept-supersede-candidate", edit["accept_supersede_candidate"]),
+                ("--observed-at", edit["observed_at"] is not None),
+            )
+            if given
+        ]
+        if dropped:
+            click.echo(json.dumps(merged_reply, indent=2, ensure_ascii=False))
+            observed = (
+                " (--observed-at went into details.observed_at only, which this "
+                "server does not read)"
+                if edit["observed_at"] is not None
+                else ""
+            )
+            raise click.ClickException(
+                f"the server (before memory-cloud 0.82.0) ignored {', '.join(dropped)}"
+                f"{observed}. Both writes happened (the first call applied the other "
+                "changes, the second the merged details); those flags need a newer "
+                "server, so check the memory with `kagura reference` before editing it "
+                "again."
+            )
+        return merged_reply
 
     _run_client_command(op, context_id)
 
@@ -1573,21 +1838,58 @@ def context_update(context_id, display_name, description, summary, usage_guide, 
     help="Reranker provider (self_hosted: the deployment's keyless local reranker)",
 )
 @click.option("--reranker-model", help="Reranker model name")
+@click.option(
+    "--content-chunks/--no-content-chunks",
+    default=None,
+    help="Embed long content as chunk vectors; sends memory content, not only summaries, "
+    "to the embedding and rerank providers. Context owner or workspace owner/admin only "
+    "(server v0.110.0+)",
+)
+@click.option(
+    "--llm-selector/--no-llm-selector",
+    default=None,
+    help="Let recall send summaries and content to the deployment's judge model to keep "
+    "the results that answer the query. Context owner or workspace owner/admin only "
+    "(server v0.115.0+)",
+)
 def context_search_config(
-    context_id, semantic, bm25, fetch_factor, rerank, reranker, reranker_model
-):
+    context_id: str,
+    semantic: float | None,
+    bm25: float | None,
+    fetch_factor: int | None,
+    rerank: bool | None,
+    reranker: str | None,
+    reranker_model: str | None,
+    content_chunks: bool | None,
+    llm_selector: bool | None,
+) -> None:
     """
     Update search configuration for a context.
 
-    Weights must sum to 1.0.
+    Weights must sum to 1.0. The weights and reranker settings need context
+    editor access; --content-chunks and --llm-selector need the context owner
+    or a workspace owner/admin, and where the deployment gates them by plan,
+    the plan's feature and a free slot.
 
     \b
     Examples:
       kagura context search-config CTX_UUID --semantic 0.5 --bm25 0.5
       kagura context search-config CTX_UUID --rerank --reranker voyage
       kagura context search-config CTX_UUID --rerank --reranker self_hosted
+      kagura context search-config CTX_UUID --content-chunks
+      kagura context search-config CTX_UUID --no-llm-selector
     """
-    if all(v is None for v in (semantic, bm25, fetch_factor, rerank, reranker, reranker_model)):
+    options = (
+        semantic,
+        bm25,
+        fetch_factor,
+        rerank,
+        reranker,
+        reranker_model,
+        content_chunks,
+        llm_selector,
+    )
+    if all(v is None for v in options):
         raise click.ClickException("At least one option is required")
 
     if semantic is not None and bm25 is not None and abs(semantic + bm25 - 1.0) > 0.01:
@@ -1604,6 +1906,8 @@ def context_search_config(
             use_rerank=rerank,
             reranker_provider=reranker,
             reranker_model=reranker_model,
+            content_chunks_enabled=content_chunks,
+            llm_selector_enabled=llm_selector,
         ),
         context_id=None,
         needs_context=False,
@@ -2233,9 +2537,17 @@ def _agents_md_option(ctx, param, value: str | None) -> str | None:
 
 
 def _tool_profile_option(ctx, param, value: str | None) -> str | None:
-    if value is not None and not value.strip():
-        raise click.BadParameter("must not be empty")
-    return value.strip() if value is not None else None
+    """``--tool-profile NAME``, trimmed; None when absent.
+
+    A blank name and one starting with ``-`` are refused: the stdio entry
+    passes it to ``kagura-mcp`` as its own argv item.
+    """
+    if value is None:
+        return None
+    try:
+        return normalize_tool_profile(value)
+    except ValueError as e:
+        raise click.BadParameter(str(e)) from None
 
 
 def _default_context_option(ctx, param, value: str | None) -> str | None:

@@ -29,19 +29,18 @@ from pydantic import BaseModel
 from ._auth import _AuthSource, _OAuthAuth, _resolve_auth, _StaticAuth
 from ._http import (
     SDK_VERSION,
+    ErrorBody,
     _retry_after_seconds,
     annotate_server_error,
     base_url_from_mcp,
-    error_envelope,
-    extract_detail,
     gate_error,
     insufficient_scope_error,
     parse_response,
     response_shape_error,
     sanitize_server_detail,
-    server_error_fields,
     service_unavailable_error,
     validate_https_url,
+    version_conflict_error,
 )
 from .auth.credentials import KaguraOAuth
 from .exceptions import (
@@ -84,15 +83,19 @@ class KaguraRestClient:
     - 503 (``DB-002``, the database unavailable) →
       :class:`KaguraServiceUnavailableError` with ``retry_after`` from
       ``Retry-After`` and ``reason`` from ``details.reason``
-    - other statuses → :class:`KaguraConnectionError`, e.g. a 409: memory
-      ``PATCH`` with a stale ``expected_version`` answers ``409 RES-002``
-      with ``details.reason == "version_conflict"`` (v0.113.0+, #2043; typed
-      by #302)
+    - a refused ``expected_version`` (memory ``PATCH``'s ``409 RES-002``
+      with ``details.reason == "version_conflict"``, v0.113.0+, #2043) →
+      :class:`KaguraVersionConflictError` (#302), after the gate rule
+    - other statuses → :class:`KaguraConnectionError`, e.g. the files API's
+      sha256 dedup ``409 RES-002`` (no ``reason``)
     - transport errors → :class:`KaguraConnectionError`
     - whatever the class, an error built from a response keeps the body's
       error code as ``code`` and its ``details`` (the REST envelope's
       ``details``, or an OAuth-style body's fields) as ``details`` — set by
       :meth:`_request`, so every hook's error gets them too
+    - the error body is decoded at most once: :meth:`_request` builds one
+      :class:`~kagura_memory._http.ErrorBody` and hands it to
+      :meth:`_map_status_error` and the hooks (#311)
     - a 2xx JSON body its model or envelope rejects →
       :class:`KaguraResponseError` (via :meth:`_parse` / :meth:`_expect_list`)
     """
@@ -276,10 +279,11 @@ class KaguraRestClient:
             response.raise_for_status()
             return response
         except httpx.HTTPStatusError as e:
-            err = self._map_status_error(e, request_json=json, request_params=params)
+            body = ErrorBody(e.response)
+            err = self._map_status_error(e, body, request_json=json, request_params=params)
             # One place for every hook: a typed error keeps what it already set.
-            if (fields := server_error_fields(e.response)) is not None:
-                annotate_server_error(err, *fields)
+            if body.fields is not None:
+                annotate_server_error(err, *body.fields)
             raise err from e
         except httpx.RequestError as e:
             raise KaguraConnectionError(f"Connection failed: {_exc_message(e)}") from e
@@ -287,6 +291,7 @@ class KaguraRestClient:
     def _map_status_error(
         self,
         e: httpx.HTTPStatusError,
+        body: ErrorBody,
         *,
         request_json: dict[str, Any] | None,
         request_params: dict[str, Any] | None,
@@ -299,30 +304,34 @@ class KaguraRestClient:
         NoReturn dispatch that static analysis cannot see through
         (CodeQL py/mixed-returns vs py/illegal-raise both flagged the
         raising-hook shape).
+
+        ``body`` is ``e.response``'s :class:`~kagura_memory._http.ErrorBody`,
+        built once by :meth:`_request`; the hooks read it from there rather
+        than decoding the body again.
         """
-        typed = self._gate_error(e)
+        typed = self._gate_error(e, body) or self._version_conflict_error(e, body)
         if typed is not None:
             return typed
         status = e.response.status_code
         if status == 401:
             return self._error_401(e)
         if status == 403:
-            scope_error = insufficient_scope_error(e.response)
+            scope_error = insufficient_scope_error(e.response, body)
             if scope_error is not None:
                 return scope_error
-            return self._error_403(e, request_json=request_json, request_params=request_params)
-        if status == 404:
-            return KaguraNotFoundError(extract_detail(e.response) or "Not found")
-        if status == 429:
-            return self._error_429(e)
-        if status == 503:
-            detail = extract_detail(e.response)
-            return service_unavailable_error(
-                e.response, f"HTTP 503: {detail}" if detail else "HTTP 503"
+            return self._error_403(
+                e, body, request_json=request_json, request_params=request_params
             )
-        return self._generic_error(e)
+        if status == 404:
+            return KaguraNotFoundError(body.detail or "Not found")
+        if status == 429:
+            return self._error_429(e, body)
+        if status == 503:
+            message = f"HTTP 503: {body.detail}" if body.detail else "HTTP 503"
+            return service_unavailable_error(e.response, message, body)
+        return self._generic_error(e, body)
 
-    def _gate_error(self, e: httpx.HTTPStatusError) -> KaguraError | None:
+    def _gate_error(self, e: httpx.HTTPStatusError, body: ErrorBody) -> KaguraError | None:
         """Type a plan, quota or capacity refusal from the canonical envelope (#256).
 
         Runs before the per-status hooks: a refusal is typed by its
@@ -332,12 +341,34 @@ class KaguraRestClient:
         ``CAPACITY-001`` capacity lock a :class:`KaguraCapacityLockedError`,
         not an access problem.
         """
-        envelope = error_envelope(e.response)
+        envelope = self._safe_envelope(e, body)
         if envelope is None:
             return None
         code, message, details = envelope
-        safe_message = sanitize_server_detail(message) or f"HTTP {e.response.status_code}"
-        return gate_error(code, safe_message, details, retry_after=_retry_after_seconds(e.response))
+        return gate_error(code, message, details, retry_after=_retry_after_seconds(e.response))
+
+    def _version_conflict_error(
+        self, e: httpx.HTTPStatusError, body: ErrorBody
+    ) -> KaguraError | None:
+        """Type a refused ``expected_version`` from the canonical envelope (#302).
+
+        Memory ``PATCH`` answers ``409 RES-002`` with ``details.reason ==
+        "version_conflict"`` (memory-cloud v0.113.0+, #2043); the files API's
+        dedup ``409 RES-002`` has no such reason and stays the generic error
+        ``FilesClient.upload`` reads its ``existing_file`` from.
+        """
+        envelope = self._safe_envelope(e, body)
+        return None if envelope is None else version_conflict_error(*envelope)
+
+    @staticmethod
+    def _safe_envelope(
+        e: httpx.HTTPStatusError, body: ErrorBody
+    ) -> tuple[str, str, dict[str, Any]] | None:
+        """``body.envelope`` (decoded once) with its message sanitized for an exception."""
+        if body.envelope is None:
+            return None
+        code, message, details = body.envelope
+        return code, sanitize_server_detail(message) or f"HTTP {e.response.status_code}", details
 
     # ---- per-status hooks (override where the wire contract differs) ----
 
@@ -353,25 +384,25 @@ class KaguraRestClient:
     def _error_403(
         self,
         e: httpx.HTTPStatusError,
+        body: ErrorBody,
         *,
         request_json: dict[str, Any] | None,
         request_params: dict[str, Any] | None,
     ) -> KaguraError:
         """403 -> generic mapping by default; clients with a richer story
         (workspace hints, secret existence-hiding) override this."""
-        return self._generic_error(e)
+        return self._generic_error(e, body)
 
-    def _error_429(self, e: httpx.HTTPStatusError) -> KaguraError:
+    def _error_429(self, e: httpx.HTTPStatusError, body: ErrorBody) -> KaguraError:
         """429 -> quota error with a tolerant ``Retry-After`` parse."""
         return KaguraQuotaError(
             "Quota exceeded. Try again later.",
             retry_after=_retry_after_seconds(e.response),
         )
 
-    def _generic_error(self, e: httpx.HTTPStatusError) -> KaguraError:
+    def _generic_error(self, e: httpx.HTTPStatusError, body: ErrorBody) -> KaguraError:
         status = e.response.status_code
-        detail = extract_detail(e.response)
-        msg = f"HTTP {status}: {detail}" if detail else f"HTTP {status}"
+        msg = f"HTTP {status}: {body.detail}" if body.detail else f"HTTP {status}"
         return KaguraConnectionError(msg)
 
     # -------------------------------------------------------------------

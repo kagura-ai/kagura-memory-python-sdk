@@ -1,5 +1,6 @@
 """Pydantic models for Kagura Memory SDK."""
 
+import re
 from datetime import datetime
 from typing import Annotated, Any, Literal, TypeVar
 
@@ -174,7 +175,52 @@ class UsageInfo(BaseModel):
 
 
 class SearchConfig(BaseModel):
-    """Hybrid search configuration for a context."""
+    """Hybrid search configuration for a context.
+
+    The content-chunk and LLM-selector fields are ``None`` when the reply did
+    not carry them — a server older than the field, or a surface that does
+    not send it. At memory-cloud v0.142.0 :meth:`KaguraClient.get_context_info`
+    sends ``llm_selector_enabled`` / ``llm_selector_effective`` only;
+    :meth:`KaguraClient.update_search_config` returns both ``*_enabled`` /
+    ``*_effective`` pairs in its ``config``; the REST ``GET
+    /api/v1/contexts/{id}/search-config`` route (not wrapped) carries every
+    field. Fields newer than this SDK are ignored.
+
+    Attributes:
+        content_chunks_enabled: The stored opt-in (memory-cloud v0.110.0+,
+            #2015): long ``content`` (1,500+ characters) is embedded as chunk
+            vectors, so memory content — not only summaries — goes to the
+            embedding and rerank providers.
+        content_chunks_effective: Whether the stored flag is acted on: a
+            vector store that keeps chunks (not LanceDB) and, where the
+            deployment gates chunks by plan, a plan slot (v0.113.0+, #2103).
+        content_chunks_limit: The plan's ``max_content_chunk_contexts``;
+            ``None`` when the deployment does not gate by plan.
+        content_chunks_in_use: Contexts of the workspace with the flag on.
+        content_chunks_disabled_reason: Why the toggle cannot be turned on,
+            or the chunks are inactive: ``unsupported``, ``plan``, ``cap`` or
+            ``permission`` (a plain ``str``, so a newer reason passes).
+        content_chunks_can_change: Whether the caller may change the flag.
+        content_chunks_supported: Whether the vector store keeps chunk
+            vectors (``False`` on LanceDB).
+        content_chunks_backfill_pending: Long memories still waiting for
+            their chunks (v0.112.0+); 0 while the flag is off.
+        embedding_provider: Where content goes with chunks on (``openai`` /
+            ``self_hosted``).
+        llm_selector_enabled: The stored recall LLM-selector opt-in
+            (v0.115.0+, #2144): an MCP :meth:`KaguraClient.recall` may send
+            the context's summaries and attached content to the deployment's
+            judge model.
+        llm_selector_effective: Whether recall acts on it (the plan, where
+            the deployment gates it).
+        llm_selector_limit: The plan's ``max_llm_selector_contexts``;
+            ``None`` when not gated by plan.
+        llm_selector_in_use: Contexts of the workspace with the selector on.
+        llm_selector_disabled_reason: ``plan``, ``cap`` or ``permission``.
+        llm_selector_can_change: Whether the caller may change it.
+    """
+
+    model_config = ConfigDict(extra="ignore")
 
     semantic_weight: float = 0.6
     bm25_weight: float = 0.4
@@ -182,6 +228,21 @@ class SearchConfig(BaseModel):
     use_rerank: bool = False
     reranker_provider: str | None = None
     reranker_model: str | None = None
+    content_chunks_enabled: bool | None = None
+    content_chunks_effective: bool | None = None
+    content_chunks_limit: int | None = None
+    content_chunks_in_use: int | None = None
+    content_chunks_disabled_reason: str | None = None
+    content_chunks_can_change: bool | None = None
+    content_chunks_supported: bool | None = None
+    content_chunks_backfill_pending: int | None = None
+    embedding_provider: str | None = None
+    llm_selector_enabled: bool | None = None
+    llm_selector_effective: bool | None = None
+    llm_selector_limit: int | None = None
+    llm_selector_in_use: int | None = None
+    llm_selector_disabled_reason: str | None = None
+    llm_selector_can_change: bool | None = None
 
 
 class ContextDetail(BaseModel):
@@ -405,6 +466,13 @@ class MemoryListItemLocation(BaseModel):
     lon: float
 
 
+# The two forms memory-cloud stores ``details.observed_at`` in and lists it as
+# (utils/observed_at.py ``DATE_RE`` / ``DATETIME_RE``, #2330). The date form is
+# also the date input form ``KaguraClient`` checks an argument against.
+_OBSERVED_DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
+_OBSERVED_STORED_DATETIME = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")
+
+
 class MemoryListItem(BaseModel):
     """A single memory row in a paginated ``list_memories`` response.
 
@@ -413,6 +481,20 @@ class MemoryListItem(BaseModel):
     into ``datetime``, consistent with the other list models in this module.
     ``location`` is ``None`` for memories without a complete location, and
     always ``None`` against servers older than v0.54.0 (which omit it).
+
+    ``observed_at`` (memory-cloud v0.127.0+, #2330) is when the fact held —
+    ``details.observed_at`` — as the text the server stores, at the writer's
+    precision: a date ``YYYY-MM-DD`` or a UTC datetime
+    ``YYYY-MM-DDTHH:MM:SSZ``. ``None`` when the memory has none (and always
+    on older servers). The two forms are kept apart because they are not
+    the same value: the server sorts and filters a date as the start of that
+    UTC day (``2024-03-07`` as ``2024-03-07T00:00:00Z``, e.g. for
+    :meth:`KaguraClient.recall`'s ``observed_after`` / ``observed_before``),
+    while an exact match on ``2024-03-07`` finds the date form only. Pad a
+    date with ``T00:00:00Z`` before comparing it with a datetime. A value
+    written before v0.127.0 checked it is listed as stored when it has one of
+    the two shapes, so it may name no real day (``2024-02-30``); any other
+    text is response drift (``KaguraResponseError``).
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -425,6 +507,20 @@ class MemoryListItem(BaseModel):
     created_at: datetime
     updated_at: datetime
     location: MemoryListItemLocation | None = None
+    observed_at: str | None = None
+
+    @field_validator("observed_at")
+    @classmethod
+    def _stored_form(cls, value: str | None) -> str | None:
+        # The server lists only its two stored shapes (observed_at_from_details,
+        # a regex check, so a legacy "2024-02-30" passes as is); other text is drift.
+        if (
+            value is None
+            or _OBSERVED_DATE.fullmatch(value)
+            or _OBSERVED_STORED_DATETIME.fullmatch(value)
+        ):
+            return value
+        raise ValueError("observed_at must be YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ")
 
 
 class MemoryListResponse(BaseModel):
@@ -1667,6 +1763,22 @@ class AgentBinding(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# MCP tools/list (#311)
+# ---------------------------------------------------------------------------
+
+
+class ToolListResponse(BaseModel):
+    """The ``tools/list`` result :meth:`KaguraClient.get_tool_definitions` returns the tools of.
+
+    Each definition stays a dict (``name``, ``description``, ``inputSchema``,
+    ``annotations``, ...), passed through unread. A result without ``tools``
+    lists none.
+    """
+
+    tools: list[dict[str, Any]] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
 # Tool guardrails (#253, server v0.74.0+, memory-cloud #1619/#1621)
 # ---------------------------------------------------------------------------
 
@@ -2446,6 +2558,15 @@ RecallVerbosity = Literal["compact", "full"]
 ``"compact"`` is the server default; ``"full"`` adds ``tags``,
 ``context_summary``, ``scope``, ``version`` and the uncut ``summary``."""
 
+DedupeMode = Literal["suggest", "check", "off"]
+"""Valid ``remember`` ``dedupe`` values (memory-cloud v0.93.0+, #1853; request side only).
+
+``"suggest"`` is the server default: write, and flag an older near-duplicate
+later as ``supersede_candidate``. ``"check"`` writes nothing when a live
+memory of the context is a near-duplicate and replies ``status:
+"duplicate_candidate"`` instead. ``"off"`` writes and never suggests for this
+memory, permanently (#2024)."""
+
 _MAX_CHARS_MIN = 10_000
 _MAX_CHARS_MAX = 100_000
 # recall's ``full``: how many top results carry content (memory-cloud
@@ -2453,7 +2574,7 @@ _MAX_CHARS_MAX = 100_000
 _RECALL_FULL_MAX = 100
 
 
-def _validate_int_range(name: str, value: object, lo: int, hi: int) -> None:
+def _validate_int_range(name: str, value: object, lo: int, hi: int | None = None) -> None:
     """Reject a request integer the server would refuse, before any request.
 
     ``bool`` is not an integer here, as on the server (``type(x) is int``).
@@ -2462,13 +2583,19 @@ def _validate_int_range(name: str, value: object, lo: int, hi: int) -> None:
         name: The argument's name, for the message.
         value: The value the caller passed.
         lo: The smallest accepted value.
-        hi: The largest accepted value.
+        hi: The largest accepted value; ``None`` leaves the range open above.
 
     Raises:
         ValueError: If ``value`` is not an ``int`` in [``lo``, ``hi``].
     """
-    if isinstance(value, bool) or not isinstance(value, int) or not lo <= value <= hi:
-        raise ValueError(f"{name} must be an integer between {lo} and {hi}, got {value!r}")
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or value < lo
+        or (hi is not None and value > hi)
+    ):
+        bounds = f"of at least {lo}" if hi is None else f"between {lo} and {hi}"
+        raise ValueError(f"{name} must be an integer {bounds}, got {value!r}")
 
 
 def _validate_max_chars(max_chars: object) -> None:

@@ -21,6 +21,7 @@ from click.testing import CliRunner, Result
 from kagura_memory import claude_code
 from kagura_memory.claude_code import MCP_SERVER_NAME, claude_json_label, claude_json_path
 from kagura_memory.cli import main
+from kagura_memory.exceptions import KaguraAuthError, KaguraConnectionError
 from kagura_memory.setup_claude import (
     POSTTOOLUSE_HOOK_COMMAND,
     SESSIONSTART_HOOK_COMMAND,
@@ -30,6 +31,7 @@ from kagura_memory.setup_claude import (
     _remove_sdk_hook,
     _sdk_prefix,
 )
+from tests.conftest import PagedContexts
 
 CTX = "11111111-2222-3333-4444-555555555555"
 MCP_URL = "https://memory.example.com/mcp"
@@ -722,6 +724,41 @@ def test_rerun_without_query_flags_notes_what_it_dropped(
     assert "also had" not in again.output
 
 
+@pytest.mark.parametrize("oauth", [True, False], ids=["oauth", "api-key"])
+def test_rerun_notes_a_dropped_tools_allowlist(connection, tmp_path: Path, oauth: bool) -> None:
+    """An http entry's ?tools= allowlist, which no setup flag sets, is named in the note (#311)."""
+    old_url = f"{MCP_URL}?tools=recall,%20remember&guardrails=off"
+    write_project_entry(
+        tmp_path,
+        {"type": "http", "url": old_url, "headers": {"Authorization": f"Bearer {API_KEY}"}},
+    )
+
+    result = run_setup(tmp_path, oauth=oauth)
+
+    assert result.exit_code == 0, result.output
+    note = " ".join(result.output.split())
+    assert (
+        "the previous project-scope entry also had --guardrails off and "
+        "?tools=recall,remember, which this run left out; re-run with them "
+        "(?tools= on the MCP URL) to keep them." in note
+    )
+
+
+def test_rerun_keeping_the_tools_allowlist_does_not_note_it(connection, tmp_path: Path) -> None:
+    url = f"{MCP_URL}?tools=recall"
+    write_project_entry(
+        tmp_path,
+        {"type": "http", "url": url, "headers": {"Authorization": f"Bearer {API_KEY}"}},
+    )
+    args = ["setup", "claude", "--project-dir", str(tmp_path), "--context-id", CTX, "-y"]
+    args += ["--api-key", API_KEY, "--mcp-url", url]
+
+    result = CliRunner().invoke(main, args)
+
+    assert result.exit_code == 0, result.output
+    assert "also had" not in result.output
+
+
 def test_rerun_notes_a_dropped_flag_in_its_equals_form(connection, tmp_path: Path) -> None:
     write_project_entry(
         tmp_path, {**STDIO_DEFAULT, "args": ["--profile", "default", f"--guardrails={CTX}"]}
@@ -754,9 +791,25 @@ def test_guardrails_rejects_values_the_server_would_ignore(tmp_path: Path, bad: 
     assert not (tmp_path / ".mcp.json").exists()
 
 
-def test_empty_tool_profile_is_rejected(tmp_path: Path) -> None:
-    result = run_setup(tmp_path, "--tool-profile", " ")
-    assert result.exit_code == 2
+@pytest.mark.parametrize(
+    ("flags", "message"),
+    [
+        (("--tool-profile", " "), "must not be empty"),
+        # kagura-mcp would read the stored value as a flag and not start (#311).
+        (("--tool-profile", "-x"), "cannot start with '-': '-x'"),
+        (("--tool-profile=--full",), "cannot start with '-': '--full'"),
+    ],
+    ids=["blank", "dashed", "dashed-equals-form"],
+)
+@pytest.mark.parametrize("oauth", [True, False], ids=["oauth", "api-key"])
+def test_bad_tool_profile_is_a_usage_error(
+    tmp_path: Path, flags: tuple[str, ...], message: str, oauth: bool
+) -> None:
+    result = run_setup(tmp_path, *flags, oauth=oauth)
+    assert result.exit_code == 2, result.output
+    assert "--tool-profile" in result.output
+    assert message in result.output
+    assert not (tmp_path / ".mcp.json").exists()
 
 
 def test_stdio_entry_carries_add_tools_and_context(connection, tmp_path: Path) -> None:
@@ -808,6 +861,51 @@ def test_query_flags_add_up_repeated_add_tools_in_a_stdio_entry() -> None:
         "--add-tools": "a,b,c",
         "--context": CTX,
     }
+
+
+@pytest.mark.parametrize(
+    ("query", "flags"),
+    [
+        ("", {}),
+        # The first value of a key wins, as the server reads it; a blank one is no flag.
+        ("?profile=&profile=full&guardrails=off&guardrails=x", {"--guardrails": "off"}),
+        ("?guardrails=%20&guardrails=off&profile=%20core", {"--tool-profile": "core"}),
+        ("?add_tools=,&add_tools=explore", {}),
+        (f"?context=%20&context={CTX}", {}),
+        (
+            f"?add_tools=explore,%20a,explore&tools=recall&context={CTX}",
+            {"--add-tools": "explore,a", "--context": CTX, "?tools=": "recall"},
+        ),
+        # The allowlist the server reads first, as it reads it; one naming no tool is no flag.
+        ("?tools=%20recall,remember,recall&tools=x", {"?tools=": "recall,remember"}),
+        ("?tools=,%20&tools=recall", {}),
+        # The server trims guardrails and context (select_guardrail_context /
+        # select_default_context) as it trims profile.
+        (
+            f"?guardrails=%20off%20&context=%20{CTX}%20",
+            {"--guardrails": "off", "--context": CTX},
+        ),
+    ],
+    ids=[
+        "no-query",
+        "blank-profile-first",
+        "blank-guardrails-first",
+        "no-names",
+        "blank-context-first",
+        "names",
+        "tools-allowlist",
+        "tools-naming-none",
+        "guardrails-and-context-trimmed",
+    ],
+)
+def test_query_flags_of_an_http_entry_read_the_url_as_the_server_does(
+    query: str, flags: dict[str, str]
+) -> None:
+    assert _query_flags({"type": "http", "url": f"{MCP_URL}{query}"}) == flags
+
+
+def test_query_flags_of_an_http_entry_without_a_url_are_empty() -> None:
+    assert _query_flags({"type": "http", "url": None}) == {}
 
 
 def test_add_tools_under_a_tools_allowlist_warns(connection, tmp_path: Path) -> None:
@@ -1259,3 +1357,68 @@ def test_remove_sdk_hook_keeps_other_hooks_in_a_shared_entry() -> None:
     ]
     assert not _remove_sdk_hook(settings, "SessionStart", SESSIONSTART_HOOK_COMMAND)
     assert not _remove_sdk_hook({"hooks": []}, "SessionStart", SESSIONSTART_HOOK_COMMAND)
+
+
+# =============================================================================
+# --context-id NAME past the first list_contexts page (#309)
+# =============================================================================
+
+
+@pytest.mark.parametrize("oauth", [True, False], ids=["oauth", "api-key"])
+@pytest.mark.parametrize("yes", [True, False], ids=["-y", "interactive"])
+def test_context_name_past_the_first_page_resolves(
+    connection, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, oauth: bool, yes: bool
+) -> None:
+    # Two contexts a page: "far" is on page 3 of the plain list, and on page 2 of
+    # name_contains="far", behind "far-a" and "far-b".
+    fake = PagedContexts(["recent-a", "recent-b", "far-a", "far-b", "far"])
+    connection.return_value = fake.first_page()
+    monkeypatch.setattr("kagura_memory.setup_claude._make_client", fake.make_client)
+    args = ["setup", "claude", "--project-dir", str(tmp_path), "--context-id", "far"]
+    args += ["--profile", "default"] if oauth else ["--api-key", API_KEY, "--mcp-url", MCP_URL]
+    if yes:
+        args.append("-y")
+
+    # Interactive, the API-key path asks for the key and the URL: Enter keeps both.
+    result = CliRunner().invoke(main, args, input=None if yes else "\n\n")
+
+    assert result.exit_code == 0, result.output
+    far = PagedContexts.id_of(4)
+    assert f"Using context: far ({far[:8]}...)" in result.output
+    assert read_json(tmp_path / ".kagura.json")["context_id"] == far
+    assert f"-c {far} " in hook_commands(tmp_path, "SessionStart")[0]
+    assert fake.calls == [{"name_contains": "far"}, {"name_contains": "far", "cursor": "2"}]
+    # The lookup runs on the credential the connection check used.
+    assert fake.made_with == [(None, MCP_URL, "default") if oauth else (API_KEY, MCP_URL, None)]
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (
+            KaguraAuthError("token revoked"),
+            "Authentication failed: token revoked\n"
+            "  Your token may have expired — re-run: kagura auth login --profile default",
+        ),
+        (
+            KaguraConnectionError("connection reset"),
+            "Cannot connect to https://memory.example.com: connection reset",
+        ),
+    ],
+    ids=["auth", "connection"],
+)
+def test_a_failed_context_lookup_carries_the_profile_hints(
+    connection, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, error: Exception, expected: str
+) -> None:
+    # The OAuth path: the lookup's own session fails after the profile check passed.
+    connection.return_value = PagedContexts(["recent-a", "recent-b", "far"]).first_page()
+    fake = PagedContexts([], pages=[error])
+    monkeypatch.setattr("kagura_memory.setup_claude._make_client", fake.make_client)
+    args = ["setup", "claude", "--project-dir", str(tmp_path), "--context-id", "far"]
+
+    result = CliRunner().invoke(main, [*args, "--profile", "default", "-y"])
+
+    assert result.exit_code == 1
+    assert expected in result.output
+    assert "Setup failed" not in result.output
+    assert not (tmp_path / ".kagura.json").exists()

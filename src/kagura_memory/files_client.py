@@ -38,8 +38,8 @@ from ._auth import (
 )
 from ._http import (
     SDK_VERSION,
+    ErrorBody,
     base_url_from_mcp,
-    extract_detail,
     normalize_uuid,
     parse_response,
     sanitize_server_detail,
@@ -226,6 +226,7 @@ class FilesClient(KaguraRestClient):
     def _error_403(
         self,
         e: httpx.HTTPStatusError,
+        body: ErrorBody,
         *,
         request_json: dict[str, Any] | None,
         request_params: dict[str, Any] | None,
@@ -242,7 +243,7 @@ class FilesClient(KaguraRestClient):
                 auth_source=self._auth_source,
                 source_workspace_hint=self._workspace_id_hint,
                 requested_workspace=_extract_requested_workspace(request_json, request_params),
-                server_detail=extract_detail(e.response),
+                server_detail=body.detail,
             )
         )
 
