@@ -1072,6 +1072,14 @@ async def test_forget_memory_ids_refuses_bad_ids_before_any_request(kwargs, erro
 
 
 @pytest.mark.asyncio
+async def test_forget_memory_ids_accepts_fifty_ids_and_other_uuid_spellings():
+    """50 is the server's cap (``FORGET_MAX_IDS``); ids go out as written."""
+    ids = [str(uuid.uuid4()) for _ in range(49)] + [MEM_A.replace("-", "").upper()]
+    _, params = await _call(FORGET_BATCH_REPLY, "forget", CTX, memory_ids=ids)
+    assert params["arguments"]["memory_ids"] == ids
+
+
+@pytest.mark.asyncio
 async def test_forget_memory_ids_all_failed_raises_with_the_rows():
     reply = _error(
         "batch_failed",
@@ -1179,6 +1187,15 @@ async def test_describe_tools_returns_definitions_for_names():
 )
 async def test_name_lists_are_checked_before_any_request(method, kwargs, error):
     await _refused_locally(method, error=error, **kwargs)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("method", "key"), [("describe_tools", "names"), ("guide", "topics")])
+async def test_name_lists_take_twenty_names(method, key):
+    """20 is the server's cap (``MAX_NAMES`` / ``MAX_TOPICS``)."""
+    names = [f"t{i}" for i in range(20)]
+    _, params = await _call({"status": "success", "topics": []}, method, **{key: names})
+    assert params["arguments"] == {key: names}
 
 
 @pytest.mark.asyncio
