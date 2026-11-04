@@ -676,17 +676,17 @@ The same client also provisions **member API keys** (memory-cloud [#1165](https:
 
 ## SDK ↔ memory-cloud Compatibility
 
-`MIN_SERVER_VERSION` in `src/kagura_memory/client.py` is **0.17.1**, and it is **advisory**: the SDK does not pre-check the server version and block a call, `check_server_version()` only logs a warning, and `kagura doctor` is the one place a too-old server fails outright. SDK 0.44.0 is checked against memory-cloud up to **0.142.0**. A newer surface carries its own server floor, given in the [docs/compatibility.md](docs/compatibility.md) section of the release that added it.
+`MIN_SERVER_VERSION` is **0.17.1** and advisory: the SDK never blocks a call on the server version. SDK 0.44.0 is checked against memory-cloud up to **0.142.0**, and a surface newer than the floor carries its own, given in the [compatibility page](https://github.com/kagura-ai/kagura-memory-python-sdk/blob/main/docs/compatibility.md) section of the release that added it.
 
 | SDK | memory-cloud checked up to | What changed |
 |---|---|---|
-| [0.44.0](docs/compatibility.md#0440) | 0.142.0 | Session tools (`bootstrap`, `changes_since`, `list_matching`, `remember_batch`), new `remember` / `update_memory` arguments, list paging, `plan_headroom`, auth refresh under the lock |
-| [0.43.0](docs/compatibility.md#0430) | 0.141.0 | Recall shape (`verbosity`, `full`, `max_chars`), MCP URL options, typed server errors, cursors and write caps |
-| [0.42.2](docs/compatibility.md#0422) | 0.77.0 | Sleep report and rollback work again on memory-cloud 0.82.0+; `list_resources()` accepts a resource whose contexts were all deleted |
-| [0.42.0](docs/compatibility.md#0420) | 0.77.0 | Consistent client surface (`KaguraResponseError` on drift), `kagura update-memory --details/--location/--merge-details` |
-| [0.41.0](docs/compatibility.md#0410) | 0.77.0 | `ServerInfo.terms_version`, the harness OAuth URL form (`kagura setup codex` / `hermes` / `openclaw --url-form --oauth`) |
+| [0.44.0](https://github.com/kagura-ai/kagura-memory-python-sdk/blob/main/docs/compatibility.md#0440) | 0.142.0 | Session tools (`bootstrap`, `changes_since`, `list_matching`, `remember_batch`), new `remember` / `update_memory` arguments, list paging, `plan_headroom`, auth refresh under the lock |
+| [0.43.0](https://github.com/kagura-ai/kagura-memory-python-sdk/blob/main/docs/compatibility.md#0430) | 0.141.0 | Recall shape (`verbosity`, `full`, `max_chars`), MCP URL options, typed server errors, cursors and write caps |
+| [0.42.2](https://github.com/kagura-ai/kagura-memory-python-sdk/blob/main/docs/compatibility.md#0422) | 0.77.0 | Sleep report and rollback work again on memory-cloud 0.82.0+; `list_resources()` accepts a resource whose contexts were all deleted |
+| [0.42.0](https://github.com/kagura-ai/kagura-memory-python-sdk/blob/main/docs/compatibility.md#0420) | 0.77.0 | Consistent client surface (`KaguraResponseError` on drift), `kagura update-memory --details/--location/--merge-details` |
+| [0.41.0](https://github.com/kagura-ai/kagura-memory-python-sdk/blob/main/docs/compatibility.md#0410) | 0.77.0 | `ServerInfo.terms_version`, the harness OAuth URL form (`kagura setup codex` / `hermes` / `openclaw --url-form --oauth`) |
 
-Every release back to 0.13.x, with each surface's floor, how the SDK reads a server version, and the full notes: **[docs/compatibility.md](docs/compatibility.md)**.
+Every release back to 0.13.x, with each surface's floor, how the SDK reads a server version, and the full notes: **[docs/compatibility.md](https://github.com/kagura-ai/kagura-memory-python-sdk/blob/main/docs/compatibility.md)**.
 
 ## CLI
 
@@ -1360,7 +1360,7 @@ This project is developed with [Claude Code](https://claude.com/claude-code):
 
 - [Kagura Memory Cloud](https://github.com/kagura-ai/memory-cloud) — the server this SDK connects to
 - [Releases](https://github.com/kagura-ai/kagura-memory-python-sdk/releases) — changelogs
-- [Compatibility](docs/compatibility.md) — the memory-cloud release each SDK release needs, per surface
+- [Compatibility](https://github.com/kagura-ai/kagura-memory-python-sdk/blob/main/docs/compatibility.md) — the memory-cloud release each SDK release needs, per surface
 - [Issues](https://github.com/kagura-ai/kagura-memory-python-sdk/issues) — bug reports & feature requests
 
 ## License
