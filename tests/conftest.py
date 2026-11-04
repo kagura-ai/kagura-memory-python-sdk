@@ -1,12 +1,15 @@
 """Shared pytest fixtures and helpers."""
 
+import contextlib
 import json
+from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
 import pytest
 
+from kagura_memory import KaguraClient
 from kagura_memory.auth.credentials import OAuthCredentials
 
 
@@ -322,6 +325,26 @@ SESSION_EXPIRED_BODY: dict[str, Any] = {
     },
     "id": None,
 }
+
+
+@contextlib.asynccontextmanager
+async def kagura_client_on(
+    handler: Callable[[httpx.Request], Any], **kwargs: Any
+) -> AsyncIterator[KaguraClient]:
+    """A ``KaguraClient`` whose requests go to ``handler`` (an ``httpx.MockTransport`` handler).
+
+    The client's own ``httpx.AsyncClient`` is closed before the mock one
+    replaces it, and the mock one when the block exits, so neither is left
+    open. ``kwargs`` override the constructor's ``api_key="test"`` and
+    ``mcp_url="https://test.com/mcp"``.
+    """
+    client = KaguraClient(**{"api_key": "test", "mcp_url": "https://test.com/mcp", **kwargs})
+    await client._client.aclose()
+    client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        yield client
+    finally:
+        await client.close()
 
 
 class FakeMcpServer:

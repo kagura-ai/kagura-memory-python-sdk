@@ -929,11 +929,21 @@ def test_parser_rejects_guardrails_that_is_neither_off_nor_uuid(bad: str, capsys
     assert "'off' or a context UUID" in capsys.readouterr().err
 
 
-def test_parser_rejects_an_empty_tool_profile(capsys):
+@pytest.mark.parametrize(
+    ("argv", "message"),
+    [
+        (["--tool-profile", " "], "must not be empty"),
+        (["--tool-profile=-x"], "cannot start with '-'"),
+    ],
+    ids=["blank", "dashed"],
+)
+def test_parser_rejects_an_empty_or_dashed_tool_profile(argv: list[str], message: str, capsys):
     with pytest.raises(SystemExit) as exc:
-        mcp_proxy._build_parser().parse_args(["--tool-profile", " "])
+        mcp_proxy._build_parser().parse_args(argv)
     assert exc.value.code == 2
-    assert "--tool-profile" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "--tool-profile" in err
+    assert message in err
 
 
 def test_parser_help_warns_that_off_removes_the_context_info_block(capsys):
@@ -984,3 +994,83 @@ async def test_forward_other_403_jsonrpc_body_still_passes_through():
     body = {"jsonrpc": "2.0", "id": 1, "error": {"code": -32002, "message": "denied"}}
     up, _ = _upstream(lambda request: httpx.Response(403, json=body))
     assert await up.forward(_tool_call(1)) == body
+
+
+# ---------------------------------------------------------------------------
+# The upstream error body is decoded once per step (#311)
+# ---------------------------------------------------------------------------
+
+
+class _CountingResponse(httpx.Response):
+    """An ``httpx.Response`` that counts how often its body is decoded."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.decodes = 0
+
+    def json(self, **kwargs: Any) -> Any:
+        self.decodes += 1
+        return super().json(**kwargs)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "body", "headers"),
+    [
+        (400, {"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "x"}}, {}),
+        (403, {"jsonrpc": "2.0", "id": 1, "error": {"code": -32002, "message": "denied"}}, {}),
+    ],
+    ids=["400", "403-not-scope"],
+)
+async def test_forward_decodes_a_forwarded_error_body_once(
+    status: int, body: dict[str, Any], headers: dict[str, str]
+):
+    sent: list[_CountingResponse] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(_CountingResponse(status, json=body, headers=headers))
+        return sent[-1]
+
+    up, _ = _upstream(handler)
+    assert await up.forward(_tool_call(1)) == {**body, "id": 1}
+    assert [r.decodes for r in sent] == [1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "body", "headers", "message", "decodes"),
+    [
+        (403, _SCOPE_BODY, {"WWW-Authenticate": _SCOPE_CHALLENGE}, "lacks the memory:write", [1]),
+        (403, {"error": "access_denied", "error_description": "No."}, {}, "HTTP 403: No.", [1]),
+        (
+            503,
+            {"error": "temporarily_unavailable", "error_description": "Retry."},
+            {},
+            "Retry.",
+            [1],
+        ),
+        (500, b"<html>Internal Server Error</html>", {}, "500 Internal Server Error", [1]),
+        # A 401 is retried once after a forced refresh; neither body is read.
+        (401, {"error": "invalid_token"}, {}, "kagura auth login", [0, 0]),
+    ],
+    ids=["403-scope", "403-oauth-style", "503", "500-not-json", "401-not-read"],
+)
+async def test_an_answered_error_body_is_decoded_once(
+    status: int, body: Any, headers: dict[str, str], message: str, decodes: list[int]
+):
+    """Forward and the worded reply share one decode: the raised error carries the body."""
+    sent: list[_CountingResponse] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        content = {"content": body} if isinstance(body, bytes) else {"json": body}
+        sent.append(_CountingResponse(status, headers=headers, **content))
+        return sent[-1]
+
+    up, _ = _upstream(handler)
+    with pytest.raises(httpx.HTTPStatusError) as exc_info:
+        await up.forward(_tool_call(1))
+    assert [r.decodes for r in sent] == decodes
+    reply = _error_response(_tool_call(1), exc_info.value)
+    assert reply is not None
+    assert message in reply["error"]["message"]
+    assert [r.decodes for r in sent] == decodes

@@ -11,7 +11,7 @@ from contextlib import aclosing, contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qsl, urlsplit, urlunsplit
+from urllib.parse import urlsplit, urlunsplit
 
 import click
 
@@ -19,8 +19,10 @@ from . import claude_code
 from ._auth import _resolve_profile_auth
 from ._http import (
     is_canonical_uuid,
+    mcp_query_tool_view,
     mcp_url_guardrails_off,
     mcp_url_has_tools_allowlist,
+    mcp_url_query_values,
     mcp_url_with_query,
     uuid_or_none,
 )
@@ -515,7 +517,9 @@ def _stdio_entry(
     make the proxy put ``?guardrails=`` / ``?profile=`` / ``?add_tools=`` /
     ``?context=`` on the upstream URL at run time (#258, #300), so the entry
     never copies the profile's URL and changing them never forces a re-login.
-    ``add_tools`` must already be normalized (``normalize_add_tools``).
+    ``tool_profile`` and ``add_tools`` must already be normalized
+    (``normalize_tool_profile`` / ``normalize_add_tools``): each value is its
+    own argv item, so one starting with ``-`` would read as a flag.
     """
     args = ["--profile", profile]
     if guardrails is not None:
@@ -589,8 +593,9 @@ class _McpPlan:
     #: The user-scope entry already matches; nothing to write.
     unchanged: bool = False
     #: Query flags (``--guardrails``, ``--tool-profile``, ``--add-tools``,
-    #: ``--context``) the replaced same-scope entry had and this run leaves
-    #: out, e.g. ``["--guardrails off"]``.
+    #: ``--context``) and a ``?tools=`` allowlist the replaced same-scope entry
+    #: had and this run leaves out, e.g. ``["--guardrails off",
+    #: "?tools=recall,remember"]``.
     dropped: list[str] = field(default_factory=list)
 
 
@@ -621,12 +626,14 @@ def _redact_entry(entry: dict[str, Any]) -> dict[str, Any]:
     return {**entry, "headers": masked}
 
 
-_QUERY_FLAGS = (
-    ("--guardrails", "guardrails"),
-    ("--tool-profile", "profile"),
-    ("--add-tools", "add_tools"),
-    ("--context", "context"),
-)
+#: The ``kagura-mcp`` flags that set ``?guardrails=`` / ``?profile=`` /
+#: ``?add_tools=`` / ``?context=`` on the upstream URL.
+_QUERY_FLAGS = ("--guardrails", "--tool-profile", "--add-tools", "--context")
+
+
+#: The key :func:`_query_flags` reports an http entry's ``?tools=`` allowlist
+#: under: no setup flag sets it, so it goes by its query parameter.
+_TOOLS_KEY = "?tools="
 
 
 def _query_flags(entry: dict[str, Any]) -> dict[str, str]:
@@ -634,14 +641,24 @@ def _query_flags(entry: dict[str, Any]) -> dict[str, str]:
 
     Read from the ``kagura-mcp`` args of a stdio entry (the last value of a
     repeated flag, as the proxy reads it, except ``--add-tools``, whose
-    values add up), or from the url's query (first value, as the server
-    reads it) of an http one.
+    values add up), or from the url's query of an http one, as the server
+    reads it (memory-cloud v0.142.0): the first value of a repeated key wins
+    for all four keys, even a blank one, and is trimmed; the tool view is
+    read by :func:`~kagura_memory._http.mcp_url_tool_view`. A blank first
+    value still means something to the server — it refuses a blank
+    ``profile``, ignores a blank ``guardrails`` (no ``instructions`` digest),
+    fails a call without ``context_id`` under a blank ``context``, and adds
+    nothing for a blank ``add_tools`` — but setup refuses a blank value, so
+    it is no flag to re-run with and is left out. An http entry's ``tools``
+    allowlist, the view key the server reads first, is reported too, under
+    :data:`_TOOLS_KEY` (its names, as the server reads them); one naming no
+    tool, which the server refuses, is left out like a blank value.
     """
     found: dict[str, str] = {}
     if classify_mcp_entry(entry) == "stdio":
         args = entry.get("args")
         argv = [a for a in args if isinstance(a, str)] if isinstance(args, list) else []
-        for flag, _ in _QUERY_FLAGS:
+        for flag in _QUERY_FLAGS:
             values: list[str] = []
             for i, arg in enumerate(argv):
                 if arg == flag and i + 1 < len(argv):
@@ -652,18 +669,32 @@ def _query_flags(entry: dict[str, Any]) -> dict[str, str]:
                 found[flag] = ",".join(values) if flag == "--add-tools" else values[-1]
         return found
     url = entry.get("url")
-    params = parse_qsl(urlsplit(url).query) if isinstance(url, str) else []
-    for flag, key in _QUERY_FLAGS:
-        value = next((v for k, v in params if k == key), None)
-        if value is not None:
-            found[flag] = value
-    return found
+    if not isinstance(url, str):
+        return found
+    query = mcp_url_query_values(url)
+    view = mcp_query_tool_view(query)
+    settings = {
+        "--guardrails": query.get("guardrails", "").strip(),
+        "--tool-profile": view.profile,
+        "--add-tools": ",".join(view.add_tools),
+        "--context": query.get("context", "").strip(),
+        _TOOLS_KEY: ",".join(view.tools or ()),
+    }
+    return {flag: value for flag, value in settings.items() if value}
 
 
 def _dropped_query_flags(old: dict[str, Any], new: dict[str, Any]) -> list[str]:
-    """Query flag settings (see :func:`_query_flags`) ``old`` has and ``new`` leaves out."""
+    """Query flag settings (see :func:`_query_flags`) ``old`` has and ``new`` leaves out.
+
+    Each as the user would give it again: ``--guardrails off``, or
+    ``?tools=recall,remember`` for an allowlist, which goes on the MCP URL.
+    """
     kept = _query_flags(new)
-    return [f"{flag} {value}" for flag, value in _query_flags(old).items() if flag not in kept]
+    return [
+        f"{flag}{value}" if flag == _TOOLS_KEY else f"{flag} {value}"
+        for flag, value in _query_flags(old).items()
+        if flag not in kept
+    ]
 
 
 def _plan_mcp_entry(
@@ -862,10 +893,15 @@ def _echo_plan_notes(plan: _McpPlan) -> None:
         )
     if plan.dropped:
         them = "them" if len(plan.dropped) > 1 else "it"
+        where = (
+            f" ({_TOOLS_KEY} on the MCP URL)"
+            if any(d.startswith(_TOOLS_KEY) for d in plan.dropped)
+            else ""
+        )
         click.echo(
             f"  Note: the previous {plan.scope}-scope entry also had "
-            f"{' and '.join(plan.dropped)}, which this run left out; re-run with {them} "
-            f"to keep {them}."
+            f"{' and '.join(plan.dropped)}, which this run left out; re-run with {them}"
+            f"{where} to keep {them}."
         )
 
 
@@ -1262,8 +1298,9 @@ def run_setup_claude(
     on the upstream URL, then the project's ``.kagura.json`` and the hooks and
     commands that ``session_hook`` / ``sync_hook`` / ``commands`` select
     (``None``: not given, on by default). ``guardrails`` must already be
-    normalized (``off`` or a canonical UUID), ``add_tools`` by
-    ``normalize_add_tools`` and ``default_context`` to a canonical UUID.
+    normalized (``off`` or a canonical UUID), ``tool_profile`` by
+    ``normalize_tool_profile``, ``add_tools`` by ``normalize_add_tools`` and
+    ``default_context`` to a canonical UUID.
 
     The SessionStart hook runs ``kagura recall --trusted-only --verbosity full
     --full 0``: uncut summaries with tags, no content. A server that refuses

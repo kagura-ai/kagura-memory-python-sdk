@@ -724,6 +724,41 @@ def test_rerun_without_query_flags_notes_what_it_dropped(
     assert "also had" not in again.output
 
 
+@pytest.mark.parametrize("oauth", [True, False], ids=["oauth", "api-key"])
+def test_rerun_notes_a_dropped_tools_allowlist(connection, tmp_path: Path, oauth: bool) -> None:
+    """An http entry's ?tools= allowlist, which no setup flag sets, is named in the note (#311)."""
+    old_url = f"{MCP_URL}?tools=recall,%20remember&guardrails=off"
+    write_project_entry(
+        tmp_path,
+        {"type": "http", "url": old_url, "headers": {"Authorization": f"Bearer {API_KEY}"}},
+    )
+
+    result = run_setup(tmp_path, oauth=oauth)
+
+    assert result.exit_code == 0, result.output
+    note = " ".join(result.output.split())
+    assert (
+        "the previous project-scope entry also had --guardrails off and "
+        "?tools=recall,remember, which this run left out; re-run with them "
+        "(?tools= on the MCP URL) to keep them." in note
+    )
+
+
+def test_rerun_keeping_the_tools_allowlist_does_not_note_it(connection, tmp_path: Path) -> None:
+    url = f"{MCP_URL}?tools=recall"
+    write_project_entry(
+        tmp_path,
+        {"type": "http", "url": url, "headers": {"Authorization": f"Bearer {API_KEY}"}},
+    )
+    args = ["setup", "claude", "--project-dir", str(tmp_path), "--context-id", CTX, "-y"]
+    args += ["--api-key", API_KEY, "--mcp-url", url]
+
+    result = CliRunner().invoke(main, args)
+
+    assert result.exit_code == 0, result.output
+    assert "also had" not in result.output
+
+
 def test_rerun_notes_a_dropped_flag_in_its_equals_form(connection, tmp_path: Path) -> None:
     write_project_entry(
         tmp_path, {**STDIO_DEFAULT, "args": ["--profile", "default", f"--guardrails={CTX}"]}
@@ -756,9 +791,25 @@ def test_guardrails_rejects_values_the_server_would_ignore(tmp_path: Path, bad: 
     assert not (tmp_path / ".mcp.json").exists()
 
 
-def test_empty_tool_profile_is_rejected(tmp_path: Path) -> None:
-    result = run_setup(tmp_path, "--tool-profile", " ")
-    assert result.exit_code == 2
+@pytest.mark.parametrize(
+    ("flags", "message"),
+    [
+        (("--tool-profile", " "), "must not be empty"),
+        # kagura-mcp would read the stored value as a flag and not start (#311).
+        (("--tool-profile", "-x"), "cannot start with '-': '-x'"),
+        (("--tool-profile=--full",), "cannot start with '-': '--full'"),
+    ],
+    ids=["blank", "dashed", "dashed-equals-form"],
+)
+@pytest.mark.parametrize("oauth", [True, False], ids=["oauth", "api-key"])
+def test_bad_tool_profile_is_a_usage_error(
+    tmp_path: Path, flags: tuple[str, ...], message: str, oauth: bool
+) -> None:
+    result = run_setup(tmp_path, *flags, oauth=oauth)
+    assert result.exit_code == 2, result.output
+    assert "--tool-profile" in result.output
+    assert message in result.output
+    assert not (tmp_path / ".mcp.json").exists()
 
 
 def test_stdio_entry_carries_add_tools_and_context(connection, tmp_path: Path) -> None:
@@ -810,6 +861,51 @@ def test_query_flags_add_up_repeated_add_tools_in_a_stdio_entry() -> None:
         "--add-tools": "a,b,c",
         "--context": CTX,
     }
+
+
+@pytest.mark.parametrize(
+    ("query", "flags"),
+    [
+        ("", {}),
+        # The first value of a key wins, as the server reads it; a blank one is no flag.
+        ("?profile=&profile=full&guardrails=off&guardrails=x", {"--guardrails": "off"}),
+        ("?guardrails=%20&guardrails=off&profile=%20core", {"--tool-profile": "core"}),
+        ("?add_tools=,&add_tools=explore", {}),
+        (f"?context=%20&context={CTX}", {}),
+        (
+            f"?add_tools=explore,%20a,explore&tools=recall&context={CTX}",
+            {"--add-tools": "explore,a", "--context": CTX, "?tools=": "recall"},
+        ),
+        # The allowlist the server reads first, as it reads it; one naming no tool is no flag.
+        ("?tools=%20recall,remember,recall&tools=x", {"?tools=": "recall,remember"}),
+        ("?tools=,%20&tools=recall", {}),
+        # The server trims guardrails and context (select_guardrail_context /
+        # select_default_context) as it trims profile.
+        (
+            f"?guardrails=%20off%20&context=%20{CTX}%20",
+            {"--guardrails": "off", "--context": CTX},
+        ),
+    ],
+    ids=[
+        "no-query",
+        "blank-profile-first",
+        "blank-guardrails-first",
+        "no-names",
+        "blank-context-first",
+        "names",
+        "tools-allowlist",
+        "tools-naming-none",
+        "guardrails-and-context-trimmed",
+    ],
+)
+def test_query_flags_of_an_http_entry_read_the_url_as_the_server_does(
+    query: str, flags: dict[str, str]
+) -> None:
+    assert _query_flags({"type": "http", "url": f"{MCP_URL}{query}"}) == flags
+
+
+def test_query_flags_of_an_http_entry_without_a_url_are_empty() -> None:
+    assert _query_flags({"type": "http", "url": None}) == {}
 
 
 def test_add_tools_under_a_tools_allowlist_warns(connection, tmp_path: Path) -> None:
