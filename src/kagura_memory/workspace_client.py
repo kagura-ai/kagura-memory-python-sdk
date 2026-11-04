@@ -21,8 +21,8 @@ from pydantic import ValidationError
 
 from ._auth import _SOURCE_LABEL
 from ._http import (
+    ErrorBody,
     _retry_after_seconds,
-    extract_detail,
     normalize_uuid,
     path_segment,
     public_id_segment,
@@ -439,17 +439,18 @@ class WorkspaceClient(KaguraRestClient):
     def _error_403(
         self,
         e: httpx.HTTPStatusError,
+        body: ErrorBody,
         *,
         request_json: dict[str, Any] | None,
         request_params: dict[str, Any] | None,
     ) -> KaguraError:
-        return KaguraConnectionError(self._format_403(extract_detail(e.response)))
+        return KaguraConnectionError(self._format_403(body.detail))
 
-    def _error_429(self, e: httpx.HTTPStatusError) -> KaguraError:
+    def _error_429(self, e: httpx.HTTPStatusError, body: ErrorBody) -> KaguraError:
         # Invite-create quota exhaustion ("Member limit reached ...") and
         # generic rate limiting both surface as 429 — keep the server
         # message, it names the cause and the fix.
         return KaguraQuotaError(
-            extract_detail(e.response) or "Quota exceeded. Try again later.",
+            body.detail or "Quota exceeded. Try again later.",
             retry_after=_retry_after_seconds(e.response),
         )

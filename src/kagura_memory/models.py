@@ -1749,6 +1749,22 @@ class AgentBinding(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# MCP tools/list (#311)
+# ---------------------------------------------------------------------------
+
+
+class ToolListResponse(BaseModel):
+    """The ``tools/list`` result :meth:`KaguraClient.get_tool_definitions` returns the tools of.
+
+    Each definition stays a dict (``name``, ``description``, ``inputSchema``,
+    ``annotations``, ...), passed through unread. A result without ``tools``
+    lists none.
+    """
+
+    tools: list[dict[str, Any]] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
 # Tool guardrails (#253, server v0.74.0+, memory-cloud #1619/#1621)
 # ---------------------------------------------------------------------------
 

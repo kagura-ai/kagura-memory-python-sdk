@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from ._auth import _SOURCE_LABEL, _OAuthAuth, _resolve_auth, _StaticAuth
-from ._http import mcp_url_query_values, validate_https_url
+from ._http import mcp_url_tool_view, validate_https_url
 from ._version import meets_minimum, parse_version
 from .auth.cli import _redact_token
 from .auth.credentials import REFRESH_SKEW_SEC, load_credentials_file
@@ -770,25 +770,26 @@ _NO_PROFILE = "(no ?profile=)"
 def _tool_view(mcp_url: str, version: str | None = None) -> dict[str, Any]:
     """What ``mcp_url``'s query asks ``tools/list`` for, read as memory-cloud reads it.
 
-    The first value of each key wins. ``tools`` is an allowlist that replaces
-    the profile and ignores ``add_tools``. With no ``profile``, ``version``
-    (the server's, when known) decides the label: ``core (default)`` from
-    0.93.0, else :data:`_NO_PROFILE`. A blank ``profile=`` is not the
-    default: the server fails ``tools/list`` for it.
+    Read by :func:`~kagura_memory._http.mcp_url_tool_view`: the first value of
+    each key wins. ``tools`` is an allowlist that replaces the profile and
+    ignores ``add_tools``. With no ``profile``, ``version`` (the server's, when
+    known) decides the label: ``core (default)`` from 0.93.0, else
+    :data:`_NO_PROFILE`. A blank ``profile=`` is not the default, and a
+    ``tools=`` naming no tool is no allowlist: the server fails ``tools/list``
+    for both, shown as ``(empty)``.
     """
-    query = mcp_url_query_values(mcp_url)
-    if "tools" in query:
-        return {"tools": query["tools"]}
-    if "profile" in query:
-        profile = query["profile"].strip() or "(empty)"
+    asked = mcp_url_tool_view(mcp_url)
+    if asked.tools is not None:
+        return {"tools": ",".join(asked.tools) or "(empty)"}
+    if asked.profile is not None:
+        profile = asked.profile or "(empty)"
     elif meets_minimum(version, _CORE_DEFAULT_SINCE):
         profile = "core (default)"
     else:
         profile = _NO_PROFILE
     view: dict[str, Any] = {"profile": profile}
-    add_tools = [name for part in query.get("add_tools", "").split(",") if (name := part.strip())]
-    if add_tools:
-        view["add_tools"] = add_tools
+    if asked.add_tools:
+        view["add_tools"] = list(asked.add_tools)
     return view
 
 

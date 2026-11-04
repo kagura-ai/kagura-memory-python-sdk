@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import httpx
 import pytest
 from click.testing import CliRunner
 
@@ -21,7 +22,7 @@ from kagura_memory.exceptions import (
     KaguraResponseError,
 )
 from kagura_memory.models import ServerInfo
-from tests.conftest import make_oauth_creds
+from tests.conftest import kagura_client_on, make_oauth_creds
 
 
 @pytest.fixture(autouse=True)
@@ -1035,6 +1036,9 @@ def test_check_server_constructor_failure(monkeypatch):
             None,
             {"tools": "recall,remember"},
         ),
+        ("?tools=recall,%20remember,recall,", None, {"tools": "recall,remember"}),
+        ("?tools=&tools=recall", None, {"tools": "(empty)"}),  # the first value wins: refused
+        ("?tools=,%20,", None, {"tools": "(empty)"}),  # names no tool: refused too
     ],
     ids=[
         "bare",
@@ -1046,6 +1050,9 @@ def test_check_server_constructor_failure(monkeypatch):
         "blank-profile",
         "full-plus-add-tools",
         "tools-allowlist",
+        "tools-names-read-as-the-server-does",
+        "blank-tools",
+        "tools-naming-none",
     ],
 )
 def test_tool_view_reads_the_query_as_the_server_does(query, version, view):
@@ -1108,6 +1115,50 @@ def test_check_tool_listing_failure_is_a_failed_tools_check(exc):
 
     assert (check.section, check.status) == ("tools", "fail")
     assert check.message == f"tools/list on the CLI's MCP URL failed (profile Core): {exc}"
+
+
+def test_check_tool_listing_names_an_empty_tools_allowlist():
+    """A blank ?tools= is refused by the server; the message names it, not a bare label."""
+    import asyncio
+
+    exc = KaguraConnectionError("MCP error: Invalid params: the 'tools' query parameter ...")
+
+    [check] = asyncio.run(
+        _check_tool_listing(_ListingClient(exc=exc), "https://example.com/mcp?tools=")
+    )
+
+    assert check.message.startswith(
+        "tools/list on the CLI's MCP URL failed (tools allowlist (empty)): "
+    )
+
+
+@pytest.mark.parametrize(
+    "result",
+    [None, [], "tools", {"tools": None}, {"tools": ["recall"]}],
+    ids=["null", "list", "string", "null-tools", "tools-not-objects"],
+)
+def test_check_tool_listing_malformed_result_is_a_failed_tools_check(result):
+    """A 200 whose tools/list result is malformed fails the check instead of a traceback (#311)."""
+    import asyncio
+
+    body = {"jsonrpc": "2.0", "id": 1, "result": result}
+    url = "https://example.com/mcp"
+
+    async def run():
+        async with kagura_client_on(
+            lambda _req: httpx.Response(200, json=body), api_key="kagura_test", mcp_url=url
+        ) as client:
+            client._session_id = "session"
+            return await _check_tool_listing(client, url, version="0.141.0")
+
+    [check] = asyncio.run(run())
+
+    assert (check.section, check.status) == ("tools", "fail")
+    assert check.message.startswith(
+        "tools/list on the CLI's MCP URL failed (profile core (default)): "
+        "KaguraClient.get_tool_definitions: unexpected server response for ToolListResponse"
+    )
+    assert "tool_count" not in check.details
 
 
 _OAUTH_TOKEN_AS_KEY = "Zx9-oauth-access-token-value-43-characters"
