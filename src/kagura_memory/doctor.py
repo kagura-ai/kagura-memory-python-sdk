@@ -114,8 +114,18 @@ class DoctorReport:
         return output
 
 
+_KAGURA_KEY_PREFIX = "kagura_"
+# memory-cloud v0.119.0+ (#1994) routes a bearer by its shape: a ``kagura_``
+# value is looked up only among API keys and any other value only among OAuth
+# tokens, so an OAuth token configured as the API key is a 401.
+_NOT_A_KAGURA_KEY_HINT = (
+    "This value does not look like a Kagura API key (kagura_…); the server routes bearer "
+    "tokens by shape, so an OAuth token passed as an API key is a 401."
+)
+
+
 def _looks_like_kagura_key(value: str) -> bool:
-    return value.startswith("kagura_") and len(value) >= 10
+    return value.startswith(_KAGURA_KEY_PREFIX) and len(value) >= 10
 
 
 def _check_optional_dependencies() -> list[DoctorCheck]:
@@ -377,10 +387,15 @@ def _check_api_key_shape(api_key: str, source: str) -> DoctorCheck:
             message=f"API key looks valid: {preview}",
             details={"source": source, "preview": preview},
         )
+    message = f"Unusual API key shape: {preview}"
+    if not api_key.startswith(_KAGURA_KEY_PREFIX):
+        # The server check cannot show the 401 itself: /api/v1/system/info
+        # takes no credential.
+        message = f"{message}. {_NOT_A_KAGURA_KEY_HINT}"
     return DoctorCheck(
         section="auth",
         status="warn",
-        message=f"Unusual API key shape: {preview}",
+        message=message,
         details={"source": source, "preview": preview},
     )
 
@@ -630,7 +645,10 @@ async def _check_server(
                         ),
                     )
                 ]
-            return [DoctorCheck(section="server", status="fail", message=str(exc))]
+            message = str(exc)
+            if not resolved.api_key.startswith(_KAGURA_KEY_PREFIX):
+                message = f"{message} {_NOT_A_KAGURA_KEY_HINT}"
+            return [DoctorCheck(section="server", status="fail", message=message)]
         except KaguraConnectionError as exc:
             return [
                 DoctorCheck(

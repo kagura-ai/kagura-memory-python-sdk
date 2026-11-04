@@ -1031,3 +1031,56 @@ def test_doctor_cli_passes_profile(monkeypatch):
 
     assert result.exit_code == 0
     assert seen["profile"] == "dev"
+
+
+def _check_server_raising(monkeypatch, exc, api_key):
+    from kagura_memory.doctor import _check_server
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def check_server_version(self):
+            raise exc
+
+    monkeypatch.setattr("kagura_memory.doctor.KaguraClient", FakeClient)
+    resolved = _StaticAuth(api_key=api_key, mcp_url="https://example.com/mcp", source="env")
+
+    import asyncio
+
+    return asyncio.run(_check_server(resolved))
+
+
+def test_check_server_401_with_a_non_kagura_key_explains_bearer_routing(monkeypatch):
+    """memory-cloud v0.119.0 (#1994) routes a bearer by shape: an OAuth token as api_key 401s."""
+    oauth_token = "Zx9-oauth-access-token-value-43-characters"
+    [check] = _check_server_raising(monkeypatch, KaguraAuthError("bad token"), oauth_token)
+    assert check.status == "fail"
+    assert check.message.startswith("bad token This value does not look like a Kagura API key")
+    assert "an OAuth token passed as an API key is a 401" in check.message
+    assert oauth_token not in check.message
+
+
+def test_check_server_401_with_a_kagura_key_has_no_shape_hint(monkeypatch):
+    [check] = _check_server_raising(
+        monkeypatch, KaguraAuthError("bad token"), "kagura_12345678abcdef"
+    )
+    assert check.message == "bad token"
+
+
+def test_unusual_key_shape_without_the_prefix_explains_bearer_routing():
+    from kagura_memory.doctor import _check_api_key_shape
+
+    oauth_token = "Zx9-oauth-access-token-value-43-characters"
+    check = _check_api_key_shape(oauth_token, "env")
+    assert check.status == "warn"
+    assert "routes bearer tokens by shape" in check.message
+    assert oauth_token not in check.message
+    # A kagura_ value that is merely short keeps the plain warning.
+    assert "routes bearer" not in _check_api_key_shape("kagura_x", "env").message
