@@ -1159,6 +1159,45 @@ def test_refresh_and_token_refuse_a_profile_without_a_refresh_token(
     refresh.assert_not_awaited()
 
 
+@pytest.mark.parametrize("command", ["refresh", "token"])
+def test_refresh_and_token_name_a_save_failure_after_the_server_rotated(
+    command: str, patched_default_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """credentials.json unwritable after the refresh → a clear error and exit 1, no traceback.
+
+    The server has rotated by then, so the message says the profile cannot be
+    refreshed again and to log in; the token it lost is never printed.
+    """
+    import errno
+
+    import kagura_memory.auth.credentials as creds_mod
+
+    _seed_credentials(
+        patched_default_path.parent.parent,
+        _make_creds(expires_at=datetime.now(UTC) + timedelta(minutes=2)),  # in the skew window
+    )
+
+    def read_only(*_args, **_kwargs):
+        raise OSError(errno.EROFS, "Read-only file system")
+
+    monkeypatch.setattr(creds_mod, "save_credentials_file", read_only)
+    with (
+        patch(
+            f"{_DF}.refresh_access_token",
+            new=AsyncMock(return_value=_mock_token_response(access_token="atok-rotated")),
+        ),
+        patch(f"{_DF}.make_oauth_client", return_value=_async_ctx()),
+    ):
+        result = CliRunner().invoke(main, ["auth", command])
+
+    assert result.exit_code == 1, result.output
+    assert isinstance(result.exception, SystemExit)  # a ClickException, not a traceback
+    assert "could not save it" in result.output
+    assert "Read-only file system" in result.output
+    assert "kagura auth login" in result.output
+    assert "atok-rotated" not in result.output
+
+
 # ---------------------------------------------------------------------------
 # token
 # ---------------------------------------------------------------------------

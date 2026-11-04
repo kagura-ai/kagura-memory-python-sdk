@@ -32,7 +32,7 @@ from kagura_memory.auth.credentials import (
     update_profile,
 )
 from kagura_memory.auth.device_flow import TokenResponse
-from kagura_memory.exceptions import KaguraAuthExpiredError
+from kagura_memory.exceptions import KaguraAuthError, KaguraAuthExpiredError
 
 # Gate POSIX-specific behaviour to non-Windows (CI runs Linux):
 #   - the cross-process refresh-dedup tests rely on fcntl serializing two
@@ -1053,6 +1053,50 @@ async def test_refresh_profile_locked_refreshes_the_fallback_when_the_profile_is
     on_disk = load_credentials_file(path)
     assert on_disk.get_profile("default").access_token == "fresh"
     assert on_disk.get_profile("other").access_token == "other-token"
+
+
+@pytest.mark.asyncio
+async def test_refresh_not_saved_is_typed_and_keeps_the_new_token_in_memory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """credentials.json unwritable after the server rotated → KaguraAuthError, OSError chained.
+
+    The rotation revoked the token on file and used up its refresh token, so the
+    refreshed profile exists only in memory: KaguraOAuth keeps it (the process
+    stays usable until it expires) and the error says to log in again.
+    """
+    import errno
+
+    import kagura_memory.auth.credentials as creds_mod
+
+    reset_state_cache()
+    path = tmp_path / "creds.json"
+    stale = _sample_creds(access_token="old", refresh_token="rtok-old")
+    cf = CredentialsFile()
+    cf.set_profile("default", stale)
+    save_credentials_file(cf, path)
+    auth = KaguraOAuth(_independent_state(path, stale))
+
+    def disk_full(*_args, **_kwargs):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(creds_mod, "save_credentials_file", disk_full)
+    with (
+        patch(
+            "kagura_memory.auth.device_flow.refresh_access_token",
+            new=AsyncMock(return_value=_fresh_token("fresh")),
+        ),
+        patch("kagura_memory.auth.device_flow.make_oauth_client", return_value=_AsyncContextStub()),
+        pytest.raises(KaguraAuthError, match="could not save it") as excinfo,
+    ):
+        await auth.force_refresh()
+
+    assert isinstance(excinfo.value.__cause__, OSError)
+    assert "kagura auth login" in str(excinfo.value)
+    assert auth._state.credentials.access_token == "fresh"
+    on_disk = load_credentials_file(path).get_profile()
+    assert on_disk is not None
+    assert on_disk.access_token == "old"
 
 
 def test_update_profile_is_file_lock_guarded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

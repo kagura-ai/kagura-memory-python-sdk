@@ -46,7 +46,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
-from ..exceptions import KaguraAuthExpiredError
+from ..exceptions import KaguraAuthError, KaguraAuthExpiredError, _exc_message
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -612,17 +612,36 @@ class KaguraOAuth(httpx.Auth):
                 token means nobody has rotated yet, so this process must refresh
                 (a 401 is independent of ``expires_at``).
         """
-        self._state.credentials = await refresh_profile_locked(
-            self._state.profile_name,
-            expected_stale_token=expected_stale_token,
-            fallback=self._state.credentials,
-            path=self._state.path,
-        )
+        try:
+            self._state.credentials = await refresh_profile_locked(
+                self._state.profile_name,
+                expected_stale_token=expected_stale_token,
+                fallback=self._state.credentials,
+                path=self._state.path,
+            )
+        except _RefreshNotSavedError as e:
+            # The server rotated, so the token this process held is revoked and
+            # the refreshed one exists only here: keep it, so this process stays
+            # usable until it expires, and still let the caller see the failure.
+            self._state.credentials = e.credentials
+            raise
 
 
 # ---------------------------------------------------------------------------
 # Cross-process refresh (shared by KaguraOAuth and ``kagura auth``)
 # ---------------------------------------------------------------------------
+
+
+class _RefreshNotSavedError(KaguraAuthError):
+    """The server rotated the token, but credentials.json could not be written.
+
+    ``credentials`` is the refreshed profile and its only copy: the rotation
+    revoked the access token on file and used up its refresh token.
+    """
+
+    def __init__(self, message: str, credentials: OAuthCredentials) -> None:
+        super().__init__(message)
+        self.credentials = credentials
 
 
 async def refresh_profile_locked(
@@ -672,7 +691,10 @@ async def refresh_profile_locked(
     Raises:
         KaguraAuthExpiredError: The profile holds no refresh token, or the
             server answered ``invalid_grant``.
-        KaguraAuthError: Any other OAuth refusal (e.g. ``invalid_scope``).
+        KaguraAuthError: Any other OAuth refusal (e.g. ``invalid_scope``), or
+            the refreshed profile could not be saved (an ``OSError``, chained).
+            The server has rotated by then, so the profile on file can no
+            longer be refreshed and the message says to log in again.
         KaguraConnectionError: Network failure.
         TimeoutError: Another holder kept the lock past the acquire timeout.
     """
@@ -689,9 +711,19 @@ async def refresh_profile_locked(
         # and self-deadlock — fcntl treats independent open descriptions
         # independently, even within one process). Re-load → set → save still
         # preserves every other profile in the file.
-        cf = load_credentials_file(path)
-        cf.set_profile(profile_name, refreshed)
-        save_credentials_file(cf, path)
+        try:
+            cf = load_credentials_file(path)
+            cf.set_profile(profile_name, refreshed)
+            save_credentials_file(cf, path)
+        except OSError as e:
+            raise _RefreshNotSavedError(
+                f"Refreshed profile '{profile_name}', but could not save it to {path}: "
+                f"{_exc_message(e)}\n"
+                "  The refresh used up the refresh token on file, so the profile "
+                "cannot be refreshed again.\n"
+                "  Fix the cause, then run: kagura auth login",
+                refreshed,
+            ) from e
         return refreshed
 
 
