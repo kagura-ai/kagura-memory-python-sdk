@@ -21,6 +21,7 @@ from click.testing import CliRunner, Result
 from kagura_memory import claude_code
 from kagura_memory.claude_code import MCP_SERVER_NAME, claude_json_label, claude_json_path
 from kagura_memory.cli import main
+from kagura_memory.exceptions import KaguraAuthError, KaguraConnectionError
 from kagura_memory.setup_claude import (
     POSTTOOLUSE_HOOK_COMMAND,
     SESSIONSTART_HOOK_COMMAND,
@@ -30,6 +31,7 @@ from kagura_memory.setup_claude import (
     _remove_sdk_hook,
     _sdk_prefix,
 )
+from tests.conftest import PagedContexts
 
 CTX = "11111111-2222-3333-4444-555555555555"
 MCP_URL = "https://memory.example.com/mcp"
@@ -1355,3 +1357,68 @@ def test_remove_sdk_hook_keeps_other_hooks_in_a_shared_entry() -> None:
     ]
     assert not _remove_sdk_hook(settings, "SessionStart", SESSIONSTART_HOOK_COMMAND)
     assert not _remove_sdk_hook({"hooks": []}, "SessionStart", SESSIONSTART_HOOK_COMMAND)
+
+
+# =============================================================================
+# --context-id NAME past the first list_contexts page (#309)
+# =============================================================================
+
+
+@pytest.mark.parametrize("oauth", [True, False], ids=["oauth", "api-key"])
+@pytest.mark.parametrize("yes", [True, False], ids=["-y", "interactive"])
+def test_context_name_past_the_first_page_resolves(
+    connection, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, oauth: bool, yes: bool
+) -> None:
+    # Two contexts a page: "far" is on page 3 of the plain list, and on page 2 of
+    # name_contains="far", behind "far-a" and "far-b".
+    fake = PagedContexts(["recent-a", "recent-b", "far-a", "far-b", "far"])
+    connection.return_value = fake.first_page()
+    monkeypatch.setattr("kagura_memory.setup_claude._make_client", fake.make_client)
+    args = ["setup", "claude", "--project-dir", str(tmp_path), "--context-id", "far"]
+    args += ["--profile", "default"] if oauth else ["--api-key", API_KEY, "--mcp-url", MCP_URL]
+    if yes:
+        args.append("-y")
+
+    # Interactive, the API-key path asks for the key and the URL: Enter keeps both.
+    result = CliRunner().invoke(main, args, input=None if yes else "\n\n")
+
+    assert result.exit_code == 0, result.output
+    far = PagedContexts.id_of(4)
+    assert f"Using context: far ({far[:8]}...)" in result.output
+    assert read_json(tmp_path / ".kagura.json")["context_id"] == far
+    assert f"-c {far} " in hook_commands(tmp_path, "SessionStart")[0]
+    assert fake.calls == [{"name_contains": "far"}, {"name_contains": "far", "cursor": "2"}]
+    # The lookup runs on the credential the connection check used.
+    assert fake.made_with == [(None, MCP_URL, "default") if oauth else (API_KEY, MCP_URL, None)]
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (
+            KaguraAuthError("token revoked"),
+            "Authentication failed: token revoked\n"
+            "  Your token may have expired — re-run: kagura auth login --profile default",
+        ),
+        (
+            KaguraConnectionError("connection reset"),
+            "Cannot connect to https://memory.example.com: connection reset",
+        ),
+    ],
+    ids=["auth", "connection"],
+)
+def test_a_failed_context_lookup_carries_the_profile_hints(
+    connection, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, error: Exception, expected: str
+) -> None:
+    # The OAuth path: the lookup's own session fails after the profile check passed.
+    connection.return_value = PagedContexts(["recent-a", "recent-b", "far"]).first_page()
+    fake = PagedContexts([], pages=[error])
+    monkeypatch.setattr("kagura_memory.setup_claude._make_client", fake.make_client)
+    args = ["setup", "claude", "--project-dir", str(tmp_path), "--context-id", "far"]
+
+    result = CliRunner().invoke(main, [*args, "--profile", "default", "-y"])
+
+    assert result.exit_code == 1
+    assert expected in result.output
+    assert "Setup failed" not in result.output
+    assert not (tmp_path / ".kagura.json").exists()

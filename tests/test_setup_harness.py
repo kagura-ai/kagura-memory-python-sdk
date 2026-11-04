@@ -33,11 +33,15 @@ from kagura_memory._auth import _OAuthAuth, _resolve_profile_auth
 from kagura_memory.auth import credentials
 from kagura_memory.auth.credentials import CredentialsFile, save_credentials_file
 from kagura_memory.cli import main
-from kagura_memory.exceptions import KaguraNotFoundError
+from kagura_memory.exceptions import (
+    KaguraAuthError,
+    KaguraConnectionError,
+    KaguraNotFoundError,
+)
 from kagura_memory.models import GuardrailDigest
 from kagura_memory.setup_harness import hermes_context_file, hermes_home, hermes_key_env
 
-from .conftest import make_oauth_creds
+from .conftest import PagedContexts, make_oauth_creds
 
 # Captured before the autouse fixtures replace them.
 REAL_PROXY_PATH = setup_harness._proxy_path
@@ -2696,6 +2700,171 @@ def test_unknown_context_name_fails_before_writing(on_path, recorder):
     assert "No context 'nope'" in result.output
     assert "Using context: nope" not in result.output
     assert recorder.mutating() == []
+
+
+# A context name past the first list_contexts page (#309): five contexts, two a
+# page, so "far" is on page 3 of the plain list, and on page 2 of
+# name_contains="far", behind "far-a" and "far-b".
+FAR = PagedContexts.id_of(4)
+
+
+@pytest.fixture
+def paged(monkeypatch, connection) -> PagedContexts:
+    fake = PagedContexts(["recent-a", "recent-b", "far-a", "far-b", "far"])
+    connection.return_value = fake.first_page()
+    monkeypatch.setattr("kagura_memory.setup_claude._make_client", fake.make_client)
+    return fake
+
+
+@pytest.mark.parametrize("yes", [True, False], ids=["-y", "interactive"])
+def test_context_name_past_the_first_page_resolves(on_path, recorder, paged, monkeypatch, yes):
+    on_path("codex")
+    monkeypatch.setattr(setup_harness, "_stdin_is_tty", lambda: not yes)
+    result = run("codex", "--profile", "work", "--context-id", "far", *(["-y"] if yes else []))
+    assert result.exit_code == 0, result.output
+    assert f"Using context: far ({FAR[:8]}...)" in result.output
+    [argv] = recorder.mutating()
+    assert argv[argv.index("--") + 1 :] == [PROXY, "--profile", "work", "--guardrails", FAR]
+    assert paged.calls == [{"name_contains": "far"}, {"name_contains": "far", "cursor": "2"}]
+    # On the profile alone, as the connection check.
+    assert paged.made_with == [(None, None, "work")]
+
+
+def test_export_context_name_past_the_first_page_resolves(
+    tmp_path, on_path, recorder, paged, digest
+):
+    on_path("openclaw")
+    path = tmp_path / "AGENTS.md"
+    args = ("--context-id", "far", "--agents-md", str(path), "-y")
+    result = run("openclaw", "--profile", "default", *args)
+    assert result.exit_code == 0, result.output
+    assert digest.calls == [("default", FAR)]
+    assert paged.calls[0]["name_contains"] == "far"
+
+
+def test_context_name_absent_after_the_last_page_fails(on_path, recorder, paged):
+    on_path("codex")
+    result = run("codex", "--profile", "default", "--context-id", "fa", "-y")
+    assert result.exit_code == 1
+    assert "No context 'fa' (by id or name)." in result.output
+    # name_contains="fa" matched all three far* contexts over two pages, none named "fa".
+    assert [c.get("cursor") for c in paged.calls] == [None, "2"]
+    assert recorder.mutating() == []
+
+
+def test_context_uuid_past_the_first_page_is_not_looked_up(on_path, recorder, paged):
+    on_path("codex")
+    result = run("codex", "--profile", "default", "--context-id", OTHER_CTX, "-y")
+    assert result.exit_code == 0, result.output
+    [argv] = recorder.mutating()
+    assert argv[-2:] == ["--guardrails", OTHER_CTX]
+    assert paged.calls == []
+
+
+def test_dry_run_does_not_look_a_context_name_up(on_path, recorder, paged, connection):
+    on_path("codex")
+    result = run("codex", "--profile", "default", "--context-id", "far", "--dry-run")
+    assert result.exit_code == 0, result.output
+    assert "<UUID of context far>" in result.output
+    connection.assert_not_called()
+    assert paged.calls == []
+
+
+def test_a_context_lookup_that_does_not_add_up_stops_before_writing(
+    on_path, recorder, connection, monkeypatch
+):
+    on_path("codex")
+    connection.return_value = PagedContexts(["a", "b", "c"]).first_page()
+    fake = PagedContexts([], pages=[{"contexts": [], "has_more": True}])
+    monkeypatch.setattr("kagura_memory.setup_claude._make_client", fake.make_client)
+    result = run("codex", "--profile", "default", "--context-id", "far", "-y")
+    assert result.exit_code == 1
+    assert "list_contexts: unexpected server response (has_more without a next_cursor)" in (
+        result.output
+    )
+    assert recorder.mutating() == []
+
+
+def test_a_padded_context_name_resolves(on_path, recorder, paged):
+    on_path("codex")
+    result = run("codex", "--profile", "default", "--context-id", " far ", "-y")
+    assert result.exit_code == 0, result.output
+    [argv] = recorder.mutating()
+    assert argv[-2:] == ["--guardrails", FAR]
+    assert [c["name_contains"] for c in paged.calls] == ["far", "far"]
+
+
+def test_a_padded_context_uuid_past_the_first_page_is_trimmed(on_path, recorder, paged):
+    on_path("codex")
+    result = run("codex", "--profile", "default", "--context-id", f" {OTHER_CTX}\t", "-y")
+    assert result.exit_code == 0, result.output
+    [argv] = recorder.mutating()
+    assert argv[-2:] == ["--guardrails", OTHER_CTX]
+    assert paged.calls == []
+
+
+def test_a_hex_context_name_is_looked_up_before_it_is_read_as_an_id(
+    on_path, recorder, connection, monkeypatch
+):
+    # A dashless 32-hex string is a valid context name and another UUID spelling:
+    # the name wins, so it is not rewritten into a dashed UUID of no context.
+    hex_name = "0123456789abcdef0123456789abcdef"
+    fake = PagedContexts(["recent-a", "recent-b", hex_name])
+    connection.return_value = fake.first_page()
+    monkeypatch.setattr("kagura_memory.setup_claude._make_client", fake.make_client)
+    on_path("codex")
+    result = run("codex", "--profile", "default", "--context-id", hex_name, "-y")
+    assert result.exit_code == 0, result.output
+    [argv] = recorder.mutating()
+    assert argv[-2:] == ["--guardrails", PagedContexts.id_of(2)]
+
+
+def test_a_hex_id_no_context_is_named_is_still_an_id(on_path, recorder, paged):
+    on_path("codex")
+    result = run("codex", "--profile", "default", "--context-id", OTHER_CTX.replace("-", ""), "-y")
+    assert result.exit_code == 0, result.output
+    [argv] = recorder.mutating()
+    assert argv[-2:] == ["--guardrails", OTHER_CTX]
+    assert len(paged.calls) == 1  # looked up by name first
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (
+            KaguraAuthError("token revoked"),
+            "Authentication failed: token revoked\n"
+            "  Your token may have expired — re-run: kagura auth login --profile default",
+        ),
+        (
+            KaguraConnectionError("connection reset"),
+            "Cannot connect to https://memory.kagura-ai.com: connection reset",
+        ),
+    ],
+    ids=["auth", "connection"],
+)
+def test_a_failed_context_lookup_carries_the_profile_hints(
+    on_path, recorder, connection, monkeypatch, error, expected
+):
+    on_path("codex")
+    connection.return_value = PagedContexts(["a", "b", "c"]).first_page()
+    fake = PagedContexts([], pages=[error])
+    monkeypatch.setattr("kagura_memory.setup_claude._make_client", fake.make_client)
+    result = run("codex", "--profile", "default", "--context-id", "far", "-y")
+    assert result.exit_code == 1
+    assert expected in result.output
+    assert "Setup failed" not in result.output
+    assert recorder.mutating() == []
+
+
+def test_dry_run_shows_a_dashless_uuid_as_a_placeholder(on_path, connection):
+    # The real run looks it up as a context name first.
+    on_path("codex")
+    hex_id = CTX.replace("-", "")
+    result = run("codex", "--profile", "default", "--context-id", hex_id, "--dry-run")
+    assert result.exit_code == 0, result.output
+    assert f"<UUID of context {hex_id}>" in result.output
+    connection.assert_not_called()
 
 
 def test_context_prompt_with_no_visible_context(on_path, connection, tty):
