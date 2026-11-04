@@ -389,8 +389,8 @@ def _check_api_key_shape(api_key: str, source: str) -> DoctorCheck:
         )
     message = f"Unusual API key shape: {preview}"
     if not api_key.startswith(_KAGURA_KEY_PREFIX):
-        # The server check cannot show the 401 itself: /api/v1/system/info
-        # takes no credential.
+        # The server check cannot show the 401 itself (/api/v1/system/info
+        # takes no credential); the tools check does, with the same hint.
         message = f"{message}. {_NOT_A_KAGURA_KEY_HINT}"
     return DoctorCheck(
         section="auth",
@@ -646,10 +646,7 @@ async def _check_server(
                     ),
                     *await _check_tool_listing(client, resolved.mcp_url),
                 ]
-            message = str(exc)
-            if not resolved.api_key.startswith(_KAGURA_KEY_PREFIX):
-                message = f"{message} {_NOT_A_KAGURA_KEY_HINT}"
-            return [DoctorCheck(section="server", status="fail", message=message)]
+            return [DoctorCheck(section="server", status="fail", message=str(exc))]
         except KaguraConnectionError as exc:
             return [
                 DoctorCheck(
@@ -677,7 +674,12 @@ async def _check_server(
             return [DoctorCheck(section="server", status="fail", message=str(exc))]
         # tools/list on the same client (#300), unless the version check fails below.
         listing = (
-            await _check_tool_listing(client, resolved.mcp_url, version=info.version)
+            await _check_tool_listing(
+                client,
+                resolved.mcp_url,
+                version=info.version,
+                api_key=resolved.api_key if isinstance(resolved, _StaticAuth) else None,
+            )
             if meets_minimum(info.version, _MIN_SERVER_VERSION_TUPLE) is not False
             else []
         )
@@ -791,7 +793,11 @@ def _tool_view(mcp_url: str, version: str | None = None) -> dict[str, Any]:
 
 
 async def _check_tool_listing(
-    client: KaguraClient, mcp_url: str, *, version: str | None = None
+    client: KaguraClient,
+    mcp_url: str,
+    *,
+    version: str | None = None,
+    api_key: str | None = None,
 ) -> list[DoctorCheck]:
     """``tools/list`` on the client ``_check_server`` opened: how many tools, which view (#300).
 
@@ -800,6 +806,11 @@ async def _check_tool_listing(
     ``tools/call`` reaches an unlisted tool too, so a short list never breaks
     a ``KaguraClient`` method. It does decide what an MCP client following
     ``tools/list`` sees.
+
+    ``api_key`` is the configured static key, if any: ``tools/list`` is the
+    first call that sends it, so a 401 for a value without the ``kagura_``
+    prefix gets the bearer-routing hint here (memory-cloud v0.119.0+, #1994).
+    The key itself is never shown.
     """
     view = _tool_view(mcp_url, version)
     if "tools" in view:
@@ -812,14 +823,14 @@ async def _check_tool_listing(
     try:
         tools = await client.get_tool_definitions()
     except (KaguraError, ValueError) as exc:
-        return [
-            DoctorCheck(
-                section="tools",
-                status="fail",
-                message=f"tools/list on the CLI's MCP URL failed ({shown}): {_exc_message(exc)}",
-                details=details,
-            )
-        ]
+        message = f"tools/list on the CLI's MCP URL failed ({shown}): {_exc_message(exc)}"
+        if (
+            isinstance(exc, KaguraAuthError)
+            and api_key is not None
+            and not api_key.startswith(_KAGURA_KEY_PREFIX)
+        ):
+            message = f"{message} {_NOT_A_KAGURA_KEY_HINT}"
+        return [DoctorCheck(section="tools", status="fail", message=message, details=details)]
     details["tool_count"] = count = len(tools)
     return [
         DoctorCheck(

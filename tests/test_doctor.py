@@ -78,7 +78,7 @@ def _patch_server(monkeypatch, checks: list[DoctorCheck] | None = None):
     monkeypatch.setattr("kagura_memory.doctor._check_server", _fake_server)
 
 
-async def _no_tool_listing(_client, _mcp_url, *, version=None) -> list[DoctorCheck]:
+async def _no_tool_listing(_client, _mcp_url, *, version=None, api_key=None) -> list[DoctorCheck]:
     """_check_server follows a passing version check with tools/list (#300): offline here."""
     return []
 
@@ -1110,6 +1110,63 @@ def test_check_tool_listing_failure_is_a_failed_tools_check(exc):
     assert check.message == f"tools/list on the CLI's MCP URL failed (profile Core): {exc}"
 
 
+_OAUTH_TOKEN_AS_KEY = "Zx9-oauth-access-token-value-43-characters"
+
+
+@pytest.mark.parametrize(
+    ("exc", "api_key", "hinted"),
+    [
+        (KaguraAuthError("Authentication failed. Check your API key."), _OAUTH_TOKEN_AS_KEY, True),
+        (KaguraAuthError("Authentication failed. Check your API key."), "kagura_1234567890", False),
+        (KaguraAuthError("Authentication failed. Check your API key."), None, False),
+        (KaguraConnectionError("HTTP 500: boom"), _OAUTH_TOKEN_AS_KEY, False),
+    ],
+    ids=["oauth-token-as-key", "kagura-key", "no-static-key", "not-a-401"],
+)
+def test_check_tool_listing_401_explains_bearer_routing(exc, api_key, hinted):
+    """memory-cloud v0.119.0 (#1994) routes a bearer by shape: tools/list is the 401."""
+    import asyncio
+
+    [check] = asyncio.run(
+        _check_tool_listing(_ListingClient(exc=exc), "https://example.com/mcp", api_key=api_key)
+    )
+
+    assert (check.section, check.status) == ("tools", "fail")
+    assert ("routes bearer tokens by shape" in check.message) is hinted
+    assert _OAUTH_TOKEN_AS_KEY not in check.message
+
+
+def test_check_server_passes_the_static_key_to_the_tools_check(monkeypatch):
+    import asyncio
+
+    from kagura_memory.doctor import _check_server
+
+    class FakeClient(_ListingClient):
+        def __init__(self, **kwargs):
+            super().__init__(exc=KaguraAuthError("Authentication failed. Check your API key."))
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def check_server_version(self):
+            return ServerInfo(name="memory-cloud", version="0.141.0")
+
+    monkeypatch.setattr("kagura_memory.doctor.KaguraClient", FakeClient)
+    resolved = _StaticAuth(
+        api_key=_OAUTH_TOKEN_AS_KEY, mcp_url="https://example.com/mcp", source="env"
+    )
+
+    checks = asyncio.run(_check_server(resolved))
+
+    [tools] = [c for c in checks if c.section == "tools"]
+    assert tools.status == "fail"
+    assert "an OAuth token passed as an API key is a 401" in tools.message
+    assert all(_OAUTH_TOKEN_AS_KEY not in c.message for c in checks)
+
+
 @pytest.mark.parametrize(
     ("version", "listed"),
     [("0.141.0", True), ("dev", True), ("0.17.0", False)],
@@ -1188,47 +1245,6 @@ def test_doctor_cli_passes_profile(monkeypatch):
 
     assert result.exit_code == 0
     assert seen["profile"] == "dev"
-
-
-def _check_server_raising(monkeypatch, exc, api_key):
-    from kagura_memory.doctor import _check_server
-
-    class FakeClient:
-        def __init__(self, **kwargs):
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, tb):
-            return None
-
-        async def check_server_version(self):
-            raise exc
-
-    monkeypatch.setattr("kagura_memory.doctor.KaguraClient", FakeClient)
-    resolved = _StaticAuth(api_key=api_key, mcp_url="https://example.com/mcp", source="env")
-
-    import asyncio
-
-    return asyncio.run(_check_server(resolved))
-
-
-def test_check_server_401_with_a_non_kagura_key_explains_bearer_routing(monkeypatch):
-    """memory-cloud v0.119.0 (#1994) routes a bearer by shape: an OAuth token as api_key 401s."""
-    oauth_token = "Zx9-oauth-access-token-value-43-characters"
-    [check] = _check_server_raising(monkeypatch, KaguraAuthError("bad token"), oauth_token)
-    assert check.status == "fail"
-    assert check.message.startswith("bad token This value does not look like a Kagura API key")
-    assert "an OAuth token passed as an API key is a 401" in check.message
-    assert oauth_token not in check.message
-
-
-def test_check_server_401_with_a_kagura_key_has_no_shape_hint(monkeypatch):
-    [check] = _check_server_raising(
-        monkeypatch, KaguraAuthError("bad token"), "kagura_12345678abcdef"
-    )
-    assert check.message == "bad token"
 
 
 def test_unusual_key_shape_without_the_prefix_explains_bearer_routing():
