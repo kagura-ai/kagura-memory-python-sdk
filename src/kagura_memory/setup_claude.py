@@ -7,6 +7,7 @@ import re
 import shlex
 import subprocess
 from collections.abc import Sequence
+from contextlib import aclosing
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -40,7 +41,7 @@ from .claude_code import (
 
 # Re-exported: the detector lived here before #258, and callers import it from here.
 from .claude_code import detect_mcp_json_mode as detect_mcp_json_mode
-from .client import _MAX_AUTO_PAGES, KaguraClient, _next_page_cursor, _unfinished_list_error
+from .client import KaguraClient, _iter_pages
 from .exceptions import KaguraAuthError, KaguraConnectionError, _exc_message
 
 DEFAULT_MCP_URL = "http://localhost:8080/mcp"
@@ -231,18 +232,14 @@ async def _find_context_by_name(
             ``next_cursor`` or repeats an earlier one, or the matches do
             not end within 50 pages.
     """
-    seen: set[str] = set()
-    cursor: str | None = None
     async with _make_client(api_key, mcp_url, profile) as client:
-        for _ in range(_MAX_AUTO_PAGES):
-            page = await client.list_contexts(name_contains=name, cursor=cursor)
-            for ctx in page.get("contexts") or []:
-                if isinstance(ctx, dict) and ctx.get("id") and ctx.get("name") == name:
-                    return ctx
-            cursor = _next_page_cursor(page, "list_contexts", seen)
-            if cursor is None:
-                return None
-    raise _unfinished_list_error("list_contexts")
+        pages = _iter_pages(client, "list_contexts", {"name_contains": name})
+        async with aclosing(pages):
+            async for page in pages:
+                for ctx in page.get("contexts") or []:
+                    if isinstance(ctx, dict) and ctx.get("id") and ctx.get("name") == name:
+                        return ctx
+    return None
 
 
 def _lookup_context(

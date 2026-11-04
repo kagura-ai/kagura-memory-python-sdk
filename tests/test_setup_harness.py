@@ -2712,10 +2712,7 @@ def test_context_name_past_the_first_page_resolves(on_path, recorder, paged, mon
     assert f"Using context: far ({FAR[:8]}...)" in result.output
     [argv] = recorder.mutating()
     assert argv[argv.index("--") + 1 :] == [PROXY, "--profile", "work", "--guardrails", FAR]
-    assert paged.calls == [
-        {"name_contains": "far", "cursor": None},
-        {"name_contains": "far", "cursor": "2"},
-    ]
+    assert paged.calls == [{"name_contains": "far"}, {"name_contains": "far", "cursor": "2"}]
     # On the profile alone, as the connection check.
     assert paged.made_with == [(None, None, "work")]
 
@@ -2738,7 +2735,7 @@ def test_context_name_absent_after_the_last_page_fails(on_path, recorder, paged)
     assert result.exit_code == 1
     assert "No context 'fa' (by id or name)." in result.output
     # name_contains="fa" matched all three far* contexts over two pages, none named "fa".
-    assert [c["cursor"] for c in paged.calls] == [None, "2"]
+    assert [c.get("cursor") for c in paged.calls] == [None, "2"]
     assert recorder.mutating() == []
 
 

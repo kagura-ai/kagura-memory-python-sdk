@@ -396,7 +396,7 @@ class PagedContexts:
     case-insensitive substring filter (on the name here), and each page holds
     ``page_size`` rows with ``has_more`` and an offset ``next_cursor``. Row ids
     are UUIDs derived from the position in ``names``. Every call is recorded as
-    its keyword arguments; ``pages`` overrides the replies in order. Install it
+    its arguments; ``pages`` overrides the replies in order. Install it
     with ``monkeypatch.setattr("kagura_memory.setup_claude._make_client",
     fake.make_client)``.
     """
@@ -429,6 +429,11 @@ class PagedContexts:
 
     async def __aexit__(self, *exc: object) -> bool:
         return False
+
+    async def _call_tool_checked(self, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        """What ``client._iter_pages`` calls: ``list_contexts`` with ``arguments``."""
+        assert tool == "list_contexts"
+        return await self.list_contexts(**arguments)
 
     async def list_contexts(self, **kwargs: Any) -> dict[str, Any]:
         self.calls.append(kwargs)

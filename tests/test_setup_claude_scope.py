@@ -1290,9 +1290,6 @@ def test_context_name_past_the_first_page_resolves(
     assert f"Using context: far ({far[:8]}...)" in result.output
     assert read_json(tmp_path / ".kagura.json")["context_id"] == far
     assert f"-c {far} " in hook_commands(tmp_path, "SessionStart")[0]
-    assert fake.calls == [
-        {"name_contains": "far", "cursor": None},
-        {"name_contains": "far", "cursor": "2"},
-    ]
+    assert fake.calls == [{"name_contains": "far"}, {"name_contains": "far", "cursor": "2"}]
     # The lookup runs on the credential the connection check used.
     assert fake.made_with == [(None, MCP_URL, "default") if oauth else (API_KEY, MCP_URL, None)]

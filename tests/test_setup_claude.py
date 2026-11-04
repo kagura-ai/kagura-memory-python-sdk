@@ -682,7 +682,7 @@ class TestFindContextByName:
         found = await _find_context_by_name("far", "key", "url")
         assert found == {"id": FAR_ID, "name": "far"}
         assert paged.calls == [
-            {"name_contains": "far", "cursor": None},
+            {"name_contains": "far"},
             {"name_contains": "far", "cursor": "2"},
         ]
         assert paged.made_with == [("key", "url", None)]
@@ -701,7 +701,7 @@ class TestFindContextByName:
         fake = PagedContexts(["FAR", "far-x", "x-far"], page_size=1)
         monkeypatch.setattr("kagura_memory.setup_claude._make_client", fake.make_client)
         assert await _find_context_by_name("far") is None
-        assert [c["cursor"] for c in fake.calls] == [None, "1", "2"]
+        assert [c.get("cursor") for c in fake.calls] == [None, "1", "2"]
 
     @pytest.mark.asyncio
     async def test_rows_without_an_id_are_skipped(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -749,7 +749,7 @@ class TestLookupContext:
 
     def test_a_name_past_the_first_page_is_looked_up(self, paged: PagedContexts) -> None:
         assert _lookup_context("far", paged.first_page(), "key", "url")["id"] == FAR_ID
-        assert paged.calls[0] == {"name_contains": "far", "cursor": None}
+        assert paged.calls[0] == {"name_contains": "far"}
 
     def test_a_complete_first_page_is_the_whole_list(self, paged: PagedContexts) -> None:
         # No has_more: a server before 0.82.0, or every context fit on the page.
@@ -773,7 +773,7 @@ class TestLookupContext:
 
     def test_a_100_character_name_is_looked_up(self, paged: PagedContexts) -> None:
         assert _lookup_context("x" * 100, paged.first_page()) is None
-        assert paged.calls == [{"name_contains": "x" * 100, "cursor": None}]
+        assert paged.calls == [{"name_contains": "x" * 100}]
 
 
 class TestSelectPreselectedPastTheFirstPage:
@@ -797,7 +797,7 @@ class TestSelectPreselectedPastTheFirstPage:
         )
         assert result == "fa"
         # name_contains="fa" matched three contexts over two pages, none named "fa".
-        assert [c["cursor"] for c in paged.calls] == [None, "2"]
+        assert [c.get("cursor") for c in paged.calls] == [None, "2"]
 
 
 @patch("kagura_memory.setup_claude._test_connection")
@@ -833,7 +833,7 @@ def test_setup_claude_warns_on_a_name_no_page_matches(
     assert json.loads((tmp_path / ".kagura.json").read_text())["context_id"] == "fa"
     # The lookup paged to the end ("fa" matched the three far* contexts, none named
     # "fa"), so the list was searched: one stderr line, before "Using context".
-    assert [c["cursor"] for c in paged.calls] == [None, "2"]
+    assert [c.get("cursor") for c in paged.calls] == [None, "2"]
     assert result.stderr == UNKNOWN_WARNING
     assert result.output.index(UNKNOWN_WARNING) < result.output.index("Using context: fa\n")
 
