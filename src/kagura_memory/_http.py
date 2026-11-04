@@ -338,11 +338,13 @@ def mcp_session_expired(response: httpx.Response, session_id: str | None) -> boo
     MCP Streamable HTTP answers a request naming a session the server no
     longer holds with ``404``, and the client must then send a new
     ``initialize``. memory-cloud keeps legacy (``initialize``-handshake)
-    sessions in process memory, drops them after an idle hour and on every
-    restart, and has that ``404`` + ``-32603`` check; but as deployed
-    (v0.75.0) its routes normalize ``/mcp`` to ``/mcp/``, which skips the
-    check and re-adopts the unknown id as a new session. So this is the
-    spec-mandated path, reached against a server that enforces it.
+    sessions in process memory and drops them after an idle hour and on
+    every restart. It re-adopts such an unknown id for the authenticated
+    caller (#1686), but since v0.82.0 (memory-cloud#1740) only one in the
+    server-minted shape (``mcp-`` + 16 hex). It answers ``404`` + ``-32603``
+    for any other unknown id, for an id ended with ``DELETE /mcp`` (remembered
+    for the idle timeout; a restart forgets it) and for another user's or
+    workspace's session. Those are the cases this path handles.
 
     The one ``404`` that is not about the session is the stateless 2026-07-28
     ``-32601`` Method-not-found reply (memory-cloud #1544): that path ignores
@@ -369,6 +371,13 @@ def sanitize_server_detail(detail: str | None) -> str | None:
     the user. Drop the detail entirely when it carries any marker that
     looks credential-shaped. Returns ``None`` when the detail is empty
     or unsafe to display.
+
+    Since memory-cloud v0.80.1 (#1719) no 403 text contains these markers
+    (the server's own tests refuse one that does), so the server's reason
+    passes through. That includes the Web UI refusal "API keys and OAuth
+    access tokens are not accepted on Web UI endpoints. Sign in with a
+    browser session." Before v0.80.1 that sentence read "Bearer" and was
+    dropped here, which left only the client's generic hint.
     """
     if not detail:
         return None

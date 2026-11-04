@@ -183,6 +183,10 @@ def auth_login(
       memory:write  — create/update/delete memories, contexts, files
       (additional scopes like profile:read may be accepted server-side;
       pass them through --scope.)
+
+    memory-cloud v0.83.0+ emails the account's verified address on every
+    device-flow approval (no opt-out), so an approval you did not start
+    shows up there.
     """
     if read_only and scope is not None:
         raise click.ClickException("--read-only and --scope are mutually exclusive; pick one.")
@@ -813,6 +817,13 @@ def auth_refresh(profile: str | None, scope: str | None) -> None:
       memory:write  — create/update/delete memories, contexts, files
       (additional scopes like profile:read may be accepted server-side;
       pass them through --scope.)
+
+    A refresh token works once (memory-cloud v0.79.0+). A password reset
+    revokes every OAuth token of the account (v0.83.0+), so a refresh
+    after one fails; run `kagura auth login`. This command refreshes
+    outside the lock that `kagura-mcp` and KaguraClient share, so run
+    while one of them is refreshing the same profile it can fail with
+    "login expired" although the stored profile is fine: run it again.
     """
     cf = load_credentials_file()
     target = profile or cf.default_profile

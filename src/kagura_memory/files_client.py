@@ -68,6 +68,14 @@ class FilesClient(KaguraRestClient):
     constructor). The R2 PUT step is unauthenticated by design — the
     presigned URL carries its own short-lived SigV4 signature.
 
+    Since memory-cloud v0.126.0 a workspace-scoped API key keeps its own
+    workspace on every file route: a ``context_id`` (wire ``workspace_id``)
+    naming another workspace no longer overrides it and answers 403, as a
+    non-member's request does, raised as :class:`KaguraConnectionError`
+    with the workspace-mismatch hint. A file bound to a context outside a
+    member's or viewer's context access list answers 404 (see
+    :class:`~kagura_memory.workspace_client.WorkspaceClient`).
+
     All methods may raise:
         KaguraAuthError: Authentication failed (401)
         KaguraNotFoundError: File not found (404)
@@ -343,10 +351,16 @@ class FilesClient(KaguraRestClient):
                 legacy behaviour) and stays fully listable.
 
         Returns:
-            FileObject with the finalized file metadata. When the file
-            already exists with the same sha256 in the workspace the
-            server returns 409 and the SDK surfaces the existing
-            FileObject (dedup happy-path) rather than raising.
+            FileObject with the finalized file metadata. When the workspace
+            already holds a file with the same sha256, ``reserve`` answers
+            ``409 RES-002``. Since memory-cloud v0.80.0 (#1693) the 409
+            carries that file as ``existing_file`` when it is in the same
+            context as this upload (both unbound counts as the same) and
+            its upload has completed. The SDK then returns it (dedup
+            happy-path) without uploading again. A duplicate bound to
+            another context, or one whose earlier upload has not completed,
+            carries no file, and the 409 is raised as
+            :class:`KaguraConnectionError`.
 
         Raises:
             ValueError: If ``source`` is ``bytes`` and ``filename`` is

@@ -152,8 +152,10 @@ class CapacityLock(BaseModel):
 class UsageInfo(BaseModel):
     """Workspace usage and quota information.
 
-    ``capacity_lock`` is ``None`` unless the workspace is over its Free
-    capacity (memory-cloud v0.99.0+), and always on older servers.
+    ``memories.used`` counts the live rows of this workspace since
+    memory-cloud v0.100.0 (#1946). ``capacity_lock`` is ``None`` unless the
+    workspace is over its Free capacity (memory-cloud v0.99.0+), and always
+    on older servers.
     """
 
     plan: str
@@ -342,7 +344,12 @@ class EmbeddingStatus(BaseModel):
 
 
 class MemoryStatItem(BaseModel):
-    """Per-memory usage statistics."""
+    """Per-memory usage statistics.
+
+    ``access_count`` is a lower bound since memory-cloud v0.105.0 (#1985): a
+    statistics write skips a row another transaction holds instead of
+    waiting, so a read under contention can go uncounted.
+    """
 
     id: str
     summary: str
@@ -1479,7 +1486,9 @@ class AgentBootstrapResponse(BaseModel):
 
     ``context`` reuses :class:`ContextDetail` — the server emits the block
     byte-compatible with ``get_context_info`` (``search_config`` is not
-    included in bootstrap and keeps its client-side default).
+    included in bootstrap and keeps its client-side default). Since
+    memory-cloud v0.79.0 (#1682) ``instructions`` is the server's static
+    quick reference and the context's guide is ``context.usage_guide``.
 
     ``context_summary_omitted`` is ``True`` when the reply did not fit its
     ``max_chars`` budget and the server left ``context_summary`` out of every

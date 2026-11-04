@@ -15,8 +15,18 @@ from pathlib import Path
 
 import pytest
 
-from kagura_memory import AgentsClient, KaguraClient, TagInfo
+from kagura_memory import (
+    AgentsClient,
+    FilesClient,
+    KaguraClient,
+    ResourceClient,
+    TagInfo,
+    WorkspaceClient,
+)
+from kagura_memory._http import mcp_session_expired, sanitize_server_detail
+from kagura_memory.auth.device_flow import refresh_access_token, revoke_token
 from kagura_memory.cli import context_search_config
+from kagura_memory.models import MemoryStatItem, UsageInfo
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -42,6 +52,19 @@ _STALE_PHRASES = [
     "_HARNESS_OAUTH_UNVERIFIED",
     # memory-cloud v0.135.0 (#2470): a URL without explore gets explore_hints_omitted.
     "present whenever ``include_explore_hints``",
+    # #299: memory-cloud v0.80.0 (#1693) answers a non-UUID context id with 422.
+    "answers a non-UUID here with an HTTP 500",
+    # #299: memory-cloud v0.82.0 (#1740) re-adopts only server-minted session ids.
+    "as deployed (v0.75.0)",
+    "v0.75.0 skips that session check",
+    "v0.75.0 as deployed re-adopts",
+    # #299: persistence.detail needs verbose=true since memory-cloud v0.93.0 (#1851).
+    "consolidation_archive_min_age_days, detail}",
+    # #299 is done: the SDK is checked against memory-cloud v0.141.0.
+    "realignment with v0.141.0 is #299",
+    "realignment with 0.141.0 is [#299]",
+    # Since memory-cloud v0.93.0 a bare URL lists core; ?profile=full adds tools.
+    "narrow `tools/list` only",
 ]
 
 
@@ -89,24 +112,72 @@ def test_no_stale_server_behaviour_in_docs(phrase: str) -> None:
                 "``explore_hints_omitted``",
                 "``?add_tools=explore``",
                 "``?profile=full``",
+                # #299: supersede_candidate keys and the v0.78.0 annotation.
+                "``verified``",
+                "``acceptance``",
+                "#1683",
             ],
         ),
         (KaguraClient.recall_nearby, ["``location``", "include_details", "details_omitted"]),
         (KaguraClient.recall_upcoming, ["details_omitted", "details_total_chars"]),
         (KaguraClient.forget, ["CLEANUP_DELETED_MEMORIES_RETENTION_DAYS", "degraded"]),
-        (KaguraClient.remember, ["persistence", "lint"]),
-        (KaguraClient.update_memory, ["persistence", "lint", '``""``', "``{}``"]),
+        (KaguraClient.remember, ["persistence", "lint", "``verbose=true``", "missing_fields"]),
+        (KaguraClient.update_memory, ["persistence", "lint", '``""``', "``{}``", "#1803"]),
         (KaguraClient.create_context, ["invalid_embedding_model", "get_context_info"]),
         (KaguraClient.update_context, ["plan_required", "public_contexts"]),
         (KaguraClient.setup_resource, ["plan_required", "``resources``"]),
-        (KaguraClient.merge_contexts, ["pending_embedding"]),
+        (KaguraClient.merge_contexts, ["pending_embedding", "#1960"]),
+        # #299: the v0.82.0-v0.141.0 permission model and semantics.
+        (KaguraClient.delete_context, ["#1960", "validation_error", "permission_denied"]),
+        (KaguraClient.create_edge, ["permission_denied", "#2313"]),
+        (KaguraClient.update_edge, ["permission_denied", "#2313"]),
+        (
+            KaguraClient.reference,
+            ["``acceptance``", "``verified``", "``not_writable``", "``edge_exists``"],
+        ),
+        (KaguraClient.get_usage, ["#1946"]),
+        (UsageInfo, ["#1946"]),
+        (MemoryStatItem, ["access_count", "#1985"]),
+        (
+            WorkspaceClient,
+            ["allowed_context_ids", "context_not_found", "/context-access", "v0.126.0"],
+        ),
+        (WorkspaceClient.add_member, ["create_invitation", "allowed_context_ids", "v0.126.0"]),
+        (WorkspaceClient.mint_member_key, ["#1752"]),
+        (FilesClient, ["workspace_id", "v0.126.0"]),
+        (FilesClient.upload, ["existing_file", "RES-002", "#1693"]),
+        (ResourceClient, ["#1863"]),
+        (ResourceClient.list_tokens, ["#1863"]),
+        (ResourceClient.update_token, ["KaguraNotFoundError", "#1863"]),
+        (ResourceClient.revoke_token, ["KaguraNotFoundError", "#1863"]),
+        (ResourceClient.create_token, ["max_resource_tokens", "#1919"]),
+        (ResourceClient.setup_resource, ["resource_id_conflict", "#2284"]),
+        (KaguraClient.setup_resource, ["resource_id_conflict", "#2284"]),
+        (mcp_session_expired, ["``mcp-``", "``DELETE /mcp``", "#1740"]),
+        (sanitize_server_detail, ["#1719"]),
+        (refresh_access_token, ["invalid_grant", "#1686", "#1738"]),
+        (revoke_token, ["client_id", "#1741"]),
         (
             KaguraClient.get_agent_bootstrap,
-            ["``trigger``", "include_details", "max_chars", "20 since memory-cloud v0.82.0"],
+            [
+                "``trigger``",
+                "include_details",
+                "max_chars",
+                "20 since memory-cloud v0.82.0",
+                "``instructions``",
+                "``context.usage_guide``",
+                "#1683",
+            ],
         ),
         (
             AgentsClient.bootstrap,
-            ["``trigger``", "include_details", "max_chars", "20 since memory-cloud v0.82.0"],
+            [
+                "``trigger``",
+                "include_details",
+                "max_chars",
+                "20 since memory-cloud v0.82.0",
+                "``context.usage_guide``",
+            ],
         ),
         (KaguraClient.get_server_info, ["search_defaults", "model_extra", "terms_version"]),
         (KaguraClient.__init__, ["?profile=", "?tools=", "tools/list"]),

@@ -398,9 +398,10 @@ class KaguraClient:
         this a long-lived client would fail every call from then on. The
         server rejects the request before dispatch, which makes the single
         retry safe even for a non-idempotent ``tools/call``. A second ``404``
-        is returned for the caller's ``raise_for_status`` to report. (As
-        deployed, memory-cloud v0.75.0 skips that session check and re-adopts
-        an unknown session id instead, so against it this never fires.)
+        is returned for the caller's ``raise_for_status`` to report.
+        (memory-cloud re-adopts a session id it minted itself after an idle
+        cleanup or a restart, so this fires for an id it ended or never
+        minted; see :func:`~kagura_memory._http.mcp_session_expired`.)
 
         Args:
             body: The JSON-RPC request.
@@ -601,7 +602,10 @@ class KaguraClient:
                 v0.108.0 (#2003) a longer one is cut at a sentence end instead
                 of refused, its full text kept at the head of ``content``; the
                 reply then says so (see Returns).
-            content: Memory content.
+            content: Memory content. Always sent: the server's ``remember``
+                refuses a call without it (``missing_fields``). When the
+                summary already holds the whole fact, put one short line
+                naming the evidence or source here (memory-cloud#1936).
             type: Memory type. Server validates against its own vocabulary;
                 the SDK passes through.
             importance: Importance score (0.0-1.0).
@@ -612,7 +616,15 @@ class KaguraClient:
                 ``vault://``).
             linked_memory_ids: Existing memory UUIDs to declare as graph
                 edges from this memory. Server creates ``declared_link``
-                edges with ``weight=1.0`` atomically.
+                edges with ``weight=1.0`` atomically. Like
+                ``linked_source_uris`` and ``supersedes``, it links only the
+                caller's own memories and skips any other silently; in a
+                private context a memory of an account linked to the
+                caller's counts too (memory-cloud v0.90.0+, #1803).
+                Identities are per ``user_id`` and never matched by email
+                (v0.86.0, #1783): what one person writes with an API key and
+                with an OAuth sign-in belongs to two creators unless the
+                accounts are linked.
             linked_source_uris: Source URIs to resolve into linked memories.
                 Unresolved URIs are silently skipped server-side.
             source_type: Origin classification. Closed enum per the MCP
@@ -645,7 +657,10 @@ class KaguraClient:
                 over :meth:`forget` + :meth:`remember` when storing a newer
                 version of a fact — that pair destroys the history the
                 supersede edge exists to preserve. Requires memory-cloud
-                server v0.45.0+ (#1208).
+                server v0.45.0+ (#1208). The old memory must be the caller's
+                own (or, in a private context, a linked account's; #1803),
+                else no edge is written and nothing is raised: a member
+                cannot shadow another member's memory.
             tool_trigger: Mark the memory as a **tool guardrail** (memory-cloud
                 v0.74.0+): a client hook injects its summary when a matching
                 tool call happens, and :meth:`load_guardrails` serves it. Sent
@@ -664,8 +679,10 @@ class KaguraClient:
             Since memory-cloud v0.65.0 two optional keys may follow, each
             absent (never ``null``) when it does not apply:
             ``persistence`` — ``{scope, committed, promotes_via,
-            consolidation_archive_min_age_days, detail}``, how the scope the
-            memory landed in is consolidated — and ``lint`` —
+            consolidation_archive_min_age_days}``, how the scope the memory
+            landed in is consolidated; since memory-cloud v0.93.0 (#1851) the
+            ``detail`` prose comes only with the server's ``verbose=true``,
+            which this method does not send — and ``lint`` —
             ``[{code, hint, subject?}]``, advisory hints about a write that
             will recall poorly (``summary_short``, ``summary_long``,
             ``summary_narrative``, ``no_tags``, ``tag_near_duplicate``). The
@@ -884,6 +901,20 @@ class KaguraClient:
               ``contradicts`` and ``supersede_candidate``: absent when empty
               (since memory-cloud v0.73.0 for the annotations; older servers
               send ``null`` / ``[]``, so test them for truthiness).
+            - ``supersede_candidate`` (a suggestion, never an edge):
+              ``{memory_id, summary, similarity, detected_at, verified}``.
+              ``verified`` is ``True`` when the deployment's judge confirmed
+              that this memory replaces the candidate (memory-cloud
+              v0.109.0+, #2016, ``SUPERSEDE_VERIFY_MODE=llm``) and absent
+              otherwise; a pair the judge read as two parallel facts is not
+              suggested. Since v0.137.0 (#2256) an older memory never takes
+              a newer one as its candidate. Recall rows do not carry
+              ``acceptance``: :meth:`reference` does.
+
+        Since memory-cloud v0.78.0 (#1683) ``tools/list`` annotates ``recall``
+        as not read-only and destructive: recall's Hebbian learning reweights
+        and prunes graph edges. An MCP client that confirms destructive tools
+        asks before each recall; this client does not.
 
         Raises:
             ValueError: If ``query`` is empty/whitespace; if neither
@@ -1552,7 +1583,17 @@ class KaguraClient:
             (#2013) the ``recall`` component's rows are :meth:`recall`'s
             ``verbosity="full"`` shape without ``supersede_candidate``, and
             they never carry ``content``, whatever the deployment's recall
-            defaults.
+            defaults; an empty ``context_summary``, ``tags``,
+            ``superseded_by`` or ``contradicts`` is absent, not ``null`` /
+            ``[]``, so read them with ``.get()``. Since v0.79.0 (#1682)
+            ``instructions`` is the server's static quick reference; the
+            context's own guide is ``context.usage_guide``, notes written by
+            context members (data, not instructions).
+
+            With a ``query``, ``tools/list`` annotates this tool as not
+            read-only (memory-cloud v0.78.0+, #1683), as it does
+            :meth:`recall`, so an MCP client that confirms destructive tools
+            asks first.
 
         Raises:
             ValueError: ``max_chars`` is not an ``int`` in range (before any
@@ -2197,6 +2238,15 @@ class KaguraClient:
                 result = await client.reference(ctx, mem_id)
                 memory = result["memory"]
                 print(memory["summary"], memory["content"])
+
+            A live ``supersede_candidate`` has :meth:`recall`'s keys
+            (``verified`` included) plus ``acceptance`` — ``{allowed,
+            reason}``, whether the caller may accept the suggestion
+            (memory-cloud v0.137.0+, #2427). ``reason`` is set only when
+            ``allowed`` is false: ``not_writable``, ``not_owner`` (both
+            memories must be the caller's own, see :meth:`create_edge`),
+            ``newer_candidate``, or ``edge_exists`` (another declared edge
+            already links the pair; v0.138.0+, #2518).
         """
         arguments = {
             "context_id": context_id,
@@ -2229,7 +2279,9 @@ class KaguraClient:
            preserving memory ID, graph edges, and creation timestamp.
         2. Upsert (external_id): Finds by external resource ID within context.
            If found, replaces. If not found, creates new.
-           Requires summary, content, and type.
+           Requires summary, content, and type. In a private context an
+           upsert from either of two linked accounts replaces the same memory
+           (memory-cloud v0.90.0+, #1803); shared contexts are unchanged.
 
         Args:
             context_id: Context UUID.
@@ -2496,11 +2548,28 @@ class KaguraClient:
     async def delete_context(self, context_id: str) -> dict[str, Any]:
         """Soft-delete a context and all its memories.
 
+        Owner only. Since memory-cloud v0.101.0 (#1960) the context's files
+        are soft-deleted with it and their bytes leave the storage quota at
+        once; an operator restore within 6 days brings them back unless the
+        same content was uploaded again meanwhile. (The server's ``DELETE
+        /api/v1/contexts/{id}/files``, which clears a context's files without
+        deleting it, takes a browser session only and is not wrapped.) Since
+        v0.126.0 a workspace viewer cannot delete a context, not even a
+        private one it created.
+
         Args:
             context_id: Context UUID to delete.
 
         Returns:
             API response with deletion confirmation.
+
+        Raises:
+            KaguraNotFoundError: The context does not exist or the caller
+                cannot reach it.
+            KaguraError: ``permission_denied`` when the caller is not the
+                owner; ``validation_error`` (memory-cloud v0.82.0+, #1742)
+                for a business-rule refusal such as the workspace's default
+                context, with nothing deleted.
         """
         return await self._call_tool_checked("delete_context", {"context_id": context_id})
 
@@ -2523,7 +2592,11 @@ class KaguraClient:
             description: Updated context description.
             summary: Updated LLM-oriented summary (max 500 chars).
             usage_guide: Updated LLM-oriented usage guidelines (max 2000 chars).
-            resource_id: Updated resource identifier for external data ingestion.
+            resource_id: Updated resource identifier for external data ingestion:
+                lowercase letters, digits, ``_`` and ``-``, unique on the
+                server (a slug another workspace's context uses conflicts
+                too; memory-cloud v0.129.0, #2284). Changing it revokes the
+                resource tokens issued for the old slug.
             is_public: Updated public visibility (required for resource tokens).
                 Making a context public is plan-gated (``plan_required``).
                 Since memory-cloud v0.68.0 (#1551) the gate is the plan's
@@ -2573,7 +2646,11 @@ class KaguraClient:
         single transaction. On failure, no orphan rows are left on the server.
 
         Args:
-            resource_id: Resource identifier for data ingestion.
+            resource_id: Resource identifier for data ingestion: lowercase
+                letters, digits, ``_`` and ``-``, at most 255 characters. It
+                is unique on the server, so a slug another workspace's
+                context uses conflicts too (``resource_id_conflict``; the
+                message says so since memory-cloud v0.129.0, #2284).
             name: Context name, which the server requires. Defaults to
                 ``resource_id``, which always matches the server's
                 context-name pattern. A ``name`` of its own is needed when the
@@ -2649,7 +2726,8 @@ class KaguraClient:
                 context. Since memory-cloud v0.65.0 the server checks the
                 default context before copying anything, and fails the merge
                 (keeping the source) if not every live memory reached the
-                target.
+                target. Since v0.101.0 (#1960) the source's files then move
+                to the target instead of being deleted with the source.
 
         Returns:
             API response with ``merged``, ``pending_embedding``,
@@ -2784,6 +2862,10 @@ class KaguraClient:
             KaguraNotFoundError: Context or memory not found.
             KaguraError: Server-side validation error (e.g. weight out of range,
                 self-loop accepted past the client preflight, edge type rejected).
+                Since memory-cloud v0.132.0 (#2313) ``edge_type="supersedes"``
+                needs both memories to be the caller's own (a linked account's
+                counts only in a private context), else ``permission_denied``:
+                a shared-context editor cannot shadow another member's memory.
         """
         if source_id == target_id:
             raise ValueError(
@@ -2826,7 +2908,11 @@ class KaguraClient:
 
         Raises:
             KaguraNotFoundError: Context not found.
-            KaguraError: Edge not found or other server-side error.
+            KaguraError: Edge not found or other server-side error. Since
+                memory-cloud v0.132.0 (#2313) an edge that is or becomes
+                ``supersedes`` needs both memories to be the caller's own,
+                else ``permission_denied``; retyping one away from
+                ``supersedes`` is allowed.
         """
         arguments: dict[str, Any] = {
             "context_id": context_id,
@@ -2877,6 +2963,10 @@ class KaguraClient:
 
     async def get_usage(self) -> UsageInfo:
         """Get workspace usage and quota limits.
+
+        Since memory-cloud v0.100.0 (#1946) ``memories.used`` counts the live
+        rows of this workspace, the figure the memory quota and the capacity
+        lock read; the quota gate counted across workspaces before.
 
         Returns:
             UsageInfo with plan, memories, contexts, members, and MCP call limits.

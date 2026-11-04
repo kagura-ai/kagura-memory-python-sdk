@@ -273,8 +273,14 @@ async def test_create_invitation():
 
 @pytest.mark.asyncio
 async def test_create_invitation_rejects_a_non_uuid_context_before_the_wire():
-    """The server answers a non-UUID context with an HTTP 500 (#285)."""
-    async with make_client(lambda r: httpx.Response(500)) as c:
+    """Checked locally on every server: memory-cloud before v0.80.0 answered a
+    non-UUID context with an HTTP 500 (#285), from v0.80.0 with 422 VAL-001
+    (#1693). The handler fails the test if a request is sent at all."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("a non-UUID context id reached the wire")
+
+    async with make_client(handler) as c:
         with pytest.raises(ValueError, match="allowed_context_ids must be a UUID"):
             await c.create_invitation(WS, "new@x.com", allowed_context_ids=[CTX, "ctx-1"])
 

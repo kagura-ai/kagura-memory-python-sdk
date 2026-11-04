@@ -874,6 +874,68 @@ async def test_upload_409_dedup_returns_existing_file():
 
 
 @pytest.mark.asyncio
+async def test_upload_409_res002_envelope_returns_existing_file():
+    """memory-cloud v0.80.0+ (#1693): the RES-002 envelope carries a same-context,
+    uploaded duplicate as a top-level ``existing_file`` beside error/message/details."""
+    client = FilesClient(api_key="test", base_url="https://example.com")
+
+    existing = _file_object_dict(file_id="existing-uuid", status="uploaded")
+    dup_resp = _error_response(
+        409,
+        {
+            "error": "RES-002",
+            "message": (
+                f"file with sha256={SAMPLE_SHA256_HEX} already exists in workspace; "
+                "reuse file_id=existing-uuid"
+            ),
+            "details": {},
+            "existing_file": existing,
+        },
+    )
+
+    with (
+        patch.object(client._client, "request", new_callable=AsyncMock) as mock_req,
+        patch.object(client._upload_client, "put", new_callable=AsyncMock) as mock_put,
+    ):
+        mock_req.return_value = dup_resp
+        result = await client.upload(
+            context_id=SAMPLE_CTX_ID, source=SAMPLE_BODY, filename="hello.txt"
+        )
+
+    assert result.id == "existing-uuid"
+    assert mock_req.call_count == 1
+    mock_put.assert_not_called()
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_upload_409_res002_naming_no_file_raises_with_the_code():
+    """A duplicate in another context, or one whose upload has not completed,
+    names no file (#1693/#1136): the 409 is raised, carrying ``RES-002``."""
+    client = FilesClient(api_key="test", base_url="https://example.com")
+
+    dup_resp = _error_response(
+        409,
+        {
+            "error": "RES-002",
+            "message": (
+                f"file with sha256={SAMPLE_SHA256_HEX} already exists in workspace; "
+                "an earlier upload of this file has not completed yet"
+            ),
+            "details": {},
+        },
+    )
+
+    with patch.object(client._client, "request", new_callable=AsyncMock) as mock_req:
+        mock_req.return_value = dup_resp
+        with pytest.raises(KaguraConnectionError, match="HTTP 409") as exc_info:
+            await client.upload(context_id=SAMPLE_CTX_ID, source=SAMPLE_BODY, filename="hello.txt")
+
+    assert exc_info.value.code == "RES-002"
+    await client.close()
+
+
+@pytest.mark.asyncio
 async def test_upload_409_without_existing_file_raises():
     """409 without an existing_file payload is just a normal connection error."""
     client = FilesClient(api_key="test", base_url="https://example.com")
@@ -1113,6 +1175,13 @@ def test_sanitize_server_detail_drops_credential_markers():
     assert _sanitize_server_detail("") is None
     assert _sanitize_server_detail(None) is None
     # Credential markers → drop (case-insensitive).
+    # memory-cloud v0.80.1 (#1719): the Web UI refusal no longer says "Bearer",
+    # so the server's reason now reaches the user.
+    web_ui = (
+        "API keys and OAuth access tokens are not accepted on Web UI endpoints. "
+        "Sign in with a browser session."
+    )
+    assert _sanitize_server_detail(web_ui) == web_ui
     assert _sanitize_server_detail("Bearer rotk-leaked-value") is None
     assert _sanitize_server_detail("bearer xxx") is None
     assert _sanitize_server_detail("Authorization: Bearer xxx") is None

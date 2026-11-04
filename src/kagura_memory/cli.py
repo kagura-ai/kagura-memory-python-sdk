@@ -3656,6 +3656,12 @@ def member_add(user_id: str, role: str, workspace_id: str | None):
     creates a dangling membership row. Prefer
     `kagura workspace invite create <email>` for onboarding.
 
+    The new member has no context access list. On memory-cloud v0.126.0+
+    a member without one reaches no context and a viewer every shared
+    context, until the list is set on the web members page (the server
+    takes it from a browser session only). `invite create --context`
+    sets it at invitation time.
+
     \b
     Example:
       kagura workspace member add google_1234 --role member

@@ -104,7 +104,11 @@ class AgentsClient(KaguraRestClient):
             :class:`AgentBootstrapResponse` — the composed envelope. Since
             memory-cloud v0.73.0 the ``upcoming`` component's rows carry
             ``trigger`` in place of ``details``, with no ``include_details``
-            opt-out on this path.
+            opt-out on this path. The ``recall`` rows and ``instructions``
+            are as in :meth:`KaguraClient.get_agent_bootstrap` (memory-cloud
+            v0.110.0, #2013; v0.79.0, #1682): no ``supersede_candidate`` or
+            ``content``, empty keys absent, and the context's guide in
+            ``context.usage_guide``.
 
         Raises:
             ValueError: ``max_chars`` is not an ``int`` in range (before any
