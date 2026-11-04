@@ -772,3 +772,22 @@ def test_a_non_bearer_challenge_naming_the_scope_error_is_not_read():
     challenge = 'Basic realm="error=insufficient_scope", charset="UTF-8"'
     err = _raised(403, {"error": "HTTP-403", "message": "x"}, **{"WWW-Authenticate": challenge})
     assert type(err) is KaguraConnectionError
+
+@pytest.mark.asyncio
+async def test_list_tags_rest_422_keeps_the_rest_body_on_the_mcp_style_error():
+    errors = [{"loc": ["query", "with_tags"], "msg": "Too many tags", "type": "value_error"}]
+    body = {
+        "error": "VAL-001",
+        "message": "Request validation failed",
+        "details": {"errors": errors},
+    }
+    client = KaguraClient(api_key="test", mcp_url="https://test.com/mcp")
+    client._client = httpx.AsyncClient(transport=httpx.MockTransport(_respond(422, body)))
+    try:
+        with pytest.raises(KaguraError) as exc:
+            await client.list_tags(context_id=CTX, with_tags=["a"])
+    finally:
+        await client.close()
+    # The MCP tool's code, as before; the fields are the REST body's.
+    assert exc.value.code == "invalid_argument"
+    assert exc.value.details == {"errors": errors}

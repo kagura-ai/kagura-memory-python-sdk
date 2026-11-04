@@ -26,6 +26,7 @@ from ._http import (
     parse_response,
     parse_response_list,
     raise_for_kagura_status,
+    server_error_fields,
     validate_coordinate,
     validate_https_url,
     validate_lat_lon,
@@ -426,7 +427,8 @@ class KaguraClient:
                 ``404`` and a ``422`` raise what that tool's
                 ``context_not_found`` and ``invalid_argument`` errors raise
                 (:meth:`_raise_for_mcp_error`), so a method moved from MCP to
-                REST keeps its exceptions (#273).
+                REST keeps its exceptions (#273); the error's ``details`` are
+                the REST body's (e.g. a 422's ``errors``).
 
         Raises:
             KaguraAuthError / KaguraRateLimitError / KaguraConnectionError: A
@@ -450,6 +452,10 @@ class KaguraClient:
                         {"status": "error", "error": code, "message": message}, mcp_tool
                     )
                 except KaguraError as mapped:
+                    # ``code`` stays the MCP tool's; the REST body's fields are
+                    # what the server sent with it.
+                    if (fields := server_error_fields(e.response)) is not None:
+                        annotate_server_error(mapped, *fields)
                     # Chained explicitly, as raise_for_kagura_status chains it.
                     raise mapped from e
             raise_for_kagura_status(e)
