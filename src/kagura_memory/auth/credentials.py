@@ -17,20 +17,19 @@ Multi-process coordination (e.g. several ``kagura-mcp`` proxy children
 refreshing the same file) is handled in two layers: the in-process
 :class:`asyncio.Lock` coalesces refreshes *within* a process, and the
 cross-process advisory lock in :mod:`kagura_memory._filelock` (acquired
-inside :meth:`KaguraOAuth._refresh_locked`) re-reads the on-disk token
+inside :func:`refresh_profile_locked`) re-reads the on-disk token
 after locking and skips the ``/oauth2/token`` round-trip when another
 process already rotated it — so only one process hits the token endpoint
 per cycle (issue #158).
 
 That matters because memory-cloud v0.79.0+ (#1686) issues one token per
 refresh token, also under concurrent requests: a second refresh with the
-same token gets ``invalid_grant``. Every :class:`KaguraOAuth` refresh —
-``KaguraClient``, the REST clients and the ``kagura-mcp`` proxy — takes both
-locks and re-reads the file first, so two of them never send the same
-refresh token. ``kagura auth refresh`` and ``kagura auth token`` refresh
-outside the cross-process lock (they only lock the write), so one of them
-running while a proxy refreshes the same profile can get ``invalid_grant``;
-the profile the winner wrote stays valid.
+same token gets ``invalid_grant``. Every refresh — :class:`KaguraOAuth`
+(``KaguraClient``, the REST clients and the ``kagura-mcp`` proxy) as well as
+``kagura auth refresh`` and ``kagura auth token`` — goes through
+:func:`refresh_profile_locked`, which takes the cross-process lock and
+re-reads the file first, so two of them never send the same refresh token
+(#313).
 """
 
 from __future__ import annotations
@@ -598,15 +597,11 @@ class KaguraOAuth(httpx.Auth):
     async def _refresh_locked(self, *, expected_stale_token: str | None = None) -> None:
         """Refresh ``/oauth2/token`` once across all processes. Caller holds the in-process lock.
 
-        The cross-process advisory lock is acquired with non-blocking attempts
-        on the event loop (``asyncio.sleep`` between tries — see
-        :func:`async_file_lock`), so other coroutines — e.g. concurrent
-        ``kagura-mcp`` proxy forwards — keep running while we wait, and a
-        cancellation while waiting holds nothing. After acquiring it we
-        re-read the credentials from disk and **skip the network call when
-        another process already rotated the token**, so only one proxy among
-        many hits ``/oauth2/token`` per cycle (dedup over the network, not just
-        a lost-update-safe write).
+        Delegates to :func:`refresh_profile_locked`, the one refresh path the
+        CLI shares, and adopts what it returns: the token another process
+        already rotated (no network call), or the one this call refreshed and
+        saved. "Skip" therefore means "adopt the on-disk result", never "leave
+        the stale in-memory token in place".
 
         Args:
             expected_stale_token: governs the "already rotated?" predicate.
@@ -617,81 +612,137 @@ class KaguraOAuth(httpx.Auth):
                 token means nobody has rotated yet, so this process must refresh
                 (a 401 is independent of ``expires_at``).
         """
-        from .._filelock import async_file_lock
-
-        path = self._state.path
-        profile = self._state.profile_name
-        # async_file_lock acquires the cross-process lock with non-blocking
-        # attempts on the event loop (asyncio.sleep between tries), so it never
-        # stalls the loop and is cancellation-safe — a cancellation while
-        # waiting holds nothing, and the body is released in its own finally.
-        async with async_file_lock(path, exclusive=True):
-            disk = load_credentials_file(path).get_profile(profile)
-            if disk is not None and self._already_rotated(disk, expected_stale_token):
-                # Another process refreshed while we waited — adopt its token
-                # and skip the network call. "Skip" means "adopt the on-disk
-                # result", never "leave the stale in-memory token in place".
-                self._state.credentials = disk
-                return
-            base = disk if disk is not None else self._state.credentials
-            await self._network_refresh_and_save(base, path, profile)
-
-    def _already_rotated(self, disk: OAuthCredentials, expected_stale_token: str | None) -> bool:
-        """Whether ``disk`` shows another process already produced a usable token."""
-        if expected_stale_token is None:
-            # Skew path: a token outside the skew window is fresh enough.
-            return not disk.is_expired(skew_seconds=REFRESH_SKEW_SEC)
-        # 401 path: a different token means someone rotated; an identical token
-        # means the rejected token is still current and we must refresh.
-        return disk.access_token != expected_stale_token
-
-    async def _network_refresh_and_save(
-        self, base: OAuthCredentials, path: Path, profile: str
-    ) -> None:
-        """Hit ``/oauth2/token`` from ``base`` and persist. Caller holds both locks."""
-        # Lazy import: ``device_flow`` may depend on this module's public types,
-        # so resolve only at refresh time to avoid a cycle at import time.
-        from .device_flow import make_oauth_client, refresh_access_token
-
-        # A profile stored without a refresh token cannot be refreshed.
-        # Going to the network only earns an ``invalid_grant``, whose
-        # message ("refresh token is no longer valid") describes a token
-        # that never existed — the grant never carried offline access.
-        # Fail here instead, naming that. Mirrors typescript-sdk#14.
-        if not base.refresh_token:
-            raise KaguraAuthExpiredError(
-                "This profile was stored without a refresh token, so it "
-                "cannot be refreshed — log in again to get one.\n"
-                "  Run: kagura auth login",
-                base.expires_at,
-            )
-
-        async with make_oauth_client() as client:
-            token = await refresh_access_token(
-                client,
-                server=base.server,
-                client_id=base.client_id,
-                refresh_token=base.refresh_token,
-            )
-        # Pass ``None`` when the server omits ``refresh_token`` so the stored
-        # token is preserved. ``TokenResponse.refresh_token`` defaults to ``""``
-        # when absent, and passing the empty string to ``with_refreshed`` would
-        # overwrite a valid stored token with an empty one — breaking every
-        # subsequent refresh.
-        self._state.credentials = base.with_refreshed(
-            access_token=token.access_token,
-            refresh_token=token.refresh_token or None,
-            expires_at=token.expires_at,
-            # ``or None`` not the bare value: TokenResponse.scope defaults
-            # to "" when the server omits it, and with_refreshed falls back
-            # only on None — so an omitted scope blanked the stored grant.
-            scope=token.scope or None,
+        self._state.credentials = await refresh_profile_locked(
+            self._state.profile_name,
+            expected_stale_token=expected_stale_token,
+            fallback=self._state.credentials,
+            path=self._state.path,
         )
+
+
+# ---------------------------------------------------------------------------
+# Cross-process refresh (shared by KaguraOAuth and ``kagura auth``)
+# ---------------------------------------------------------------------------
+
+
+async def refresh_profile_locked(
+    profile_name: str,
+    *,
+    expected_stale_token: str | None,
+    fallback: OAuthCredentials,
+    scope: str | None = None,
+    path: Path | None = None,
+) -> OAuthCredentials:
+    """Refresh one profile at most once across processes and save the result.
+
+    The one refresh path: :class:`KaguraOAuth` (``KaguraClient``, the REST
+    clients, ``kagura-mcp``) and ``kagura auth refresh`` / ``kagura auth token``
+    all come here. Under the cross-process lock on ``path`` it re-reads the
+    profile and, when another process already rotated the token, returns that
+    profile without calling ``/oauth2/token``. Otherwise it refreshes from the
+    refresh token on disk and saves the result before releasing the lock. A
+    refresh token works once (memory-cloud v0.79.0+, #1686), so refreshing
+    from an older copy of the file would earn ``invalid_grant``.
+
+    The lock is acquired with non-blocking attempts on the event loop
+    (:func:`kagura_memory._filelock.async_file_lock`), so other coroutines —
+    e.g. concurrent ``kagura-mcp`` proxy forwards — keep running while it
+    waits, and a cancellation while waiting holds nothing. It is held across
+    the network round-trip only: callers must not run anything that waits on
+    a person (the device flow) inside it.
+
+    Args:
+        profile_name: The profile to refresh.
+        expected_stale_token: Governs the "already rotated?" check. ``None``
+            (skew path) → skip when the on-disk token is outside
+            :data:`REFRESH_SKEW_SEC` of expiry. A token string (forced path:
+            an upstream 401, ``kagura auth refresh``) → skip only when the
+            on-disk token differs from it; the same token means nobody has
+            rotated yet.
+        fallback: The caller's copy of the profile, refreshed when the profile
+            is no longer in the file.
+        scope: Scope to request. When set, the refresh always runs: a token
+            another process rotated carries the grant it had, not this one.
+        path: The credentials file (default :data:`DEFAULT_CREDENTIALS_PATH`).
+
+    Returns:
+        The profile now in force: the one another process saved, or the one
+        this call refreshed and saved.
+
+    Raises:
+        KaguraAuthExpiredError: The profile holds no refresh token, or the
+            server answered ``invalid_grant``.
+        KaguraAuthError: Any other OAuth refusal (e.g. ``invalid_scope``).
+        KaguraConnectionError: Network failure.
+        TimeoutError: Another holder kept the lock past the acquire timeout.
+    """
+    from .._filelock import async_file_lock
+
+    path = _resolve_path(path)
+    async with async_file_lock(path, exclusive=True):
+        disk = load_credentials_file(path).get_profile(profile_name)
+        if disk is not None and scope is None and _already_rotated(disk, expected_stale_token):
+            return disk
+        refreshed = await _network_refresh(disk if disk is not None else fallback, scope=scope)
         # We already hold the cross-process lock; write directly rather than via
         # update_profile (which would re-acquire the same lock on a second fd
         # and self-deadlock — fcntl treats independent open descriptions
         # independently, even within one process). Re-load → set → save still
         # preserves every other profile in the file.
         cf = load_credentials_file(path)
-        cf.set_profile(profile, self._state.credentials)
+        cf.set_profile(profile_name, refreshed)
         save_credentials_file(cf, path)
+        return refreshed
+
+
+def _already_rotated(disk: OAuthCredentials, expected_stale_token: str | None) -> bool:
+    """Whether ``disk`` shows another process already produced a usable token."""
+    if expected_stale_token is None:
+        # Skew path: a token outside the skew window is fresh enough.
+        return not disk.is_expired(skew_seconds=REFRESH_SKEW_SEC)
+    # Forced path: a different token means someone rotated; an identical token
+    # means the stale token is still current and we must refresh.
+    return disk.access_token != expected_stale_token
+
+
+async def _network_refresh(base: OAuthCredentials, *, scope: str | None) -> OAuthCredentials:
+    """Hit ``/oauth2/token`` with ``base``'s refresh token. Caller holds the file lock."""
+    # Lazy import: ``device_flow`` may depend on this module's public types,
+    # so resolve only at refresh time to avoid a cycle at import time.
+    from .device_flow import make_oauth_client, refresh_access_token
+
+    # A profile stored without a refresh token cannot be refreshed.
+    # Going to the network only earns an ``invalid_grant``, whose
+    # message ("refresh token is no longer valid") describes a token
+    # that never existed — the grant never carried offline access.
+    # Fail here instead, naming that. Mirrors typescript-sdk#14.
+    if not base.refresh_token:
+        raise KaguraAuthExpiredError(
+            "This profile was stored without a refresh token, so it "
+            "cannot be refreshed — log in again to get one.\n"
+            "  Run: kagura auth login",
+            base.expires_at,
+        )
+
+    async with make_oauth_client() as client:
+        token = await refresh_access_token(
+            client,
+            server=base.server,
+            client_id=base.client_id,
+            refresh_token=base.refresh_token,
+            scope=scope,
+        )
+    # Pass ``None`` when the server omits ``refresh_token`` so the stored
+    # token is preserved. ``TokenResponse.refresh_token`` defaults to ``""``
+    # when absent, and passing the empty string to ``with_refreshed`` would
+    # overwrite a valid stored token with an empty one — breaking every
+    # subsequent refresh.
+    return base.with_refreshed(
+        access_token=token.access_token,
+        refresh_token=token.refresh_token or None,
+        expires_at=token.expires_at,
+        # ``or None`` not the bare value: TokenResponse.scope defaults
+        # to "" when the server omits it, and with_refreshed falls back
+        # only on None — so an omitted scope blanked the stored grant.
+        scope=token.scope or None,
+    )

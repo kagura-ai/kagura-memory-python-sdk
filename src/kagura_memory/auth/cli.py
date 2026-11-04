@@ -47,6 +47,7 @@ from .credentials import (
     delete_credentials_file,
     delete_profile,
     load_credentials_file,
+    refresh_profile_locked,
     reset_state_cache,
     save_credentials_file,
     set_default_profile,
@@ -67,7 +68,6 @@ from .device_flow import (
     make_oauth_client,
     parse_invite,
     poll_for_token,
-    refresh_access_token,
     revoke_token,
 )
 
@@ -829,13 +829,14 @@ def auth_refresh(profile: str | None, scope: str | None) -> None:
       (additional scopes like profile:read may be accepted server-side;
       pass them through --scope.)
 
-    A refresh token works once (memory-cloud v0.79.0+). A password reset
-    revokes every OAuth token of the account (v0.83.0+), so a refresh
-    after one fails; run `kagura auth login`. This command refreshes
-    outside the lock that `kagura-mcp` and KaguraClient share. If one of
-    them refreshes the same profile at the same time, one of the two
-    refreshes can fail with "login expired"; the profile the other stored
-    stays valid, so retry.
+    A refresh token works once (memory-cloud v0.79.0+). The refresh is
+    shared with `kagura-mcp` and KaguraClient: all of them refresh under
+    one lock on credentials.json and re-read it first, so when one of them
+    rotated the token meanwhile, this command keeps that token instead of
+    sending the used refresh token again. With --scope it always asks the
+    server, using the refresh token on file at that moment. A password
+    reset revokes every OAuth token of the account (v0.83.0+), so a
+    refresh after one fails; run `kagura auth login`.
     """
     cf = load_credentials_file()
     target = profile or cf.default_profile
@@ -844,7 +845,11 @@ def auth_refresh(profile: str | None, scope: str | None) -> None:
         raise click.ClickException(f"No profile named '{target}'.\n  Run: kagura auth login")
 
     try:
-        new_creds = asyncio.run(_run_refresh(creds, scope=scope))
+        # Forced path: refresh unless the file no longer holds the token read
+        # above (another process rotated it while this one waited on the lock).
+        new_creds = asyncio.run(
+            _run_refresh(target, creds, expected_stale_token=creds.access_token, scope=scope)
+        )
     except click.ClickException:
         raise
     except KaguraAuthExpiredError as e:
@@ -854,7 +859,6 @@ def auth_refresh(profile: str | None, scope: str | None) -> None:
     except Exception as e:
         raise click.ClickException(_exc_message(e)) from e
 
-    update_profile(target, new_creds)
     reset_state_cache()
     click.echo(f"✓ Refreshed profile '{target}'.")
     click.echo(f"  Scope: {new_creds.scope}")
@@ -862,50 +866,63 @@ def auth_refresh(profile: str | None, scope: str | None) -> None:
 
 
 async def _run_refresh(
+    profile: str,
     creds: OAuthCredentials,
     *,
-    scope: str | None,
+    expected_stale_token: str | None,
+    scope: str | None = None,
 ) -> OAuthCredentials:
-    """Refresh; on scope widening, fall back to a full device flow."""
-    async with make_oauth_client() as client:
-        try:
-            token = await refresh_access_token(
-                client,
-                creds.server,
-                client_id=creds.client_id,
-                refresh_token=creds.refresh_token,
-                scope=scope,
-            )
-            return _build_credentials(token, server=creds.server, base=creds)
-        except KaguraAuthError as e:
-            # Heuristic: when the user asked for a wider scope and the
-            # server rejected it as insufficient/invalid_scope, fall
-            # through to a fresh device flow to collect new consent.
-            message = str(e).lower()
-            if scope is not None and (
-                "insufficient_scope" in message or "invalid_scope" in message
-            ):
-                click.echo(
-                    f"  Requested scope '{scope}' is wider than the current grant — "
-                    "re-running the device flow for consent..."
-                )
-                device = await authorize_device(
-                    client,
-                    creds.server,
-                    client_id=creds.client_id,
-                    scope=scope,
-                )
-                _print_device_prompt(device, attempt_browser=True)
-                token = await poll_for_token(
-                    client,
-                    creds.server,
-                    client_id=creds.client_id,
-                    device_code=device.device_code,
-                    interval=device.interval,
-                    expires_at=device.expires_at,
-                )
-                return _build_credentials(token, server=creds.server)
+    """Refresh ``profile`` under the cross-process lock and return what is stored.
+
+    The refresh goes through :func:`refresh_profile_locked`, the path
+    ``kagura-mcp`` and ``KaguraClient`` take, which re-reads the file under
+    the lock, skips the network when another process already rotated the
+    token, and saves the result before releasing the lock.
+
+    When the server refuses a wider ``scope``, a full device flow collects the
+    new consent. It runs after the lock is released — it waits on the user
+    for minutes, and holding the lock that long would stall every
+    ``kagura-mcp`` refresh — and its result is saved with
+    :func:`update_profile`.
+    """
+    try:
+        return await refresh_profile_locked(
+            profile,
+            expected_stale_token=expected_stale_token,
+            fallback=creds,
+            scope=scope,
+        )
+    except KaguraAuthError as e:
+        # Heuristic: when the user asked for a wider scope and the
+        # server rejected it as insufficient/invalid_scope, fall
+        # through to a fresh device flow to collect new consent.
+        message = str(e).lower()
+        if scope is None or not ("insufficient_scope" in message or "invalid_scope" in message):
             raise
+
+    click.echo(
+        f"  Requested scope '{scope}' is wider than the current grant — "
+        "re-running the device flow for consent..."
+    )
+    async with make_oauth_client() as client:
+        device = await authorize_device(
+            client,
+            creds.server,
+            client_id=creds.client_id,
+            scope=scope,
+        )
+        _print_device_prompt(device, attempt_browser=True)
+        token = await poll_for_token(
+            client,
+            creds.server,
+            client_id=creds.client_id,
+            device_code=device.device_code,
+            interval=device.interval,
+            expires_at=device.expires_at,
+        )
+    new_creds = _build_credentials(token, server=creds.server)
+    update_profile(profile, new_creds)
+    return new_creds
 
 
 # ---------------------------------------------------------------------------
@@ -922,10 +939,10 @@ def auth_token(profile: str | None) -> None:
     The token will be auto-refreshed if it's within 5 minutes of expiry.
     A warning with the absolute expiry time is written to stderr.
 
-    That refresh runs outside the lock that `kagura-mcp` and KaguraClient
-    share. If one of them refreshes the same profile at the same time, one
-    of the two refreshes can fail with "login expired"; the profile the
-    other stored stays valid, so retry.
+    That refresh is shared with `kagura-mcp` and KaguraClient: all of them
+    refresh under one lock on credentials.json and re-read it first, so
+    when one of them already refreshed the profile, its token is printed
+    and no second refresh runs.
 
     \b
     Security note: this token is short-lived — do not persist it to
@@ -940,16 +957,16 @@ def auth_token(profile: str | None) -> None:
 
     if creds.is_expired(skew_seconds=REFRESH_SKEW_SEC):
         try:
-            new_creds = asyncio.run(_run_refresh(creds, scope=None))
+            # Skew path: skip when the file already holds a token outside the
+            # skew window (another process refreshed while this one waited).
+            creds = asyncio.run(_run_refresh(target, creds, expected_stale_token=None))
         except KaguraAuthExpiredError as e:
             raise click.ClickException(_exc_message(e)) from e
         except KaguraConnectionError as e:
             raise click.ClickException(_exc_message(e)) from e
         except Exception as e:
             raise click.ClickException(_exc_message(e)) from e
-        update_profile(target, new_creds)
         reset_state_cache()
-        creds = new_creds
 
     click.echo(creds.access_token)
     expires = creds.expires_at.astimezone(UTC)
@@ -988,41 +1005,27 @@ def _resolve_server(explicit: str | None) -> str:
     return url
 
 
-def _build_credentials(
-    token: TokenResponse,
-    *,
-    server: str,
-    base: OAuthCredentials | None = None,
-) -> OAuthCredentials:
-    """Turn a successful token response into an :class:`OAuthCredentials`.
+def _build_credentials(token: TokenResponse, *, server: str) -> OAuthCredentials:
+    """Turn a device-flow token response into a new :class:`OAuthCredentials`.
 
-    Initial login (``base is None``): construct from scratch, taking
-    ``workspace_*`` / ``user_email`` from the token response.
-
-    Refresh (``base`` provided): apply rotated token fields onto the
-    existing credentials, preserving ``workspace_*`` / ``user_email``
-    and falling back to the prior scope when the server omits it.
+    Used after ``login`` and after the scope-widening device flow of
+    ``refresh``; ``workspace_*`` / ``user_email`` come from the token
+    response. A plain refresh merges the rotated fields onto the stored
+    profile in :func:`refresh_profile_locked` instead.
     """
-    if base is None:
-        return OAuthCredentials(
-            server=server,
-            mcp_url=f"{server.rstrip('/')}/mcp",
-            client_id=DEFAULT_CLIENT_ID,
-            access_token=token.access_token,
-            refresh_token=token.refresh_token,
-            token_type=token.token_type,
-            expires_at=token.expires_at,
-            scope=token.scope,
-            workspace_id=token.workspace_id,
-            workspace_name=token.workspace_name,
-            user_email=token.user_email,
-            issued_at=datetime.now(UTC),
-        )
-    return base.with_refreshed(
+    return OAuthCredentials(
+        server=server,
+        mcp_url=f"{server.rstrip('/')}/mcp",
+        client_id=DEFAULT_CLIENT_ID,
         access_token=token.access_token,
-        refresh_token=token.refresh_token or None,
+        refresh_token=token.refresh_token,
+        token_type=token.token_type,
         expires_at=token.expires_at,
-        scope=token.scope or base.scope,
+        scope=token.scope,
+        workspace_id=token.workspace_id,
+        workspace_name=token.workspace_name,
+        user_email=token.user_email,
+        issued_at=datetime.now(UTC),
     )
 
 
