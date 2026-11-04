@@ -3079,9 +3079,17 @@ class KaguraClient:
     ) -> SleepReportDetail:
         """Get a detailed Sleep Maintenance report including audit log.
 
+        Only ``report_id`` is sent. No memory-cloud release declares or reads
+        a ``context_id`` on this tool, and since v0.82.0 (memory-cloud#1742)
+        the server refuses an argument the tool's schema does not declare, so
+        SDKs up to 0.42.1, which sent one, failed every call with
+        ``invalid_argument`` (#296). Since memory-cloud v0.126.0
+        (memory-cloud#2315) the server authorizes the call against the
+        report's own context: read access there is enough.
+
         Args:
-            context_id: Context UUID. Used for permission scoping; the server
-                also verifies the report belongs to the caller.
+            context_id: Unused; kept for backwards compatibility. The server
+                scopes the call by ``report_id``.
             report_id: Sleep report UUID.
 
         Returns:
@@ -3089,14 +3097,13 @@ class KaguraClient:
             audit log.
 
         Raises:
-            KaguraNotFoundError: Report not found or not owned by caller.
+            KaguraNotFoundError: Report not found or not owned by caller, or
+                (memory-cloud v0.126.0+) in a context the caller cannot
+                read: the server answers ``report_not_found`` for each.
             KaguraResponseError: The report did not match the SDK's model.
             KaguraError: Other server-side error.
         """
-        result = await self._call_tool_checked(
-            "get_sleep_report",
-            {"context_id": context_id, "report_id": report_id},
-        )
+        result = await self._call_tool_checked("get_sleep_report", {"report_id": report_id})
         # The MCP tool wraps the report fields under a "report" key;
         # flatten so SleepReportDetail (a SleepReport subclass) validates
         # naturally without forcing callers through an extra ``.report.``
@@ -3123,25 +3130,35 @@ class KaguraClient:
         order with per-step commits — a 5xx or partial failure means SOME
         actions may have been reversed before the error surfaced.
 
+        Only ``report_id`` is sent, as for :meth:`get_sleep_report` (#296).
+        Since memory-cloud v0.126.0 (memory-cloud#2315) the server
+        authorizes the call against the report's own context: it needs the
+        editor or owner role there, and a workspace viewer cannot roll back.
+
         Args:
-            context_id: Context UUID.
+            context_id: Unused; kept for backwards compatibility. The server
+                scopes the call by ``report_id``.
             report_id: Sleep report UUID.
 
         Returns:
             ``RollbackResult`` with per-category counts of reversed actions.
 
         Raises:
-            KaguraNotFoundError: Report not found or not owned by caller.
+            KaguraNotFoundError: Report not found or not owned by caller, or
+                (memory-cloud v0.126.0+) in a context the caller cannot
+                read: the server answers ``report_not_found`` for each.
             KaguraPartialRollbackError: Some undo steps failed. The rest
                 stay reversed; ``.summary`` counts them and lists the
                 failures in ``.summary.errors``.
             KaguraError: Other server-side error. The exception message
-                includes the server-side error code for triage.
+                includes the server-side error code for triage, e.g.
+                ``permission_denied`` when the caller can read the report's
+                context but not edit it (v0.126.0+), or ``analysis_report``
+                for a Memory Analysis report (``source="analysis"``), which
+                records LLM spend and has no Sleep actions to reverse
+                (v0.140.0+, memory-cloud#2547).
         """
-        result = await self._call_tool_checked(
-            "rollback_sleep_run",
-            {"context_id": context_id, "report_id": report_id},
-        )
+        result = await self._call_tool_checked("rollback_sleep_run", {"report_id": report_id})
         return parse_response(RollbackResult, result, operation="rollback_sleep_run")
 
     async def list_embedding_models(self) -> EmbeddingModelsResponse:
