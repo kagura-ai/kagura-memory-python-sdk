@@ -80,6 +80,23 @@ def test_forget_ids_refuses_another_target_and_an_empty_list():
     assert result.exit_code != 0 and "--ids needs at least one memory ID" in result.output
 
 
+def test_forget_ids_refuses_k():
+    for k in ("5", "10"):
+        result, client = _invoke("forget", "--ids", MEM_A, "-k", k)
+        assert result.exit_code != 0
+        assert "-k applies to --query only, not to --ids" in result.output
+        client.forget.assert_not_called()
+
+
+def test_forget_query_mode_keeps_k_ten_by_default():
+    reply = {"status": "success", "deleted_count": 0, "memory_ids": []}
+    result, client = _invoke("forget", "-q", "old", forget=reply)
+    assert result.exit_code == 0, result.output
+    client.forget.assert_awaited_once_with(context_id=CTX, memory_id=None, query="old", k=10)
+    result, client = _invoke("forget", "-q", "old", "-k", "3", forget=reply)
+    client.forget.assert_awaited_once_with(context_id=CTX, memory_id=None, query="old", k=3)
+
+
 def test_forget_without_a_target_names_ids_too():
     result, _ = _invoke("forget")
     assert result.exit_code != 0

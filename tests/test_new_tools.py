@@ -1067,6 +1067,8 @@ async def test_forget_memory_ids_reads_per_id_rows():
     [
         ({"memory_ids": [MEM_A], "memory_id": MEM_B}, ValueError, "exactly one"),
         ({"memory_ids": [MEM_A], "query": "old"}, ValueError, "exactly one"),
+        ({"memory_ids": [MEM_A], "k": 5}, ValueError, "k applies to query mode only"),
+        ({"memory_ids": [MEM_A], "k": 10}, ValueError, "k applies to query mode only"),
         ({"memory_ids": []}, ValueError, "1 to 50"),
         ({"memory_ids": [str(uuid.uuid4()) for _ in range(51)]}, ValueError, "50"),
         ({"memory_ids": MEM_A}, TypeError, "list"),
@@ -1133,6 +1135,15 @@ async def test_forget_single_mode_still_returns_the_dict():
     result, params = await _call(reply, "forget", CTX, memory_id=MEM_A)
     assert result == reply
     assert params["arguments"] == {"context_id": CTX, "memory_id": MEM_A}
+
+
+@pytest.mark.asyncio
+async def test_forget_query_mode_still_sends_k_ten_by_default():
+    reply = {"status": "success", "deleted_count": 0, "memory_ids": []}
+    _, params = await _call(reply, "forget", CTX, query="old data")
+    assert params["arguments"] == {"context_id": CTX, "query": "old data", "k": 10}
+    _, params = await _call(reply, "forget", CTX, None, "old data", 3)
+    assert params["arguments"]["k"] == 3
 
 
 # ============================================================================

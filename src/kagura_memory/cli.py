@@ -1267,7 +1267,7 @@ def update_memory(
 @click.option("--context-id", "-c", help="Context ID (or set in .kagura.json)")
 @click.option("--memory-id", "-m", help="Memory ID to delete (specific deletion)")
 @click.option("--query", "-q", help="Query to find memories to delete (bulk deletion)")
-@click.option("-k", type=int, default=10, help="Max memories to delete in query mode")
+@click.option("-k", type=int, help="Max memories to delete in query mode (default 10)")
 @click.option(
     "--ids",
     "memory_ids",
@@ -1300,6 +1300,8 @@ def forget(context_id, memory_id, query, k, memory_ids):
             raise click.ClickException("--ids needs at least one memory ID")
         if memory_id or query:
             raise click.ClickException("Use only one of --memory-id, --ids or --query")
+        if k is not None:
+            raise click.ClickException("-k applies to --query only, not to --ids")
 
         async def forget_ids(client: KaguraClient, ctx: str) -> dict[str, Any]:
             result = await client.forget(context_id=ctx, memory_ids=ids)
@@ -1311,7 +1313,9 @@ def forget(context_id, memory_id, query, k, memory_ids):
         raise click.ClickException("Either --memory-id or --query is required (or --ids)")
 
     _run_client_command(
-        lambda client, ctx: client.forget(context_id=ctx, memory_id=memory_id, query=query, k=k),
+        lambda client, ctx: client.forget(
+            context_id=ctx, memory_id=memory_id, query=query, k=10 if k is None else k
+        ),
         context_id,
     )
 

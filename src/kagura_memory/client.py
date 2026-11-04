@@ -2430,7 +2430,7 @@ class KaguraClient:
         context_id: str,
         memory_id: None = None,
         query: None = None,
-        k: int = 10,
+        k: None = None,
         *,
         memory_ids: list[str],
     ) -> ForgetBatchResult: ...
@@ -2440,7 +2440,7 @@ class KaguraClient:
         context_id: str,
         memory_id: str | None = None,
         query: str | None = None,
-        k: int = 10,
+        k: int | None = None,
         *,
         memory_ids: list[str] | None = None,
     ) -> dict[str, Any] | ForgetBatchResult:
@@ -2483,9 +2483,12 @@ class KaguraClient:
             context_id: Context ID
             memory_id: UUID of specific memory to delete
             query: Search query to find and delete matching memories
-            k: Number of memories to delete in query mode (default: 10)
+            k: Number of memories to delete in query mode (default: 10).
+                Query mode only: passed with ``memory_ids`` it raises
+                ``ValueError``.
             memory_ids: 1-50 distinct memory UUIDs to delete in one call.
-                Keyword-only; not combined with ``memory_id`` or ``query``.
+                Keyword-only; not combined with ``memory_id``, ``query`` or
+                ``k``.
 
         Returns:
             For ``memory_id`` / ``query``: the API response dict
@@ -2500,8 +2503,9 @@ class KaguraClient:
                 ``memory_ids`` is provided — ``forget`` always targets a
                 specific memory or a search; an unqualified call would be an
                 ambiguous no-op — or ``memory_ids`` is combined with another
-                target, is empty, holds more than 50 ids, an id that is not a
-                UUID, or the same id twice (all checked before any request).
+                target or with ``k``, is empty, holds more than 50 ids, an id
+                that is not a UUID, or the same id twice (all checked before
+                any request).
             TypeError: ``memory_ids`` is a bare ``str``, not a list, or holds a
                 non-``str``.
             KaguraError: Server-side rejection, e.g. a ``query`` delete while
@@ -2515,6 +2519,8 @@ class KaguraClient:
         if memory_ids is not None:
             if memory_id or query:
                 raise ValueError("Provide exactly one of memory_id, memory_ids or query")
+            if k is not None:
+                raise ValueError("k applies to query mode only, not to memory_ids")
             result = await self._call_tool_checked(
                 "forget", {"context_id": context_id, "memory_ids": _checked_memory_ids(memory_ids)}
             )
@@ -2526,7 +2532,7 @@ class KaguraClient:
             arguments["memory_id"] = memory_id
         if query:
             arguments["query"] = query
-            arguments["k"] = k
+            arguments["k"] = _FORGET_DEFAULT_K if k is None else k
         return await self._call_tool_checked("forget", arguments)
 
     async def bootstrap(
@@ -4444,6 +4450,8 @@ _BATCH_MAX_ITEMS = 50
 _BATCH_LEVEL_KEYS = ("dedupe", "tags_normalize", "verbose")
 # forget(memory_ids=) ids per call (server ``FORGET_MAX_IDS``).
 _FORGET_MAX_IDS = 50
+# forget(query=) matches deleted when ``k`` is unset (the server's default too).
+_FORGET_DEFAULT_K = 10
 # describe_tools names / guide topics per call (server ``MAX_NAMES`` / ``MAX_TOPICS``).
 _DESCRIBE_MAX_NAMES = 20
 _GUIDE_MAX_TOPICS = 20
