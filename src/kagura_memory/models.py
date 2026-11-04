@@ -236,12 +236,19 @@ def _validate_or_none(model: type[_M], value: Any) -> _M | None:
 
 
 class ContextGuardrailItem(BaseModel):
-    """One entry of :class:`ContextGuardrails` — L1 only, summary cut server-side."""
+    """One entry of :class:`ContextGuardrails` — L1 only, summary cut server-side.
+
+    In a ``bootstrap(format="index")`` reply (memory-cloud v0.115.0+, #2126)
+    an entry is a pointer row: ``summary`` is cut to 80 characters,
+    ``summary_cut`` is ``True`` when text was dropped, and the provenance
+    fields are absent.
+    """
 
     model_config = ConfigDict(extra="ignore")
 
     memory_id: str
     summary: str
+    summary_cut: bool = False
     importance: float | None = None
     authored_by_caller: bool | None = None
     source_type: str | None = None
@@ -1843,6 +1850,579 @@ class GuardrailDigest(BaseModel):
     text: str
     tool_triggered_version: str | None = None
     content_type: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Session tools: bootstrap, changes_since, list, remember_batch, forget ids,
+# describe_tools, guide, list_revisions, rollback_session (#301,
+# memory-cloud v0.93.0+) and the plan headroom notice (v0.142.0, #2615)
+# ---------------------------------------------------------------------------
+
+
+class PlanHeadroomNotice(BaseModel):
+    """One ``plan_headroom`` entry (memory-cloud v0.142.0+, #2615).
+
+    A plan dimension at or above 80 % (``level="warning"``) or 95 %
+    (``"critical"``) of its *effective* limit (add-on and referral bonuses
+    included). ``dimension`` is ``memories`` (live memories), ``memories_per_day``
+    or ``mcp_calls_per_day``; ``level`` and ``dimension`` are plain ``str`` so a
+    value a newer server adds still parses. ``percentage`` is rounded down to
+    one decimal (94.97 % reads 94.9). ``remedies`` names what helps:
+    ``cleanup`` (forget memories or delete contexts; the total cap only),
+    ``wait`` (the daily reset), ``upgrade`` (a higher tier raises this cap)
+    or ``admin`` (a deployment without billing). ``help`` is one sentence
+    under 300 characters with no URL; ``resets_at`` is the next UTC midnight
+    on the daily dimensions.
+
+    ``plan`` is absent when the server could not resolve the plan, and
+    ``bootstrap`` keeps ``help`` on its most severe entry only when the
+    notice would take more than a quarter of its ``max_chars`` budget; both
+    then read as ``None``.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    dimension: str
+    level: str
+    used: int
+    limit: int
+    percentage: float
+    plan: str | None = None
+    remedies: list[str] = Field(default_factory=list)
+    help: str | None = None
+    resets_at: datetime | None = None
+
+
+def _plan_headroom_or_none(value: Any) -> list[PlanHeadroomNotice] | None:
+    """Parse the advisory ``plan_headroom`` list, fail-open like the server.
+
+    The server leaves the field out when its own read fails; likewise an
+    entry the SDK cannot read is dropped instead of failing the enclosing
+    reply, and a value that is not a list, or holds no readable entry, reads
+    as ``None``.
+    """
+    if not isinstance(value, list):
+        return None
+    notices = [
+        notice
+        for notice in (_validate_or_none(PlanHeadroomNotice, entry) for entry in value)
+        if notice is not None
+    ]
+    return notices or None
+
+
+class _ContextEcho(BaseModel):
+    """The ``context_*`` fields every context-scoped MCP reply echoes.
+
+    They name the context the call ran in — useful when the context came
+    from the MCP URL's ``?context=`` default. ``None`` when the server did
+    not send them.
+    """
+
+    context_id: str | None = None
+    context_name: str | None = None
+    context_display_name: str | None = None
+    context_is_private: bool | None = None
+    context_is_locked: bool | None = None
+
+
+class ChangeEvent(BaseModel):
+    """One row of the change log — ``changes_since`` and ``bootstrap``'s ``changes`` lane.
+
+    ``kind`` is ``created``, ``updated``, ``superseded`` or ``forgotten``
+    (``restored`` too in the revision lane: ``changes_since(session_id=)`` or
+    ``by_me=True``), a plain ``str``. ``summary`` is ``None`` for every event
+    of a memory that is forgotten now (memory-cloud v0.96.0+, #1876).
+    ``superseded_by`` is the newer memory, on ``superseded`` events only. In a
+    ``bootstrap(format="index")`` reply ``summary`` is cut to 80 characters
+    and ``summary_cut`` says text was dropped.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    memory_id: str
+    kind: str
+    at: datetime
+    summary: str | None = None
+    summary_cut: bool = False
+    superseded_by: str | None = None
+
+
+class BootstrapLane(BaseModel):
+    """What every ``bootstrap`` lane carries: fail-soft ``status`` and ``truncated``.
+
+    ``status`` is ``"ok"``, or ``"error"`` when the lane failed (``error``
+    is then ``"component_failed"``, its rows are empty, and the reply's
+    ``degraded`` is ``True``). ``truncated`` is ``True`` when the reply's
+    ``max_chars`` budget cut the lane's rows (never a silent cut).
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    status: str
+    error: str | None = None
+    truncated: bool = False
+
+
+class BootstrapPinnedLane(BootstrapLane):
+    """``components.pinned``: the trusted pinned set (``load_pinned``, cap 20).
+
+    Rows stay dicts, as :meth:`KaguraClient.load_pinned` returns them: the
+    full format has ``memory_id``, ``summary``, ``context_summary``,
+    ``type``, ``importance``, ``delivery_mode``; the index format keeps the
+    full ``summary`` and drops ``context_summary`` / ``delivery_mode``.
+    ``truncated`` is also ``True`` when the set held more than ``cap``.
+    """
+
+    memories: list[dict[str, Any]] = Field(default_factory=list)
+    total_available: int | None = None
+    cap: int | None = None
+
+
+class BootstrapUpcomingLane(BootstrapLane):
+    """``components.upcoming``: trusted Time Memories whose window is ahead (k = 20).
+
+    Rows stay dicts, as :meth:`KaguraClient.recall_upcoming` returns them
+    (``trigger`` in place of ``details``). An index-format row is
+    ``{memory_id, summary, summary_cut?, from?, until?}`` — the trigger's
+    window. ``from_`` (wire key ``from``) is the lower bound the server used,
+    a naive UTC ISO string.
+    """
+
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+    results: list[dict[str, Any]] = Field(default_factory=list)
+    from_: str | None = Field(default=None, alias="from")
+
+
+class BootstrapChangesLane(BootstrapLane):
+    """``components.changes``: the change log since ``since`` (trusted, at most 50).
+
+    Page on with :meth:`KaguraClient.changes_since` and ``next_cursor``
+    while ``has_more``; a budget-cut lane points ``next_cursor`` at the last
+    change it kept, so paging on skips nothing.
+    """
+
+    changes: list[ChangeEvent] = Field(default_factory=list)
+    has_more: bool = False
+    next_cursor: str | None = None
+
+
+class BootstrapComponents(BaseModel):
+    """``bootstrap``'s lanes; one left out of ``include`` is ``None``.
+
+    A lane a newer server adds is kept in ``model_extra`` as a dict.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    pinned: BootstrapPinnedLane | None = None
+    upcoming: BootstrapUpcomingLane | None = None
+    changes: BootstrapChangesLane | None = None
+
+
+BootstrapComponentName = Literal["pinned", "upcoming", "changes"]
+"""Valid ``bootstrap`` ``include`` values (request side only; the server's ``COMPONENTS``)."""
+
+BootstrapFormat = Literal["full", "index"]
+"""Valid ``bootstrap`` ``format`` values (memory-cloud v0.115.0+, #2126; request side only)."""
+
+
+class BootstrapResponse(_ContextEcho):
+    """Reply of the ``bootstrap`` MCP tool (memory-cloud v0.93.0+, #1851).
+
+    An interactive session's start on one context in one deterministic call
+    (no recall): the ``context`` block, ``guardrails``, and the ``pinned`` /
+    ``upcoming`` / ``changes`` lanes under ``components``. Lanes are
+    fail-soft: a failed one is ``status="error"`` while the rest return,
+    and ``degraded`` is ``True``. Not the same tool as
+    :meth:`KaguraClient.get_agent_bootstrap`, which rehydrates an *agent*.
+
+    ``format`` is ``"index"`` for pointer rows (memory-cloud v0.115.0+,
+    #2126: pinned keeps its text; guardrail, upcoming and change rows carry
+    an 80-character ``summary`` head with ``summary_cut``; no
+    ``instructions``), and ``None`` for the full shape (the server sends the
+    key in index mode only).
+
+    ``guardrails`` has three states, as on :class:`ContextInfo`: absent when
+    the MCP URL carries ``?guardrails=off``, ``null`` when the server's read
+    failed, else :class:`ContextGuardrails`. Both of the first two read as
+    ``None`` (tell them apart with ``"guardrails" in r.model_fields_set``),
+    and so does a block the SDK cannot parse. In index mode a budget cut can
+    empty its ``items`` (``truncated``).
+
+    ``context_summary_omitted`` is ``True`` when a full-format reply passed
+    its ``max_chars`` budget and the server left ``context_summary`` out of
+    the pinned rows first. ``plan_headroom`` (memory-cloud v0.142.0+, #2615)
+    is on every bootstrap whose workspace has a dimension at 80 % or more of
+    its limit, else ``None``.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    status: str = "success"
+    format: str | None = None
+    degraded: bool = False
+    context: ContextDetail | None = None
+    instructions: str | None = None
+    guardrails: ContextGuardrails | None = None
+    components: BootstrapComponents = Field(default_factory=BootstrapComponents)
+    since: datetime | None = None
+    generated_at: datetime | None = None
+    context_summary_omitted: bool = False
+    plan_headroom: list[PlanHeadroomNotice] | None = None
+
+    @field_validator("guardrails", mode="before")
+    @classmethod
+    def _unreadable_guardrails_is_none(cls, value: Any) -> ContextGuardrails | None:
+        return _validate_or_none(ContextGuardrails, value)
+
+    @field_validator("plan_headroom", mode="before")
+    @classmethod
+    def _advisory_plan_headroom(cls, value: Any) -> list[PlanHeadroomNotice] | None:
+        return _plan_headroom_or_none(value)
+
+
+class ChangesSinceResponse(_ContextEcho):
+    """Reply of the ``changes_since`` MCP tool (memory-cloud v0.93.0+, #1852).
+
+    A context's memory change log in ``[since, until)``, oldest first, keyset
+    paged: call again with ``cursor=next_cursor`` while ``has_more``.
+    ``changes`` and ``has_more`` are required, so a reply without them fails
+    to parse instead of reading as a complete log. ``session_id`` /
+    ``by_me`` echo the revision-lane filters; ``truncated`` is ``True`` when
+    the ``max_chars`` budget cut the page (``next_cursor`` then continues
+    from the last change kept).
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    status: str = "success"
+    changes: list[ChangeEvent]
+    count: int | None = None
+    has_more: bool
+    next_cursor: str | None = None
+    since: datetime | None = None
+    until: datetime | None = None
+    session_id: str | None = None
+    by_me: bool = False
+    truncated: bool = False
+
+
+ListOrderBy = Literal["updated_at", "created_at", "importance", "observed_at"]
+"""Valid ``list_matching`` ``order_by`` values (request side only).
+
+``observed_at`` needs memory-cloud v0.127.0+ (#2330) and puts memories
+without one last."""
+
+
+class ListMatchingResponse(_ContextEcho):
+    """Reply of the ``list`` MCP tool (memory-cloud v0.93.0+, #1852).
+
+    Every live memory of the context that matches the exact filters, in a
+    stable order, offset-paged (``next_cursor``). ``total`` counts every
+    match across pages. Rows stay dicts, as :meth:`KaguraClient.recall`'s
+    do: ``memory_id``, ``summary``, ``type``, ``importance``, ``scope``,
+    ``tags``, ``delivery_mode``, ``source_type``, ``created_at``,
+    ``updated_at``, ``version`` (v0.113.0+), ``observed_at`` when set
+    (v0.127.0+) and ``details`` with ``include_details``. ``truncated`` /
+    ``details_omitted`` report a ``max_chars`` cut (``details`` goes first).
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    status: str = "success"
+    memories: list[dict[str, Any]]
+    count: int | None = None
+    total: int
+    has_more: bool
+    next_cursor: str | None = None
+    order_by: str | None = None
+    direction: str | None = None
+    truncated: bool = False
+    details_omitted: bool = False
+
+
+class RememberBatchItemResult(BaseModel):
+    """One ``remember_batch`` result row, in item order (``index``).
+
+    ``status`` is ``success`` (``memory_id``, ``scope``, ``persistence?``,
+    ``lint?``, ``summary_truncated?``), ``duplicate_candidate`` (nothing
+    written; ``candidate`` is the near-duplicate — a ``dedupe="check"``
+    refusal), ``skipped`` (the rest of a rolled-back atomic batch) or
+    ``error`` (``error`` / ``message``: e.g. ``invalid_argument``,
+    ``missing_fields``, ``validation_error``, ``quota_exceeded``,
+    ``payload_too_large`` with ``limit`` / ``actual``, ``forbidden``,
+    ``dedupe_unavailable``). All plain ``str``; keys a newer server adds
+    stay in ``model_extra``.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    index: int
+    status: str
+    memory_id: str | None = None
+    scope: str | None = None
+    error: str | None = None
+    message: str | None = None
+    candidate: dict[str, Any] | None = None
+    persistence: dict[str, Any] | None = None
+    lint: list[dict[str, Any]] | None = None
+    summary_truncated: bool = False
+    summary_original_length: int | None = None
+
+
+class RememberBatchResult(_ContextEcho):
+    """Reply of the ``remember_batch`` MCP tool (memory-cloud v0.93.0+, #1853).
+
+    ``status`` is ``success`` (every item written), ``partial`` (some
+    written) or ``duplicate_candidate`` (nothing written and every refusal a
+    candidate). ``failed`` excludes ``skipped`` and ``candidates`` (v0.96.0+,
+    #1873; an older server counts the rolled-back rest as failed and sends no
+    ``skipped``). ``committed_after_timeout`` is ``True`` when an atomic batch
+    passed its time limit *after* the commit: every item is stored (each row
+    has its ``memory_id``) — do not send it again; ``message`` says the
+    declared links of some items may be missing. ``session_id`` is the
+    session the writes are recorded under (v0.113.0+, for
+    :meth:`KaguraClient.changes_since` / :meth:`KaguraClient.rollback_session`).
+    ``plan_headroom`` (v0.142.0+, #2615) comes once per call, throttled hourly
+    per workspace and dimension.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    status: str = "success"
+    results: list[RememberBatchItemResult]
+    count: int
+    succeeded: int
+    candidates: int = 0
+    failed: int
+    skipped: int = 0
+    committed_after_timeout: bool = False
+    message: str | None = None
+    session_id: str | None = None
+    plan_headroom: list[PlanHeadroomNotice] | None = None
+
+    @field_validator("plan_headroom", mode="before")
+    @classmethod
+    def _advisory_plan_headroom(cls, value: Any) -> list[PlanHeadroomNotice] | None:
+        return _plan_headroom_or_none(value)
+
+
+class ForgetIdResult(BaseModel):
+    """One ``forget(memory_ids=...)`` row, in request order.
+
+    ``status`` is ``deleted``, ``skipped`` (not found, not the caller's to
+    delete, or already gone — one word on purpose, so the row is no
+    existence oracle) or ``error`` with ``error`` / ``message``; an id the
+    call's time budget did not reach is ``error`` with ``error ==
+    "not_attempted"`` (memory-cloud v0.118.0+, #2191): resend it. Plain
+    ``str``; ``correlation_id`` comes with a server failure.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    memory_id: str
+    status: str
+    error: str | None = None
+    message: str | None = None
+    correlation_id: str | None = None
+
+
+class ForgetBatchResult(BaseModel):
+    """Reply of ``forget(memory_ids=[...])`` (memory-cloud v0.117.0+, #2127).
+
+    Each id is forgotten exactly as ``forget(memory_id=...)`` would forget
+    it, committed on its own. ``status`` is ``success`` or ``partial`` (an
+    id failed); ``memory_ids`` lists the deleted ids and ``deleted_count`` /
+    ``succeeded`` count them, ``failed`` counts the ``error`` rows.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    status: str = "success"
+    deleted_count: int
+    memory_ids: list[str] = Field(default_factory=list)
+    results: list[ForgetIdResult]
+    count: int
+    succeeded: int
+    skipped: int
+    failed: int
+    session_id: str | None = None
+    context_id: str | None = None
+    context_name: str | None = None
+
+
+class ToolDescriptions(BaseModel):
+    """Reply of the ``describe_tools`` MCP tool (memory-cloud v0.93.0+, #1849).
+
+    Without ``names``: ``tools`` lists the tools this MCP URL's
+    ``tools/list`` left out, one ``{name, title, summary}`` dict each, and
+    ``listed`` the names it shows. With ``names``: ``definitions`` holds
+    those tools' complete definitions (``inputSchema``, annotations) and
+    ``unknown`` the names the server does not know. ``url`` says which URL
+    query lists more (``?profile=full``, ``?add_tools=a,b``, ``?tools=a,b``);
+    ``url_error`` is the message ``tools/list`` fails with when the URL's
+    selection is broken. Keys a newer server adds stay in ``model_extra``.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    status: str = "success"
+    tools: list[dict[str, Any]] = Field(default_factory=list)
+    count: int | None = None
+    listed: list[str] = Field(default_factory=list)
+    definitions: list[dict[str, Any]] = Field(default_factory=list)
+    unknown: list[str] = Field(default_factory=list)
+    url: dict[str, Any] = Field(default_factory=dict)
+    url_error: str | None = None
+    hint: str | None = None
+
+
+class GuideTopic(BaseModel):
+    """One manual section from ``guide``: its ``topic`` key and static ``text``."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    topic: str
+    text: str
+
+
+class GuideResponse(BaseModel):
+    """Reply of the ``guide`` MCP tool (memory-cloud v0.93.0+, #1850).
+
+    ``topics`` holds the sections asked for, in request order (a tool name
+    expands to all of its sections); names the server does not know are in
+    ``unknown``, not raised.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    status: str = "success"
+    topics: list[GuideTopic]
+    unknown: list[str] = Field(default_factory=list)
+    hint: str | None = None
+
+
+class MemoryRevision(BaseModel):
+    """One event of a memory's revision log (memory-cloud v0.113.0+, #2043).
+
+    ``kind`` is ``created``, ``updated``, ``forgotten`` or ``restored``;
+    ``version`` is the version after the event (read it with ``reference``'s
+    ``version``). ``changed_fields`` lists what an ``updated`` event changed
+    (empty otherwise, and when the caller may not read the versions around
+    it). ``writer`` is ``api``, ``rollback`` or ``erasure`` (v0.123.0+,
+    #2244). ``by_you`` says the caller or a linked account wrote it;
+    ``agent_id`` / ``session_id`` show on the caller's own events only.
+    The value sets are plain ``str``.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    version: int
+    kind: str
+    at: datetime
+    changed_fields: list[str] = Field(default_factory=list)
+    writer: str
+    by_you: bool
+    agent_id: str | None = None
+    session_id: str | None = None
+
+
+class RevisionsPage(_ContextEcho):
+    """Reply of the ``list_revisions`` MCP tool (memory-cloud v0.113.0+, #2043).
+
+    One page of a memory's revision log, newest first; page on with
+    ``cursor=next_cursor`` while ``has_more``. ``truncated`` reports a
+    ``max_chars`` cut. Sleep maintenance and connector re-indexes write no
+    events.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    status: str = "success"
+    memory_id: str
+    current_version: int
+    revisions: list[MemoryRevision]
+    count: int | None = None
+    has_more: bool
+    next_cursor: str | None = None
+    truncated: bool = False
+
+
+class SessionRollbackItem(BaseModel):
+    """One planned memory of ``rollback_session``.
+
+    ``kind`` is what the session did (``created`` / ``updated`` /
+    ``forgotten``); ``action`` is ``forget``, ``restore``, ``unforget`` or
+    ``skip`` with a ``cause`` (``modified_since``, ``merged_by_sleep``,
+    ``deleted_by_other``, ``resource_row``, ``not_permitted`` (v0.134.0+,
+    #2432), ``prior_erased``, ``already_forgotten``, ...). ``fields`` are the
+    fields a ``restore`` puts back. Plain ``str`` throughout.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    memory_id: str
+    kind: str
+    action: str
+    cause: str | None = None
+    fields: list[str] = Field(default_factory=list)
+    unforget: bool = False
+
+
+class SessionRollbackSummary(BaseModel):
+    """What one ``rollback_session`` call reversed, skipped and failed.
+
+    ``skipped_items`` are ``{memory_id, kind, cause}`` dicts and ``errors``
+    one line per failed item (with its correlation id). Counters a newer
+    server adds stay in ``model_extra``.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    forgotten: int = 0
+    restored: int = 0
+    updated_restored: int = 0
+    skipped: int = 0
+    failed: int = 0
+    chunks_requeued: int = 0
+    points_requeued: int = 0
+    skipped_items: list[dict[str, Any]] = Field(default_factory=list)
+    errors: list[str] = Field(default_factory=list)
+
+
+class SessionRollbackResult(_ContextEcho):
+    """Reply of the ``rollback_session`` MCP tool (memory-cloud v0.113.0+, #2044).
+
+    ``status`` is ``dry_run`` (``plan`` counts per action and ``items`` lists
+    up to 100 planned memories, ``items_truncated`` past that), or after a
+    real run ``rolled_back`` / ``in_progress`` (``remaining`` events left:
+    call again with the same arguments), with ``summary`` for this call and
+    ``totals`` for every call of the rollback so far. The mode echo is
+    ``session_id``, or the effective ``since`` / ``until`` of a window
+    (v0.114.0+, #2121); ``until_from == "unfinished_rollback"`` says the
+    ``until`` is an earlier call's. Plain ``str`` statuses.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    status: str
+    dry_run: bool
+    session_id: str | None = None
+    since: datetime | None = None
+    until: datetime | None = None
+    until_from: str | None = None
+    events: int = 0
+    remaining: int = 0
+    rollback_id: int | None = None
+    plan: dict[str, int] | None = None
+    items: list[SessionRollbackItem] = Field(default_factory=list)
+    items_truncated: bool = False
+    rollback_status: str | None = None
+    summary: SessionRollbackSummary | None = None
+    totals: dict[str, Any] | None = None
+    help: str | None = None
 
 
 # ---------------------------------------------------------------------------
