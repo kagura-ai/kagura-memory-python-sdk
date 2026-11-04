@@ -852,6 +852,25 @@ class KaguraClient:
             ``duplicate_candidate`` one described there, with nothing
             written: check ``result["status"]``.
 
+            From memory-cloud v0.142.0 (#2615) a success may carry
+            ``plan_headroom``: one entry per plan dimension at or above 80 %
+            (``level`` ``"warning"``) or 95 % (``"critical"``) of its
+            effective limit (add-on and referral bonuses included) —
+            ``{dimension, level, used, limit, percentage, plan, remedies,
+            help}``, plus ``resets_at`` (the next UTC midnight) on the daily
+            dimensions; ``plan`` is left out when the server could not
+            resolve it. ``dimension`` is ``memories``, ``memories_per_day``
+            or ``mcp_calls_per_day``; ``remedies`` starts with ``cleanup``
+            (the total cap) or ``wait`` (a daily cap), then ``upgrade`` when
+            a higher tier raises that cap, or ``admin`` on a deployment
+            without billing; ``help`` says what to do and what fails at
+            100 %. Below 80 % the key is absent (never ``[]`` or ``null``),
+            and writes show an entry at most once an hour per workspace,
+            dimension and level, so a missing key does not mean the plan has
+            room. The entries stay dicts here;
+            :class:`~kagura_memory.models.PlanHeadroomNotice` is the typed
+            form :meth:`bootstrap` and :meth:`remember_batch` return.
+
         Raises:
             ValueError: ``tool_trigger`` is given and ``details`` already has
                 a ``"tool_trigger"`` key — pass the guardrail one way only;
@@ -1088,14 +1107,20 @@ class KaguraClient:
               (since memory-cloud v0.73.0 for the annotations; older servers
               send ``null`` / ``[]``, so test them for truthiness).
             - ``supersede_candidate`` (a suggestion, never an edge):
-              ``{memory_id, summary, similarity, detected_at, verified}``.
+              ``{memory_id, summary, similarity, detected_at, verified,
+              acceptance}`` (``acceptance`` from memory-cloud v0.142.0).
               ``verified`` is ``True`` when the deployment's judge confirmed
               that this memory replaces the candidate (memory-cloud
               v0.109.0+, #2016, ``SUPERSEDE_VERIFY_MODE=llm``) and absent
               otherwise; a pair the judge read as two parallel facts is not
               suggested. Since v0.137.0 (#2256) an older memory never takes
-              a newer one as its candidate. Recall rows do not carry
-              ``acceptance``: :meth:`reference` does.
+              a newer one as its candidate. From memory-cloud v0.142.0
+              (#2508) the candidate also carries the caller's
+              ``acceptance`` — ``{allowed, reason}``, whether
+              ``update_memory(accept_supersede_candidate=True)`` would go
+              through — as :meth:`reference` has since v0.137.0 (#2427); see
+              :meth:`reference` for the reasons. It is absent on an older
+              server and where the server could not evaluate it.
 
         Since memory-cloud v0.78.0 (#1683) ``tools/list`` annotates ``recall``
         as not read-only and destructive: recall's Hebbian learning reweights
@@ -2519,11 +2544,19 @@ class KaguraClient:
             when it is set. A live ``supersede_candidate`` has
             :meth:`recall`'s keys (``verified`` included) plus
             ``acceptance`` — ``{allowed, reason}``, whether the caller may
-            accept the suggestion (memory-cloud v0.137.0+, #2427). ``reason``
-            is set only when ``allowed`` is false: ``not_writable``,
-            ``not_owner`` (both memories must be the caller's own, see
-            :meth:`create_edge`), ``newer_candidate``, or ``edge_exists``
-            (another declared edge already links the pair; v0.138.0+, #2518).
+            accept the suggestion (memory-cloud v0.137.0+, #2427; on every
+            :meth:`recall` row that carries a candidate from v0.142.0,
+            #2508). ``reason`` is set only when ``allowed`` is false:
+            ``not_writable`` (no write access to the context; from v0.142.0
+            (#2614) also a memory carrying ``details.tool_trigger`` when the
+            caller is below context editor or not on a user credential — the
+            guardrail gate the accept runs first), ``not_owner`` (both
+            memories must be the caller's own, see :meth:`create_edge`),
+            ``newer_candidate``, or ``edge_exists`` (another declared edge
+            already links the pair; v0.138.0+, #2518). From v0.142.0
+            (#2614) ``edge_exists`` reads only the edge kept by the
+            carrier's author, the account the accept writes under, so a
+            linked caller's own different edge no longer reports it.
             Accept it with ``update_memory(accept_supersede_candidate=True)``.
 
         A call without an offset counts as a read in the memory's access
@@ -2680,10 +2713,14 @@ class KaguraClient:
                 takes no field edits in the same call and leaves ``version``
                 and ``updated_at`` alone; ``expected_version`` may guard it.
                 Both memories must be the caller's own (in a private context a
-                linked account's count, #1803). Check
-                ``supersede_candidate.acceptance`` on :meth:`reference` first:
-                it says whether the accept would be refused. Sent only when
-                ``True``. Keyword-only.
+                linked account's count, #1803). On a memory carrying
+                ``details.tool_trigger`` the accept first runs the guardrail
+                gate (context editor or above, a user credential). Check
+                ``supersede_candidate.acceptance`` first, on :meth:`reference`
+                (v0.137.0+) or on the :meth:`recall` row (v0.142.0+, #2508):
+                it says whether the accept would be refused, and from v0.142.0
+                (#2614) reports that guardrail gate as the ``not_writable``
+                reason. Sent only when ``True``. Keyword-only.
             verbose: ``True`` asks for ``persistence.detail`` (memory-cloud
                 v0.93.0+, #1851). Sent only when ``True``. Keyword-only.
 
@@ -2699,6 +2736,8 @@ class KaguraClient:
             dismissal happened: the key is absent both when there was no
             live suggestion and when the server predates v0.65.0. An accept
             returns ``superseded_memory_id``, the memory now shadowed.
+            ``plan_headroom`` (memory-cloud v0.142.0+, #2615) comes as on
+            :meth:`remember`.
 
         Raises:
             ValueError: Checked before any request, mirroring the server's
@@ -2727,8 +2766,11 @@ class KaguraClient:
                 a guardrail edit below context editor; ``validation_error`` for
                 an accept with no live suggestion, a candidate written after
                 this memory or a pair that is not both the caller's own; or
-                ``code == "edge_exists"`` when another declared edge already
-                links the pair (``details["existing_edge"]``; nothing written).
+                ``code == "edge_exists"`` when a different declared edge kept
+                by this memory's author already links the pair (the accept
+                writes under that author; ``details["existing_edge"]``;
+                nothing written). This error code is not the ``acceptance``
+                reason of the same name, which predicts it.
         """
         if not memory_id and not external_id:
             raise ValueError("Provide exactly one of memory_id or external_id")
