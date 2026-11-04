@@ -1182,6 +1182,156 @@ async def test_force_refresh_coalesces_with_an_in_flight_skew_refresh(tmp_path: 
     assert auth._state.credentials.access_token == "fresh-1"
 
 
+_UNREADABLE_FILES = [
+    pytest.param("not json {{{", id="not-json"),
+    pytest.param("\udcff", id="not-utf8"),
+    pytest.param('["an", "array"]', id="not-an-object"),
+    pytest.param('{"profiles": []}', id="profiles-not-a-map"),
+    pytest.param('{"profiles": {"default": {"server": "x"}}}', id="profile-missing-fields"),
+]
+
+
+def _write_unreadable(path: Path, text: str) -> bytes:
+    raw = text.encode("utf-8", "surrogateescape")
+    path.write_bytes(raw)
+    return raw
+
+
+@pytest.mark.parametrize("text", _UNREADABLE_FILES)
+def test_load_returns_empty_on_any_unreadable_file(tmp_path: Path, text: str):
+    """The lenient reader still treats every unreadable shape as empty."""
+    path = tmp_path / "creds.json"
+    _write_unreadable(path, text)
+    assert load_credentials_file(path).profiles == {}
+
+
+@pytest.mark.parametrize("text", _UNREADABLE_FILES)
+@pytest.mark.parametrize("write", ["update", "set_default", "delete"])
+def test_read_modify_write_refuses_a_file_it_cannot_read(tmp_path: Path, text: str, write: str):
+    """update_profile / set_default_profile / delete_profile raise, naming the file.
+
+    Loading it as empty and saving would rewrite it with one profile (or none),
+    dropping every other profile and the default.
+    """
+    from kagura_memory.auth.credentials import delete_profile, set_default_profile
+
+    path = tmp_path / "creds.json"
+    raw = _write_unreadable(path, text)
+    calls = {
+        "update": lambda: update_profile("default", _sample_creds(), path),
+        "set_default": lambda: set_default_profile("default", path),
+        "delete": lambda: delete_profile("default", path),
+    }
+
+    with pytest.raises(KaguraAuthError, match="Cannot update") as excinfo:
+        calls[write]()
+
+    assert str(path) in str(excinfo.value)
+    assert "kagura auth login" in str(excinfo.value)
+    assert path.read_bytes() == raw
+
+
+def test_update_profile_starts_a_missing_file(tmp_path: Path):
+    """Only an existing file that cannot be read is refused; a missing one starts empty."""
+    path = tmp_path / "sub" / "creds.json"
+    update_profile("work", _sample_creds(access_token="first"), path)
+    cf = load_credentials_file(path)
+    assert cf.default_profile == "work"
+    assert list(cf.profiles) == ["work"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("text", _UNREADABLE_FILES)
+async def test_refresh_profile_locked_refuses_a_file_it_cannot_read(tmp_path: Path, text: str):
+    """The refresh fails before the network on a file it cannot read, leaving it as is.
+
+    Refreshing from the caller's copy and saving would consume the refresh token
+    and rewrite the file with that one profile.
+    """
+    path = tmp_path / "creds.json"
+    raw = _write_unreadable(path, text)
+    refresh = AsyncMock(return_value=_fresh_token("fresh"))
+
+    with (
+        patch("kagura_memory.auth.device_flow.refresh_access_token", new=refresh),
+        patch("kagura_memory.auth.device_flow.make_oauth_client", return_value=_AsyncContextStub()),
+        pytest.raises(KaguraAuthError, match="Cannot update"),
+    ):
+        await refresh_profile_locked(
+            "default", expected_stale_token="old", fallback=_sample_creds(), path=path
+        )
+
+    refresh.assert_not_awaited()
+    assert path.read_bytes() == raw
+
+
+@pytest.mark.asyncio
+async def test_refresh_profile_locked_keeps_every_other_profile_and_the_default(tmp_path: Path):
+    """The refresh saves the file it loaded under the lock: other profiles and the
+    default survive (the second load it used to make could come back empty)."""
+    path = tmp_path / "creds.json"
+    cf = CredentialsFile(default_profile="work")
+    cf.set_profile("work", _sample_creds(access_token="work-token"))
+    cf.set_profile("default", _sample_creds(access_token="old", refresh_token="rtok-old"))
+    save_credentials_file(cf, path)
+    loads: list[Path] = []
+    import kagura_memory.auth.credentials as creds_mod
+
+    real_read = creds_mod._read_credentials_file
+
+    def counting_read(p: Path) -> CredentialsFile:
+        loads.append(p)
+        return real_read(p)
+
+    with (
+        patch.object(creds_mod, "_read_credentials_file", counting_read),
+        patch(
+            "kagura_memory.auth.device_flow.refresh_access_token",
+            new=AsyncMock(return_value=_fresh_token("fresh")),
+        ),
+        patch("kagura_memory.auth.device_flow.make_oauth_client", return_value=_AsyncContextStub()),
+    ):
+        await refresh_profile_locked(
+            "default",
+            expected_stale_token="old",
+            fallback=_sample_creds(access_token="old", refresh_token="rtok-old"),
+            path=path,
+        )
+
+    assert len(loads) == 1, "the file is read once under the lock"
+    after = load_credentials_file(path)
+    assert after.default_profile == "work"
+    assert {name: p.access_token for name, p in after.profiles.items()} == {
+        "work": "work-token",
+        "default": "fresh",
+    }
+
+
+def test_delete_credentials_file_is_file_lock_guarded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """logout --all unlinks under the lock, so a refresh holding it cannot save
+    the profiles back right after."""
+    import kagura_memory._filelock as fl
+
+    path = tmp_path / "creds.json"
+    cf = CredentialsFile()
+    cf.set_profile("default", _sample_creds())
+    save_credentials_file(cf, path)
+    seen: list[bool] = []
+    real_file_lock = fl.file_lock
+
+    def spy_file_lock(target: Path, *, exclusive: bool = True):
+        seen.append(path.exists())  # the file is still there when the lock is taken
+        return real_file_lock(target, exclusive=exclusive)
+
+    monkeypatch.setattr(fl, "file_lock", spy_file_lock)
+    delete_credentials_file(path)
+
+    assert seen == [True]
+    assert not path.exists()
+
+
 def test_update_profile_is_file_lock_guarded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """update_profile wraps its read-modify-write in the cross-process file lock."""
     import kagura_memory._filelock as fl

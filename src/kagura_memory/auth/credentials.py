@@ -336,23 +336,57 @@ def load_credentials_file(path: Path | None = None) -> CredentialsFile:
     path = _resolve_path(path)
     if not path.exists():
         return CredentialsFile()
-
-    _enforce_dir_perms(path.parent)
-    _enforce_file_perms(path)
-
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return CredentialsFile()
-
-    if not isinstance(data, dict):
-        return CredentialsFile()
-
-    try:
-        return CredentialsFile.from_dict(data)
-    except (KeyError, ValueError, TypeError):
+        return _read_credentials_file(path)
+    except ValueError:
         # Corrupt or partial file — treat as empty rather than crashing.
         return CredentialsFile()
+
+
+def _read_credentials_file(path: Path) -> CredentialsFile:
+    """Parse the credentials file at ``path``, which exists.
+
+    Coerces the directory and file permissions to ``0700``/``0600`` first.
+
+    Raises:
+        ValueError: The file cannot be read or parsed. The message says which,
+            never what the file holds.
+    """
+    _enforce_dir_perms(path.parent)
+    _enforce_file_perms(path)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except OSError as e:
+        raise ValueError(f"it cannot be read ({_exc_message(e)})") from e
+    except ValueError as e:  # JSONDecodeError, or UnicodeDecodeError on non-UTF-8 bytes
+        raise ValueError("it is not valid JSON") from e
+    if not isinstance(data, dict):
+        raise ValueError("it is not a JSON object")
+    try:
+        return CredentialsFile.from_dict(data)
+    except (KeyError, ValueError, TypeError, AttributeError) as e:
+        raise ValueError("it is not a credentials file this SDK can read") from e
+
+
+def _load_for_update(path: Path) -> CredentialsFile:
+    """Load ``path`` for a read-modify-write; the caller holds the file lock.
+
+    A missing file starts empty. One that exists but cannot be read or parsed
+    raises instead of loading as empty: saving an empty file plus the one
+    profile being written would drop every other profile and the default.
+
+    Raises:
+        KaguraAuthError: The file exists but cannot be read or parsed.
+    """
+    if not path.exists():
+        return CredentialsFile()
+    try:
+        return _read_credentials_file(path)
+    except ValueError as e:
+        raise KaguraAuthError(
+            f"Cannot update {path}: {e}.\n"
+            "  Fix the file, or move it aside and run: kagura auth login"
+        ) from e
 
 
 def save_credentials_file(cf: CredentialsFile, path: Path | None = None) -> None:
@@ -376,12 +410,16 @@ def update_profile(
     update. The lock is on a sibling ``credentials.json.lock``, not the file
     itself, so it never races the atomic ``os.replace`` in
     :func:`save_credentials_file`.
+
+    Raises:
+        KaguraAuthError: The file exists but cannot be read or parsed; it is
+            left as it is rather than rewritten with this profile alone.
     """
     from .._filelock import file_lock
 
     path = _resolve_path(path)
     with file_lock(path, exclusive=True):
-        cf = load_credentials_file(path)
+        cf = _load_for_update(path)
         cf.set_profile(profile_name, creds)
         save_credentials_file(cf, path)
 
@@ -397,12 +435,13 @@ def set_default_profile(profile_name: str, path: Path | None = None) -> None:
     Raises:
         KeyError: If ``profile_name`` is not an existing profile — selecting a
             non-existent default would silently break resolution.
+        KaguraAuthError: The file exists but cannot be read or parsed.
     """
     from .._filelock import file_lock
 
     path = _resolve_path(path)
     with file_lock(path, exclusive=True):
-        cf = load_credentials_file(path)
+        cf = _load_for_update(path)
         if profile_name not in cf.profiles:
             raise KeyError(profile_name)
         cf.default_profile = profile_name
@@ -421,12 +460,15 @@ def delete_profile(
     in a sibling ``kagura-mcp`` process cannot clobber a freshly written token
     (#190). The absent-profile early return runs *inside* the lock so the
     membership check and the save observe one consistent snapshot (no TOCTOU).
+
+    Raises:
+        KaguraAuthError: The file exists but cannot be read or parsed.
     """
     from .._filelock import file_lock
 
     path = _resolve_path(path)
     with file_lock(path, exclusive=True):
-        cf = load_credentials_file(path)
+        cf = _load_for_update(path)
         if profile_name not in cf.profiles:
             return
         cf.delete_profile(profile_name)
@@ -436,14 +478,19 @@ def delete_profile(
 def delete_credentials_file(path: Path | None = None) -> None:
     """Remove the entire credentials file (``kagura auth logout --all``).
 
-    Missing file is treated as success — ``logout --all`` is idempotent.
+    Missing file is treated as success — ``logout --all`` is idempotent. The
+    unlink takes the cross-process lock like every other writer: a refresh
+    holding it saves the file it loaded, which would bring the profiles back.
     """
+    from .._filelock import file_lock
+
     path = _resolve_path(path)
-    try:
-        path.unlink()
-    except FileNotFoundError:
-        # File already absent — logout is idempotent.
-        return
+    with file_lock(path, exclusive=True):
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            # File already absent — logout is idempotent.
+            return
 
 
 # ---------------------------------------------------------------------------
@@ -695,6 +742,8 @@ async def refresh_profile_locked(
             the refreshed profile could not be saved (an ``OSError``, chained).
             The server has rotated by then, so the profile on file can no
             longer be refreshed and the message says to log in again.
+        KaguraAuthError: Also when the file exists but cannot be read or
+            parsed (checked before any network call).
         KaguraConnectionError: Network failure.
         TimeoutError: Another holder kept the lock past the acquire timeout.
     """
@@ -702,18 +751,20 @@ async def refresh_profile_locked(
 
     path = _resolve_path(path)
     async with async_file_lock(path, exclusive=True):
-        disk = load_credentials_file(path).get_profile(profile_name)
+        # One load under the lock: every writer takes it, so the file cannot
+        # change before the save below, and a second load could only differ by
+        # failing — an unreadable file must not be rewritten with one profile.
+        cf = _load_for_update(path)
+        disk = cf.get_profile(profile_name)
         if disk is not None and scope is None and _already_rotated(disk, expected_stale_token):
             return disk
         refreshed = await _network_refresh(disk if disk is not None else fallback, scope=scope)
         # We already hold the cross-process lock; write directly rather than via
         # update_profile (which would re-acquire the same lock on a second fd
         # and self-deadlock — fcntl treats independent open descriptions
-        # independently, even within one process). Re-load → set → save still
-        # preserves every other profile in the file.
+        # independently, even within one process).
+        cf.set_profile(profile_name, refreshed)
         try:
-            cf = load_credentials_file(path)
-            cf.set_profile(profile_name, refreshed)
             save_credentials_file(cf, path)
         except OSError as e:
             raise _RefreshNotSavedError(
