@@ -3058,7 +3058,9 @@ class KaguraClient:
             return
         code = result.get("error", "unknown")
         message = result.get("message", "Unknown error")
+        text = f"{operation} failed ({code}): {message}"
         err: KaguraError
+        drift: KaguraResponseError | None = None
         if code in (
             "report_not_found",
             "context_not_found",
@@ -3067,26 +3069,27 @@ class KaguraClient:
             "binding_not_found",
         ):
             err = KaguraNotFoundError(f"{operation}: {message}")
-            raise annotate_server_error(err, str(code), result)
-        text = f"{operation} failed ({code}): {message}"
-        if code == "partial_rollback":
+        elif code == "partial_rollback":
             report_id = result.get("report_id")
             report_id = report_id if isinstance(report_id, str) else None
             try:
                 summary = parse_response(
                     RollbackSummary, result.get("rollback_summary"), operation=operation
                 )
-            except KaguraResponseError as drift:
+                err = KaguraPartialRollbackError(text, report_id=report_id, summary=summary)
+            except KaguraResponseError as e:
                 # The partial reversal is already committed; a summary the
                 # SDK cannot read must not hide that (#256).
+                drift = e
                 err = KaguraPartialRollbackError(
                     f"{text} (rollback_summary could not be read)", report_id=report_id
                 )
-                raise annotate_server_error(err, str(code), result) from drift
-            err = KaguraPartialRollbackError(text, report_id=report_id, summary=summary)
-            raise annotate_server_error(err, str(code), result)
-        err = gate_error(str(code), text, result) or KaguraError(text)
-        raise annotate_server_error(err, str(code), result)
+        else:
+            err = gate_error(str(code), text, result) or KaguraError(text)
+        annotate_server_error(err, str(code), result)
+        if drift is not None:
+            raise err from drift
+        raise err
 
     async def get_sleep_history(
         self,

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import copy
 import pickle
+from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -338,7 +339,7 @@ def test_capacity_lock_purge_at_is_nullable():
         {**_USAGE, "capacity_lock": {**_LOCK_FIGURES, "purge_at": "2026-12-01T04:00:00Z"}}
     )
     assert usage.capacity_lock is not None
-    assert usage.capacity_lock.purge_at == "2026-12-01T04:00:00Z"
+    assert usage.capacity_lock.purge_at == datetime(2026, 12, 1, 4, tzinfo=UTC)
 
 
 # ---------------------------------------------------------------------------

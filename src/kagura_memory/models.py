@@ -122,7 +122,7 @@ class CapacityLock(BaseModel):
         help: The server's next step: how much to remove and what still works
             (MCP ``get_usage``).
         purge_at: When the workspace's data is deleted if it is still over
-            capacity, ISO 8601 UTC (REST ``GET /api/v1/workspace/usage/current``
+            capacity, in UTC (REST ``GET /api/v1/workspace/usage/current``
             only). ``None`` until the daily sweep has seen it and while the
             deployment cannot purge; it may move later (v0.126.0, #1971).
     """
@@ -135,7 +135,7 @@ class CapacityLock(BaseModel):
     over_bytes: int | None = None
     cleanup_url: str | None = None
     help: str | None = None
-    purge_at: str | None = None
+    purge_at: datetime | None = None
 
 
 class UsageInfo(BaseModel):
