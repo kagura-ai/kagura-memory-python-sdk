@@ -173,6 +173,25 @@ class _Upstream:
         return resp
 
 
+class _UpstreamError(httpx.HTTPStatusError):
+    """A non-2xx upstream reply with nothing to forward, and its body as already read.
+
+    :func:`_error_response` words the reply from :attr:`body`, so the
+    upstream's error body is decoded at most once per message (#311).
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        request: httpx.Request,
+        response: httpx.Response,
+        body: ErrorBody,
+    ) -> None:
+        super().__init__(message, request=request, response=response)
+        self.body = body
+
+
 def _downstream_response(message: dict[str, Any], resp: httpx.Response) -> dict[str, Any] | None:
     """Turn the upstream reply to ``message`` into the line to write back, if any.
 
@@ -180,20 +199,24 @@ def _downstream_response(message: dict[str, Any], resp: httpx.Response) -> dict[
     ``null`` id (the server could not read one) is replaced with the
     downstream's. A ``401`` and a ``403`` ``insufficient_scope`` (memory-cloud
     v0.79.0+: the OAuth sign-in lacks the tool's scope) always raise so
-    :func:`_error_response` can attach the re-login hint.
+    :func:`_error_response` can attach the re-login hint; a ``401``'s body is
+    never read.
 
     Raises:
-        httpx.HTTPStatusError: A non-2xx with nothing to forward.
+        _UpstreamError: A non-2xx with nothing to forward (an
+            ``httpx.HTTPStatusError`` with httpx's message, carrying the body).
     """
     if not resp.is_success:
         error = ErrorBody(resp)
-        if error.jsonrpc is not None and not _needs_login(resp, error):
+        if not _needs_login(resp, error) and (body := error.jsonrpc) is not None:
             msg_id = message.get("id")
             if msg_id is None:  # a notification never gets a reply, not even an error
                 return None
-            body = error.jsonrpc
             return {**body, "id": msg_id} if body.get("id") is None else body
-    resp.raise_for_status()
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise _UpstreamError(str(exc), request=exc.request, response=resp, body=error) from None
     if resp.status_code == 202 or not resp.content:
         return None
     return resp.json()
@@ -220,7 +243,8 @@ def _error_response(message: dict[str, Any], exc: Exception) -> dict[str, Any] |
                 "Run `kagura auth login` to re-authenticate."
             )
         else:
-            body = ErrorBody(exc.response)
+            # The body _downstream_response already read, when it raised.
+            body = exc.body if isinstance(exc, _UpstreamError) else ErrorBody(exc.response)
             scope_error = insufficient_scope_error(exc.response, body) if status == 403 else None
             if scope_error is not None:
                 detail = str(scope_error)

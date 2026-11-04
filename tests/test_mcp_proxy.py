@@ -1038,29 +1038,39 @@ async def test_forward_decodes_a_forwarded_error_body_once(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("status", "body", "headers", "message"),
+    ("status", "body", "headers", "message", "decodes"),
     [
-        (403, _SCOPE_BODY, {"WWW-Authenticate": _SCOPE_CHALLENGE}, "lacks the memory:write"),
-        (403, {"error": "access_denied", "error_description": "No."}, {}, "HTTP 403: No."),
-        (503, {"error": "temporarily_unavailable", "error_description": "Retry."}, {}, "Retry."),
+        (403, _SCOPE_BODY, {"WWW-Authenticate": _SCOPE_CHALLENGE}, "lacks the memory:write", [1]),
+        (403, {"error": "access_denied", "error_description": "No."}, {}, "HTTP 403: No.", [1]),
+        (
+            503,
+            {"error": "temporarily_unavailable", "error_description": "Retry."},
+            {},
+            "Retry.",
+            [1],
+        ),
+        (500, b"<html>Internal Server Error</html>", {}, "500 Internal Server Error", [1]),
+        # A 401 is retried once after a forced refresh; neither body is read.
+        (401, {"error": "invalid_token"}, {}, "kagura auth login", [0, 0]),
     ],
-    ids=["403-scope", "403-oauth-style", "503"],
+    ids=["403-scope", "403-oauth-style", "503", "500-not-json", "401-not-read"],
 )
-async def test_an_answered_error_body_is_decoded_once_per_step(
-    status: int, body: dict[str, Any], headers: dict[str, str], message: str
+async def test_an_answered_error_body_is_decoded_once(
+    status: int, body: Any, headers: dict[str, str], message: str, decodes: list[int]
 ):
-    """Once where forward decides not to pass it through, once where the reply is worded."""
+    """Forward and the worded reply share one decode: the raised error carries the body."""
     sent: list[_CountingResponse] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        sent.append(_CountingResponse(status, json=body, headers=headers))
+        content = {"content": body} if isinstance(body, bytes) else {"json": body}
+        sent.append(_CountingResponse(status, headers=headers, **content))
         return sent[-1]
 
     up, _ = _upstream(handler)
     with pytest.raises(httpx.HTTPStatusError) as exc_info:
         await up.forward(_tool_call(1))
-    assert [r.decodes for r in sent] == [1]
+    assert [r.decodes for r in sent] == decodes
     reply = _error_response(_tool_call(1), exc_info.value)
     assert reply is not None
     assert message in reply["error"]["message"]
-    assert [r.decodes for r in sent] == [2]
+    assert [r.decodes for r in sent] == decodes
