@@ -21,6 +21,7 @@ from ._guardrail_export import write_guardrail_block
 from ._http import (
     normalize_add_tools,
     normalize_guardrails,
+    normalize_tool_profile,
     normalize_uuid,
     path_segment,
     validate_lat_lon,
@@ -1915,9 +1916,17 @@ def _agents_md_option(ctx, param, value: str | None) -> str | None:
 
 
 def _tool_profile_option(ctx, param, value: str | None) -> str | None:
-    if value is not None and not value.strip():
-        raise click.BadParameter("must not be empty")
-    return value.strip() if value is not None else None
+    """``--tool-profile NAME``, trimmed; None when absent.
+
+    A blank name and one starting with ``-`` are refused: the stdio entry
+    passes it to ``kagura-mcp`` as its own argv item.
+    """
+    if value is None:
+        return None
+    try:
+        return normalize_tool_profile(value)
+    except ValueError as e:
+        raise click.BadParameter(str(e)) from None
 
 
 def _default_context_option(ctx, param, value: str | None) -> str | None:

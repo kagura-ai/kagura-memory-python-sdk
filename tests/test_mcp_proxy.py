@@ -929,11 +929,21 @@ def test_parser_rejects_guardrails_that_is_neither_off_nor_uuid(bad: str, capsys
     assert "'off' or a context UUID" in capsys.readouterr().err
 
 
-def test_parser_rejects_an_empty_tool_profile(capsys):
+@pytest.mark.parametrize(
+    ("argv", "message"),
+    [
+        (["--tool-profile", " "], "must not be empty"),
+        (["--tool-profile=-x"], "cannot start with '-'"),
+    ],
+    ids=["blank", "dashed"],
+)
+def test_parser_rejects_an_empty_or_dashed_tool_profile(argv: list[str], message: str, capsys):
     with pytest.raises(SystemExit) as exc:
-        mcp_proxy._build_parser().parse_args(["--tool-profile", " "])
+        mcp_proxy._build_parser().parse_args(argv)
     assert exc.value.code == 2
-    assert "--tool-profile" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "--tool-profile" in err
+    assert message in err
 
 
 def test_parser_help_warns_that_off_removes_the_context_info_block(capsys):

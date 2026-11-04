@@ -1477,8 +1477,17 @@ class TestToolView:
         assert "?tools= allowlist, which the server applies" in result.output
         assert "instead of --add-tools explore." in result.output
 
-    @pytest.mark.parametrize("flags", [("--add-tools", " "), ("--tool-profile", " ")])
-    def test_a_blank_value_is_a_usage_error(self, harness, recorder, flags):
+    @pytest.mark.parametrize(
+        "flags",
+        [
+            ("--add-tools", " "),
+            ("--tool-profile", " "),
+            ("--add-tools", "-x"),
+            ("--tool-profile", "-x"),  # kagura-mcp would read it as a flag (#311)
+        ],
+        ids=["blank-add-tools", "blank-tool-profile", "dashed-add-tools", "dashed-tool-profile"],
+    )
+    def test_a_blank_or_dashed_value_is_a_usage_error(self, harness, recorder, flags):
         result = run(harness, "--profile", "default", *flags, "-y")
         assert result.exit_code == 2
         assert flags[0] in result.output

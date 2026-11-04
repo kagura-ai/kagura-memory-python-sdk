@@ -1790,7 +1790,8 @@ def run_setup_harness(
     """Set up the ``name`` MCP entry of ``harness``, and the AGENTS.md export if asked.
 
     ``guardrails`` must already be normalized (``off`` or a canonical UUID),
-    ``add_tools`` by ``normalize_add_tools``. ``tool_profile`` / ``add_tools``
+    ``tool_profile`` by ``normalize_tool_profile`` and ``add_tools`` by
+    ``normalize_add_tools``. ``tool_profile`` / ``add_tools``
     become ``kagura-mcp --tool-profile/--add-tools`` on the stdio entry and
     ``?profile=`` / ``?add_tools=`` on a URL entry, where a value already in
     ``mcp_url`` is kept when they are None (#300).

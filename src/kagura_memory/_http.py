@@ -200,6 +200,33 @@ def normalize_guardrails(value: str) -> str:
         raise ValueError(f"guardrails must be 'off' or a context UUID, got {value!r}") from None
 
 
+def normalize_tool_profile(value: str) -> str:
+    """Validate a tool profile name (``?profile=``) before it goes into an MCP entry.
+
+    memory-cloud knows ``core`` and ``full`` and fails ``tools/list`` for any
+    other name, so that list is left to the server. Refused here is what
+    breaks the entry before the server sees it: a blank name, and one
+    starting with ``-``, which ``kagura-mcp --tool-profile -x`` in a stored
+    entry would read as a flag, so the proxy would not start (as
+    :func:`normalize_add_tools` refuses such a tool name).
+
+    Args:
+        value: The profile name, e.g. ``"full"``.
+
+    Returns:
+        The name, trimmed.
+
+    Raises:
+        ValueError: The name is blank or starts with ``-``.
+    """
+    name = value.strip()
+    if not name:
+        raise ValueError("tool_profile must not be empty")
+    if name.startswith("-"):
+        raise ValueError(f"tool_profile cannot start with '-': {name!r}")
+    return name
+
+
 #: The most names memory-cloud reads from one ``add_tools`` value (``MAX_TOOL_NAMES``).
 MAX_ADD_TOOLS = 100
 

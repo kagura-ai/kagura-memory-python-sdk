@@ -76,6 +76,7 @@ from ._http import (
     mcp_url_with_query,
     normalize_add_tools,
     normalize_guardrails,
+    normalize_tool_profile,
     normalize_uuid,
     validate_https_url,
 )
@@ -274,9 +275,10 @@ def _guardrails_arg(value: str) -> str:
 
 
 def _tool_profile_arg(value: str) -> str:
-    if not value.strip():
-        raise argparse.ArgumentTypeError("must not be empty")
-    return value.strip()
+    try:
+        return normalize_tool_profile(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from None
 
 
 def _add_tools_arg(value: str) -> str:

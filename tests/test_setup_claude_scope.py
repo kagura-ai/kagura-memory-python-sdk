@@ -754,9 +754,25 @@ def test_guardrails_rejects_values_the_server_would_ignore(tmp_path: Path, bad: 
     assert not (tmp_path / ".mcp.json").exists()
 
 
-def test_empty_tool_profile_is_rejected(tmp_path: Path) -> None:
-    result = run_setup(tmp_path, "--tool-profile", " ")
-    assert result.exit_code == 2
+@pytest.mark.parametrize(
+    ("flags", "message"),
+    [
+        (("--tool-profile", " "), "must not be empty"),
+        # kagura-mcp would read the stored value as a flag and not start (#311).
+        (("--tool-profile", "-x"), "cannot start with '-': '-x'"),
+        (("--tool-profile=--full",), "cannot start with '-': '--full'"),
+    ],
+    ids=["blank", "dashed", "dashed-equals-form"],
+)
+@pytest.mark.parametrize("oauth", [True, False], ids=["oauth", "api-key"])
+def test_bad_tool_profile_is_a_usage_error(
+    tmp_path: Path, flags: tuple[str, ...], message: str, oauth: bool
+) -> None:
+    result = run_setup(tmp_path, *flags, oauth=oauth)
+    assert result.exit_code == 2, result.output
+    assert "--tool-profile" in result.output
+    assert message in result.output
+    assert not (tmp_path / ".mcp.json").exists()
 
 
 def test_stdio_entry_carries_add_tools_and_context(connection, tmp_path: Path) -> None:

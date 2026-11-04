@@ -27,6 +27,7 @@ from kagura_memory._http import (
     mcp_url_without_query_param,
     normalize_add_tools,
     normalize_guardrails,
+    normalize_tool_profile,
     normalize_url,
     normalize_uuid,
     validate_https_url,
@@ -701,6 +702,25 @@ def test_mcp_url_with_query_rejects_bad_add_tools_and_context(kwargs, error):
 )
 def test_normalize_add_tools(names, expected):
     assert normalize_add_tools(names) == expected
+
+
+def test_normalize_tool_profile_trims_the_name():
+    assert normalize_tool_profile(" full ") == "full"
+    assert normalize_tool_profile("Core") == "Core"  # the server decides which names exist
+
+
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [
+        ("", "must not be empty"),
+        (" \t", "must not be empty"),
+        ("-x", "cannot start with '-': '-x'"),  # kagura-mcp would read it as a flag
+        (" --full", "cannot start with '-': '--full'"),
+    ],
+)
+def test_normalize_tool_profile_refuses_blank_and_dashed_names(value: str, message: str):
+    with pytest.raises(ValueError, match=message):
+        normalize_tool_profile(value)
 
 
 def test_mcp_url_query_values_keeps_the_first_value_and_blanks():

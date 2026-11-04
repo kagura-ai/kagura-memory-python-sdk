@@ -351,7 +351,9 @@ def _stdio_entry(
     make the proxy put ``?guardrails=`` / ``?profile=`` / ``?add_tools=`` /
     ``?context=`` on the upstream URL at run time (#258, #300), so the entry
     never copies the profile's URL and changing them never forces a re-login.
-    ``add_tools`` must already be normalized (``normalize_add_tools``).
+    ``tool_profile`` and ``add_tools`` must already be normalized
+    (``normalize_tool_profile`` / ``normalize_add_tools``): each value is its
+    own argv item, so one starting with ``-`` would read as a flag.
     """
     args = ["--profile", profile]
     if guardrails is not None:
@@ -1102,8 +1104,9 @@ def run_setup_claude(
     on the upstream URL, then the project's ``.kagura.json`` and the hooks and
     commands that ``session_hook`` / ``sync_hook`` / ``commands`` select
     (``None``: not given, on by default). ``guardrails`` must already be
-    normalized (``off`` or a canonical UUID), ``add_tools`` by
-    ``normalize_add_tools`` and ``default_context`` to a canonical UUID.
+    normalized (``off`` or a canonical UUID), ``tool_profile`` by
+    ``normalize_tool_profile``, ``add_tools`` by ``normalize_add_tools`` and
+    ``default_context`` to a canonical UUID.
 
     The SessionStart hook runs ``kagura recall --trusted-only --verbosity full
     --full 0``: uncut summaries with tags, no content. A server that refuses
