@@ -22,6 +22,7 @@ pytest.importorskip("pymupdf", reason="pymupdf not installed — install [ingest
 
 from kagura_memory.client import KaguraClient  # noqa: E402
 from kagura_memory.exceptions import (  # noqa: E402
+    KaguraCapacityLockedError,
     KaguraError,
     KaguraQuotaError,
     KaguraRateLimitError,
@@ -1036,6 +1037,45 @@ async def test_quota_error_stops_sections_waiting_for_a_slot(tmp_path: Any) -> N
     remember_errors = [e for e in result.errors if e.step == "remember"]
     assert sorted(e.section_index for e in remember_errors) == [0, 1, 2, 3, 4]
     assert len([e for e in remember_errors if "not written" in e.message]) == 3
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("cleanup_url", "tail"),
+    [
+        ("https://memory.kagura-ai.com/workspace/settings/plan", "Clean up or re-subscribe: "),
+        (None, "(workspace capacity locked)."),
+    ],
+    ids=["member", "outsider"],
+)
+async def test_capacity_lock_stops_section_writes(
+    tmp_path: Any, cleanup_url: str | None, tail: str
+) -> None:
+    """#299: the Free capacity lock refuses every later write too, until cleanup."""
+    client = _make_client()
+    ingestor = FileIngestor(client=client, text_provider=FakeProvider(), concurrency=1)
+
+    sent: list[dict[str, Any]] = []
+
+    async def remember(**kwargs: Any) -> dict[str, Any]:
+        sent.append(kwargs)
+        if len(sent) == 3:
+            raise KaguraCapacityLockedError(
+                "remember failed (capacity_locked): over capacity", cleanup_url=cleanup_url
+            )
+        return {"memory_id": f"mem-{len(sent)}"}
+
+    with patch.object(client, "remember", side_effect=remember):
+        result = await ingestor.ingest(_five_section_markdown(tmp_path), context_id="ctx-uuid")
+
+    assert len([c for c in sent if c["type"] == "document_section"]) == 2
+    skipped = [e for e in result.errors if "not written" in e.message]
+    assert [e.section_index for e in skipped] == [2, 3, 4]
+    assert all(e.exception_type == "KaguraCapacityLockedError" for e in skipped)
+    assert all("workspace capacity locked" in e.message for e in skipped)
+    assert all(e.message.endswith(tail + (cleanup_url or "")) for e in skipped)
 
     await client.close()
 

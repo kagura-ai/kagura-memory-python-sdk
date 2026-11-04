@@ -8,9 +8,10 @@ Stitches together :class:`Fetcher`, :class:`Extractor`, the chunker, and
 The orchestrator is best-effort: per-section LLM or write failures are
 captured in :attr:`IngestResult.errors` and do NOT abort the run. Only
 fetch failures and overview-write failures are terminal. One exception: a
-section write refused with :class:`KaguraQuotaError` or
-:class:`KaguraRateLimitError` stops the section writes not yet sent, since
-they would be refused the same way; each is still recorded in ``errors``.
+section write refused with :class:`KaguraQuotaError`,
+:class:`KaguraRateLimitError` or :class:`KaguraCapacityLockedError` stops the
+section writes not yet sent, since they would be refused the same way; each
+is still recorded in ``errors``.
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ from urllib.parse import urlsplit
 
 from ..client import KaguraClient, _validate_memory_tags
 from ..exceptions import (
+    KaguraCapacityLockedError,
     KaguraFetchError,
     KaguraIngestError,
     KaguraLLMError,
@@ -903,10 +905,11 @@ class FileIngestor:
         results: list[str | None] = [None] * len(chunks)
         section_importance = max(0.0, min(1.0, importance - 0.2))
         # #256: after a quota refusal or a 429 every later write fails the
-        # same way until the quota or the rate window resets, so sections not
-        # yet sent are skipped — each still recorded under its section_index —
-        # instead of each spending a round trip on it.
-        stop_error: KaguraQuotaError | KaguraRateLimitError | None = None
+        # same way until the quota or the rate window resets — and after the
+        # Free capacity lock (#299) until the workspace is cleaned up — so
+        # sections not yet sent are skipped, each still recorded under its
+        # section_index, instead of each spending a round trip on it.
+        stop_error: _StopError | None = None
 
         async def write_one(idx: int, chunk_obj: Chunk) -> None:
             nonlocal stop_error
@@ -954,7 +957,7 @@ class FileIngestor:
                         linked_memory_ids=[overview_id],
                     )
                 except Exception as e:  # noqa: BLE001
-                    if isinstance(e, (KaguraQuotaError, KaguraRateLimitError)):
+                    if isinstance(e, _STOP_ERRORS):
                         stop_error = e
                     errors.append(
                         IngestErrorRecord(
@@ -984,8 +987,18 @@ class FileIngestor:
         return [r for r in results if r is not None]
 
 
-def _unsent_section_message(stop: KaguraQuotaError | KaguraRateLimitError) -> str:
+# Refusals every later section write would get too (#256, #299).
+_StopError = KaguraQuotaError | KaguraRateLimitError | KaguraCapacityLockedError
+_STOP_ERRORS = (KaguraQuotaError, KaguraRateLimitError, KaguraCapacityLockedError)
+
+
+def _unsent_section_message(stop: _StopError) -> str:
     """Why a section write was skipped after ``stop`` refused an earlier one (#256)."""
+    if isinstance(stop, KaguraCapacityLockedError):
+        message = "not written: an earlier section write was refused (workspace capacity locked)."
+        if stop.cleanup_url:
+            return f"{message} Clean up or re-subscribe: {stop.cleanup_url}"
+        return message
     reason = "quota exceeded" if isinstance(stop, KaguraQuotaError) else "rate limited"
     message = f"not written: an earlier section write was refused ({reason})."
     if isinstance(stop, KaguraQuotaError) and stop.resets_at is not None:
