@@ -3432,10 +3432,17 @@ class KaguraClient:
         use_rerank: bool | None = None,
         reranker_provider: str | None = None,
         reranker_model: str | None = None,
+        *,
+        content_chunks_enabled: bool | None = None,
+        llm_selector_enabled: bool | None = None,
     ) -> dict[str, Any]:
         """Update hybrid search configuration for a context.
 
-        Weights must sum to 1.0 (±0.01). Requires owner or editor permission.
+        Weights must sum to 1.0 (±0.01). The weights, ``fetch_factor`` and
+        the reranker settings need context editor or above;
+        ``content_chunks_enabled`` and ``llm_selector_enabled`` need the
+        context owner or a workspace owner/admin (an editor gets
+        ``permission_denied`` with ``details["required_role"] == "owner"``).
         New contexts start from the deployment's defaults, which
         :meth:`get_server_info` reports as ``search_defaults`` (memory-cloud
         v0.69.0+).
@@ -3454,9 +3461,50 @@ class KaguraClient:
                 Ollama or vLLM.
             reranker_model: Reranker model name. May be omitted for
                 ``"self_hosted"`` (memory-cloud v0.69.0+).
+            content_chunks_enabled: Embed long ``content`` (1,500+
+                characters) as chunk vectors, so dense retrieval sees the
+                body, not only the summary (memory-cloud v0.110.0+, #2015).
+                **On, memory content — not only summaries — is sent to the
+                embedding and rerank providers.** Turning it on queues the
+                context's existing long memories for chunking (each costs
+                embeddings; v0.112.0+), turning it off deletes the chunks, and
+                sending the stored value is a no-op. Turning it on is refused
+                on a LanceDB deployment (``invalid_search_config``, v0.112.0+,
+                #2072) and, where the deployment gates it by plan
+                (``CONTENT_CHUNKS_REQUIRE_PLAN``, v0.113.0+, #2103), without
+                the plan's ``content_chunks`` feature or past its
+                ``max_content_chunk_contexts``. Sent when not ``None`` —
+                ``False`` turns it off. Keyword-only.
+            llm_selector_enabled: Let an MCP :meth:`recall` send the
+                context's summaries and attached content to the deployment's
+                judge model, which keeps the results that answer the query and
+                cuts their content to verbatim passages (``selector`` /
+                ``spans`` in the reply; memory-cloud v0.115.0+, #2144). Same
+                owner rule; where the deployment gates it by plan
+                (``LLM_SELECTOR_REQUIRE_PLAN``), turning it on needs the
+                ``llm_selector`` feature and a free slot under
+                ``max_llm_selector_contexts``. Sent when not ``None``.
+                Keyword-only.
 
         Returns:
-            Current search config after update.
+            Current search config after update, under ``config``. Besides the
+            arguments it carries ``reinforce_*`` and ``routing_mode``, and the
+            stored ``content_chunks_enabled`` (v0.110.0+) and
+            ``llm_selector_enabled`` (v0.115.0+) each with its ``*_effective``
+            — whether the stored flag is acted on (store, plan and cap). Read
+            the stored flag, never the effective one, before writing it back:
+            echoing an effective ``False`` would turn the setting off.
+
+        Raises:
+            KaguraFeatureNotAvailableError: The plan lacks ``content_chunks`` /
+                ``llm_selector`` (where the deployment gates it by plan).
+            KaguraQuotaError: The workspace is at its cap — ``quota_type``
+                ``content_chunk_contexts`` or ``llm_selector_contexts``.
+            KaguraError: ``code == "permission_denied"`` (an editor changing an
+                owner-only flag, or a viewer), ``"invalid_search_config"`` (the
+                weights do not sum to 1.0, a provider / model mismatch, or
+                content chunks on LanceDB; the REST twin answers ``422
+                VAL-001``), or ``"context_not_found"``.
         """
         arguments: dict[str, Any] = {"context_id": context_id}
         if semantic_weight is not None:
@@ -3471,6 +3519,10 @@ class KaguraClient:
             arguments["reranker_provider"] = reranker_provider
         if reranker_model is not None:
             arguments["reranker_model"] = reranker_model
+        if content_chunks_enabled is not None:
+            arguments["content_chunks_enabled"] = content_chunks_enabled
+        if llm_selector_enabled is not None:
+            arguments["llm_selector_enabled"] = llm_selector_enabled
         return await self._call_tool_checked("update_search_config", arguments)
 
     async def get_server_info(self) -> ServerInfo:

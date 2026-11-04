@@ -26,6 +26,7 @@ from kagura_memory import (
     KaguraResponseError,
     KaguraVersionConflictError,
     MemoryClient,
+    SearchConfig,
 )
 from kagura_memory.client import _observed_at_arg
 
@@ -783,3 +784,169 @@ async def test_list_memories_ignores_fields_newer_than_the_sdk() -> None:
 async def test_list_memories_unreadable_observed_at_is_response_drift() -> None:
     with pytest.raises(KaguraResponseError, match="list_memories"):
         await _list_memories([{**_LIST_ROW, "observed_at": "last spring"}])
+
+
+# ============================================================================
+# update_search_config(content_chunks_enabled=, llm_selector_enabled=) + SearchConfig
+# ============================================================================
+
+_SEARCH_CONFIG_REPLY = {
+    "status": "success",
+    "message": "Search configuration updated.",
+    "context_id": CTX,
+    "config": {
+        "semantic_weight": 0.6,
+        "bm25_weight": 0.4,
+        "fetch_factor": 3,
+        "use_rerank": False,
+        "reranker_provider": "voyage",
+        "reranker_model": "rerank-2",
+        "reinforce_enabled": True,
+        "reinforce_max_boost": 0.15,
+        "reinforce_require_host_arbitration": False,
+        "routing_mode": "off",
+        "content_chunks_enabled": True,
+        "content_chunks_effective": False,
+        "llm_selector_enabled": False,
+        "llm_selector_effective": False,
+    },
+}
+
+
+async def _search_config(**kwargs: Any) -> tuple[dict[str, Any], dict[str, Any]]:
+    sent: list[dict[str, Any]] = []
+    client = _wire_client(_SEARCH_CONFIG_REPLY, sent)
+    try:
+        result = await client.update_search_config(CTX, **kwargs)
+    finally:
+        await client.close()
+    return result, _arguments(sent)
+
+
+@pytest.mark.asyncio
+async def test_update_search_config_omits_the_toggles_by_default() -> None:
+    _, arguments = await _search_config(use_rerank=True)
+    assert arguments == {"context_id": CTX, "use_rerank": True}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", [True, False], ids=["on", "off"])
+async def test_update_search_config_sends_the_toggles(value: bool) -> None:
+    """``False`` turns a setting off, so it goes on the wire like ``True``."""
+    result, arguments = await _search_config(
+        content_chunks_enabled=value, llm_selector_enabled=value
+    )
+    assert arguments == {
+        "context_id": CTX,
+        "content_chunks_enabled": value,
+        "llm_selector_enabled": value,
+    }
+    assert result["config"]["content_chunks_effective"] is False
+
+
+@pytest.mark.asyncio
+async def test_update_search_config_owner_only_refusal() -> None:
+    sent: list[dict[str, Any]] = []
+    client = _wire_client(
+        {
+            "status": "error",
+            "error": "permission_denied",
+            "message": "Only the context owner or a workspace owner/admin may change it.",
+            "required_role": "owner",
+            "help": "Ask the context owner or a workspace owner/admin to change ...",
+        },
+        sent,
+    )
+    try:
+        with pytest.raises(KaguraError) as excinfo:
+            await client.update_search_config(CTX, content_chunks_enabled=True)
+    finally:
+        await client.close()
+    assert excinfo.value.code == "permission_denied"
+    assert excinfo.value.details["required_role"] == "owner"
+
+
+def test_search_config_reads_every_v0142_field() -> None:
+    """The REST search-config shape: every field reaches the model."""
+    config = SearchConfig.model_validate(
+        {
+            "context_id": CTX,
+            "semantic_weight": 0.5,
+            "bm25_weight": 0.5,
+            "fetch_factor": 3,
+            "use_rerank": True,
+            "reranker_provider": "cohere",
+            "reranker_model": "rerank-v3.5",
+            "embedding_model": "text-embedding-3-small",
+            "content_chunks_enabled": True,
+            "content_chunks_effective": False,
+            "content_chunks_limit": 1,
+            "content_chunks_in_use": 1,
+            "content_chunks_disabled_reason": "cap",
+            "content_chunks_can_change": True,
+            "content_chunks_supported": True,
+            "content_chunks_backfill_pending": 12,
+            "embedding_provider": "openai",
+            "llm_selector_enabled": True,
+            "llm_selector_effective": True,
+            "llm_selector_limit": None,
+            "llm_selector_in_use": 2,
+            "llm_selector_disabled_reason": None,
+            "llm_selector_can_change": False,
+            "created_at": "2026-10-01T00:00:00Z",
+            "a_field_from_a_newer_server": {"x": 1},
+        }
+    )
+    assert config.content_chunks_enabled is True
+    assert config.content_chunks_effective is False
+    assert config.content_chunks_limit == 1
+    assert config.content_chunks_in_use == 1
+    assert config.content_chunks_disabled_reason == "cap"
+    assert config.content_chunks_can_change is True
+    assert config.content_chunks_supported is True
+    assert config.content_chunks_backfill_pending == 12
+    assert config.embedding_provider == "openai"
+    assert config.llm_selector_enabled is True
+    assert config.llm_selector_effective is True
+    assert config.llm_selector_limit is None
+    assert config.llm_selector_in_use == 2
+    assert config.llm_selector_can_change is False
+    assert not hasattr(config, "a_field_from_a_newer_server")
+
+
+def test_search_config_unknown_reason_passes_through() -> None:
+    config = SearchConfig.model_validate({"content_chunks_disabled_reason": "region"})
+    assert config.content_chunks_disabled_reason == "region"
+
+
+@pytest.mark.asyncio
+async def test_get_context_info_reads_the_selector_and_leaves_chunks_unreported() -> None:
+    """At v0.142.0 get_context_info sends the selector pair only; the rest read None."""
+    reply = {
+        "status": "success",
+        "context": {
+            "id": CTX,
+            "name": "dev",
+            "search_config": {
+                "semantic_weight": 0.6,
+                "bm25_weight": 0.4,
+                "fetch_factor": 3,
+                "use_rerank": False,
+                "reranker_provider": "voyage",
+                "reranker_model": "rerank-2",
+                "llm_selector_enabled": True,
+                "llm_selector_effective": False,
+            },
+        },
+    }
+    sent: list[dict[str, Any]] = []
+    client = _wire_client(reply, sent)
+    try:
+        info = await client.get_context_info(CTX)
+    finally:
+        await client.close()
+    config = info.context.search_config
+    assert config.llm_selector_enabled is True
+    assert config.llm_selector_effective is False
+    assert config.content_chunks_enabled is None
+    assert config.content_chunks_supported is None

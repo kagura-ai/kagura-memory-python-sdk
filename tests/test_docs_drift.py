@@ -64,6 +64,8 @@ _STALE_PHRASES = [
     "realignment with 0.141.0 is [#299]",
     # Since memory-cloud v0.93.0 a bare URL lists core; ?profile=full adds tools.
     "narrow `tools/list` only",
+    # #302: content_chunks_enabled / llm_selector_enabled need the context owner.
+    "Requires owner or editor permission",
 ]
 
 
@@ -139,6 +141,11 @@ def test_no_doc_says_a_non_uuid_is_a_500_without_the_422() -> None:
             ],
         ),
         (KaguraClient.list_memories, ["``observed_at``", "#2330"]),
+        # #302: owner-only toggles, not "owner or editor"; the LanceDB refusal.
+        (
+            KaguraClient.update_search_config,
+            ["workspace owner/admin", "invalid_search_config", "#2015", "#2144"],
+        ),
         (KaguraClient.recall_nearby, ["``location``", "include_details", "details_omitted"]),
         (KaguraClient.recall_upcoming, ["details_omitted", "details_total_chars"]),
         (KaguraClient.forget, ["CLEANUP_DELETED_MEMORIES_RETENTION_DAYS", "degraded"]),

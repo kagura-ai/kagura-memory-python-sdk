@@ -167,7 +167,52 @@ class UsageInfo(BaseModel):
 
 
 class SearchConfig(BaseModel):
-    """Hybrid search configuration for a context."""
+    """Hybrid search configuration for a context.
+
+    The content-chunk and LLM-selector fields are ``None`` when the reply did
+    not carry them — a server older than the field, or a surface that does
+    not send it. At memory-cloud v0.142.0 :meth:`KaguraClient.get_context_info`
+    sends ``llm_selector_enabled`` / ``llm_selector_effective`` only;
+    :meth:`KaguraClient.update_search_config` returns both ``*_enabled`` /
+    ``*_effective`` pairs in its ``config``; the REST ``GET
+    /api/v1/contexts/{id}/search-config`` route (not wrapped) carries every
+    field. Fields newer than this SDK are ignored.
+
+    Attributes:
+        content_chunks_enabled: The stored opt-in (memory-cloud v0.110.0+,
+            #2015): long ``content`` (1,500+ characters) is embedded as chunk
+            vectors, so memory content — not only summaries — goes to the
+            embedding and rerank providers.
+        content_chunks_effective: Whether the stored flag is acted on: a
+            vector store that keeps chunks (not LanceDB) and, where the
+            deployment gates chunks by plan, a plan slot (v0.113.0+, #2103).
+        content_chunks_limit: The plan's ``max_content_chunk_contexts``;
+            ``None`` when the deployment does not gate by plan.
+        content_chunks_in_use: Contexts of the workspace with the flag on.
+        content_chunks_disabled_reason: Why the toggle cannot be turned on,
+            or the chunks are inactive: ``unsupported``, ``plan``, ``cap`` or
+            ``permission`` (a plain ``str``, so a newer reason passes).
+        content_chunks_can_change: Whether the caller may change the flag.
+        content_chunks_supported: Whether the vector store keeps chunk
+            vectors (``False`` on LanceDB).
+        content_chunks_backfill_pending: Long memories still waiting for
+            their chunks (v0.112.0+); 0 while the flag is off.
+        embedding_provider: Where content goes with chunks on (``openai`` /
+            ``self_hosted``).
+        llm_selector_enabled: The stored recall LLM-selector opt-in
+            (v0.115.0+, #2144): an MCP :meth:`KaguraClient.recall` may send
+            the context's summaries and attached content to the deployment's
+            judge model.
+        llm_selector_effective: Whether recall acts on it (the plan, where
+            the deployment gates it).
+        llm_selector_limit: The plan's ``max_llm_selector_contexts``;
+            ``None`` when not gated by plan.
+        llm_selector_in_use: Contexts of the workspace with the selector on.
+        llm_selector_disabled_reason: ``plan``, ``cap`` or ``permission``.
+        llm_selector_can_change: Whether the caller may change it.
+    """
+
+    model_config = ConfigDict(extra="ignore")
 
     semantic_weight: float = 0.6
     bm25_weight: float = 0.4
@@ -175,6 +220,21 @@ class SearchConfig(BaseModel):
     use_rerank: bool = False
     reranker_provider: str | None = None
     reranker_model: str | None = None
+    content_chunks_enabled: bool | None = None
+    content_chunks_effective: bool | None = None
+    content_chunks_limit: int | None = None
+    content_chunks_in_use: int | None = None
+    content_chunks_disabled_reason: str | None = None
+    content_chunks_can_change: bool | None = None
+    content_chunks_supported: bool | None = None
+    content_chunks_backfill_pending: int | None = None
+    embedding_provider: str | None = None
+    llm_selector_enabled: bool | None = None
+    llm_selector_effective: bool | None = None
+    llm_selector_limit: int | None = None
+    llm_selector_in_use: int | None = None
+    llm_selector_disabled_reason: str | None = None
+    llm_selector_can_change: bool | None = None
 
 
 class ContextDetail(BaseModel):
