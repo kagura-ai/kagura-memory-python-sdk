@@ -925,6 +925,7 @@ async def test_cli_and_proxy_refresh_race_makes_one_token_call(tmp_path: Path, c
     assert calls == ["rtok-old"], f"expected one token call, got {calls}"
     assert [r.access_token for r in results] == ["fresh-from-rtok-old"] * 2
     on_disk = load_credentials_file(path).get_profile()
+    assert on_disk is not None
     assert (on_disk.access_token, on_disk.refresh_token) == ("fresh-from-rtok-old", "new-rtok")
 
 
@@ -1018,10 +1019,13 @@ async def test_refresh_profile_locked_with_scope_refreshes_from_the_token_on_dis
         )
 
     refresh.assert_awaited_once()
+    assert refresh.await_args is not None
     assert refresh.await_args.kwargs["refresh_token"] == "rtok-peer"
     assert refresh.await_args.kwargs["scope"] == "memory:read"
     assert result.access_token == "narrowed"
-    assert load_credentials_file(path).get_profile().access_token == "narrowed"
+    on_disk = load_credentials_file(path).get_profile()
+    assert on_disk is not None
+    assert on_disk.access_token == "narrowed"
 
 
 @_POSIX_ONLY_CREDS
@@ -1048,11 +1052,13 @@ async def test_refresh_profile_locked_refreshes_the_fallback_when_the_profile_is
             path=path,
         )
 
+    assert refresh.await_args is not None
     assert refresh.await_args.kwargs["refresh_token"] == "rtok-mine"
     assert result.access_token == "fresh"
     on_disk = load_credentials_file(path)
-    assert on_disk.get_profile("default").access_token == "fresh"
-    assert on_disk.get_profile("other").access_token == "other-token"
+    mine, other = on_disk.get_profile("default"), on_disk.get_profile("other")
+    assert mine is not None and other is not None
+    assert (mine.access_token, other.access_token) == ("fresh", "other-token")
 
 
 @pytest.mark.asyncio

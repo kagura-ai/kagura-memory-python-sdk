@@ -141,8 +141,9 @@ def test_login_happy_path(
     assert "user@example.com" in output
     mock_browser.assert_called_once()
     # Credentials persisted.
-    cf = load_credentials_file(patched_default_path)
-    assert cf.get_profile("default").access_token == "atok-fresh"
+    stored = load_credentials_file(patched_default_path).get_profile("default")
+    assert stored is not None
+    assert stored.access_token == "atok-fresh"
 
 
 @patch("kagura_memory.auth.cli._try_open_browser")
@@ -950,8 +951,9 @@ def test_refresh_rotates_access_token(
     result = CliRunner().invoke(main, ["auth", "refresh"])
     assert result.exit_code == 0, result.output
     assert "Refreshed" in result.output
-    cf = load_credentials_file(patched_default_path)
-    assert cf.get_profile("default").access_token == "atok-rotated"
+    stored = load_credentials_file(patched_default_path).get_profile("default")
+    assert stored is not None
+    assert stored.access_token == "atok-rotated"
 
 
 def _lock_is_free(credentials_path: Path) -> bool:
@@ -1021,9 +1023,10 @@ def test_refresh_scope_widening_triggers_device_flow(
     mock_poll.assert_called_once()
     # The probe sees a held lock (positive control), then a free one.
     assert lock_free == {"refresh": False, "authorize": True, "poll": True}
-    cf = load_credentials_file(patched_default_path)
-    assert cf.get_profile("default").access_token == "atok-write"
-    assert "memory:write" in cf.get_profile("default").scope
+    stored = load_credentials_file(patched_default_path).get_profile("default")
+    assert stored is not None
+    assert stored.access_token == "atok-write"
+    assert "memory:write" in stored.scope
 
 
 @contextlib.contextmanager
@@ -1105,6 +1108,7 @@ def test_refresh_adopts_the_token_another_process_rotated_while_it_waited(
     assert "Scope: memory:read memory:write" in result.output
     assert rotated.expires_at.astimezone(UTC).replace(microsecond=0).isoformat() in result.output
     on_disk = load_credentials_file(patched_default_path).get_profile("default")
+    assert on_disk is not None
     assert (on_disk.access_token, on_disk.refresh_token) == ("atok-peer", "rtok-peer")
 
 
@@ -1131,9 +1135,9 @@ def test_token_adopts_the_token_another_process_refreshed_while_it_waited(
     assert result.exit_code == 0, result.output
     refresh.assert_not_awaited()
     assert result.stdout.strip().splitlines()[0] == "atok-peer"
-    assert load_credentials_file(patched_default_path).get_profile("default").refresh_token == (
-        "rtok-peer"
-    )
+    on_disk = load_credentials_file(patched_default_path).get_profile("default")
+    assert on_disk is not None
+    assert on_disk.refresh_token == "rtok-peer"
 
 
 @pytest.mark.parametrize("command", ["refresh", "token"])
