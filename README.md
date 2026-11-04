@@ -842,7 +842,7 @@ kagura bootstrap --since 7d --format index --max-chars 5000   # session start (v
 kagura changes 2026-11-01T00:00:00Z --kinds created,forgotten  # change log, oldest first (v0.93.0+)
 kagura changes 2026-11-04T09:00:00Z --by-me --limit 20   # own writes (v0.114.0+); --session-id ID (v0.113.0+); --cursor pages on
 kagura list --filters '{"type": "task", "details.status": "open"}'   # exact filters + total (v0.93.0+)
-kagura list --order-by observed_at --direction asc --details   # observed_at order v0.127.0+; --cursor/--limit page
+kagura list --order-by observed_at --direction asc --details   # observed_at order needs v0.127.0+; page with --cursor
 kagura update-memory -m "memory-uuid" --dismiss-supersede-candidate   # server v0.65.0+
 kagura update-memory -m "memory-uuid" --accept-supersede-candidate    # server v0.126.0+
 kagura update-memory -m "memory-uuid" --observed-at 2026-11-01        # when it held (server v0.127.0+)
