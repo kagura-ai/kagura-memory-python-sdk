@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import httpx
 import pytest
 from click.testing import CliRunner
 
@@ -13,6 +14,7 @@ from kagura_memory._http import _UPGRADE_HINT, parse_response
 from kagura_memory.auth.credentials import CredentialsFile, reset_state_cache, save_credentials_file
 from kagura_memory.claude_code import McpEntry, claude_json_label
 from kagura_memory.cli import main
+from kagura_memory.client import KaguraClient
 from kagura_memory.doctor import DoctorCheck, DoctorReport, _check_tool_listing, _tool_view
 from kagura_memory.exceptions import (
     KaguraAuthError,
@@ -1112,6 +1114,38 @@ def test_check_tool_listing_failure_is_a_failed_tools_check(exc):
 
     assert (check.section, check.status) == ("tools", "fail")
     assert check.message == f"tools/list on the CLI's MCP URL failed (profile Core): {exc}"
+
+
+@pytest.mark.parametrize(
+    "result",
+    [None, [], "tools", {"tools": None}, {"tools": ["recall"]}],
+    ids=["null", "list", "string", "null-tools", "tools-not-objects"],
+)
+def test_check_tool_listing_malformed_result_is_a_failed_tools_check(result):
+    """A 200 whose tools/list result is malformed fails the check instead of a traceback (#311)."""
+    import asyncio
+
+    body = {"jsonrpc": "2.0", "id": 1, "result": result}
+    client = KaguraClient(api_key="kagura_test", mcp_url="https://example.com/mcp")
+    client._client = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _req: httpx.Response(200, json=body))
+    )
+    client._session_id = "session"
+
+    async def run():
+        try:
+            return await _check_tool_listing(client, "https://example.com/mcp", version="0.141.0")
+        finally:
+            await client.close()
+
+    [check] = asyncio.run(run())
+
+    assert (check.section, check.status) == ("tools", "fail")
+    assert check.message.startswith(
+        "tools/list on the CLI's MCP URL failed (profile core (default)): "
+        "KaguraClient.get_tool_definitions: unexpected server response for ToolListResponse"
+    )
+    assert "tool_count" not in check.details
 
 
 _OAUTH_TOKEN_AS_KEY = "Zx9-oauth-access-token-value-43-characters"

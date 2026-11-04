@@ -66,6 +66,7 @@ from .models import (
     ServerInfo,
     SleepReport,
     SleepReportDetail,
+    ToolListResponse,
     ToolTrigger,
     UsageInfo,
     _agent_update_payload,
@@ -2191,9 +2192,15 @@ class KaguraClient:
         Raises:
             KaguraAuthError: Authentication failed
             KaguraConnectionError: Connection to server failed
+            KaguraResponseError: The result is not a ``tools/list`` result
+                (e.g. ``"result": null``, or ``tools`` that is not a list of
+                objects)
         """
         result = await self._make_jsonrpc_request(method="tools/list", params={})
-        return result.get("tools", [])
+        listing = parse_response(
+            ToolListResponse, result, operation="KaguraClient.get_tool_definitions"
+        )
+        return listing.tools
 
     async def explore(
         self,

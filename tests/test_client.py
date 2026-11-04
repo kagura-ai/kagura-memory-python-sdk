@@ -467,6 +467,27 @@ async def test_get_tool_definitions_empty():
     await client.close()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "result",
+    [None, ["recall"], {"tools": None}, {"tools": [{"name": "recall"}, "remember"]}],
+    ids=["null", "list", "null-tools", "tool-not-an-object"],
+)
+async def test_get_tool_definitions_malformed_result_is_a_response_error(result):
+    """A malformed tools/list result raises KaguraResponseError, not AttributeError (#311)."""
+    from kagura_memory import KaguraResponseError
+
+    body = {"jsonrpc": "2.0", "id": 1, "result": result}
+    client = _client_on(lambda _req: httpx.Response(200, json=body))
+    client._session_id = "session"
+    try:
+        with pytest.raises(KaguraResponseError, match="ToolListResponse") as exc:
+            await client.get_tool_definitions()
+    finally:
+        await client.close()
+    assert exc.value.operation == "KaguraClient.get_tool_definitions"
+
+
 # ============================================================================
 # Request ID concurrency (I-2)
 # ============================================================================
