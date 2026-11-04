@@ -801,6 +801,45 @@ def test_rerun_upgrades_the_pre_258_session_hook_in_place(tmp_path: Path) -> Non
     ]
 
 
+def test_session_hook_asks_for_uncut_summaries_and_tags(tmp_path: Path) -> None:
+    """#298: memory-cloud v0.108.0+ recall is compact unless asked for the full shape."""
+    _install_hooks(tmp_path, CTX)
+    [command] = hook_commands(tmp_path, "SessionStart")
+    assert "--trusted-only --verbosity full " in command
+    # How many hits carry content stays the deployment's default.
+    assert "--full" not in command.replace("--verbosity full", "")
+    assert command.endswith("2>/dev/null | head -c 2000 || true")
+
+
+def test_rerun_upgrades_the_pre_298_session_hook_in_place(tmp_path: Path) -> None:
+    old = (
+        'kagura recall "project context and recent decisions" '
+        f"-c {CTX} -k 5 --trusted-only 2>/dev/null | head -c 2000 || true"
+    )
+    own = {"type": "command", "command": "kagura recall 'my own query' -k 3"}
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude" / "settings.json").write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "SessionStart": [
+                        {"hooks": [{"type": "command", "command": old}]},
+                        {"hooks": [own]},
+                    ]
+                }
+            }
+        )
+    )
+
+    _install_hooks(tmp_path, CTX)
+
+    # Exactly one SDK hook, now the new command; the user's own hook is untouched.
+    assert hook_commands(tmp_path, "SessionStart") == [
+        SESSIONSTART_HOOK_COMMAND.format(context_id=CTX),
+        own["command"],
+    ]
+
+
 # =============================================================================
 # C. Opt-outs
 # =============================================================================

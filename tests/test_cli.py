@@ -1,6 +1,7 @@
 """Tests for CLI commands."""
 
 import json
+import shlex
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -9,6 +10,7 @@ from click.testing import CliRunner
 from kagura_memory.auth.credentials import reset_state_cache
 from kagura_memory.cli import _parse_tags, main
 from kagura_memory.exceptions import KaguraConnectionError, KaguraNotFoundError
+from kagura_memory.setup_claude import SESSIONSTART_HOOK_COMMAND
 from tests.conftest import (
     indexer_status_dict,
     measurement_dict,
@@ -177,6 +179,103 @@ def test_recall_trusted_only_flag(mock_client_cls, mock_config, flags, expected)
     result, mock_client = _recall_cli(mock_client_cls, mock_config, *flags)
     assert result.exit_code == 0, result.output
     assert mock_client.recall.call_args.kwargs.get("filters") == expected
+
+
+@pytest.mark.parametrize(
+    ("flags", "expected"),
+    [
+        ((), {"verbosity": None, "full": None, "max_chars": None}),
+        (
+            ("--verbosity", "full", "--full", "0", "--max-chars", "10000"),
+            {"verbosity": "full", "full": 0, "max_chars": 10_000},
+        ),
+        (
+            ("--verbosity", "compact", "--full", "100", "--max-chars", "100000"),
+            {"verbosity": "compact", "full": 100, "max_chars": 100_000},
+        ),
+    ],
+    ids=["omitted", "full-low", "compact-high"],
+)
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_recall_shape_flags(mock_client_cls, mock_config, flags, expected):
+    """Issue #298: each flag reaches recall(); an omitted one is None, so it stays off the wire."""
+    result, mock_client = _recall_cli(mock_client_cls, mock_config, *flags)
+    assert result.exit_code == 0, result.output
+    kwargs = mock_client.recall.call_args.kwargs
+    assert {key: kwargs[key] for key in expected} == expected
+
+
+@pytest.mark.parametrize(
+    "flags",
+    [
+        ("--verbosity", "verbose"),
+        ("--full", "-1"),
+        ("--full", "101"),
+        ("--max-chars", "9999"),
+        ("--max-chars", "100001"),
+    ],
+)
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_recall_shape_flags_out_of_range_are_usage_errors(mock_client_cls, mock_config, flags):
+    result, mock_client = _recall_cli(mock_client_cls, mock_config, *flags)
+    assert result.exit_code == 2, result.output
+    assert flags[0] in result.output
+    mock_client.recall.assert_not_called()
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_recall_prints_content_right_after_its_summary(mock_client_cls, mock_config):
+    """Issue #298: the JSON keeps the server's key order, so content follows its summary."""
+    hit = {
+        "memory_id": "m1",
+        "summary": "Deploy target moved",
+        "summary_cut": True,
+        "content": "The latency review showed…",
+        "content_truncated": True,
+        "content_next_offset": 1500,
+        "type": "decision",
+        "score": 0.81,
+    }
+    mock_config.return_value = {
+        "api_key": "key",
+        "mcp_url": "https://test.com/mcp",
+        "context_id": "ctx",
+    }
+    mock_client = AsyncMock()
+    mock_client.recall.return_value = {"confidence": {"level": "high"}, "results": [hit]}
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    mock_client_cls.return_value = mock_client
+
+    result = CliRunner().invoke(main, ["recall", "deploy", "--full", "1"])
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["results"] == [hit]
+    out = result.output
+    assert out.index('"summary"') < out.index('"content"') < out.index('"type"')
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_session_start_hook_command_is_a_valid_recall(mock_client_cls, mock_config):
+    """The hook `kagura setup claude` writes must parse with this CLI's flags (#258, #298)."""
+    command = SESSIONSTART_HOOK_COMMAND.format(context_id="ctx")
+    argv = shlex.split(command.split(" 2>/dev/null", 1)[0])
+    assert argv[:3] == ["kagura", "recall", "project context and recent decisions"]
+
+    # _recall_cli supplies its own query; pass the hook's flags after it.
+    result, mock_client = _recall_cli(mock_client_cls, mock_config, *argv[3:])
+
+    assert result.exit_code == 0, result.output
+    kwargs = mock_client.recall.call_args.kwargs
+    assert kwargs["context_id"] == "ctx"
+    assert kwargs["k"] == 5
+    assert kwargs["filters"] == {"trust_tier": "trusted"}
+    assert kwargs["verbosity"] == "full"
+    assert kwargs["full"] is None  # content stays the deployment default
 
 
 def test_forget_requires_memory_id_or_query():

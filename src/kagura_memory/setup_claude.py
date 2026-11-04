@@ -45,11 +45,15 @@ KAGURA_HOOK_MARKER = "kagura "
 _CONTEXT_ID_PATTERN = r"^[a-zA-Z0-9_-]+$"
 
 # --trusted-only (#258): the output is injected into the session unreviewed,
-# so connector-ingested memories stay out of it. Removal matches this
-# command's fixed prefix (see _sdk_prefix), which the pre-#258 form shares.
+# so connector-ingested memories stay out of it. --verbosity full (#298):
+# memory-cloud v0.108.0+ answers recall with 160-character summaries and no
+# tags unless asked, so the hook asks for the uncut summaries and tags; how
+# many hits carry content (--full) stays the deployment's default. Install
+# and removal match this command's fixed prefix (see _sdk_prefix), which the
+# pre-#258 and pre-#298 forms share, so re-running setup replaces them.
 SESSIONSTART_HOOK_COMMAND = (
     'kagura recall "project context and recent decisions" '
-    "-c {context_id} -k 5 --trusted-only 2>/dev/null | head -c 2000 || true"
+    "-c {context_id} -k 5 --trusted-only --verbosity full 2>/dev/null | head -c 2000 || true"
 )
 
 POSTTOOLUSE_HOOK_COMMAND = (

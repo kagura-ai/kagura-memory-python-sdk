@@ -39,6 +39,7 @@ from .models import (
     GuardrailDigest,
     MeasurementAggregate,
     MeasurementPeriod,
+    RecallVerbosity,
     ResourceEventRequest,
 )
 from .resource_client import ResourceClient
@@ -528,7 +529,28 @@ def remember(
         "server v0.24.0+). Use it for reads fed back to an agent, like the SessionStart hook."
     ),
 )
-def recall(query, context_id, k, rerank, trusted_only):
+@click.option(
+    "--verbosity",
+    type=click.Choice(get_args(RecallVerbosity)),
+    help=(
+        "Result detail (server v0.108.0+). compact, the server default: 160-character "
+        "summaries without tags; full: uncut summaries, tags, context_summary and scope."
+    ),
+)
+@click.option(
+    "--full",
+    type=click.IntRange(0, 100),
+    help=(
+        "How many top results carry content, up to 1,500 characters each "
+        "(server v0.114.0+; default: the server's, 3 unless set; 0: summaries only)."
+    ),
+)
+@click.option(
+    "--max-chars",
+    type=click.IntRange(10_000, 100_000),
+    help="Response budget in characters, 10000-100000 (server v0.82.0+; default 20000).",
+)
+def recall(query, context_id, k, rerank, trusted_only, verbosity, full, max_chars):
     """
     Search memories directly (without AI analysis).
 
@@ -536,18 +558,32 @@ def recall(query, context_id, k, rerank, trusted_only):
     config (memory-cloud v0.69.0+). --rerank applies only when the context
     enables reranking; --no-rerank always skips it.
 
+    The reply is printed as JSON, with each hit's content (when the server
+    sends it) right after its summary. --verbosity, --full and --max-chars
+    are sent only when given; a server from v0.82.0 that predates one of
+    them refuses it (invalid_argument).
+
     \b
     Examples:
       kagura recall "FastAPI dependency injection"
       kagura recall "OAuth2 implementation" -k 10
       kagura recall -c dev "error handling pattern"
       kagura recall "latency-sensitive lookup" --no-rerank
-      kagura recall "project context" --trusted-only
+      kagura recall "project context" --trusted-only --verbosity full
+      kagura recall "deploy runbook" --full 1 --max-chars 40000
+      kagura recall "release notes" --full 0
     """
     filters = {"trust_tier": "trusted"} if trusted_only else None
     _run_client_command(
         lambda client, ctx: client.recall(
-            context_id=ctx, query=query, k=k, use_rerank=rerank, filters=filters
+            context_id=ctx,
+            query=query,
+            k=k,
+            use_rerank=rerank,
+            filters=filters,
+            verbosity=verbosity,
+            full=full,
+            max_chars=max_chars,
         ),
         context_id,
     )
