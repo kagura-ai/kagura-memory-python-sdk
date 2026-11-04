@@ -2664,6 +2664,7 @@ class KaguraClient:
 
         Raises:
             ValueError: ``max_chars`` is out of range (before any request).
+            TypeError: ``kinds`` is a bare ``str`` (before any request).
             KaguraNotFoundError: The context does not exist or is not
                 accessible.
             KaguraError: Another server-side refusal (``validation_error``:
@@ -2679,6 +2680,9 @@ class KaguraClient:
         if until is not None:
             arguments["until"] = _iso_arg(until)
         if kinds is not None:
+            if isinstance(kinds, str):
+                # list("created") would send its characters as kinds.
+                raise TypeError("kinds must be a list of kind names, not a str")
             arguments["kinds"] = list(kinds)
         if cursor is not None:
             arguments["cursor"] = cursor

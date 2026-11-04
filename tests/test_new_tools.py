@@ -586,6 +586,15 @@ async def test_changes_since_refuses_an_out_of_range_budget_locally():
 
 
 @pytest.mark.asyncio
+async def test_changes_since_refuses_a_bare_str_kinds():
+    """``list("created")`` would send the characters as kinds."""
+    message = await _refused_locally(
+        "changes_since", CTX, "2026-11-01T00:00:00Z", error=TypeError, kinds="created"
+    )
+    assert "kinds" in message
+
+
+@pytest.mark.asyncio
 async def test_changes_since_without_has_more_is_drift():
     reply = {k: v for k, v in CHANGES_REPLY.items() if k != "has_more"}
     sent: list[dict[str, Any]] = []
