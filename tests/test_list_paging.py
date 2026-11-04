@@ -456,6 +456,39 @@ def test_context_list_limit_is_checked_by_the_option(limit: str):
     assert server.arguments == []
 
 
+def test_contexts_shortcut_points_a_cut_page_to_context_list():
+    """``kagura contexts`` prints one page; the next one is ``context list --cursor``."""
+    server = _Server(_directory([_context(n) for n in range(101)]))
+    with (
+        patch("kagura_memory.cli.load_config", return_value=dict(_CONFIG)),
+        patch("kagura_memory.cli.KaguraClient", side_effect=server.client),
+    ):
+        cut = CliRunner().invoke(main, ["contexts"])
+        follow = CliRunner().invoke(main, ["context", "list", "--cursor", "100"])
+    assert cut.exit_code == 0, cut.output
+    assert len(json.loads(cut.stdout)["contexts"]) == 100
+    assert cut.stderr == (
+        'has_more: true; next_cursor: "100". For the next page, run kagura context list '
+        '--cursor "100".\n'
+    )
+    assert follow.exit_code == 0, follow.output
+    assert [c["name"] for c in json.loads(follow.stdout)["contexts"]] == ["ctx-100"]
+    assert follow.stderr == ""
+    assert server.arguments == [{}, {"cursor": "100"}]
+
+
+def test_contexts_shortcut_prints_no_hint_on_the_only_page():
+    server = _Server(_directory([_context(1)]))
+    with (
+        patch("kagura_memory.cli.load_config", return_value=dict(_CONFIG)),
+        patch("kagura_memory.cli.KaguraClient", side_effect=server.client),
+    ):
+        result = CliRunner().invoke(main, ["contexts"])
+    assert result.exit_code == 0, result.output
+    assert result.stderr == ""
+    assert server.arguments == [{}]
+
+
 @pytest.mark.parametrize(
     "result",
     [

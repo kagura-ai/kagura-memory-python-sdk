@@ -1139,9 +1139,10 @@ def context():
     pass
 
 
-def _next_page_footer(result: dict[str, Any]) -> str | None:
-    """The stderr line after a cut ``context list`` page (memory-cloud 0.82.0+, #1743).
+def _page_footer(result: dict[str, Any], rerun: str) -> str | None:
+    """The stderr line after a cut ``list_contexts`` page (memory-cloud 0.82.0+, #1743).
 
+    ``rerun`` is what to run for the next page, up to its ``--cursor`` flag.
     ``None`` on the last page, and from a server before 0.82.0, which sends
     no ``has_more``. The line is a command to paste into a shell, so the
     cursor is shown only in the form the server takes back as ``cursor``
@@ -1154,13 +1155,23 @@ def _next_page_footer(result: dict[str, Any]) -> str | None:
         return None
     if not (cursor.isascii() and cursor.isdigit()):
         return (
-            "has_more: true. For the next page, run the command again with the same "
-            "options and --cursor set to next_cursor from the JSON."
+            f"has_more: true. For the next page, run {rerun} --cursor set to next_cursor "
+            "from the JSON."
         )
     return (
-        f'has_more: true; next_cursor: "{cursor}". For the next page, run the command again '
-        f'with the same options and --cursor "{cursor}".'
+        f'has_more: true; next_cursor: "{cursor}". For the next page, run {rerun} '
+        f'--cursor "{cursor}".'
     )
+
+
+def _next_page_footer(result: dict[str, Any]) -> str | None:
+    """The ``kagura context list`` footer: the same command, with the next cursor."""
+    return _page_footer(result, "the command again with the same options and")
+
+
+def _contexts_footer(result: dict[str, Any]) -> str | None:
+    """The ``kagura contexts`` footer: the shortcut takes no cursor, ``context list`` does."""
+    return _page_footer(result, "kagura context list")
 
 
 @context.command(name="list")
@@ -1372,15 +1383,21 @@ def context_search_config(
 
 # Keep backward compat: kagura contexts → kagura context list
 @main.command()
-def contexts():
+def contexts() -> None:
     """List available contexts (short form of 'context list', without its options).
 
-    For --name-contains/--summary/--details/--stats use 'kagura context list'.
+    Prints one page: from memory-cloud 0.82.0 that is the 100 most recently
+    used contexts. When more follow, a line on stderr names the
+    'kagura context list --cursor' call for the next page.
+
+    For --name-contains/--summary/--details/--stats/--limit/--cursor use
+    'kagura context list'.
     """
     _run_client_command(
         lambda client, _: client.list_contexts(),
         context_id=None,
         needs_context=False,
+        footer=_contexts_footer,
     )
 
 
