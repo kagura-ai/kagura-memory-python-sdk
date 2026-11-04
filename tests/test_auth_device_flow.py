@@ -424,10 +424,33 @@ async def test_refresh_invalid_grant_raises_expired():
     client = MagicMock()
     client.post = AsyncMock(return_value=_mock_response(400, {"error": "invalid_grant"}))
 
-    with pytest.raises(KaguraAuthExpiredError, match="Your login expired"):
+    with pytest.raises(KaguraAuthExpiredError, match="Your login expired") as excinfo:
         await refresh_access_token(
             client, SERVER, client_id=DEFAULT_CLIENT_ID, refresh_token="rtok-old"
         )
+    assert excinfo.value.code == "invalid_grant"
+
+
+@pytest.mark.asyncio
+async def test_refresh_oauth_refusal_keeps_the_error_as_code():
+    """An OAuth refusal keeps ``error`` as ``code`` and the description in ``details``."""
+    client = MagicMock()
+    client.post = AsyncMock(
+        return_value=_mock_response(
+            400, {"error": "invalid_scope", "error_description": "scope exceeds the grant"}
+        )
+    )
+
+    with pytest.raises(KaguraAuthError, match="Refresh failed: invalid_scope") as excinfo:
+        await refresh_access_token(
+            client,
+            SERVER,
+            client_id=DEFAULT_CLIENT_ID,
+            refresh_token="rtok-old",
+            scope="memory:read memory:write",
+        )
+    assert excinfo.value.code == "invalid_scope"
+    assert excinfo.value.details == {"error_description": "scope exceeds the grant"}
 
 
 @pytest.mark.asyncio

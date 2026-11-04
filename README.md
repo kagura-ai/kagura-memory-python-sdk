@@ -696,10 +696,11 @@ yields one token, also under concurrent requests
 ([#1686](https://github.com/kagura-ai/memory-cloud/issues/1686)). `KaguraClient`,
 the REST clients and `kagura-mcp` refresh under one cross-process lock on
 `credentials.json` and re-read it first, so they never send the same refresh
-token twice. `kagura auth refresh` and `kagura auth token` refresh outside that
-lock, so one of them run while a proxy refreshes the same profile can fail with
-"login expired": run it again. A password reset revokes every OAuth token and
-device code of the account (v0.83.0+,
+token twice. `kagura auth refresh` and `kagura auth token` refresh under the
+same lock and keep a token another of them rotated meanwhile; up to 0.43.0 they
+refreshed outside it, so one of them run while a proxy refreshed the same
+profile could fail with "login expired". A password reset revokes every OAuth
+token and device code of the account (v0.83.0+,
 [#1738](https://github.com/kagura-ai/memory-cloud/issues/1738)), and only
 `kagura auth login` recovers. From v0.83.0 the account's verified address is
 emailed on every device-flow approval and for every API key minted for it,
