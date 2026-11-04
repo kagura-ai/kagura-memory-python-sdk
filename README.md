@@ -337,6 +337,47 @@ async with MemoryClient.from_mcp_url() as memory:  # REST twin for API-key hooks
   on a tracked one, so the guardrail summaries never land in a commit (or, in a public
   repository, get published).
 
+#### Session start, change log and batch writes (server v0.93.0+)
+
+`bootstrap` opens an interactive session on one context in one deterministic call (no
+recall): the context block, its tool guardrails, the pinned memories, the upcoming Time
+Memories and what changed since a time, each lane fail-soft (`degraded`). `changes_since`
+pages the change log on, `list_matching` (the MCP `list` tool) returns every memory that
+matches exact filters with a `total`, `remember_batch` stores up to 50 memories in one call
+and `forget(memory_ids=[...])` deletes up to 50 with one result row per id:
+
+```python
+async with KaguraClient() as client:
+    start = await client.bootstrap("ctx-uuid", since="7d", format="index", max_chars=5000)
+    changes = start.components.changes                # None when include= leaves it out
+    if changes and changes.status == "ok":
+        for row in changes.changes:
+            print(row.kind, row.memory_id, row.summary)  # summary is None once forgotten
+    for notice in start.plan_headroom or []:          # server v0.142.0+: a cap at 80 %+
+        print(notice.level, notice.dimension, notice.help)
+
+    page = await client.changes_since("ctx-uuid", "2026-11-01T00:00:00Z", kinds=["created"])
+    backlog = await client.list_matching(
+        "ctx-uuid", filters={"type": ["tech-debt"], "tags": ["status:open"]}
+    )
+
+    saved = await client.remember_batch("ctx-uuid", [
+        {"summary": "Decision: ship the session tools", "content": "PR review", "type": "decision"},
+        {"summary": "Lesson: page changes by cursor", "content": "#301", "type": "lesson"},
+    ], atomic=True)                                   # all or nothing; failed excludes skipped
+    ids = [r.memory_id for r in saved.results if r.memory_id]
+    gone = await client.forget("ctx-uuid", memory_ids=ids)
+    print(gone.succeeded, [r.status for r in gone.results])  # deleted | skipped | error
+```
+
+`bootstrap(format=...)` and a `max_chars` below 10,000 need server v0.115.0+, `forget(memory_ids=)`
+v0.117.0+. `describe_tools` / `guide` read the tools a URL does not list and the server's tool
+manual (v0.93.0+), `list_revisions` a memory's revision log (v0.113.0+), and `rollback_session`
+plans (`dry_run=True`, the default, always sent) or undoes one session's writes, or the caller's
+own in a window of at most 7 days (v0.113.0+; window v0.114.0+). Each method raises
+`KaguraResponseError` on a reply it cannot read; a batch that wrote nothing raises `KaguraError`
+with `code == "batch_failed"` and the rows in `details["results"]`.
+
 #### Agent bootstrap — one-call session-start rehydration (v0.37.0, server v0.49.0+)
 
 `get_agent_bootstrap` composes the primitives above (context guide + pinned +
@@ -776,6 +817,10 @@ kagura recall "deploy runbook" --full 1 --max-chars 40000   # content on the top
 # retry without the ones it names (all three sent when it names none), with a note on stderr.
 kagura explore -m "memory-uuid" --depth 3
 kagura forget -m "memory-uuid"
+kagura forget --ids "uuid-1,uuid-2"                  # up to 50, one row per id (server v0.117.0+)
+kagura bootstrap --since 7d --format index --max-chars 5000   # session start (v0.93.0+; index v0.115.0+)
+kagura changes 2026-11-01T00:00:00Z --kinds created,forgotten  # change log, oldest first (v0.93.0+)
+kagura list --filters '{"type": "task", "details.status": "open"}'   # exact filters + total (v0.93.0+)
 kagura update-memory -m "memory-uuid" --dismiss-supersede-candidate   # server v0.65.0+
 # --details replaces details wholesale; --merge-details does a reference() round-trip and keeps the other keys
 kagura update-memory -m "memory-uuid" --details '{"location": {"lat": 35.68, "lon": 139.76}, "client": "acme"}'
@@ -1231,6 +1276,10 @@ scope the server lists, `memory:admin` and `memory:delete` included.
 | Retrieval feedback (feedback) | `KaguraClient` | MCP | API Key |
 | Agent session-state lane (set_state/get_state, TTL) | `KaguraClient` | MCP | API Key |
 | Agent bootstrap (get_agent_bootstrap — one-call session-start rehydration) | `KaguraClient` / `AgentsClient` | MCP + REST | API Key |
+| Session start + deterministic lanes (bootstrap, changes_since, list_matching) | `KaguraClient` | MCP | API Key |
+| Batch writes and deletes (remember_batch, forget `memory_ids=`) | `KaguraClient` | MCP | API Key |
+| Revision log and session rollback (list_revisions, rollback_session) | `KaguraClient` | MCP | API Key |
+| Tool discovery and manual (describe_tools, guide) | `KaguraClient` | MCP | API Key |
 | Agent registry + context bindings (register/list/update/delete, bind/unbind — owner/admin) | `KaguraClient` / `AgentsClient` | MCP + REST | API Key |
 | Tool guardrails (load_guardrails, remember/update_memory `tool_trigger=`, get_context_info `guardrails`) | `KaguraClient` / `MemoryClient` | MCP + REST | API Key |
 | Guardrail digest (`AGENTS.md` export block / server-instructions preview) | `MemoryClient` | REST | API Key |
