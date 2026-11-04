@@ -994,3 +994,73 @@ async def test_forward_other_403_jsonrpc_body_still_passes_through():
     body = {"jsonrpc": "2.0", "id": 1, "error": {"code": -32002, "message": "denied"}}
     up, _ = _upstream(lambda request: httpx.Response(403, json=body))
     assert await up.forward(_tool_call(1)) == body
+
+
+# ---------------------------------------------------------------------------
+# The upstream error body is decoded once per step (#311)
+# ---------------------------------------------------------------------------
+
+
+class _CountingResponse(httpx.Response):
+    """An ``httpx.Response`` that counts how often its body is decoded."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.decodes = 0
+
+    def json(self, **kwargs: Any) -> Any:
+        self.decodes += 1
+        return super().json(**kwargs)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "body", "headers"),
+    [
+        (400, {"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "x"}}, {}),
+        (403, {"jsonrpc": "2.0", "id": 1, "error": {"code": -32002, "message": "denied"}}, {}),
+    ],
+    ids=["400", "403-not-scope"],
+)
+async def test_forward_decodes_a_forwarded_error_body_once(
+    status: int, body: dict[str, Any], headers: dict[str, str]
+):
+    sent: list[_CountingResponse] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(_CountingResponse(status, json=body, headers=headers))
+        return sent[-1]
+
+    up, _ = _upstream(handler)
+    assert await up.forward(_tool_call(1)) == {**body, "id": 1}
+    assert [r.decodes for r in sent] == [1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "body", "headers", "message"),
+    [
+        (403, _SCOPE_BODY, {"WWW-Authenticate": _SCOPE_CHALLENGE}, "lacks the memory:write"),
+        (403, {"error": "access_denied", "error_description": "No."}, {}, "HTTP 403: No."),
+        (503, {"error": "temporarily_unavailable", "error_description": "Retry."}, {}, "Retry."),
+    ],
+    ids=["403-scope", "403-oauth-style", "503"],
+)
+async def test_an_answered_error_body_is_decoded_once_per_step(
+    status: int, body: dict[str, Any], headers: dict[str, str], message: str
+):
+    """Once where forward decides not to pass it through, once where the reply is worded."""
+    sent: list[_CountingResponse] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(_CountingResponse(status, json=body, headers=headers))
+        return sent[-1]
+
+    up, _ = _upstream(handler)
+    with pytest.raises(httpx.HTTPStatusError) as exc_info:
+        await up.forward(_tool_call(1))
+    assert [r.decodes for r in sent] == [1]
+    reply = _error_response(_tool_call(1), exc_info.value)
+    assert reply is not None
+    assert message in reply["error"]["message"]
+    assert [r.decodes for r in sent] == [2]

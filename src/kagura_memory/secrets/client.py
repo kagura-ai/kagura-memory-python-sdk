@@ -16,7 +16,7 @@ from urllib.parse import quote
 
 import httpx
 
-from .._http import extract_detail
+from .._http import ErrorBody
 from .._rest_base import KaguraRestClient
 from ..exceptions import (
     KaguraConnectionError,
@@ -54,6 +54,7 @@ class SecretClient(KaguraRestClient):
     def _error_403(
         self,
         e: httpx.HTTPStatusError,
+        body: ErrorBody,
         *,
         request_json: dict[str, Any] | None,
         request_params: dict[str, Any] | None,
@@ -61,7 +62,7 @@ class SecretClient(KaguraRestClient):
         # The server returns 403 (not 404) for a secret the caller can't
         # read, to avoid leaking whether it exists. Give an actionable
         # message rather than a bare "HTTP 403".
-        detail = extract_detail(e.response)
+        detail = body.detail
         msg = (
             "Access denied (HTTP 403): you may not have a grant on this secret, "
             "it may not exist, or you lack permission for this operation."
@@ -70,12 +71,12 @@ class SecretClient(KaguraRestClient):
             msg = f"{msg} ({detail})"
         return KaguraConnectionError(msg)
 
-    def _error_429(self, e: httpx.HTTPStatusError) -> KaguraError:
+    def _error_429(self, e: httpx.HTTPStatusError, body: ErrorBody) -> KaguraError:
         # Historical mapping preserved (#229 is zero-behavior-change): the
         # secret surface renders 429 through the generic branch. A quota
         # refusal never reaches this hook — ``_gate_error`` types it first,
         # as on every REST client (#256).
-        return self._generic_error(e)
+        return self._generic_error(e, body)
 
     # -- pubkey registry -----------------------------------------------------
 

@@ -67,9 +67,8 @@ import httpx
 
 from ._http import (
     SDK_VERSION,
-    extract_detail,
+    ErrorBody,
     insufficient_scope_error,
-    jsonrpc_error_body,
     mcp_session_expired,
     mcp_session_header,
     mcp_url_has_tools_allowlist,
@@ -186,15 +185,14 @@ def _downstream_response(message: dict[str, Any], resp: httpx.Response) -> dict[
     Raises:
         httpx.HTTPStatusError: A non-2xx with nothing to forward.
     """
-    if not resp.is_success and not _needs_login(resp):
-        body = jsonrpc_error_body(resp)
-        if body is not None:
+    if not resp.is_success:
+        error = ErrorBody.read(resp)
+        if error.jsonrpc is not None and not _needs_login(resp, error):
             msg_id = message.get("id")
             if msg_id is None:  # a notification never gets a reply, not even an error
                 return None
-            if body.get("id") is None:
-                body["id"] = msg_id
-            return body
+            body = error.jsonrpc
+            return {**body, "id": msg_id} if body.get("id") is None else body
     resp.raise_for_status()
     if resp.status_code == 202 or not resp.content:
         return None
@@ -216,16 +214,18 @@ def _error_response(message: dict[str, Any], exc: Exception) -> dict[str, Any] |
     detail = str(exc)
     if isinstance(exc, httpx.HTTPStatusError):
         status = exc.response.status_code
-        scope_error = insufficient_scope_error(exc.response) if status == 403 else None
         if status == 401:
             detail = (
                 "Kagura authentication failed and the token could not be refreshed. "
                 "Run `kagura auth login` to re-authenticate."
             )
-        elif scope_error is not None:
-            detail = str(scope_error)
-        elif server_detail := extract_detail(exc.response):
-            detail = f"HTTP {status}: {server_detail}"
+        else:
+            body = ErrorBody.read(exc.response)
+            scope_error = insufficient_scope_error(exc.response, body) if status == 403 else None
+            if scope_error is not None:
+                detail = str(scope_error)
+            elif body.detail:
+                detail = f"HTTP {status}: {body.detail}"
     return {
         "jsonrpc": "2.0",
         "id": msg_id,
@@ -479,17 +479,18 @@ def main(argv: list[str] | None = None) -> int:
         return 130
 
 
-def _needs_login(resp: httpx.Response) -> bool:
+def _needs_login(resp: httpx.Response, body: ErrorBody) -> bool:
     """Whether ``resp`` is answered with the proxy's re-login hint, not forwarded.
 
     A ``401`` (the token was rejected even after the forced refresh) and a
     ``403`` ``insufficient_scope`` (the sign-in lacks the tool's scope, e.g. a
     ``kagura auth login --read-only`` profile calling a write tool; a refresh
-    keeps the same scope, so only a new sign-in helps).
+    keeps the same scope, so only a new sign-in helps). ``body`` is ``resp``'s
+    body, as :meth:`~kagura_memory._http.ErrorBody.read` read it.
     """
     if resp.status_code == 401:
         return True
-    return resp.status_code == 403 and insufficient_scope_error(resp) is not None
+    return resp.status_code == 403 and insufficient_scope_error(resp, body) is not None
 
 
 if __name__ == "__main__":  # pragma: no cover

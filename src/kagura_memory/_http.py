@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import uuid
 from collections.abc import Collection, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime, time, timedelta
 from importlib.metadata import version as _pkg_version
 from typing import Any, NamedTuple, NoReturn, TypeVar
@@ -295,10 +296,19 @@ def extract_detail(response: httpx.Response) -> str:
       ``message``, or values of unexpected type — returns an empty string so
       callers can fall back to ``response.text`` or just print the status.
     """
+    return _detail_of(_json_body(response))
+
+
+def _json_body(response: httpx.Response) -> Any:
+    """``response``'s decoded JSON body; ``None`` when it is not JSON."""
     try:
-        body = response.json()
+        return response.json()
     except (ValueError, UnicodeDecodeError):
-        return ""
+        return None
+
+
+def _detail_of(body: Any) -> str:
+    """:func:`extract_detail` of an already decoded body."""
     if not isinstance(body, dict):
         return ""
     detail = body.get("detail")
@@ -341,10 +351,11 @@ def jsonrpc_error_body(response: httpx.Response) -> dict[str, Any] | None:
     Args:
         response: Any MCP endpoint response.
     """
-    try:
-        body = response.json()
-    except (ValueError, UnicodeDecodeError):
-        return None
+    return _jsonrpc_error_of(_json_body(response))
+
+
+def _jsonrpc_error_of(body: Any) -> dict[str, Any] | None:
+    """:func:`jsonrpc_error_body` of an already decoded body."""
     if isinstance(body, dict) and isinstance(body.get("error"), dict):
         return body
     return None
@@ -468,17 +479,13 @@ _TIER_QUOTA_TYPES = frozenset(
 )
 
 
-def error_envelope(response: httpx.Response) -> tuple[str, str, dict[str, Any]] | None:
-    """Return ``(error, message, details)`` of memory-cloud's canonical REST error body.
+def _envelope_of(body: Any) -> tuple[str, str, dict[str, Any]] | None:
+    """``(error, message, details)`` of memory-cloud's canonical REST error body.
 
     ``None`` when the body is not ``{"error": <str>, ...}`` — non-JSON, the
     FastAPI ``{"detail": ...}`` shape, or the JSON-RPC ``error`` object. A
     missing ``message`` reads as ``""`` and missing ``details`` as ``{}``.
     """
-    try:
-        body = response.json()
-    except (ValueError, UnicodeDecodeError):
-        return None
     if not isinstance(body, dict) or not isinstance(body.get("error"), str):
         return None
     message = body.get("message")
@@ -644,20 +651,21 @@ def raise_for_kagura_status(e: httpx.HTTPStatusError) -> NoReturn:
     status = response.status_code
     if status == 401:
         raise KaguraAuthError("Authentication failed. Check your API key.") from e
-    if status == 403 and (scope_error := insufficient_scope_error(response)) is not None:
+    body = ErrorBody.read(response)
+    if status == 403 and (scope_error := insufficient_scope_error(response, body)) is not None:
         raise scope_error from e
-    detail = extract_detail(response) or _exc_message(e)
+    detail = body.detail or _exc_message(e)
     if status == 429:
         err: KaguraError = KaguraRateLimitError(
             f"Rate limit exceeded (HTTP 429): {detail}",
             retry_after=_retry_after_seconds(response),
         )
     elif status == 503:
-        err = service_unavailable_error(response, f"HTTP 503: {detail}")
+        err = service_unavailable_error(response, f"HTTP 503: {detail}", body)
     else:
         err = KaguraConnectionError(f"HTTP {status}: {detail}")
-    if (fields := server_error_fields(response)) is not None:
-        annotate_server_error(err, *fields)
+    if body.fields is not None:
+        annotate_server_error(err, *body.fields)
     raise err from e
 
 
@@ -1065,10 +1073,11 @@ def server_error_fields(response: httpx.Response) -> tuple[str, dict[str, Any]] 
     Args:
         response: A non-2xx response.
     """
-    try:
-        body = response.json()
-    except (ValueError, UnicodeDecodeError):
-        return None
+    return _fields_of(_json_body(response))
+
+
+def _fields_of(body: Any) -> tuple[str, dict[str, Any]] | None:
+    """:func:`server_error_fields` of an already decoded body."""
     if not isinstance(body, dict):
         return None
     error = body.get("error")
@@ -1083,6 +1092,38 @@ def server_error_fields(response: httpx.Response) -> tuple[str, dict[str, Any]] 
     if isinstance(details, dict):
         return error, details
     return error, {k: v for k, v in body.items() if k != "error"}
+
+
+@dataclass(frozen=True)
+class ErrorBody:
+    """A non-2xx response's JSON body, decoded once and read each way the error mapping needs.
+
+    ``KaguraRestClient``, :func:`raise_for_kagura_status` and ``kagura-mcp``
+    read one per error response and pass it down, instead of decoding the
+    body again in every reader (#311). A body that is not JSON reads as
+    nothing in every field.
+    """
+
+    #: What :func:`extract_detail` returns: the server's message, or ``""``.
+    detail: str
+    #: The canonical REST envelope ``{"error": <str>, "message": ..., "details": {...}}``
+    #: as ``(error, message, details)`` (``""`` / ``{}`` when missing); ``None``
+    #: for any other shape.
+    envelope: tuple[str, str, dict[str, Any]] | None
+    #: What :func:`server_error_fields` returns: ``(code, fields)``.
+    fields: tuple[str, dict[str, Any]] | None
+    #: What :func:`jsonrpc_error_body` returns: the JSON-RPC error envelope.
+    jsonrpc: dict[str, Any] | None
+
+    @classmethod
+    def read(cls, response: httpx.Response) -> ErrorBody:
+        """Decode ``response``'s body once and read it every way.
+
+        Args:
+            response: A non-2xx response.
+        """
+        body = _json_body(response)
+        return cls(_detail_of(body), _envelope_of(body), _fields_of(body), _jsonrpc_error_of(body))
 
 
 def _bearer_challenge(response: httpx.Response) -> dict[str, str]:
@@ -1111,7 +1152,7 @@ def _bearer_challenge(response: httpx.Response) -> dict[str, str]:
     return params or {}
 
 
-def insufficient_scope_error(response: httpx.Response) -> KaguraAuthError | None:
+def insufficient_scope_error(response: httpx.Response, body: ErrorBody) -> KaguraAuthError | None:
     """The :class:`KaguraAuthError` for a 403 ``insufficient_scope``, else ``None``.
 
     memory-cloud v0.79.0+ (#1686) refuses a ``tools/call`` whose OAuth token
@@ -1125,14 +1166,15 @@ def insufficient_scope_error(response: httpx.Response) -> KaguraAuthError | None
     value to re-authorize with.
 
     Args:
-        response: A 403 response.
+        response: A 403 response, for its ``WWW-Authenticate`` challenge.
+        body: Its body, as :meth:`ErrorBody.read` read it.
 
     Returns:
         The error, with ``code`` ``"insufficient_scope"`` and
         ``details["required_scope"]`` when the scope is known; ``None`` for
         any other 403.
     """
-    fields = server_error_fields(response)
+    fields = body.fields
     data = fields[1] if fields is not None and fields[0] == _INSUFFICIENT_SCOPE else None
     challenge = _bearer_challenge(response)
     if data is None and challenge.get("error") != _INSUFFICIENT_SCOPE:
@@ -1151,7 +1193,7 @@ def insufficient_scope_error(response: httpx.Response) -> KaguraAuthError | None
 
 
 def service_unavailable_error(
-    response: httpx.Response, message: str
+    response: httpx.Response, message: str, body: ErrorBody
 ) -> KaguraServiceUnavailableError:
     """The :class:`KaguraServiceUnavailableError` for an HTTP 503 ``response``.
 
@@ -1161,10 +1203,11 @@ def service_unavailable_error(
     error code (``/mcp``'s ``temporarily_unavailable``, v0.82.0+).
 
     Args:
-        response: The 503 response.
+        response: The 503 response, for its ``Retry-After`` header.
         message: Message for the exception.
+        body: Its body, as :meth:`ErrorBody.read` read it.
     """
-    fields = server_error_fields(response)
+    fields = body.fields
     code, data = fields if fields is not None else (None, {})
     retry_after = _retry_after_seconds(response)
     if retry_after is None:

@@ -809,3 +809,96 @@ async def test_list_tags_rest_422_keeps_the_rest_body_on_the_mcp_style_error():
     # The MCP tool's code, as before; the fields are the REST body's.
     assert exc.value.code == "invalid_argument"
     assert exc.value.details == {"errors": errors}
+
+
+# ---------------------------------------------------------------------------
+# The error body is decoded once (#311)
+# ---------------------------------------------------------------------------
+
+
+class _CountingResponse(httpx.Response):
+    """An ``httpx.Response`` that counts how often its body is decoded."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.decodes = 0
+
+    def json(self, **kwargs: Any) -> Any:
+        self.decodes += 1
+        return super().json(**kwargs)
+
+
+_SCOPE_ONLY = {"WWW-Authenticate": 'Bearer error="insufficient_scope", scope="memory:write"'}
+_DB_002 = {"error": "DB-002", "message": "Database down", "details": {"reason": "pool"}}
+
+
+async def _resource_tokens(c: ResourceClient) -> Any:
+    return await c.list_tokens()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("cls", "call", "status", "body", "headers", "raised"),
+    [
+        (ResourceClient, _resource_tokens, 403, _DENY_BODY, {}, KaguraConnectionError),
+        (FilesClient, _files_list, 403, _DENY_BODY, {}, KaguraConnectionError),
+        (WorkspaceClient, _workspace_members, 403, _DENY_BODY, {}, KaguraConnectionError),
+        (SecretClient, _secret_pubkeys, 403, _DENY_BODY, {}, KaguraConnectionError),
+        (ResourceClient, _resource_tokens, 403, _DENY_BODY, _SCOPE_ONLY, KaguraAuthError),
+        (ResourceClient, _resource_tokens, 403, _CAPACITY_BODY, {}, KaguraCapacityLockedError),
+        (ResourceClient, _resource_tokens, 404, _DENY_BODY, {}, KaguraNotFoundError),
+        (WorkspaceClient, _workspace_members, 429, {"detail": "slow"}, {}, KaguraQuotaError),
+        (SecretClient, _secret_pubkeys, 429, {"detail": "slow"}, {}, KaguraConnectionError),
+        (ResourceClient, _resource_tokens, 503, _DB_002, {}, KaguraServiceUnavailableError),
+        (ResourceClient, _resource_tokens, 409, _DENY_BODY, {}, KaguraConnectionError),
+    ],
+    ids=[
+        "403-default-hook",
+        "403-files-hook",
+        "403-workspace-hook",
+        "403-secret-hook",
+        "403-scope",
+        "403-capacity-gate",
+        "404",
+        "429-workspace-hook",
+        "429-secret-hook",
+        "503",
+        "409",
+    ],
+)
+async def test_rest_error_body_is_decoded_once(cls, call, status, body, headers, raised):
+    """Gate, scope, hook wording and the code/details all read one decode."""
+    sent: list[_CountingResponse] = []
+
+    def handler(_req: httpx.Request) -> httpx.Response:
+        sent.append(_CountingResponse(status, json=body, headers=headers))
+        return sent[-1]
+
+    async with _rest(cls, handler) as c:
+        with pytest.raises(raised) as exc:
+            await call(c)
+    assert [r.decodes for r in sent] == [1]
+    # The one decode still gives the error the body's code.
+    assert (exc.value.code is not None) == ("error" in body)
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "headers", "decodes"),
+    [
+        (401, {"error": "invalid_token"}, {}, 0),
+        (403, _MCP_SCOPE_BODY, {"WWW-Authenticate": _MCP_SCOPE_CHALLENGE}, 1),
+        (403, {"error": "access_denied", "error_description": "No."}, {}, 1),
+        (429, {"detail": "slow"}, {}, 1),
+        (503, {"error": "temporarily_unavailable", "error_description": "Retry."}, {}, 1),
+        (500, {"detail": "boom"}, {}, 1),
+    ],
+    ids=["401-not-read", "403-scope", "403-other", "429", "503", "500"],
+)
+def test_raise_for_kagura_status_decodes_the_body_once(status, body, headers, decodes):
+    request = httpx.Request("POST", "https://test.com/mcp")
+    response = _CountingResponse(status, json=body, headers=headers, request=request)
+    with pytest.raises(KaguraError):
+        raise_for_kagura_status(
+            httpx.HTTPStatusError(str(status), request=request, response=response)
+        )
+    assert response.decodes == decodes
