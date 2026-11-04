@@ -187,8 +187,9 @@ class KaguraClient:
     ``get_embedding_status``, ``get_memory_stats``, ``find_duplicates``,
     ``list_memories``, ``list_embedding_models``) do the same with
     ``operation="KaguraClient.<method>"`` (#254, #277); from them a network
-    failure, a non-JSON 2xx body and a non-2xx status other than 401/429
-    (and a 403 ``insufficient_scope``) raise :class:`KaguraConnectionError`.
+    failure, a non-JSON 2xx body and a non-2xx status other than 401, 429
+    and a 403 ``insufficient_scope`` raise :class:`KaguraConnectionError`
+    (a 503 its subclass :class:`KaguraServiceUnavailableError`).
     """
 
     def __init__(
