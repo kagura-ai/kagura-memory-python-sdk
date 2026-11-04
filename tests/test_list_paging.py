@@ -417,11 +417,23 @@ def test_context_list_refused_cursor_is_a_clean_error():
     assert server.arguments == [{"cursor": "abc"}]
 
 
-def test_context_list_refuses_a_details_page_over_20_before_any_request():
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["--details", "--limit", "21"],
+        ["--details", "--name-contains", "   ", "--limit", "200"],  # blank: no filter
+    ],
+)
+def test_context_list_refuses_a_details_page_over_20_before_any_request(args: list[str]):
+    """The CLI names its own flags, not the SDK's arguments."""
     server = _Server(_directory([]))
-    result = _invoke(server, "--details", "--limit", "21")
-    assert result.exit_code == 1
-    assert "pass name_contains or a limit of at most 20, got 21" in result.stderr
+    result = _invoke(server, *args)
+    assert result.exit_code == 2
+    assert (
+        "Error: --details returns full summaries: pass --name-contains or --limit 20 or less"
+        in result.stderr
+    )
+    assert "name_contains" not in result.stderr
     assert server.arguments == []
 
 

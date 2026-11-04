@@ -27,7 +27,12 @@ from ._http import (
 )
 from .auth.cli import auth as _auth_group
 from .claude_code import MCP_SERVER_NAME
-from .client import _LIST_CONTEXTS_MAX_LIMIT, KaguraClient
+from .client import (
+    _LIST_CONTEXTS_DETAILS_MAX_LIMIT,
+    _LIST_CONTEXTS_MAX_LIMIT,
+    KaguraClient,
+    _details_page_over_cap,
+)
 from .config import load_config
 from .doctor import run_doctor
 from .exceptions import (
@@ -1203,6 +1208,11 @@ def context_list(name_contains, summary, details, stats, limit, cursor):
       kagura context list --stats
       kagura context list --limit 50 --cursor 50
     """
+    if _details_page_over_cap(details, name_contains, limit):
+        raise click.UsageError(
+            "--details returns full summaries: pass --name-contains or "
+            f"--limit {_LIST_CONTEXTS_DETAILS_MAX_LIMIT} or less (got {limit})."
+        )
     _run_client_command(
         lambda client, _: client.list_contexts(
             name_contains=name_contains,
