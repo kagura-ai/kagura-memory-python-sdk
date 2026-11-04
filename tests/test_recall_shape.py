@@ -18,7 +18,7 @@ from unittest.mock import AsyncMock, patch
 import httpx
 import pytest
 
-from kagura_memory import AgentBootstrapResponse, KaguraClient
+from kagura_memory import AgentBootstrapResponse, KaguraClient, KaguraError
 from tests.conftest import bootstrap_envelope_dict
 
 CTX = "11111111-2222-3333-4444-555555555555"
@@ -448,3 +448,35 @@ def test_bootstrap_envelope_without_the_marker_reads_false():
         AgentBootstrapResponse.model_validate(bootstrap_envelope_dict()).context_summary_omitted
         is False
     )
+
+
+@pytest.mark.skipif(
+    not hasattr(KaguraError("probe"), "code"),
+    reason="KaguraError.code arrives with the error realignment (#299, PR #308)",
+)
+@pytest.mark.asyncio
+async def test_an_undeclared_argument_refusal_carries_the_code_kagura_recall_retries_on():
+    """`kagura recall` retries without its shape flags on exactly this error (#298).
+
+    From 0.82.0 a server answers an argument its schema does not declare with
+    an ``invalid_argument`` envelope (memory-cloud ``find_unknown_arguments``);
+    the CLI keys on the code, never on the message.
+    """
+    reply = {
+        "status": "error",
+        "error": "invalid_argument",
+        "message": (
+            "recall does not accept the argument 'full'. Arguments its inputSchema declares: "
+            "context_id, context_ids, filters, include_explore_hints, include_superseded, k, "
+            "query, search_mode, use_rerank, verbosity."
+        ),
+        "unknown_arguments": ["full"],
+    }
+    sent: list[dict[str, Any]] = []
+    client = _wire_client(reply, sent)
+    try:
+        with pytest.raises(KaguraError) as excinfo:
+            await client.recall(context_id=CTX, query="deploy", verbosity="full", full=0)
+    finally:
+        await client.close()
+    assert getattr(excinfo.value, "code", None) == "invalid_argument"

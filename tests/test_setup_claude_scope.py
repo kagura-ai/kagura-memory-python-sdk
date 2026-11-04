@@ -15,7 +15,6 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
-import httpx
 import pytest
 from click.testing import CliRunner, Result
 
@@ -23,10 +22,8 @@ from kagura_memory import claude_code
 from kagura_memory.claude_code import MCP_SERVER_NAME, claude_json_label, claude_json_path
 from kagura_memory.cli import main
 from kagura_memory.setup_claude import (
-    LEGACY_SESSIONSTART_HOOK_COMMAND,
     POSTTOOLUSE_HOOK_COMMAND,
     SESSIONSTART_HOOK_COMMAND,
-    _fetch_server_version,
     _install_hooks,
     _plugin_server_url,
     _remove_sdk_hook,
@@ -826,122 +823,8 @@ def test_session_hook_asks_for_uncut_summaries_with_tags_and_no_content(tmp_path
 def test_every_session_hook_form_shares_the_sdk_prefix() -> None:
     """Install and removal match on the prefix, so each form replaces the others."""
     prefix = _sdk_prefix(SESSIONSTART_HOOK_COMMAND)
-    assert _sdk_prefix(LEGACY_SESSIONSTART_HOOK_COMMAND) == prefix
     for old in (_PRE_258_HOOK, _PRE_298_HOOK):
         assert old.startswith(prefix)
-    legacy = LEGACY_SESSIONSTART_HOOK_COMMAND
-    assert "--verbosity" not in legacy and "--full" not in legacy
-    assert legacy.replace("--trusted-only", "--trusted-only --verbosity full --full 0") == (
-        SESSIONSTART_HOOK_COMMAND
-    )
-
-
-def _report_version(monkeypatch: pytest.MonkeyPatch, version: object) -> list[str]:
-    """Make the setup probe report ``version``; returns the MCP URLs it was sent for."""
-    probed: list[str] = []
-
-    async def fake(mcp_url: str) -> object:
-        probed.append(mcp_url)
-        return version
-
-    monkeypatch.setattr("kagura_memory.setup_claude._fetch_server_version", fake)
-    return probed
-
-
-@pytest.mark.parametrize("oauth", [True, False], ids=["oauth", "api-key"])
-@pytest.mark.parametrize("version", ["0.113.9", "0.82.0", "0.114.0-rc1", "v0.107.2"])
-def test_setup_writes_the_legacy_hook_below_0_114(
-    connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, oauth: bool, version: str
-) -> None:
-    probed = _report_version(monkeypatch, version)
-
-    result = run_setup(tmp_path, oauth=oauth)
-
-    assert result.exit_code == 0, result.output
-    assert probed == [MCP_URL]  # one probe, on the entry's server
-    assert hook_commands(tmp_path, "SessionStart") == [
-        LEGACY_SESSIONSTART_HOOK_COMMAND.format(context_id=CTX)
-    ]
-    assert "older than 0.114.0" in result.output
-
-
-@pytest.mark.parametrize("version", ["0.114.0", "0.141.0", "1.0.0", None, "dev", 114])
-def test_setup_writes_the_full_hook_at_0_114_or_when_unknown(
-    connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, version: object
-) -> None:
-    _report_version(monkeypatch, version)
-
-    result = run_setup(tmp_path)
-
-    assert result.exit_code == 0, result.output
-    assert hook_commands(tmp_path, "SessionStart") == [
-        SESSIONSTART_HOOK_COMMAND.format(context_id=CTX)
-    ]
-    assert "older than 0.114.0" not in result.output
-
-
-@pytest.mark.parametrize(
-    "error", [httpx.ConnectError("down"), httpx.InvalidURL("bad"), ValueError("bad")]
-)
-def test_a_failing_probe_writes_the_full_hook(
-    connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: Exception
-) -> None:
-    async def failing(_mcp_url: str) -> object:
-        raise error
-
-    monkeypatch.setattr("kagura_memory.setup_claude._fetch_server_version", failing)
-
-    result = run_setup(tmp_path)
-
-    assert result.exit_code == 0, result.output
-    assert hook_commands(tmp_path, "SessionStart") == [
-        SESSIONSTART_HOOK_COMMAND.format(context_id=CTX)
-    ]
-
-
-def test_no_session_hook_sends_no_probe(
-    connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    probed = _report_version(monkeypatch, "0.113.0")
-
-    result = run_setup(tmp_path, "--no-session-hook")
-
-    assert result.exit_code == 0, result.output
-    assert probed == []
-
-
-def test_rerun_on_an_upgraded_server_replaces_the_legacy_hook(
-    connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _report_version(monkeypatch, "0.113.0")
-    assert run_setup(tmp_path).exit_code == 0
-    _report_version(monkeypatch, "0.141.0")
-    assert run_setup(tmp_path).exit_code == 0
-
-    assert hook_commands(tmp_path, "SessionStart") == [
-        SESSIONSTART_HOOK_COMMAND.format(context_id=CTX)
-    ]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("info", "expected"), [({"version": "0.141.0"}, "0.141.0"), ({}, None), (None, None)]
-)
-async def test_fetch_server_version_reads_system_info_unauthenticated(
-    monkeypatch: pytest.MonkeyPatch, info: dict[str, Any] | None, expected: str | None
-) -> None:
-    seen: list[tuple[str, str | None]] = []
-
-    async def fake_fetch(client: httpx.AsyncClient, server: str) -> dict[str, Any] | None:
-        seen.append((server, client.headers.get("Authorization")))
-        return info
-
-    monkeypatch.setattr("kagura_memory.setup_claude.fetch_system_info", fake_fetch)
-
-    version = await _fetch_server_version("https://memory.example.com/mcp/w/ws-1?profile=core")
-
-    assert version == expected
-    assert seen == [("https://memory.example.com", None)]
 
 
 def test_rerun_upgrades_the_pre_298_session_hook_in_place(tmp_path: Path) -> None:

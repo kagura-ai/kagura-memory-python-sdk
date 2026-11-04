@@ -515,6 +515,11 @@ def remember(
     _run_client_command(op, context_id)
 
 
+# The memory-cloud release that declares each recall shape flag (#298). From
+# 0.82.0 the server refuses an argument it does not declare (invalid_argument).
+_RECALL_SHAPE_FLOORS = {"--verbosity": "0.108.0", "--full": "0.114.0", "--max-chars": "0.82.0"}
+
+
 @main.command()
 @click.argument("query")
 @click.option("--context-id", "-c", help="Context ID (or set in .kagura.json)")
@@ -563,8 +568,10 @@ def recall(query, context_id, k, rerank, trusted_only, verbosity, full, max_char
 
     The reply is printed as JSON, with each hit's content (when the server
     sends it) right after its summary. --verbosity, --full and --max-chars
-    are sent only when given; a server from v0.82.0 that predates one of
-    them refuses it (invalid_argument).
+    are sent only when given. A server from v0.82.0 that predates one of
+    them refuses it (invalid_argument); the command then retries once
+    without all three and says so on stderr, so on such a server you get
+    its default shape.
 
     \b
     Examples:
@@ -577,19 +584,33 @@ def recall(query, context_id, k, rerank, trusted_only, verbosity, full, max_char
       kagura recall "release notes" --full 0
     """
     filters = {"trust_tier": "trusted"} if trusted_only else None
-    _run_client_command(
-        lambda client, ctx: client.recall(
-            context_id=ctx,
-            query=query,
-            k=k,
-            use_rerank=rerank,
-            filters=filters,
-            verbosity=verbosity,
-            full=full,
-            max_chars=max_chars,
-        ),
-        context_id,
-    )
+    shape = {"verbosity": verbosity, "full": full, "max_chars": max_chars}
+    sent = [f"--{name.replace('_', '-')}" for name, value in shape.items() if value is not None]
+
+    async def op(client: KaguraClient, ctx: str) -> dict[str, Any]:
+        async def call(**shape_args: Any) -> dict[str, Any]:
+            return await client.recall(
+                context_id=ctx, query=query, k=k, use_rerank=rerank, filters=filters, **shape_args
+            )
+
+        try:
+            return await call(**shape)
+        except KaguraError as e:
+            # #298: from 0.82.0 memory-cloud refuses an argument it does not
+            # declare, so a server below 0.114.0 refuses the SessionStart
+            # hook's --verbosity / --full. The rule is the code and "did we
+            # send one" — never the message, which the server words for people.
+            if not sent or getattr(e, "code", None) != "invalid_argument":
+                raise
+        floors = ", ".join(f"{flag} {_RECALL_SHAPE_FLOORS[flag]}+" for flag in sent)
+        click.echo(
+            f"note: the server refused a recall with {', '.join(sent)} (invalid_argument; "
+            f"memory-cloud declares {floors}); retried without them.",
+            err=True,
+        )
+        return await call(verbosity=None, full=None, max_chars=None)
+
+    _run_client_command(op, context_id)
 
 
 @main.command()

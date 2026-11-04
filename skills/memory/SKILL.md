@@ -93,6 +93,9 @@ Search options:
   SessionStart hook passes `--verbosity full --full 0`: uncut summaries with
   tags, no content.
 - `--max-chars N` (10000-100000, default 20000) bounds the whole reply.
+- A server that predates one of these three flags refuses it; `kagura recall`
+  then retries once without all three and prints a `note:` on stderr, so you
+  get that server's default shape.
 
 ## Consume the result
 

@@ -172,7 +172,8 @@ async with KaguraClient(api_key="kagura_...", mcp_url="https://...") as client:
     # Since v0.114.0 the top `full` hits also carry content (up to 1,500 chars each;
     # the deployment default is 3, full=0 means summaries only), and max_chars
     # (10,000-100,000, default 20,000; v0.82.0+) bounds the whole reply. All three are
-    # keyword-only and sent only when set; a server from 0.82.0 that predates one refuses it.
+    # keyword-only and sent only when set; a server from 0.82.0 that predates one refuses it
+    # (KaguraError, invalid_argument) and the library does not retry: `kagura recall` does.
     detailed = await client.recall(context_id="dev", query="OAuth2", verbosity="full", full=0)
     for hit in detailed["results"]:
         print(hit["summary"], hit.get("tags", []))  # empty tags are omitted, not []
@@ -698,6 +699,8 @@ kagura recall "dependency injection" --no-rerank   # skip reranking; no flag fol
 kagura recall "project context" --trusted-only     # exclude connector-ingested memories (filters.trust_tier, v0.24.0+)
 kagura recall "project context" --verbosity full   # uncut summaries + tags; compact is the server default (v0.108.0+)
 kagura recall "deploy runbook" --full 1 --max-chars 40000   # content on the top hit only (v0.114.0+); reply budget (v0.82.0+)
+# A server that refuses one of --verbosity/--full/--max-chars (invalid_argument) gets one
+# retry without all three, with a note on stderr.
 kagura explore -m "memory-uuid" --depth 3
 kagura forget -m "memory-uuid"
 kagura update-memory -m "memory-uuid" --dismiss-supersede-candidate   # server v0.65.0+
@@ -881,15 +884,16 @@ memory loop; the server knows `full` and `core` (case-sensitive), fails
 a `?tools=` allowlist. Older servers ignore both parameters.
 
 **Hooks and commands** — the SessionStart hook recalls project context with
-`kagura recall -k 5 --trusted-only --verbosity full --full 0 | head -c 5000` (`--trusted-only`
-needs server v0.24.0+), so connector-ingested memories never reach the session
-unreviewed, and the five hits arrive as uncut summaries with their tags and without
-content: since memory-cloud 0.108.0 recall is compact unless asked, and since 0.114.0
-it puts content on the top hits. Setup first asks the server for its version
-(`GET /api/v1/system/info`, no credentials). A server that reports a version below
-0.114.0, which would refuse those two flags, gets the hook without them; no answer
-gets the 0.114.0 form. Re-running setup, for example after a server upgrade, replaces an
-earlier SDK-written hook in place. `--no-session-hook`, `--no-sync-hook` (the
+`kagura recall "project context and recent decisions" -c <context> -k 5 --trusted-only
+--verbosity full --full 0 2>/dev/null | head -c 5000 || true` (`--trusted-only` needs
+server v0.24.0+), so connector-ingested memories never reach the session unreviewed,
+and on memory-cloud 0.114.0+ the five hits arrive as uncut summaries with their tags
+and without content: since 0.108.0 recall is compact unless asked, and since 0.114.0
+it puts content on the top hits. On an older server, which from 0.82.0 refuses an
+argument it does not declare, `kagura recall` retries once without `--verbosity` /
+`--full`, so the same hook works on every server: compact rows on 0.108.0–0.113.x,
+full rows before 0.108.0. Re-running setup replaces an earlier SDK-written hook in
+place. `--no-session-hook`, `--no-sync-hook` (the
 `.claude/memory` sync) and `--no-commands` (`/kagura-recall` · `/kagura-remember`)
 skip them; re-running with one removes only what setup itself wrote. When the
 memory-cloud **`kagura-memory` plugin** is installed (`claude plugin list`), an

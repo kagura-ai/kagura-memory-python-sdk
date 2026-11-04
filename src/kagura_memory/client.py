@@ -702,7 +702,9 @@ class KaguraClient:
         From v0.82.0 (#1742) a server refuses a tool argument it does not
         declare (``KaguraError``, code ``invalid_argument``), so ``verbosity``
         needs v0.108.0+ and ``full`` v0.114.0+ there; a server before v0.82.0
-        ignores all three.
+        ignores all three. This method never retries without them: the
+        caller decides. (The ``kagura recall`` CLI does retry, once, without
+        all three, so its SessionStart hook works on every server.)
 
         Args:
             context_id: Context ID for single-context search.

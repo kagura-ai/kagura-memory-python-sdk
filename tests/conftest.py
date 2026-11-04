@@ -382,19 +382,3 @@ class FakeMcpServer:
             json={"jsonrpc": "2.0", "id": body["id"], "result": result},
             headers={"mcp-session-id": session_id},
         )
-
-
-@pytest.fixture(autouse=True)
-def _no_session_hook_version_probe(monkeypatch):
-    """Keep ``kagura setup claude``'s server-version probe off the network (#298).
-
-    Setup sends ``GET /api/v1/system/info`` before it writes the SessionStart
-    hook. Answer it with "no version" (the probe-failure path, which writes
-    the 0.114.0 form); tests of the probe patch ``_fetch_server_version`` (or
-    the ``fetch_system_info`` it calls) themselves.
-    """
-
-    async def _no_version(_mcp_url: str) -> None:
-        return None
-
-    monkeypatch.setattr("kagura_memory.setup_claude._fetch_server_version", _no_version)

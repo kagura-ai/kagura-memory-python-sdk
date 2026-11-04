@@ -10,8 +10,8 @@ from click.testing import CliRunner
 
 from kagura_memory.auth.credentials import reset_state_cache
 from kagura_memory.cli import _parse_tags, main
-from kagura_memory.exceptions import KaguraConnectionError, KaguraNotFoundError
-from kagura_memory.setup_claude import LEGACY_SESSIONSTART_HOOK_COMMAND, SESSIONSTART_HOOK_COMMAND
+from kagura_memory.exceptions import KaguraConnectionError, KaguraError, KaguraNotFoundError
+from kagura_memory.setup_claude import SESSIONSTART_HOOK_COMMAND
 from tests.conftest import (
     indexer_status_dict,
     measurement_dict,
@@ -259,18 +259,11 @@ def test_recall_prints_content_right_after_its_summary(mock_client_cls, mock_con
     assert out.index('"summary"') < out.index('"content"') < out.index('"type"')
 
 
-@pytest.mark.parametrize(
-    ("template", "verbosity", "full"),
-    [(SESSIONSTART_HOOK_COMMAND, "full", 0), (LEGACY_SESSIONSTART_HOOK_COMMAND, None, None)],
-    ids=["0.114.0+", "legacy"],
-)
 @patch("kagura_memory.cli.load_config")
 @patch("kagura_memory.cli.KaguraClient")
-def test_session_start_hook_command_is_a_valid_recall(
-    mock_client_cls, mock_config, template, verbosity, full
-):
+def test_session_start_hook_command_is_a_valid_recall(mock_client_cls, mock_config):
     """The hook `kagura setup claude` writes must parse with this CLI's flags (#258, #298)."""
-    command = template.format(context_id="ctx")
+    command = SESSIONSTART_HOOK_COMMAND.format(context_id="ctx")
     argv = shlex.split(command.split(" 2>/dev/null", 1)[0])
     assert argv[:3] == ["kagura", "recall", "project context and recent decisions"]
 
@@ -282,8 +275,8 @@ def test_session_start_hook_command_is_a_valid_recall(
     assert kwargs["context_id"] == "ctx"
     assert kwargs["k"] == 5
     assert kwargs["filters"] == {"trust_tier": "trusted"}
-    assert kwargs["verbosity"] == verbosity
-    assert kwargs["full"] == full
+    assert kwargs["verbosity"] == "full"
+    assert kwargs["full"] == 0
 
 
 def _full_row(i: int) -> dict:
@@ -308,7 +301,6 @@ def _full_row(i: int) -> dict:
 def test_session_start_hook_cap_keeps_five_full_rows_with_tags(mock_client_cls, mock_config):
     """#298: the hook's `head -c` cap holds all five uncut-summary rows and their tags."""
     cap = int(re.search(r"head -c (\d+)", SESSIONSTART_HOOK_COMMAND).group(1))
-    assert cap == int(re.search(r"head -c (\d+)", LEGACY_SESSIONSTART_HOOK_COMMAND).group(1))
     mock_config.return_value = {
         "api_key": "key",
         "mcp_url": "https://test.com/mcp",
@@ -344,6 +336,109 @@ def test_session_start_hook_cap_keeps_five_full_rows_with_tags(mock_client_cls, 
     head = result.output.encode("utf-8")[:cap].decode("utf-8", errors="ignore")
     for i in range(5):
         assert f'"row-{i}"\n      ]' in head  # row i's tags list, closed
+
+
+def _server_error(code: str | None, message: str = "refused") -> KaguraError:
+    """A KaguraError as the client raises it for an MCP error envelope with ``code``."""
+    err = KaguraError(f"recall failed ({code}): {message}")
+    err.code = code  # what the client's MCP error mapping sets (KaguraError.code)
+    return err
+
+
+def _recall_cli_raising(mock_client_cls, mock_config, side_effect, *args):
+    """`_recall_cli` with ``client.recall`` answering in turn from ``side_effect``."""
+    mock_config.return_value = {
+        "api_key": "key",
+        "mcp_url": "https://test.com/mcp",
+        "context_id": "ctx",
+    }
+    mock_client = AsyncMock()
+    mock_client.recall.side_effect = side_effect
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    mock_client_cls.return_value = mock_client
+    result = CliRunner().invoke(main, ["recall", "test query", *args])
+    return result, mock_client
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_recall_retries_once_without_shape_flags_on_invalid_argument(mock_client_cls, mock_config):
+    """#298: a server below 0.114.0 refuses --verbosity / --full; the hook still gets rows."""
+    reply = {"results": [{"memory_id": "m1", "summary": "found"}]}
+    result, mock_client = _recall_cli_raising(
+        mock_client_cls,
+        mock_config,
+        [_server_error("invalid_argument"), reply],
+        "--trusted-only",
+        "--verbosity",
+        "full",
+        "--full",
+        "0",
+    )
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout) == reply
+    first, second = (call.kwargs for call in mock_client.recall.await_args_list)
+    assert (first["verbosity"], first["full"], first["max_chars"]) == ("full", 0, None)
+    assert (second["verbosity"], second["full"], second["max_chars"]) == (None, None, None)
+    same = ("context_id", "query", "k", "use_rerank", "filters")
+    assert {key: second[key] for key in same} == {key: first[key] for key in same}
+    assert second["filters"] == {"trust_tier": "trusted"}
+    assert result.stderr.count("note:") == 1
+    assert "--verbosity 0.108.0+, --full 0.114.0+" in result.stderr
+    assert "--max-chars" not in result.stderr
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_recall_does_not_retry_when_no_shape_flag_was_sent(mock_client_cls, mock_config):
+    result, mock_client = _recall_cli_raising(
+        mock_client_cls, mock_config, _server_error("invalid_argument")
+    )
+
+    assert result.exit_code == 1
+    assert mock_client.recall.await_count == 1
+    assert "invalid_argument" in result.output
+    assert "note:" not in result.stderr
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_recall_retry_error_propagates_unchanged(mock_client_cls, mock_config):
+    result, mock_client = _recall_cli_raising(
+        mock_client_cls,
+        mock_config,
+        [_server_error("invalid_argument"), _server_error("context_locked", "second failure")],
+        "--max-chars",
+        "40000",
+    )
+
+    assert result.exit_code == 1
+    assert mock_client.recall.await_count == 2
+    assert "recall failed (context_locked): second failure" in result.output
+    assert "--max-chars 0.82.0+" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        _server_error("validation_error"),
+        _server_error(None),
+        KaguraNotFoundError("recall: Context not found"),
+    ],
+    ids=["other-code", "no-code", "not-found"],
+)
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_recall_does_not_retry_other_errors(mock_client_cls, mock_config, error):
+    result, mock_client = _recall_cli_raising(
+        mock_client_cls, mock_config, error, "--verbosity", "full"
+    )
+
+    assert result.exit_code == 1
+    assert mock_client.recall.await_count == 1
+    assert "note:" not in result.stderr
 
 
 def test_forget_requires_memory_id_or_query():
