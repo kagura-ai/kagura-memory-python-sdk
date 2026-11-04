@@ -12,11 +12,19 @@ from typing import Any
 from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
 import click
+import httpx
 
 from . import claude_code
 from ._auth import _resolve_profile_auth
-from ._http import mcp_url_guardrails_off, mcp_url_has_tools_allowlist, mcp_url_with_query
+from ._http import (
+    base_url_from_mcp,
+    mcp_url_guardrails_off,
+    mcp_url_has_tools_allowlist,
+    mcp_url_with_query,
+)
+from ._version import meets_minimum, parse_version
 from .auth.credentials import CredentialsFile, OAuthCredentials
+from .auth.device_flow import fetch_system_info, make_oauth_client
 from .claude_code import (
     MCP_API_KEY_ENV,
     MCP_PROXY_COMMAND,
@@ -45,16 +53,30 @@ KAGURA_HOOK_MARKER = "kagura "
 _CONTEXT_ID_PATTERN = r"^[a-zA-Z0-9_-]+$"
 
 # --trusted-only (#258): the output is injected into the session unreviewed,
-# so connector-ingested memories stay out of it. --verbosity full (#298):
-# memory-cloud v0.108.0+ answers recall with 160-character summaries and no
-# tags unless asked, so the hook asks for the uncut summaries and tags; how
-# many hits carry content (--full) stays the deployment's default. Install
-# and removal match this command's fixed prefix (see _sdk_prefix), which the
-# pre-#258 and pre-#298 forms share, so re-running setup replaces them.
+# so connector-ingested memories stay out of it. --verbosity full --full 0
+# (#298): memory-cloud v0.108.0+ answers recall with 160-character summaries
+# and no tags unless asked, and v0.114.0+ puts up to 1,500 characters of
+# content on the top 3 hits, ahead of their tags; the hook asks for uncut
+# summaries with tags and no content. 5,000 bytes hold five such rows (about
+# 4,040 characters with 200-character ASCII summaries; CJK text takes up to 3
+# bytes a character). Install and removal match this command's fixed prefix
+# (see _sdk_prefix), which every earlier form shares, so re-running setup
+# replaces them.
 SESSIONSTART_HOOK_COMMAND = (
     'kagura recall "project context and recent decisions" '
-    "-c {context_id} -k 5 --trusted-only --verbosity full 2>/dev/null | head -c 2000 || true"
+    "-c {context_id} -k 5 --trusted-only --verbosity full --full 0 "
+    "2>/dev/null | head -c 5000 || true"
 )
+
+# The hook for a server that reports a version below 0.114.0 (#298): from
+# 0.82.0 memory-cloud refuses a tool argument it does not declare, so
+# --verbosity (0.108.0) and --full (0.114.0) would leave the hook printing
+# nothing. Same prefix, so a later run on an upgraded server replaces it.
+LEGACY_SESSIONSTART_HOOK_COMMAND = (
+    'kagura recall "project context and recent decisions" '
+    "-c {context_id} -k 5 --trusted-only 2>/dev/null | head -c 5000 || true"
+)
+SESSIONSTART_HOOK_MIN_SERVER_VERSION: tuple[int, int, int] = (0, 114, 0)
 
 POSTTOOLUSE_HOOK_COMMAND = (
     "INPUT=$(cat); "
@@ -795,9 +817,18 @@ def _sdk_prefix(template: str) -> str:
 
 
 def _install_hooks(
-    project_dir: Path, context_id: str, *, session: bool = True, sync: bool = True
+    project_dir: Path,
+    context_id: str,
+    *,
+    session: bool = True,
+    sync: bool = True,
+    session_template: str = SESSIONSTART_HOOK_COMMAND,
 ) -> Path:
-    """Install hooks to .claude/settings.json, preserving existing hooks."""
+    """Install hooks to .claude/settings.json, preserving existing hooks.
+
+    ``session_template`` is the SessionStart command to write, from
+    :func:`_session_hook_template`; every form shares one prefix.
+    """
     claude_dir = project_dir / ".claude"
     claude_dir.mkdir(exist_ok=True)
     path = claude_dir / "settings.json"
@@ -809,9 +840,9 @@ def _install_hooks(
         session_start_list = hooks.setdefault("SessionStart", [])
         kagura_session_hook = {
             "type": "command",
-            "command": SESSIONSTART_HOOK_COMMAND.format(context_id=context_id),
+            "command": session_template.format(context_id=context_id),
         }
-        _upsert_hook_entry(session_start_list, kagura_session_hook, SESSIONSTART_HOOK_COMMAND)
+        _upsert_hook_entry(session_start_list, kagura_session_hook, session_template)
 
     if sync:
         post_tool_list = hooks.setdefault("PostToolUse", [])
@@ -967,14 +998,25 @@ def _remove_sdk_skills(project: Path, non_interactive: bool) -> list[str]:
     return [f"{names} command files"]
 
 
-def _apply_extras(project: Path, context_id: str, extras: _Extras, non_interactive: bool) -> None:
+def _apply_extras(
+    project: Path, context_id: str, extras: _Extras, non_interactive: bool, mcp_url: str
+) -> None:
     """Install the enabled hooks and commands and remove the disabled SDK-written ones.
 
     Items whose removal the user declines are recorded in ``extras.kept``.
+    The SessionStart hook's form depends on the version of ``mcp_url``'s
+    server (:func:`_session_hook_template`), probed only when it is installed.
     """
     if extras.session_hook or extras.sync_hook:
+        session_template = (
+            _session_hook_template(mcp_url) if extras.session_hook else SESSIONSTART_HOOK_COMMAND
+        )
         hooks_path = _install_hooks(
-            project, context_id, session=extras.session_hook, sync=extras.sync_hook
+            project,
+            context_id,
+            session=extras.session_hook,
+            sync=extras.sync_hook,
+            session_template=session_template,
         )
         click.echo(f"  Wrote {hooks_path.relative_to(project)}")
     extras.kept += _remove_disabled_hooks(project, extras, non_interactive)
@@ -1046,6 +1088,14 @@ def run_setup_claude(
     ``.kagura.json`` and the hooks and commands that ``session_hook`` /
     ``sync_hook`` / ``commands`` select (``None``: not given, on by default).
     ``guardrails`` must already be normalized (``off`` or a canonical UUID).
+
+    The SessionStart hook runs ``kagura recall --trusted-only --verbosity full
+    --full 0`` (uncut summaries with tags, no content), which needs
+    memory-cloud 0.114.0+. Before writing it, setup sends one unauthenticated
+    ``GET /api/v1/system/info`` to the MCP URL's server: one that reports an
+    older version gets the hook without ``--verbosity`` / ``--full``, which
+    0.82.0-0.113.x would refuse. No answer, or a version setup cannot read,
+    gets the 0.114.0 form; the probe never fails setup.
     """
     if profile is not None:
         if api_key is not None:
@@ -1150,7 +1200,7 @@ def run_setup_claude(
     if scope == "user":
         _echo_api_key_env_note(resolved_api_key)
     _echo_plan_notes(plan)
-    _apply_extras(project, resolved_context_id, extras, non_interactive)
+    _apply_extras(project, resolved_context_id, extras, non_interactive, resolved_mcp_url)
 
     if plugin_id is not None:
         _echo_plugin_notes(plugin_id, upstream_url, resolved_context_id, guardrails)
@@ -1308,7 +1358,7 @@ def _run_setup_claude_oauth(
     server_command = shlex.join([MCP_PROXY_COMMAND, *entry["args"]])
     click.echo(f"  {_write_mcp_entry(project, plan)} (stdio: {server_command})")
     _echo_plan_notes(plan)
-    _apply_extras(project, resolved_context_id, extras, non_interactive)
+    _apply_extras(project, resolved_context_id, extras, non_interactive, creds.mcp_url)
 
     # The installed hooks shell out to `kagura recall` / `kagura remember`,
     # which resolve the *default* OAuth profile (they take no --profile flag).
@@ -1339,3 +1389,40 @@ def _run_setup_claude_oauth(
     )
     for line in extras.summary():
         click.echo(line)
+
+
+async def _fetch_server_version(mcp_url: str) -> object:
+    """The version ``GET /api/v1/system/info`` reports for ``mcp_url``'s server, or ``None``.
+
+    Unauthenticated, like ``kagura auth login --invite`` and ``setup codex
+    --oauth``; :func:`fetch_system_info` turns a network error, a non-200 or a
+    body that is not a JSON object into ``None``.
+    """
+    async with make_oauth_client() as client:
+        info = await fetch_system_info(client, base_url_from_mcp(mcp_url))
+    return None if info is None else info.get("version")
+
+
+def _session_hook_template(mcp_url: str) -> str:
+    """The SessionStart hook command for ``mcp_url``'s server (#298).
+
+    :data:`LEGACY_SESSIONSTART_HOOK_COMMAND` when the server reports a version
+    below :data:`SESSIONSTART_HOOK_MIN_SERVER_VERSION` (0.114.0), else
+    :data:`SESSIONSTART_HOOK_COMMAND` — also when the probe gets no answer or
+    a version it cannot read. Fail-soft: the probe never stops setup.
+    """
+    try:
+        version = asyncio.run(_fetch_server_version(mcp_url))
+    except (httpx.HTTPError, httpx.InvalidURL, ValueError):
+        version = None
+    if meets_minimum(version, SESSIONSTART_HOOK_MIN_SERVER_VERSION) is not False:
+        return SESSIONSTART_HOOK_COMMAND
+    # meets_minimum() read it, so parse_version() does too: print the triple,
+    # never the server's raw string.
+    shown = ".".join(map(str, parse_version(version) or ()))
+    click.echo(
+        f"  The server runs memory-cloud {shown}, older than 0.114.0: the SessionStart\n"
+        "  hook recalls without --verbosity full --full 0, which that server would refuse.\n"
+        "  Re-run this setup after the server is upgraded to get uncut summaries and tags."
+    )
+    return LEGACY_SESSIONSTART_HOOK_COMMAND

@@ -1,6 +1,7 @@
 """Tests for CLI commands."""
 
 import json
+import re
 import shlex
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -10,7 +11,7 @@ from click.testing import CliRunner
 from kagura_memory.auth.credentials import reset_state_cache
 from kagura_memory.cli import _parse_tags, main
 from kagura_memory.exceptions import KaguraConnectionError, KaguraNotFoundError
-from kagura_memory.setup_claude import SESSIONSTART_HOOK_COMMAND
+from kagura_memory.setup_claude import LEGACY_SESSIONSTART_HOOK_COMMAND, SESSIONSTART_HOOK_COMMAND
 from tests.conftest import (
     indexer_status_dict,
     measurement_dict,
@@ -258,11 +259,18 @@ def test_recall_prints_content_right_after_its_summary(mock_client_cls, mock_con
     assert out.index('"summary"') < out.index('"content"') < out.index('"type"')
 
 
+@pytest.mark.parametrize(
+    ("template", "verbosity", "full"),
+    [(SESSIONSTART_HOOK_COMMAND, "full", 0), (LEGACY_SESSIONSTART_HOOK_COMMAND, None, None)],
+    ids=["0.114.0+", "legacy"],
+)
 @patch("kagura_memory.cli.load_config")
 @patch("kagura_memory.cli.KaguraClient")
-def test_session_start_hook_command_is_a_valid_recall(mock_client_cls, mock_config):
+def test_session_start_hook_command_is_a_valid_recall(
+    mock_client_cls, mock_config, template, verbosity, full
+):
     """The hook `kagura setup claude` writes must parse with this CLI's flags (#258, #298)."""
-    command = SESSIONSTART_HOOK_COMMAND.format(context_id="ctx")
+    command = template.format(context_id="ctx")
     argv = shlex.split(command.split(" 2>/dev/null", 1)[0])
     assert argv[:3] == ["kagura", "recall", "project context and recent decisions"]
 
@@ -274,8 +282,68 @@ def test_session_start_hook_command_is_a_valid_recall(mock_client_cls, mock_conf
     assert kwargs["context_id"] == "ctx"
     assert kwargs["k"] == 5
     assert kwargs["filters"] == {"trust_tier": "trusted"}
-    assert kwargs["verbosity"] == "full"
-    assert kwargs["full"] is None  # content stays the deployment default
+    assert kwargs["verbosity"] == verbosity
+    assert kwargs["full"] == full
+
+
+def _full_row(i: int) -> dict:
+    """A verbosity="full", full=0 recall row: 200-character summary, 140 of context_summary."""
+    return {
+        "memory_id": f"00000000-0000-0000-0000-00000000000{i}",
+        "summary": f"Decision {i}: " + "x" * 188,
+        "context_summary": "y" * 140,
+        "type": "decision",
+        "importance": 0.8,
+        "scope": "persistent",
+        "score": 0.8123,
+        "created_at": "2026-10-01T00:00:00Z",
+        "updated_at": "2026-10-02T00:00:00Z",
+        "version": 3,
+        "tags": ["architecture", "decision", f"row-{i}"],
+    }
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_session_start_hook_cap_keeps_five_full_rows_with_tags(mock_client_cls, mock_config):
+    """#298: the hook's `head -c` cap holds all five uncut-summary rows and their tags."""
+    cap = int(re.search(r"head -c (\d+)", SESSIONSTART_HOOK_COMMAND).group(1))
+    assert cap == int(re.search(r"head -c (\d+)", LEGACY_SESSIONSTART_HOOK_COMMAND).group(1))
+    mock_config.return_value = {
+        "api_key": "key",
+        "mcp_url": "https://test.com/mcp",
+        "context_id": "ctx",
+    }
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    mock_client_cls.return_value = mock_client
+    mock_client.recall.return_value = {
+        "confidence": {
+            "level": "high",
+            "top_score": 0.71,
+            "prominence": 0.52,
+            "relative_margin": 3.1,
+            "result_count": 5,
+            "rationale": "Top hit is well above the background of the candidate pool.",
+        },
+        "status": "success",
+        "results": [_full_row(i) for i in range(5)],
+        "count": 5,
+        "context_id": "00000000-0000-0000-0000-000000000099",
+        "context_name": "dev",
+        "context_display_name": "Dev",
+        "context_is_private": False,
+        "context_is_locked": False,
+        "related_tags": [{"tag": "architecture", "count": 3}],
+    }
+
+    result = CliRunner().invoke(main, ["recall", "project context"])
+
+    assert result.exit_code == 0, result.output
+    head = result.output.encode("utf-8")[:cap].decode("utf-8", errors="ignore")
+    for i in range(5):
+        assert f'"row-{i}"\n      ]' in head  # row i's tags list, closed
 
 
 def test_forget_requires_memory_id_or_query():
