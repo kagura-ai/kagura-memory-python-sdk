@@ -16,17 +16,16 @@ from pydantic import BaseModel as _BaseModel
 from ._auth import _OAuthAuth, _resolve_auth, _StaticAuth
 from ._http import (
     SDK_VERSION,
+    ErrorBody,
     _opt_int,
     annotate_server_error,
     base_url_from_mcp,
-    extract_detail,
     gate_error,
     mcp_session_expired,
     mcp_session_header,
     parse_response,
     parse_response_list,
     raise_for_kagura_status,
-    server_error_fields,
     validate_coordinate,
     validate_https_url,
     validate_lat_lon,
@@ -461,9 +460,11 @@ class KaguraClient:
             response.raise_for_status()
             return response.json()
         except httpx.HTTPStatusError as e:
+            # One body for both paths: the MCP-style remap and the status mapping.
+            body = ErrorBody(e.response)
             code = {404: "context_not_found", 422: "invalid_argument"}.get(e.response.status_code)
             if mcp_tool is not None and code is not None:
-                message = extract_detail(e.response) or f"HTTP {e.response.status_code}"
+                message = body.detail or f"HTTP {e.response.status_code}"
                 try:
                     self._raise_for_mcp_error(
                         {"status": "error", "error": code, "message": message}, mcp_tool
@@ -471,11 +472,11 @@ class KaguraClient:
                 except KaguraError as mapped:
                     # ``code`` stays the MCP tool's; the REST body's fields are
                     # what the server sent with it.
-                    if (fields := server_error_fields(e.response)) is not None:
-                        annotate_server_error(mapped, *fields)
+                    if body.fields is not None:
+                        annotate_server_error(mapped, *body.fields)
                     # Chained explicitly, as raise_for_kagura_status chains it.
                     raise mapped from e
-            raise_for_kagura_status(e)
+            raise_for_kagura_status(e, body)
         except httpx.RequestError as e:
             raise KaguraConnectionError(f"Connection failed: {_exc_message(e)}") from e
         except (ValueError, TypeError) as e:

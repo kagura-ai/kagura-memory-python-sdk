@@ -53,6 +53,7 @@ from kagura_memory.models import ResourceEventRequest
 from kagura_memory.resource_client import ResourceClient
 from kagura_memory.secrets.client import SecretClient
 from kagura_memory.workspace_client import WorkspaceClient
+from tests.conftest import kagura_client_on
 
 WS = "11111111-2222-3333-4444-555555555555"
 CTX = "22222222-3333-4444-5555-666666666666"
@@ -902,6 +903,40 @@ def test_raise_for_kagura_status_decodes_the_body_once(status, body, headers, de
             httpx.HTTPStatusError(str(status), request=request, response=response)
         )
     assert response.decodes == decodes
+
+
+async def _list_tags_via_rest(c: KaguraClient) -> Any:
+    return await c.list_tags(context_id=CTX, with_tags=["a"])  # REST, mcp_tool="list_tags"
+
+
+async def _server_info(c: KaguraClient) -> Any:
+    return await c.get_server_info()  # REST, no mcp_tool
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("call", "status", "body", "raised", "decodes"),
+    [
+        (_list_tags_via_rest, 422, {"error": "VAL-001", "message": "bad"}, KaguraError, 1),
+        (_list_tags_via_rest, 404, {"detail": "no context"}, KaguraNotFoundError, 1),
+        (_list_tags_via_rest, 500, {"detail": "boom"}, KaguraConnectionError, 1),
+        (_server_info, 404, {"detail": "gone"}, KaguraConnectionError, 1),
+        (_server_info, 401, {"error": "invalid_token"}, KaguraAuthError, 0),
+    ],
+    ids=["mcp-remap-422", "mcp-remap-404", "fall-through-500", "no-mcp-tool-404", "401-not-read"],
+)
+async def test_kagura_client_rest_error_body_is_decoded_once(call, status, body, raised, decodes):
+    """KaguraClient's REST reads: the MCP-style remap and the status mapping share one decode."""
+    sent: list[_CountingResponse] = []
+
+    def handler(_req: httpx.Request) -> httpx.Response:
+        sent.append(_CountingResponse(status, json=body))
+        return sent[-1]
+
+    async with kagura_client_on(handler) as client:
+        with pytest.raises(raised):
+            await call(client)
+    assert [r.decodes for r in sent] == [decodes]
 
 
 def test_error_body_decodes_lazily_once_and_shares_no_dict():

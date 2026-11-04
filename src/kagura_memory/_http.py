@@ -640,7 +640,7 @@ def _opt_datetime(value: object) -> datetime | None:
         return None
 
 
-def raise_for_kagura_status(e: httpx.HTTPStatusError) -> NoReturn:
+def raise_for_kagura_status(e: httpx.HTTPStatusError, body: ErrorBody | None = None) -> NoReturn:
     """Translate an httpx ``HTTPStatusError`` into the matching Kagura error.
 
     Maps ``401`` → :class:`~kagura_memory.exceptions.KaguraAuthError`, a ``403``
@@ -660,12 +660,19 @@ def raise_for_kagura_status(e: httpx.HTTPStatusError) -> NoReturn:
     the REST-backed ``KaguraClient`` methods it serves are listing and status
     reads, which memory-cloud keeps open under the Free capacity lock (#1941).
     This function always raises.
+
+    Args:
+        e: The status error.
+        body: ``e.response``'s :class:`ErrorBody`, when the caller already
+            built one to read the body itself, so the body is decoded at
+            most once between them; ``None`` builds one here.
     """
     response = e.response
     status = response.status_code
     if status == 401:
         raise KaguraAuthError("Authentication failed. Check your API key.") from e
-    body = ErrorBody(response)
+    if body is None:
+        body = ErrorBody(response)
     if status == 403 and (scope_error := insufficient_scope_error(response, body)) is not None:
         raise scope_error from e
     detail = body.detail or _exc_message(e)
