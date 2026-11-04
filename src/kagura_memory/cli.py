@@ -46,8 +46,10 @@ from .models import (
     _MAX_CHARS_MAX,
     _MAX_CHARS_MIN,
     _RECALL_FULL_MAX,
+    BootstrapFormat,
     FileObject,
     GuardrailDigest,
+    ListOrderBy,
     MeasurementAggregate,
     MeasurementPeriod,
     RecallVerbosity,
@@ -129,16 +131,26 @@ def _parse_details(details: str | None) -> dict[str, Any] | None:
         click.UsageError: If the string is not valid JSON, or is valid JSON but
             not an object (the MCP tool's ``details`` is typed ``object``).
     """
-    if details is None or not details.strip():
+    return _parse_json_object(
+        details, "--details", '\'{"location": {"lat": 35.68, "lon": 139.76}}\''
+    )
+
+
+def _parse_json_object(value: str | None, flag: str, example: str) -> dict[str, Any] | None:
+    """Parse the JSON object option ``flag`` into a dict, or None if blank.
+
+    Raises:
+        click.UsageError: If the string is not valid JSON, or is not an object.
+    """
+    if value is None or not value.strip():
         return None
     try:
-        parsed = json.loads(details)
+        parsed = json.loads(value)
     except json.JSONDecodeError as e:
-        raise click.UsageError(f"Invalid JSON for --details: {_exc_message(e)}") from e
+        raise click.UsageError(f"Invalid JSON for {flag}: {_exc_message(e)}") from e
     if not isinstance(parsed, dict):
         raise click.UsageError(
-            f"--details must be a JSON object, got {type(parsed).__name__}. "
-            'Example: --details \'{"location": {"lat": 35.68, "lon": 139.76}}\''
+            f"{flag} must be a JSON object, got {type(parsed).__name__}. Example: {flag} {example}"
         )
     return parsed
 
@@ -971,6 +983,165 @@ def reference(context_id, memory_id):
     )
 
 
+@main.command(name="bootstrap")
+@click.option("--context-id", "-c", help="Context ID (or set in .kagura.json)")
+@click.option(
+    "--since",
+    help="Start of the changes window: ISO 8601 (naive = UTC) or '<N>d' days back "
+    "(default: the server's 7d)",
+)
+@click.option("--include", help="Comma-separated lanes: pinned,upcoming,changes (default: all)")
+@click.option(
+    "--format",
+    "reply_format",
+    type=click.Choice(get_args(BootstrapFormat)),
+    help="index: one short row per memory (server v0.115.0+); full: the whole shape. "
+    "Default: index below --max-chars 10000, else full",
+)
+@click.option(
+    "--max-chars",
+    type=click.IntRange(2_000, _MAX_CHARS_MAX),
+    help="Response budget in characters, 2000-100000 (below 10000 needs server v0.115.0+; "
+    "default 20000)",
+)
+def bootstrap(context_id, since, include, reply_format, max_chars):
+    """
+    Open a session on one context in one call (server v0.93.0+).
+
+    Prints the context block, its tool guardrails, the pinned memories, the
+    upcoming Time Memories and what changed since --since, each lane
+    fail-soft (degraded: true when one failed). No search runs: use
+    `kagura recall` for a topic.
+
+    \b
+    Examples:
+      kagura bootstrap
+      kagura bootstrap --since 7d --format index --max-chars 5000
+      kagura bootstrap -c dev --include pinned,changes --since 2026-11-01
+    """
+    lanes: Any = _parse_tags(include)  # the client checks the lane names
+
+    async def op(client: KaguraClient, ctx: str) -> dict[str, Any]:
+        result = await client.bootstrap(
+            ctx, since=since, include=lanes, max_chars=max_chars, format=reply_format
+        )
+        return result.model_dump(mode="json", by_alias=True)
+
+    _run_client_command(op, context_id)
+
+
+@main.command(name="changes")
+@click.argument("since")
+@click.option("--context-id", "-c", help="Context ID (or set in .kagura.json)")
+@click.option("--until", help="Window end, exclusive (ISO 8601; default: now)")
+@click.option(
+    "--kinds",
+    help="Comma-separated kinds: created,updated,superseded,forgotten "
+    "(with --session-id/--by-me: created,updated,forgotten,restored). Default: all",
+)
+@click.option("--cursor", help="next_cursor of the previous page")
+@click.option("--limit", type=click.IntRange(1, 100), help="Changes per page (default 50)")
+@click.option(
+    "--session-id",
+    help="Only that session's writes (a session_id a write returned; server v0.113.0+)",
+)
+@click.option(
+    "--by-me",
+    is_flag=True,
+    default=False,
+    help="Only your own writes, in any session (server v0.114.0+)",
+)
+@click.option(
+    "--max-chars",
+    type=click.IntRange(_MAX_CHARS_MIN, _MAX_CHARS_MAX),
+    help="Response budget in characters, 10000-100000 (default 20000)",
+)
+def changes(since, context_id, until, kinds, cursor, limit, session_id, by_me, max_chars):
+    """
+    List what changed in a context since SINCE, oldest first (server v0.93.0+).
+
+    SINCE is ISO 8601 (naive = UTC). Events are created, updated,
+    superseded (with superseded_by) and forgotten; a forgotten memory's
+    events carry no summary. Page on with --cursor while has_more is true.
+
+    \b
+    Examples:
+      kagura changes 2026-11-01T00:00:00Z
+      kagura changes 2026-11-01 --kinds created,forgotten --limit 20
+      kagura changes 2026-11-04T09:00:00Z --by-me
+    """
+
+    async def op(client: KaguraClient, ctx: str) -> dict[str, Any]:
+        result = await client.changes_since(
+            ctx,
+            since,
+            until=until,
+            kinds=_parse_tags(kinds),
+            cursor=cursor,
+            limit=limit,
+            session_id=session_id,
+            by_me=True if by_me else None,
+            max_chars=max_chars,
+        )
+        return result.model_dump(mode="json")
+
+    _run_client_command(op, context_id)
+
+
+@main.command(name="list")
+@click.option("--context-id", "-c", help="Context ID (or set in .kagura.json)")
+@click.option(
+    "--filters",
+    help="Exact-match filters as a JSON object, e.g. "
+    '\'{"type": "task", "details.status": "open"}\'',
+)
+@click.option(
+    "--order-by",
+    type=click.Choice(get_args(ListOrderBy)),
+    help="Sort key (default updated_at; observed_at needs server v0.127.0+)",
+)
+@click.option("--direction", type=click.Choice(["asc", "desc"]), help="Default desc")
+@click.option("--cursor", help="next_cursor of the previous page")
+@click.option("--limit", type=click.IntRange(1, 100), help="Memories per page (default 50)")
+@click.option("--details", "include_details", is_flag=True, help="Add each memory's details")
+@click.option(
+    "--max-chars",
+    type=click.IntRange(_MAX_CHARS_MIN, _MAX_CHARS_MAX),
+    help="Response budget in characters, 10000-100000 (default 20000)",
+)
+def list_command(
+    context_id, filters, order_by, direction, cursor, limit, include_details, max_chars
+):
+    """
+    List every memory of a context that matches exact filters (server v0.93.0+).
+
+    No ranking: a stable order and a total. Use `kagura recall` to search by
+    meaning. Page on with --cursor while has_more is true.
+
+    \b
+    Examples:
+      kagura list --filters '{"type": ["tech-debt"], "tags": ["status:open"]}'
+      kagura list --filters '{"details.status": "open"}' --order-by created_at
+      kagura list --order-by observed_at --direction asc --details
+    """
+    filter_dict = _parse_json_object(filters, "--filters", '\'{"type": "task"}\'')
+
+    async def op(client: KaguraClient, ctx: str) -> dict[str, Any]:
+        result = await client.list_matching(
+            ctx,
+            filters=filter_dict,
+            order_by=order_by,
+            direction=direction,
+            cursor=cursor,
+            limit=limit,
+            include_details=include_details,
+            max_chars=max_chars,
+        )
+        return result.model_dump(mode="json")
+
+    _run_client_command(op, context_id)
+
+
 @main.command(name="update-memory")
 @click.option("--context-id", "-c", help="Context ID (or set in .kagura.json)")
 @click.option("--memory-id", "-m", help="Memory UUID to update in-place")
@@ -1096,24 +1267,47 @@ def update_memory(
 @click.option("--memory-id", "-m", help="Memory ID to delete (specific deletion)")
 @click.option("--query", "-q", help="Query to find memories to delete (bulk deletion)")
 @click.option("-k", type=int, default=10, help="Max memories to delete in query mode")
-def forget(context_id, memory_id, query, k):
+@click.option(
+    "--ids",
+    "memory_ids",
+    help="Comma-separated memory IDs to delete in one call, 1-50 (server v0.117.0+); "
+    "prints one result row per id",
+)
+def forget(context_id, memory_id, query, k, memory_ids):
     """
     Delete memories (soft delete).
 
     Deleted memories stay recoverable until the deployment's cleanup window
     passes (CLEANUP_DELETED_MEMORIES_RETENTION_DAYS, 30 days by default).
 
-    Use --memory-id for specific deletion or --query for bulk deletion.
-    The server refuses --query while recall is degraded (keyword-only).
+    Use --memory-id for specific deletion, --ids for several specific
+    memories in one call, or --query for bulk deletion. The server refuses
+    --query while recall is degraded (keyword-only). --ids reports each id
+    as deleted, skipped (not found or not yours) or error; resend the ids
+    whose error is not_attempted.
 
     \b
     Examples:
       kagura forget -m "abc-123-def"
+      kagura forget --ids "abc-123-def,fed-321-cba"
       kagura forget -q "outdated test data" -k 5
       kagura forget -c dev -m "memory-uuid"
     """
+    if memory_ids is not None:
+        ids = _parse_tags(memory_ids)
+        if not ids:
+            raise click.ClickException("--ids needs at least one memory ID")
+        if memory_id or query:
+            raise click.ClickException("Use only one of --memory-id, --ids or --query")
+
+        async def forget_ids(client: KaguraClient, ctx: str) -> dict[str, Any]:
+            result = await client.forget(context_id=ctx, memory_ids=ids)
+            return result.model_dump(mode="json")
+
+        _run_client_command(forget_ids, context_id)
+        return
     if not memory_id and not query:
-        raise click.ClickException("Either --memory-id or --query is required")
+        raise click.ClickException("Either --memory-id or --query is required (or --ids)")
 
     _run_client_command(
         lambda client, ctx: client.forget(context_id=ctx, memory_id=memory_id, query=query, k=k),
