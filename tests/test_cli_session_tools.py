@@ -127,7 +127,8 @@ def test_bootstrap_passes_every_option_and_prints_wire_keys():
 
 
 def test_bootstrap_defaults_send_nothing_extra():
-    result, client = _invoke("bootstrap", bootstrap=BootstrapResponse())
+    reply = BootstrapResponse.model_validate({"components": {}})
+    result, client = _invoke("bootstrap", bootstrap=reply)
     assert result.exit_code == 0, result.output
     client.bootstrap.assert_awaited_once_with(
         CTX, since=None, include=None, max_chars=None, format=None

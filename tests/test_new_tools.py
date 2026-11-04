@@ -477,6 +477,19 @@ async def test_bootstrap_drift_raises_response_error():
 
 
 @pytest.mark.asyncio
+async def test_bootstrap_without_components_is_drift():
+    reply = {k: v for k, v in FULL_REPLY.items() if k != "components"}
+    sent: list[dict[str, Any]] = []
+    client = _wire_client(reply, sent)
+    try:
+        with pytest.raises(KaguraResponseError) as info:
+            await client.bootstrap(CTX)
+    finally:
+        await client.close()
+    assert info.value.operation == "bootstrap"
+
+
+@pytest.mark.asyncio
 async def test_bootstrap_context_not_found_raises_not_found():
     reply = _error("context_not_found", "Context not found or you don't have access to it.")
     sent: list[dict[str, Any]] = []

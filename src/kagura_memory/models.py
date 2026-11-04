@@ -2059,7 +2059,8 @@ class BootstrapResponse(_ContextEcho):
     its ``max_chars`` budget and the server left ``context_summary`` out of
     the pinned rows first. ``plan_headroom`` (memory-cloud v0.142.0+, #2615)
     is on every bootstrap whose workspace has a dimension at 80 % or more of
-    its limit, else ``None``.
+    its limit, else ``None``. ``components`` is required, so a reply without
+    it fails to parse instead of reading as a session with nothing in it.
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -2070,7 +2071,7 @@ class BootstrapResponse(_ContextEcho):
     context: ContextDetail | None = None
     instructions: str | None = None
     guardrails: ContextGuardrails | None = None
-    components: BootstrapComponents = Field(default_factory=BootstrapComponents)
+    components: BootstrapComponents
     since: datetime | None = None
     generated_at: datetime | None = None
     context_summary_omitted: bool = False
