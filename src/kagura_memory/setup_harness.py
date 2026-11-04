@@ -83,7 +83,7 @@ from ._guardrail_export import has_guardrail_block, write_guardrail_block
 from ._http import (
     base_url_from_mcp,
     mcp_url_guardrails_off,
-    mcp_url_query_values,
+    mcp_url_tool_view,
     mcp_url_with_query,
     mcp_url_without_query_param,
     normalize_url,
@@ -2107,15 +2107,14 @@ def _digest_view_args(
 
     The preview's truncation note names a tool the entry's ``tools/list``
     shows, so the preview carries the entry's ``profile`` / ``tools`` /
-    ``add_tools`` (#300): from the query of a URL entry (the first value, as
-    the server reads it), else the stdio entry's ``kagura-mcp`` flags.
+    ``add_tools`` (#300): from the query of a URL entry (read by
+    :func:`~kagura_memory._http.mcp_url_tool_view`, as the server reads it),
+    else the stdio entry's ``kagura-mcp`` flags. A blank value is left out,
+    and so is a list naming no tool (``--add-tools`` would refuse it).
     """
     if entry.url is not None:
-        query = mcp_url_query_values(entry.url)
-        added = query.get("add_tools", "")
-        # A list naming no tool adds nothing, and `--add-tools` would refuse it.
-        names = added if added.replace(",", "").strip() else None
-        view = [query.get("profile"), query.get("tools"), names]
+        query = mcp_url_tool_view(entry.url)
+        view = [query.profile, ",".join(query.tools or ()), ",".join(query.add_tools)]
     else:
         view = [tool_profile, None, ",".join(add_tools) if add_tools else None]
     args: list[str] = []

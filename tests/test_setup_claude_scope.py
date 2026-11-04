@@ -810,6 +810,27 @@ def test_query_flags_add_up_repeated_add_tools_in_a_stdio_entry() -> None:
     }
 
 
+@pytest.mark.parametrize(
+    ("query", "flags"),
+    [
+        ("", {}),
+        # The first value of a key wins, as the server reads it; a blank one is no flag.
+        ("?profile=&profile=full&guardrails=off&guardrails=x", {"--guardrails": "off"}),
+        ("?guardrails=%20&guardrails=off&profile=%20core", {"--tool-profile": "core"}),
+        ("?add_tools=,&add_tools=explore", {}),
+        (
+            f"?add_tools=explore,%20a,explore&tools=recall&context={CTX}",
+            {"--add-tools": "explore,a", "--context": CTX},
+        ),
+    ],
+    ids=["no-query", "blank-profile-first", "blank-guardrails-first", "no-names", "names"],
+)
+def test_query_flags_of_an_http_entry_read_the_url_as_the_server_does(
+    query: str, flags: dict[str, str]
+) -> None:
+    assert _query_flags({"type": "http", "url": f"{MCP_URL}{query}"}) == flags
+
+
 def test_add_tools_under_a_tools_allowlist_warns(connection, tmp_path: Path) -> None:
     args = ["setup", "claude", "--project-dir", str(tmp_path), "--context-id", CTX, "-y"]
     args += ["--api-key", API_KEY, "--mcp-url", f"{MCP_URL}?tools=recall"]

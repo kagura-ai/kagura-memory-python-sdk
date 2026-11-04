@@ -10,13 +10,19 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qsl, urlsplit, urlunsplit
+from urllib.parse import urlsplit, urlunsplit
 
 import click
 
 from . import claude_code
 from ._auth import _resolve_profile_auth
-from ._http import mcp_url_guardrails_off, mcp_url_has_tools_allowlist, mcp_url_with_query
+from ._http import (
+    mcp_url_guardrails_off,
+    mcp_url_has_tools_allowlist,
+    mcp_url_query_values,
+    mcp_url_tool_view,
+    mcp_url_with_query,
+)
 from .auth.credentials import CredentialsFile, OAuthCredentials
 from .claude_code import (
     MCP_API_KEY_ENV,
@@ -451,12 +457,9 @@ def _redact_entry(entry: dict[str, Any]) -> dict[str, Any]:
     return {**entry, "headers": masked}
 
 
-_QUERY_FLAGS = (
-    ("--guardrails", "guardrails"),
-    ("--tool-profile", "profile"),
-    ("--add-tools", "add_tools"),
-    ("--context", "context"),
-)
+#: The ``kagura-mcp`` flags that set ``?guardrails=`` / ``?profile=`` /
+#: ``?add_tools=`` / ``?context=`` on the upstream URL.
+_QUERY_FLAGS = ("--guardrails", "--tool-profile", "--add-tools", "--context")
 
 
 def _query_flags(entry: dict[str, Any]) -> dict[str, str]:
@@ -464,14 +467,16 @@ def _query_flags(entry: dict[str, Any]) -> dict[str, str]:
 
     Read from the ``kagura-mcp`` args of a stdio entry (the last value of a
     repeated flag, as the proxy reads it, except ``--add-tools``, whose
-    values add up), or from the url's query (first value, as the server
-    reads it) of an http one.
+    values add up), or from the url's query of an http one, as the server
+    reads it: the first value of a repeated key, the tool view by
+    :func:`~kagura_memory._http.mcp_url_tool_view`. A blank first value is
+    no flag to re-run with, so it is left out.
     """
     found: dict[str, str] = {}
     if classify_mcp_entry(entry) == "stdio":
         args = entry.get("args")
         argv = [a for a in args if isinstance(a, str)] if isinstance(args, list) else []
-        for flag, _ in _QUERY_FLAGS:
+        for flag in _QUERY_FLAGS:
             values: list[str] = []
             for i, arg in enumerate(argv):
                 if arg == flag and i + 1 < len(argv):
@@ -482,12 +487,17 @@ def _query_flags(entry: dict[str, Any]) -> dict[str, str]:
                 found[flag] = ",".join(values) if flag == "--add-tools" else values[-1]
         return found
     url = entry.get("url")
-    params = parse_qsl(urlsplit(url).query) if isinstance(url, str) else []
-    for flag, key in _QUERY_FLAGS:
-        value = next((v for k, v in params if k == key), None)
-        if value is not None:
-            found[flag] = value
-    return found
+    if not isinstance(url, str):
+        return found
+    query = mcp_url_query_values(url)
+    view = mcp_url_tool_view(url)
+    settings = {
+        "--guardrails": query.get("guardrails"),
+        "--tool-profile": view.profile,
+        "--add-tools": ",".join(view.add_tools),
+        "--context": query.get("context"),
+    }
+    return {flag: value for flag, value in settings.items() if value and value.strip()}
 
 
 def _dropped_query_flags(old: dict[str, Any], new: dict[str, Any]) -> list[str]:

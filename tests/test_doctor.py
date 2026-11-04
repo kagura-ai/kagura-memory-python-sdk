@@ -1035,6 +1035,8 @@ def test_check_server_constructor_failure(monkeypatch):
             None,
             {"tools": "recall,remember"},
         ),
+        ("?tools=recall,%20remember,recall,", None, {"tools": "recall,remember"}),
+        ("?tools=&tools=recall", None, {"tools": ""}),  # the first value wins: refused
     ],
     ids=[
         "bare",
@@ -1046,6 +1048,8 @@ def test_check_server_constructor_failure(monkeypatch):
         "blank-profile",
         "full-plus-add-tools",
         "tools-allowlist",
+        "tools-names-read-as-the-server-does",
+        "blank-tools",
     ],
 )
 def test_tool_view_reads_the_query_as_the_server_does(query, version, view):

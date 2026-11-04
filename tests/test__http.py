@@ -13,6 +13,7 @@ import httpx
 import pytest
 
 from kagura_memory._http import (
+    McpToolView,
     base_url_from_mcp,
     extract_detail,
     jsonrpc_error_body,
@@ -21,6 +22,7 @@ from kagura_memory._http import (
     mcp_url_guardrails_off,
     mcp_url_has_tools_allowlist,
     mcp_url_query_values,
+    mcp_url_tool_view,
     mcp_url_with_query,
     mcp_url_without_query_param,
     normalize_add_tools,
@@ -705,6 +707,58 @@ def test_mcp_url_query_values_keeps_the_first_value_and_blanks():
     url = "https://h.example/mcp?profile=full&tools=&profile=core&add%5Ftools=a,b#f"
     assert mcp_url_query_values(url) == {"profile": "full", "tools": "", "add_tools": "a,b"}
     assert mcp_url_query_values("https://h.example/mcp") == {}
+
+
+@pytest.mark.parametrize(
+    ("query", "view"),
+    [
+        ("", McpToolView(None, None, ())),
+        ("?k=1#profile=full", McpToolView(None, None, ())),  # a fragment is no query
+        # The first value wins, even a blank one: the server refuses ?profile=.
+        ("?profile=&profile=full", McpToolView("", None, ())),
+        ("?profile=%20full%20&profile=core", McpToolView("full", None, ())),
+        ("?profile", McpToolView("", None, ())),  # no "=" is a blank value
+        # A blank tools= is present (the server refuses it), a blank add_tools= adds nothing.
+        ("?tools=&tools=recall", McpToolView(None, (), ())),
+        ("?add_tools=&add_tools=explore", McpToolView(None, None, ())),
+        ("?add_tools=,%20,", McpToolView(None, None, ())),
+        # Names are trimmed, de-duplicated in order and case-sensitive.
+        (
+            "?add_tools=explore,%20list_edges,explore,Explore",
+            McpToolView(None, None, ("explore", "list_edges", "Explore")),
+        ),
+        # tools and add_tools are read apart; the caller applies "tools wins".
+        (
+            "?add%5Ftools=explore&tools=recall,%20remember,&profile=full",
+            McpToolView("full", ("recall", "remember"), ("explore",)),
+        ),
+    ],
+    ids=[
+        "no-query",
+        "fragment",
+        "blank-profile-first",
+        "profile-trimmed",
+        "profile-without-value",
+        "blank-tools-first",
+        "blank-add-tools-first",
+        "add-tools-naming-none",
+        "names-normalized",
+        "tools-and-add-tools",
+    ],
+)
+def test_mcp_url_tool_view_reads_the_query_as_the_server_does(query: str, view: McpToolView):
+    assert mcp_url_tool_view(f"https://h.example/mcp{query}") == view
+
+
+def test_mcp_url_tool_view_reads_the_first_100_items_of_a_list():
+    """The server reads the first 100 comma-separated items (blank ones count), then names."""
+    items = ["", *(f"t{i}" for i in range(100))]
+    profile, tools, add_tools = mcp_url_tool_view(
+        f"https://h.example/mcp?tools={','.join(items)}&add_tools={','.join(items[1:])},x"
+    )
+    assert profile is None
+    assert tools == tuple(f"t{i}" for i in range(99))
+    assert add_tools == tuple(f"t{i}" for i in range(100))
 
 
 def test_normalize_add_tools_caps_distinct_names_at_100():

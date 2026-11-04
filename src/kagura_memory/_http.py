@@ -7,7 +7,7 @@ import uuid
 from collections.abc import Collection, Mapping, Sequence
 from datetime import UTC, datetime, time, timedelta
 from importlib.metadata import version as _pkg_version
-from typing import Any, NoReturn, TypeVar
+from typing import Any, NamedTuple, NoReturn, TypeVar
 from urllib.parse import parse_qsl, quote, unquote_plus, urlencode, urlsplit, urlunsplit
 
 import httpx
@@ -153,10 +153,9 @@ def mcp_url_has_tools_allowlist(mcp_url: str) -> bool:
         mcp_url: The MCP endpoint URL.
 
     Returns:
-        Whether its query has a ``tools`` parameter.
+        Whether its query has a ``tools`` parameter, even a blank one.
     """
-    query = urlsplit(mcp_url).query
-    return any(key == "tools" for key, _ in parse_qsl(query, keep_blank_values=True))
+    return mcp_url_tool_view(mcp_url).tools is not None
 
 
 def mcp_url_guardrails_off(mcp_url: str) -> bool:
@@ -914,6 +913,55 @@ def mcp_url_query_values(mcp_url: str) -> dict[str, str]:
     for key, value in parse_qsl(urlsplit(mcp_url).query, keep_blank_values=True):
         values.setdefault(key, value)
     return values
+
+
+class McpToolView(NamedTuple):
+    """The ``tools/list`` view an MCP URL's query selects (see :func:`mcp_url_tool_view`)."""
+
+    #: The first ``profile`` value, trimmed; ``""`` for a blank one, which the
+    #: server refuses; ``None`` without one (the server's default profile).
+    profile: str | None
+    #: The names in the first ``tools`` value; ``()`` when it names none, which
+    #: the server refuses; ``None`` without one. When set, the server ignores
+    #: ``profile`` and ``add_tools``.
+    tools: tuple[str, ...] | None
+    #: The names in the first ``add_tools`` value; ``()`` without one or when it
+    #: names none (it then adds nothing).
+    add_tools: tuple[str, ...]
+
+
+def mcp_url_tool_view(mcp_url: str) -> McpToolView:
+    """The ``profile`` / ``tools`` / ``add_tools`` in ``mcp_url``'s query, as the server reads them.
+
+    The one reader of a URL's tool view (#311), for ``kagura setup``'s re-run
+    notes and digest previews and for ``kagura doctor``. It follows the
+    server's ``select_tool_definitions`` (memory-cloud v0.142.0): the first
+    value of a repeated parameter wins, even a blank one
+    (:func:`mcp_url_query_values`), ``profile`` is trimmed, and a name list
+    is read as ``_read_names`` reads it — its first 100 comma-separated
+    items, trimmed, blank names dropped, duplicates removed in order. Which
+    parameter wins (``tools`` over the other two) is left to the caller.
+
+    Args:
+        mcp_url: The MCP endpoint URL.
+
+    Returns:
+        The view; every field empty for a URL without these parameters.
+    """
+    query = mcp_url_query_values(mcp_url)
+    profile = query.get("profile")
+    tools = query.get("tools")
+    return McpToolView(
+        profile=profile.strip() if profile is not None else None,
+        tools=_tool_names(tools) if tools is not None else None,
+        add_tools=_tool_names(query.get("add_tools", "")),
+    )
+
+
+def _tool_names(value: str) -> tuple[str, ...]:
+    """The tool names memory-cloud reads from one ``tools`` / ``add_tools`` value."""
+    parts = value.split(",", MAX_ADD_TOOLS)[:MAX_ADD_TOOLS]
+    return tuple(dict.fromkeys(name for part in parts if (name := part.strip())))
 
 
 # ---------------------------------------------------------------------------
