@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import re
+import uuid
 from datetime import UTC, datetime
 from typing import Any
 
@@ -25,6 +26,7 @@ import pytest
 from kagura_memory import (
     BootstrapResponse,
     ContextGuardrails,
+    ForgetBatchResult,
     KaguraClient,
     KaguraError,
     KaguraNotFoundError,
@@ -900,3 +902,126 @@ async def test_remember_batch_drift_raises_response_error():
     finally:
         await client.close()
     assert info.value.operation == "remember_batch"
+
+
+# ============================================================================
+# forget(memory_ids=)
+# ============================================================================
+
+FORGET_BATCH_REPLY: dict[str, Any] = {
+    "status": "partial",
+    "deleted_count": 1,
+    "memory_ids": [MEM_A],
+    "results": [
+        {"memory_id": MEM_A, "status": "deleted"},
+        {"memory_id": MEM_B, "status": "skipped"},
+        {
+            "memory_id": MEM_C,
+            "status": "error",
+            "error": "not_attempted",
+            "message": "Not attempted: the call's time budget was spent on earlier ids. Retry it "
+            "in a new call.",
+        },
+        {
+            "memory_id": MEM_D,
+            "status": "error",
+            "error": "timeout",
+            "message": "forget timed out",
+            "correlation_id": "c0ffee",
+        },
+    ],
+    "count": 4,
+    "succeeded": 1,
+    "skipped": 1,
+    "failed": 2,
+    "session_id": "mcp-0123456789abcdef",
+    "context_id": CTX,
+    "context_name": "dev",
+}
+
+
+@pytest.mark.asyncio
+async def test_forget_memory_ids_sends_only_the_ids():
+    ids = [MEM_A, MEM_B, MEM_C, MEM_D]
+    _, params = await _call(FORGET_BATCH_REPLY, "forget", CTX, memory_ids=ids)
+    assert params == {"name": "forget", "arguments": {"context_id": CTX, "memory_ids": ids}}
+
+
+@pytest.mark.asyncio
+async def test_forget_memory_ids_reads_per_id_rows():
+    result, _ = await _call(FORGET_BATCH_REPLY, "forget", CTX, memory_ids=[MEM_A, MEM_B])
+
+    assert isinstance(result, ForgetBatchResult)
+    assert result.status == "partial" and result.memory_ids == [MEM_A]
+    assert (result.deleted_count, result.succeeded, result.skipped, result.failed) == (1, 1, 1, 2)
+    deleted, skipped, unreached, timed_out = result.results
+    assert deleted.status == "deleted" and skipped.status == "skipped"
+    assert unreached.status == "error" and unreached.error == "not_attempted"
+    assert timed_out.correlation_id == "c0ffee"
+    assert result.session_id == "mcp-0123456789abcdef" and result.context_name == "dev"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("kwargs", "error", "match"),
+    [
+        ({"memory_ids": [MEM_A], "memory_id": MEM_B}, ValueError, "exactly one"),
+        ({"memory_ids": [MEM_A], "query": "old"}, ValueError, "exactly one"),
+        ({"memory_ids": []}, ValueError, "1 to 50"),
+        ({"memory_ids": [str(uuid.uuid4()) for _ in range(51)]}, ValueError, "50"),
+        ({"memory_ids": MEM_A}, TypeError, "list"),
+        ({"memory_ids": [MEM_A, 7]}, TypeError, r"memory_ids\[1\]"),
+        ({"memory_ids": [MEM_A, "not-a-uuid"]}, ValueError, r"memory_ids\[1\] is not"),
+        ({"memory_ids": [MEM_A, MEM_A.upper()]}, ValueError, "more than once"),
+    ],
+)
+async def test_forget_memory_ids_refuses_bad_ids_before_any_request(kwargs, error, match):
+    message = await _refused_locally("forget", CTX, error=error, **kwargs)
+    assert re.search(match, message)
+
+
+@pytest.mark.asyncio
+async def test_forget_memory_ids_all_failed_raises_with_the_rows():
+    reply = _error(
+        "batch_failed",
+        "No id was deleted; see results.",
+        deleted_count=0,
+        memory_ids=[],
+        results=[{"memory_id": MEM_A, "status": "error", "error": "permission_denied"}],
+        count=1,
+        succeeded=0,
+        skipped=0,
+        failed=1,
+        context_id=CTX,
+        context_name="dev",
+    )
+    sent: list[dict[str, Any]] = []
+    client = _wire_client(reply, sent)
+    try:
+        with pytest.raises(KaguraError) as info:
+            await client.forget(CTX, memory_ids=[MEM_A])
+    finally:
+        await client.close()
+    assert info.value.code == "batch_failed"
+    assert info.value.details["results"][0]["error"] == "permission_denied"
+
+
+@pytest.mark.asyncio
+async def test_forget_memory_ids_drift_raises_response_error():
+    reply = {k: v for k, v in FORGET_BATCH_REPLY.items() if k != "results"}
+    sent: list[dict[str, Any]] = []
+    client = _wire_client(reply, sent)
+    try:
+        with pytest.raises(KaguraResponseError) as info:
+            await client.forget(CTX, memory_ids=[MEM_A])
+    finally:
+        await client.close()
+    assert info.value.operation == "forget"
+
+
+@pytest.mark.asyncio
+async def test_forget_single_mode_still_returns_the_dict():
+    reply = {"status": "success", "deleted_count": 1, "memory_ids": [MEM_A], "context_id": CTX}
+    result, params = await _call(reply, "forget", CTX, memory_id=MEM_A)
+    assert result == reply
+    assert params["arguments"] == {"context_id": CTX, "memory_id": MEM_A}

@@ -5,9 +5,10 @@ import itertools
 import json
 import logging
 import math
+import uuid
 import warnings
 from datetime import datetime
-from typing import Any, Literal, Self, TypeVar, get_args
+from typing import Any, Literal, Self, TypeVar, get_args, overload
 from urllib.parse import quote
 
 import httpx
@@ -56,6 +57,7 @@ from .models import (
     Edge,
     EmbeddingModelsResponse,
     EmbeddingStatus,
+    ForgetBatchResult,
     GuardrailSet,
     ListMatchingResponse,
     ListOrderBy,
@@ -2404,17 +2406,42 @@ class KaguraClient:
             arguments["dismiss_supersede_candidate"] = True
         return await self._call_tool_checked("update_memory", arguments)
 
+    @overload
     async def forget(
         self,
         context_id: str,
         memory_id: str | None = None,
         query: str | None = None,
         k: int = 10,
-    ) -> dict[str, Any]:
+        *,
+        memory_ids: None = None,
+    ) -> dict[str, Any]: ...
+
+    @overload
+    async def forget(
+        self,
+        context_id: str,
+        memory_id: None = None,
+        query: None = None,
+        k: int = 10,
+        *,
+        memory_ids: list[str],
+    ) -> ForgetBatchResult: ...
+
+    async def forget(
+        self,
+        context_id: str,
+        memory_id: str | None = None,
+        query: str | None = None,
+        k: int = 10,
+        *,
+        memory_ids: list[str] | None = None,
+    ) -> dict[str, Any] | ForgetBatchResult:
         """
         Call forget MCP tool (soft delete memories).
 
-        Delete by specific memory_id or by search query. This is a soft
+        Delete by specific memory_id, by a list of ids (``memory_ids``) or by
+        search query. This is a soft
         delete: a deleted memory stays recoverable until the deployment's
         cleanup sweep purges it. The window is set per deployment
         (``CLEANUP_DELETED_MEMORIES_RETENTION_DAYS``, default 30 days, ``0``
@@ -2436,23 +2463,53 @@ class KaguraClient:
         other matches without counting the guardrail. Check
         ``deleted_count`` rather than assuming success.
 
+        ``memory_ids`` (memory-cloud v0.117.0+, #2127) forgets 1-50 distinct
+        ids in one call, each exactly as ``memory_id`` would and committed on
+        its own, and returns a :class:`~kagura_memory.models.ForgetBatchResult`
+        with one row per id (``deleted`` / ``skipped`` / ``error``). The ids
+        share one time budget (the server's ``forget`` timeout, v0.118.0+,
+        #2191): an id it did not reach is an ``error`` row with ``error ==
+        "not_attempted"`` — resend those. An older server refuses the
+        argument (``invalid_argument``, v0.82.0+).
+
         Args:
             context_id: Context ID
             memory_id: UUID of specific memory to delete
             query: Search query to find and delete matching memories
             k: Number of memories to delete in query mode (default: 10)
+            memory_ids: 1-50 distinct memory UUIDs to delete in one call.
+                Keyword-only; not combined with ``memory_id`` or ``query``.
 
         Returns:
-            API response with deletion results (``deleted_count``,
-            ``memory_ids``) — may be fewer than targeted, see above.
+            For ``memory_id`` / ``query``: the API response dict
+            (``deleted_count``, ``memory_ids``) — may be fewer than
+            targeted, see above. Since memory-cloud v0.113.0 (#2044) it adds
+            ``session_id`` when the request has a session (for
+            :meth:`changes_since` / :meth:`rollback_session`). For
+            ``memory_ids``: a :class:`~kagura_memory.models.ForgetBatchResult`.
 
         Raises:
-            ValueError: If neither ``memory_id`` nor ``query`` is provided —
-                ``forget`` always targets a specific memory or a search; an
-                unqualified call would be an ambiguous no-op.
+            ValueError: If none of ``memory_id``, ``query`` and
+                ``memory_ids`` is provided — ``forget`` always targets a
+                specific memory or a search; an unqualified call would be an
+                ambiguous no-op — or ``memory_ids`` is combined with another
+                target, is empty, holds more than 50 ids, an id that is not a
+                UUID, or the same id twice (all checked before any request).
+            TypeError: ``memory_ids`` is a bare ``str`` or holds a non-``str``.
             KaguraError: Server-side rejection, e.g. a ``query`` delete while
-                recall is degraded.
+                recall is degraded. With ``memory_ids``, every id failing is
+                ``code == "batch_failed"`` with the rows in
+                ``details["results"]``.
+            KaguraResponseError: A ``memory_ids`` reply does not match
+                :class:`~kagura_memory.models.ForgetBatchResult`
+                (``operation="forget"``).
         """
+        if memory_ids is not None:
+            if memory_id or query:
+                raise ValueError("Provide exactly one of memory_id, memory_ids or query")
+            arguments = {"context_id": context_id, "memory_ids": _checked_memory_ids(memory_ids)}
+            result = await self._call_tool_checked("forget", arguments)
+            return parse_response(ForgetBatchResult, result, operation="forget")
         if not memory_id and not query:
             raise ValueError("Provide either memory_id or query")
         arguments: dict[str, Any] = {"context_id": context_id}
@@ -4165,6 +4222,8 @@ _MAX_CHARS_LIMIT = 100_000
 # that are set on the batch, never per item (``_BATCH_LEVEL`` + context_id).
 _BATCH_MAX_ITEMS = 50
 _BATCH_LEVEL_KEYS = ("context_id", "dedupe", "tags_normalize", "verbose")
+# forget(memory_ids=) ids per call (server ``FORGET_MAX_IDS``).
+_FORGET_MAX_IDS = 50
 
 
 def _checked_batch_items(items: Any) -> list[dict[str, Any]]:
@@ -4199,3 +4258,31 @@ def _checked_batch_items(items: Any) -> list[dict[str, Any]]:
             except ValueError as e:
                 raise ValueError(f"items[{index}]: {e}") from None
     return items
+
+
+def _checked_memory_ids(memory_ids: Any) -> list[str]:
+    """Reject a ``forget(memory_ids=)`` list the server would refuse.
+
+    Distinct the way the server compares them: as UUIDs, so two spellings
+    of one id (case) are the same id.
+
+    Raises:
+        TypeError: A bare ``str``, a non-list, or a non-``str`` id.
+        ValueError: Not 1-50 ids, an id that is not a UUID, or a repeat.
+    """
+    if isinstance(memory_ids, str) or not isinstance(memory_ids, list):
+        raise TypeError("memory_ids must be a list of memory UUID strings")
+    if not 1 <= len(memory_ids) <= _FORGET_MAX_IDS:
+        raise ValueError(f"memory_ids must hold 1 to {_FORGET_MAX_IDS} ids, got {len(memory_ids)}")
+    seen: set[uuid.UUID] = set()
+    for index, value in enumerate(memory_ids):
+        if not isinstance(value, str):
+            raise TypeError(f"memory_ids[{index}] must be a str, got {type(value).__name__}")
+        try:
+            parsed = uuid.UUID(value)
+        except ValueError:
+            raise ValueError(f"memory_ids[{index}] is not a memory UUID") from None
+        if parsed in seen:
+            raise ValueError(f"memory_ids lists {parsed} more than once")
+        seen.add(parsed)
+    return list(memory_ids)
