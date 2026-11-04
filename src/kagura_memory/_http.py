@@ -599,8 +599,11 @@ def raise_for_kagura_status(e: httpx.HTTPStatusError) -> NoReturn:
     present — surfacing e.g. which field failed a 422 — otherwise the
     exception's own message is used so the status is never left bare. The
     error code and fields the body carried (a JSON-RPC error's ``data``, the
-    REST ``details``) are kept on the error's ``code`` / ``details``. This
-    function always raises.
+    REST ``details``) are kept on the error's ``code`` / ``details``. Plan,
+    quota and capacity refusals are not typed here (see :func:`gate_error`):
+    the REST-backed ``KaguraClient`` methods it serves are listing and status
+    reads, which memory-cloud keeps open under the Free capacity lock (#1941).
+    This function always raises.
     """
     response = e.response
     status = response.status_code
