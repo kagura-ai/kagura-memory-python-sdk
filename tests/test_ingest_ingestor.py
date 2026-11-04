@@ -1124,3 +1124,42 @@ async def test_other_remember_errors_do_not_stop_section_writes(tmp_path: Any) -
     assert len([e for e in result.errors if e.step == "remember"]) == 1
 
     await client.close()
+
+
+@pytest.mark.parametrize(
+    ("tags", "match"),
+    [
+        ([f"t{i}" for i in range(51)], "at most 50 tags, got 51"),
+        (["ok", "x" * 101], "at most 100 characters, got 101"),
+    ],
+    ids=["51-tags", "101-chars"],
+)
+@pytest.mark.asyncio
+async def test_over_cap_tags_raise_before_any_fetch_or_llm_call(
+    tags: list[str], match: str
+) -> None:
+    """The remember() tag caps (#299) are checked at ingest() entry, so an over-cap
+    list costs no fetch, summarization or archive upload."""
+    client = _make_client()
+    provider = FakeProvider()
+    files = _make_files_client_mock()
+    ingestor = FileIngestor(
+        client=client,
+        text_provider=provider,
+        vision_provider=None,
+        files_client=files,
+    )
+
+    with (
+        patch.object(client, "remember", new_callable=AsyncMock) as mock_remember,
+        patch.object(ingestor, "_fetch", new_callable=AsyncMock) as mock_fetch,
+    ):
+        with pytest.raises(ValueError, match=match):
+            await ingestor.ingest(str(FIXTURE), context_id="ctx-uuid", tags=tags)
+        mock_fetch.assert_not_called()
+        mock_remember.assert_not_called()
+    assert provider.summarize_calls == []
+    assert provider.overview_calls == []
+    files.upload.assert_not_called()
+
+    await client.close()

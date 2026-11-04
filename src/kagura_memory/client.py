@@ -72,6 +72,8 @@ from .models import (
 
 _T = TypeVar("_T", bound=_BaseModel)
 
+_logger = logging.getLogger("kagura_memory")
+
 
 MIN_SERVER_VERSION = "0.17.1"
 """Minimum memory-cloud server version this SDK was tested against.
@@ -567,7 +569,9 @@ class KaguraClient:
             type: Memory type. Server validates against its own vocabulary;
                 the SDK passes through.
             importance: Importance score (0.0-1.0).
-            tags: Optional tags.
+            tags: Optional tags: at most 50, each at most 100 characters —
+                the caps memory-cloud v0.82.0+ enforces on a write
+                (#1743), checked before any request.
             source_uri: Origin URI (e.g. ``file:///``, ``https://``,
                 ``vault://``).
             linked_memory_ids: Existing memory UUIDs to declare as graph
@@ -634,10 +638,13 @@ class KaguraClient:
 
         Raises:
             ValueError: ``tool_trigger`` is given and ``details`` already has
-                a ``"tool_trigger"`` key — pass the guardrail one way only.
+                a ``"tool_trigger"`` key — pass the guardrail one way only;
+                or ``tags`` holds more than 50 tags or a tag longer than
+                100 characters.
             KaguraError: Server-side rejection, e.g. ``permission_denied`` or
                 ``validation_error`` for a guardrail write.
         """
+        _validate_memory_tags(tags)
         details = _details_with_tool_trigger(details, tool_trigger)
         arguments: dict[str, Any] = {
             "context_id": context_id,
@@ -1203,7 +1210,11 @@ class KaguraClient:
             context_id: Target context UUID (state is scoped to this context).
             key: State key (max 255 chars). Re-using a key overwrites its value.
             value: Arbitrary JSON value to store (object, array, string, number,
-                or boolean).
+                or boolean), at most 16,384 characters as compact JSON — the
+                cap memory-cloud v0.82.0+ enforces (#1743), measured as the
+                server measures it (``ensure_ascii=False``, no spaces) and
+                checked before any request. Store large data as a memory and
+                keep its id here.
             ttl_seconds: Optional TTL in seconds (server clamps to 2592000 =
                 30 days). Omit for no expiry.
 
@@ -1211,9 +1222,12 @@ class KaguraClient:
             API response acknowledging the upsert.
 
         Raises:
+            ValueError: ``value`` is longer than 16,384 characters as
+                compact JSON.
             KaguraNotFoundError: Context not found.
             KaguraError: Other server-side error.
         """
+        _validate_state_value(value)
         arguments: dict[str, Any] = {
             "context_id": context_id,
             "key": key,
@@ -1227,30 +1241,48 @@ class KaguraClient:
         self,
         context_id: str,
         key: str | None = None,
+        *,
+        cursor: str | None = None,
     ) -> dict[str, Any]:
         """Read ephemeral agent run-state.
 
         Calls the ``get_state`` MCP tool — the read side of the session-state
         lane (see :meth:`set_state`). Supply ``key`` to read one value, or omit
-        it to list all live keys for the context. Expired entries are never
+        it to list the context's live entries. Expired entries are never
         returned. This lane is excluded from :meth:`recall` by design.
+
+        Since memory-cloud v0.82.0 (#1743) the list is paged in key order:
+        50 entries a page within the server's 20,000-character budget. The
+        reply then carries ``has_more`` and ``next_cursor``; pass
+        ``next_cursor`` back as ``cursor`` for the next page. A value too
+        large for the page is named in ``omitted_keys`` instead (read it by
+        ``key``). Older servers return every entry and no paging fields.
 
         Args:
             context_id: Target context UUID.
-            key: Optional state key. Omit to list all live ``(key, value)``
+            key: Optional state key. Omit to list the live ``(key, value)``
                 entries for the context.
+            cursor: List mode only: the ``next_cursor`` of the previous page.
+                Sent only when set (memory-cloud v0.82.0+). Keyword-only.
 
         Returns:
-            API response with the value for ``key``, or all live entries when
-            ``key`` is omitted.
+            API response with the value for ``key``, or one page of live
+            entries when ``key`` is omitted: ``states`` (key → value),
+            ``count``, ``has_more``, ``next_cursor`` and, when a value was
+            left out, ``omitted_keys``.
 
         Raises:
+            ValueError: ``cursor`` is given together with ``key``.
             KaguraNotFoundError: Context not found.
             KaguraError: Other server-side error.
         """
+        if key is not None and cursor is not None:
+            raise ValueError("cursor pages the list of entries; omit key to list them")
         arguments: dict[str, Any] = {"context_id": context_id}
         if key is not None:
             arguments["key"] = key
+        if cursor is not None:
+            arguments["cursor"] = cursor
         return await self._call_tool_checked("get_state", arguments)
 
     async def get_agent_bootstrap(
@@ -1406,11 +1438,26 @@ class KaguraClient:
     async def list_agents(self) -> list[Agent]:
         """List the workspace's registered agents, newest first (owner/admin only).
 
+        Since memory-cloud v0.82.0 (#1743) the tool returns 50 agents a page
+        with ``has_more`` / ``next_cursor``; this method follows the cursor
+        and returns every agent, at most 50 pages (an older server answers in
+        one page). The cursor is an offset, so an agent registered or deleted
+        between two calls shifts the rows: an agent an earlier page returned
+        is dropped from a later one (each ``id`` once), but one deleted
+        between calls can make the next page skip an agent. Each row's
+        ``description`` is a 200-character preview
+        there, with ``description_truncated`` set when it was cut —
+        :meth:`get_agent` returns it whole.
+
         Returns:
             List of :class:`Agent` rows in the active workspace.
+
+        Raises:
+            KaguraResponseError: A row does not match :class:`Agent`, a page
+                repeats a cursor or says ``has_more`` without one, or the
+                list is not complete after 50 pages.
         """
-        result = await self._call_tool_checked("list_agents", {})
-        return parse_response_list(Agent, result.get("agents", []), operation="list_agents")
+        return await _collect_pages(self, "list_agents", Agent, "agents")
 
     async def update_agent(
         self,
@@ -1632,6 +1679,7 @@ class KaguraClient:
         include_summary: bool = False,
         include_details: bool = False,
         include_stats: bool = False,
+        cursor: str | None = None,
     ) -> dict[str, Any]:
         """List the contexts you can access, most recently used first.
 
@@ -1648,6 +1696,12 @@ class KaguraClient:
         ``result.get("total")`` or use ``len(result["contexts"])``). ``hint``
         needs v0.75.0+. ``include_stats`` works on any server.
 
+        Since memory-cloud v0.82.0 (#1743) the directory is paged: 100
+        contexts a page (20 with ``include_details`` and no
+        ``name_contains``), and a page also stops at the server's
+        20,000-character budget. ``has_more`` says more contexts follow;
+        pass ``next_cursor`` back as ``cursor`` for the next page.
+
         Args:
             name_contains: Only contexts whose name or display name contains
                 this text (case-insensitive, max 100 characters). Omitted when
@@ -1658,10 +1712,12 @@ class KaguraClient:
                 (the pre-v0.73.0 item shape). Wins over ``include_summary``.
                 Large on big workspaces, so combine it with ``name_contains``.
             include_stats: Add ``memory_count`` per context.
+            cursor: The ``next_cursor`` of the previous page. Sent only when
+                set (memory-cloud v0.82.0+).
 
         Returns:
             The envelope ``{status, contexts, count, total, limit, can_create,
-            hint?}``:
+            has_more, next_cursor, hint?}``:
 
             - ``contexts``: the items described above.
             - ``count``: contexts in the workspace. This is quota usage, so
@@ -1670,6 +1726,9 @@ class KaguraClient:
               before ``name_contains``.
             - ``total``: contexts in this response (v0.73.0+). ``0`` on no
               match is still a success.
+            - ``has_more`` / ``next_cursor``: whether more contexts follow
+              this page, and the ``cursor`` that returns them (``None`` on the
+              last page; v0.82.0+, absent before).
             - ``limit`` / ``can_create``: the plan's context maximum and whether
               another context fits. Absent when the caller has no current
               workspace; ``0`` / ``False`` when the server could not read the
@@ -1691,6 +1750,8 @@ class KaguraClient:
             arguments["include_details"] = True
         if include_stats:
             arguments["include_stats"] = True
+        if cursor is not None:
+            arguments["cursor"] = cursor
         return await self._call_tool_checked("list_contexts", arguments)
 
     async def list_tags(
@@ -1727,9 +1788,15 @@ class KaguraClient:
         API keys and OAuth profiles alike (OAuth needs the ``memory:read``
         scope, which every ``kagura auth login`` grant has).
 
+        Since memory-cloud v0.82.0 (#1743) the MCP tool returns at most 200
+        tags whatever the ``limit``, and sets ``has_more`` on the result when
+        more matched. The tool takes no cursor: narrow with ``prefix`` or
+        ``min_count``. The REST drill-down still returns up to ``limit``.
+
         Args:
             context_id: Context ID to list tags from.
-            limit: Maximum tags to return (1-500, default 50).
+            limit: Maximum tags to return (1-500, default 50; the server's
+                own bound). Over MCP a reply holds at most 200 (see above).
             min_count: Minimum memory count per tag (1-10000, default 1).
             sort: Sort order — ``"count"`` (default), ``"recent"``, or ``"alpha"``.
             prefix: Case-insensitive prefix filter for autocomplete-style lookup.
@@ -1755,7 +1822,8 @@ class KaguraClient:
 
         Returns:
             :class:`ListTagsResponse` with ``context_id``, ``context_name``,
-            ``tags`` (list of :class:`TagInfo`), and ``total`` count.
+            ``tags`` (list of :class:`TagInfo`), ``total`` count and
+            ``has_more``.
 
         Raises:
             ValueError: If ``limit``, ``min_count``, ``prefix`` or
@@ -1953,7 +2021,8 @@ class KaguraClient:
             content: Updated content.
             type: Updated memory type.
             importance: Updated importance (0.0-1.0).
-            tags: Updated tags (replaces the list; ``[]`` clears it).
+            tags: Updated tags (replaces the list; ``[]`` clears it). At most
+                50, each at most 100 characters, as for :meth:`remember`.
             context_summary: Updated context summary (max 2000 chars).
                 ``""`` clears it; ``None`` leaves it unchanged.
             delivery_mode: Pin or unpin the memory. ``"always"`` pins it
@@ -2007,7 +2076,8 @@ class KaguraClient:
                 with ``external_id`` (the server rejects that pair: an upsert
                 replaces the memory and its suggestion); or if
                 ``tool_trigger`` is given together with a
-                ``details["tool_trigger"]`` key.
+                ``details["tool_trigger"]`` key; or if ``tags`` holds more
+                than 50 tags or a tag longer than 100 characters.
             KaguraError: Server-side rejection, e.g. ``permission_denied`` for
                 a guardrail edit below context editor.
         """
@@ -2020,6 +2090,7 @@ class KaguraClient:
                 "dismiss_supersede_candidate requires memory_id (in-place mode); "
                 "an external_id upsert replaces the memory and its suggestion."
             )
+        _validate_memory_tags(tags)
         details = _details_with_tool_trigger(details, tool_trigger)
 
         arguments: dict[str, Any] = {"context_id": context_id}
@@ -2389,17 +2460,34 @@ class KaguraClient:
     ) -> list[Edge]:
         """List neural memory edges connected to a memory.
 
-        Returns both outgoing and incoming edges, deduplicated.
+        Returns both outgoing and incoming edges, deduplicated, heaviest
+        first.
+
+        Since memory-cloud v0.82.0 (#1743) each direction is cut at ``limit``
+        edges (50 unless set, at most 200). The tool takes no cursor: when a
+        direction held more, its ``outgoing_has_more`` / ``incoming_has_more``
+        flag is set, which this list cannot carry. When the cut came from the
+        server's default (``limit=None``) or its 200 clamp, not from the
+        ``limit`` passed, the client logs a warning on the ``kagura_memory``
+        logger. Raise ``limit`` to get more of them, or raise ``min_weight`` /
+        narrow ``edge_types`` so the ones that matter fit.
 
         Args:
             context_id: Context UUID containing the memory.
             memory_id: Memory UUID whose edges to list.
-            min_weight: Minimum edge weight (0.0-3.0). Edges below this are filtered.
+            min_weight: Minimum edge weight (0.0-3.0). Edges below this are
+                filtered. Always sent: since memory-cloud v0.117.0 (#2127) the
+                server's own default is 0.05, which hides weak automatic
+                edges, while this method keeps sending ``0.0`` (every edge),
+                as on every earlier server.
             edge_types: Restrict to these edge types (e.g. ``["related_to"]``). ``None``
                 returns all types.
-            limit: Maximum edges per direction. **The server applies this to outgoing
-                AND incoming queries independently**, so the practical maximum returned
-                is ``2 * limit`` minus dedup overlap. ``None`` means no limit.
+            limit: Maximum edges per direction (the server clamps it to
+                1-200). **The server applies this to outgoing AND incoming
+                queries independently**, so the practical maximum returned is
+                ``2 * limit`` minus dedup overlap. ``None`` sends nothing: the
+                server's default, 50 per direction since v0.82.0 (no limit
+                before).
 
         Returns:
             List of :class:`Edge` instances ordered as the server returns them.
@@ -2418,7 +2506,20 @@ class KaguraClient:
         if limit is not None:
             arguments["limit"] = limit
         result = await self._call_tool_checked("list_edges", arguments)
-        return parse_response_list(Edge, result.get("edges", []), operation="list_edges")
+        edges = parse_response_list(Edge, result.get("edges", []), operation="list_edges")
+        cut = [d for d in ("outgoing", "incoming") if result.get(f"{d}_has_more") is True]
+        # A cut at the caller's own limit is what they asked for: warn only when
+        # the server's default or its clamp made it.
+        if cut and (limit is None or limit > _LIST_EDGES_MAX_LIMIT):
+            _logger.warning(
+                "list_edges returned %d edges of memory %s, but more %s edges exist past "
+                "the per-direction limit: raise limit (max 200), or narrow with "
+                "min_weight / edge_types",
+                len(edges),
+                memory_id,
+                " and ".join(cut),
+            )
+        return edges
 
     async def create_edge(
         self,
@@ -2627,7 +2728,7 @@ class KaguraClient:
             # and anything unexpected — log a warning, and cache None so we
             # degrade to steering=None without re-fetching. (python.md
             # permits a broad catch that logs.)
-            logging.getLogger("kagura_memory").warning(
+            _logger.warning(
                 "get_context_info failed for context %s; ingest steering disabled: %s",
                 context_id,
                 e,
@@ -2745,7 +2846,7 @@ class KaguraClient:
         """
         info = await self.get_server_info()
         if meets_minimum(info.version, _MIN_SERVER_VERSION_TUPLE) is False:
-            logging.getLogger("kagura_memory").warning(
+            _logger.warning(
                 "Server version %s is below the SDK's tested minimum %s. "
                 "Some features may not work; older servers may silently "
                 "ignore unknown parameters.",
@@ -3035,6 +3136,8 @@ class KaguraClient:
         self,
         context_id: str,
         limit: int = 10,
+        *,
+        source: Literal["sleep", "analysis", "all"] | None = None,
     ) -> list[SleepReport]:
         """List recent Sleep Maintenance runs for a context.
 
@@ -3050,10 +3153,19 @@ class KaguraClient:
         :meth:`get_sleep_report` returns it as ``error_message``
         (e.g. ``phase_failure: <phases>`` on a degraded run).
 
+        Since memory-cloud v0.138.0 (#2219) the tool lists Sleep runs only
+        (``source="sleep"``) unless ``source`` says otherwise, and each row
+        carries ``source``. Older servers have no filter, may list the rows
+        Memory Analysis writes for its LLM spend among the Sleep runs, and
+        send no ``source``.
+
         Args:
             context_id: Context UUID.
             limit: Maximum number of runs to return (server clamps to 1-50,
                 default: 10).
+            source: ``"sleep"`` (Sleep runs, the server's default),
+                ``"analysis"`` (Memory Analysis spend rows) or ``"all"``.
+                Sent only when set (memory-cloud v0.138.0+). Keyword-only.
 
         Returns:
             List of ``SleepReport`` summaries ordered by ``started_at``
@@ -3064,10 +3176,10 @@ class KaguraClient:
             KaguraResponseError: A run did not match the SDK's model.
             KaguraError: Other server-side error.
         """
-        result = await self._call_tool_checked(
-            "get_sleep_history",
-            {"context_id": context_id, "limit": limit},
-        )
+        arguments: dict[str, Any] = {"context_id": context_id, "limit": limit}
+        if source is not None:
+            arguments["source"] = source
+        result = await self._call_tool_checked("get_sleep_history", arguments)
         return parse_response_list(
             SleepReport, result.get("reports"), operation="get_sleep_history"
         )
@@ -3076,25 +3188,48 @@ class KaguraClient:
         self,
         context_id: str,
         report_id: str,
+        *,
+        actions_cursor: str | None = None,
+        actions_limit: int | None = None,
+        max_chars: int | None = None,
     ) -> SleepReportDetail:
         """Get a detailed Sleep Maintenance report including audit log.
 
-        Only ``report_id`` is sent. No memory-cloud release declares or reads
-        a ``context_id`` on this tool, and since v0.82.0 (memory-cloud#1742)
-        the server refuses an argument the tool's schema does not declare, so
-        SDKs up to 0.42.1, which sent one, failed every call with
-        ``invalid_argument`` (#296). Since memory-cloud v0.126.0
+        ``context_id`` is never sent: besides ``report_id``, only the paging
+        arguments below go out, each only when set. No memory-cloud release
+        declares or reads a ``context_id`` on this tool, and since v0.82.0
+        (memory-cloud#1742) the server refuses an argument the tool's schema
+        does not declare, so SDKs up to 0.42.1, which sent one, failed every
+        call with ``invalid_argument`` (#296). Since memory-cloud v0.126.0
         (memory-cloud#2315) the server authorizes the call against the
         report's own context: read access there is enough.
+
+        Since memory-cloud v0.82.0 (#1743) ``actions`` is one page of the
+        run's actions in id order, 50 by default, within a 20,000-character
+        budget: ``action_count`` is the run's total, and while
+        ``actions_has_more`` is ``True`` pass ``actions_next_cursor`` back as
+        ``actions_cursor`` for the next page. An action too large for its
+        page comes with ``details_omitted`` instead of ``details``. Older
+        servers send every action at once. An analysis report
+        (``source="analysis"``) carries a ``note`` (v0.140.0+, #2547): it
+        records Memory Analysis spend and has no Sleep actions.
 
         Args:
             context_id: Unused; kept for backwards compatibility. The server
                 scopes the call by ``report_id``.
             report_id: Sleep report UUID.
+            actions_cursor: The ``actions_next_cursor`` of the previous page.
+                Keyword-only, like the two below; all three need memory-cloud
+                v0.82.0+.
+            actions_limit: Actions per page (the server clamps it to 1-200,
+                default 50).
+            max_chars: Response budget in characters, not tokens (10,000 to
+                100,000, default 20,000; the server refuses other values with
+                ``validation_error``).
 
         Returns:
-            ``SleepReportDetail`` with per-phase results and the per-action
-            audit log.
+            ``SleepReportDetail`` with per-phase results and one page of the
+            per-action audit log.
 
         Raises:
             KaguraNotFoundError: Report not found or not owned by caller, or
@@ -3103,7 +3238,14 @@ class KaguraClient:
             KaguraResponseError: The report did not match the SDK's model.
             KaguraError: Other server-side error.
         """
-        result = await self._call_tool_checked("get_sleep_report", {"report_id": report_id})
+        arguments: dict[str, Any] = {"report_id": report_id}
+        if actions_cursor is not None:
+            arguments["actions_cursor"] = actions_cursor
+        if actions_limit is not None:
+            arguments["actions_limit"] = actions_limit
+        if max_chars is not None:
+            arguments["max_chars"] = max_chars
+        result = await self._call_tool_checked("get_sleep_report", arguments)
         # The MCP tool wraps the report fields under a "report" key;
         # flatten so SleepReportDetail (a SleepReport subclass) validates
         # naturally without forcing callers through an extra ``.report.``
@@ -3113,7 +3255,7 @@ class KaguraClient:
         if isinstance(report, dict):
             report = {
                 **report,
-                **{key: result[key] for key in ("actions", "action_count") if key in result},
+                **{key: result[key] for key in _SLEEP_REPORT_ENVELOPE_KEYS if key in result},
             }
         return parse_response(SleepReportDetail, report, operation="get_sleep_report")
 
@@ -3142,6 +3284,9 @@ class KaguraClient:
 
         Returns:
             ``RollbackResult`` with per-category counts of reversed actions.
+            Since memory-cloud v0.112.0 ``chunks_requeued`` /
+            ``points_requeued`` count restored memories whose chunks / vector
+            were queued for a rebuild (see :class:`RollbackSummary`).
 
         Raises:
             KaguraNotFoundError: Report not found or not owned by caller, or
@@ -3205,3 +3350,123 @@ class KaguraClient:
     ) -> None:
         """Async context manager exit."""
         await self.close()
+
+
+# ---------------------------------------------------------------------------
+# memory-cloud v0.82.0 bounds (#1743): write caps and cursor paging (#299)
+# ---------------------------------------------------------------------------
+
+# remember / update_memory tag caps (server ``MEMORY_TAGS_MAX_COUNT`` /
+# ``MEMORY_TAG_MAX_CHARS``), enforced on new writes only.
+_MEMORY_TAGS_MAX_COUNT = 50
+_MEMORY_TAG_MAX_CHARS = 100
+# set_state value cap (server ``STATE_VALUE_MAX_CHARS``), in characters of
+# compact JSON.
+_STATE_VALUE_MAX_CHARS = 16_384
+# Pages a plain-list method follows before giving up on an unfinished list.
+_MAX_AUTO_PAGES = 50
+# list_edges per-direction clamp (server ``LIST_EDGES_MAX_LIMIT``).
+_LIST_EDGES_MAX_LIMIT = 200
+# get_sleep_report envelope keys merged into the flattened report.
+_SLEEP_REPORT_ENVELOPE_KEYS = (
+    "actions",
+    "action_count",
+    "actions_has_more",
+    "actions_next_cursor",
+    "note",
+)
+
+
+def _validate_memory_tags(tags: list[str] | None) -> None:
+    """Reject a ``tags`` list the server would refuse on a write.
+
+    Measured as the server measures it: the list as given (no trimming or
+    deduplication) and each tag's length in characters.
+
+    Raises:
+        ValueError: More than 50 tags, or a tag longer than 100 characters.
+    """
+    if tags is None:
+        return
+    if len(tags) > _MEMORY_TAGS_MAX_COUNT:
+        raise ValueError(f"tags accepts at most {_MEMORY_TAGS_MAX_COUNT} tags, got {len(tags)}")
+    longest = max((len(tag) for tag in tags if isinstance(tag, str)), default=0)
+    if longest > _MEMORY_TAG_MAX_CHARS:
+        raise ValueError(
+            f"each tag must be at most {_MEMORY_TAG_MAX_CHARS} characters, got {longest}"
+        )
+
+
+def _validate_state_value(value: Any) -> None:
+    """Reject a ``set_state`` value longer than the server's cap.
+
+    The length is the server's measure: compact JSON (``ensure_ascii=False``,
+    no spaces), with a value JSON cannot encode measured as its ``str``, so
+    the check never raises for a reason of its own.
+
+    Raises:
+        ValueError: The value is longer than 16,384 characters as compact JSON.
+    """
+    # Mirrors the server's ``utils.response_budget.json_chars`` exactly.
+    size = len(json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str))
+    if size > _STATE_VALUE_MAX_CHARS:
+        raise ValueError(
+            f"value must be at most {_STATE_VALUE_MAX_CHARS} characters as compact JSON, "
+            f"got {size}; store large data as a memory and keep its id in the state"
+        )
+
+
+async def _collect_pages(client: KaguraClient, tool: str, model: type[_T], key: str) -> list[_T]:
+    """Every row of a cursor-paged MCP list tool (memory-cloud v0.82.0+, #1743).
+
+    The first call sends no paging argument, so an older server, which pages
+    nothing and sends no ``has_more``, answers in one call. Each later call
+    sends only ``cursor``, the ``next_cursor`` of the page before.
+
+    The cursor is an offset, so a row added or removed between two calls
+    shifts the rows after it. A row whose ``id`` an earlier page already
+    returned is dropped (the first occurrence is kept). A row removed
+    between calls can still make the next page skip the row after it.
+
+    Args:
+        client: The client whose MCP session runs the calls.
+        tool: The MCP list tool; also the error's ``operation``.
+        model: The row model.
+        key: The envelope key that holds a page's rows.
+
+    Returns:
+        The rows of every page, in order, each ``id`` once.
+
+    Raises:
+        KaguraResponseError: A row does not match ``model``; ``has_more`` came
+            without a usable ``next_cursor``, or with one an earlier page
+            already sent; or the list is not complete after 50 pages.
+    """
+    rows: list[_T] = []
+    returned_ids: set[Any] = set()
+    arguments: dict[str, Any] = {}
+    seen: set[str] = set()
+    for _ in range(_MAX_AUTO_PAGES):
+        result = await client._call_tool_checked(tool, arguments)
+        page = parse_response_list(model, result.get(key, []), operation=tool)
+        rows.extend(row for row in page if getattr(row, "id", None) not in returned_ids)
+        returned_ids.update(getattr(row, "id", None) for row in page)
+        returned_ids.discard(None)
+        if result.get("has_more") is not True:
+            return rows
+        cursor = result.get("next_cursor")
+        if not isinstance(cursor, str) or not cursor:
+            raise KaguraResponseError(
+                f"{tool}: unexpected server response (has_more without a next_cursor)",
+                operation=tool,
+            )
+        if cursor in seen:
+            raise KaguraResponseError(
+                f"{tool}: unexpected server response (a page repeated an earlier next_cursor)",
+                operation=tool,
+            )
+        seen.add(cursor)
+        arguments = {"cursor": cursor}
+    raise KaguraResponseError(
+        f"{tool}: the list did not end within {_MAX_AUTO_PAGES} pages", operation=tool
+    )
