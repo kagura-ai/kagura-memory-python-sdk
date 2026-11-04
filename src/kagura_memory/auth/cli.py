@@ -44,6 +44,7 @@ from .credentials import (
     REFRESH_SKEW_SEC,
     CredentialsFile,
     OAuthCredentials,
+    RefreshResult,
     delete_credentials_file,
     delete_profile,
     load_credentials_file,
@@ -833,10 +834,10 @@ def auth_refresh(profile: str | None, scope: str | None) -> None:
     shared with `kagura-mcp` and KaguraClient: all of them refresh under
     one lock on credentials.json and re-read it first, so when one of them
     rotated the token meanwhile, this command keeps that token instead of
-    sending the used refresh token again. With --scope it always asks the
-    server, using the refresh token on file at that moment. A password
-    reset revokes every OAuth token of the account (v0.83.0+), so a
-    refresh after one fails; run `kagura auth login`.
+    sending the used refresh token again, and says so. With --scope it
+    always asks the server, using the refresh token on file at that moment.
+    A password reset revokes every OAuth token of the account (v0.83.0+),
+    so a refresh after one fails; run `kagura auth login`.
     """
     cf = load_credentials_file()
     target = profile or cf.default_profile
@@ -847,7 +848,7 @@ def auth_refresh(profile: str | None, scope: str | None) -> None:
     try:
         # Forced path: refresh unless the file no longer holds the token read
         # above (another process rotated it while this one waited on the lock).
-        new_creds = asyncio.run(
+        result = asyncio.run(
             _run_refresh(target, creds, expected_stale_token=creds.access_token, scope=scope)
         )
     except click.ClickException:
@@ -860,7 +861,11 @@ def auth_refresh(profile: str | None, scope: str | None) -> None:
         raise click.ClickException(_exc_message(e)) from e
 
     reset_state_cache()
-    click.echo(f"✓ Refreshed profile '{target}'.")
+    new_creds = result.credentials
+    if result.refreshed:
+        click.echo(f"✓ Refreshed profile '{target}'.")
+    else:
+        click.echo(f"✓ Profile '{target}' was already refreshed by another process.")
     click.echo(f"  Scope: {new_creds.scope}")
     click.echo(f"  Expires: {new_creds.expires_at.astimezone(UTC).isoformat()}")
 
@@ -871,8 +876,8 @@ async def _run_refresh(
     *,
     expected_stale_token: str | None,
     scope: str | None = None,
-) -> OAuthCredentials:
-    """Refresh ``profile`` under the cross-process lock and return what is stored.
+) -> RefreshResult:
+    """Refresh ``profile`` under the cross-process lock and say what happened.
 
     The refresh goes through :func:`refresh_profile_locked`, the path
     ``kagura-mcp`` and ``KaguraClient`` take, which re-reads the file under
@@ -920,7 +925,7 @@ async def _run_refresh(
         )
     new_creds = _build_credentials(token, server=creds.server)
     update_profile(profile, new_creds)
-    return new_creds
+    return RefreshResult(new_creds, refreshed=True)
 
 
 _SCOPE_REFUSALS = ("insufficient_scope", "invalid_scope")
@@ -972,7 +977,7 @@ def auth_token(profile: str | None) -> None:
         try:
             # Skew path: skip when the file already holds a token outside the
             # skew window (another process refreshed while this one waited).
-            creds = asyncio.run(_run_refresh(target, creds, expected_stale_token=None))
+            creds = asyncio.run(_run_refresh(target, creds, expected_stale_token=None)).credentials
         except KaguraAuthExpiredError as e:
             raise click.ClickException(_exc_message(e)) from e
         except KaguraConnectionError as e:

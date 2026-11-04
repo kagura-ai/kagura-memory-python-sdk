@@ -904,9 +904,12 @@ async def test_cli_and_proxy_refresh_race_makes_one_token_call(tmp_path: Path, c
 
     async def cli_refresh() -> OAuthCredentials:
         # What `kagura auth refresh` does: the forced path, from the token it read.
-        return await refresh_profile_locked(
+        result = await refresh_profile_locked(
             "default", expected_stale_token="old", fallback=stale, path=path
         )
+        # Second to the lock → it adopts the proxy's rotation; first → it refreshes.
+        assert result.refreshed is cli_first
+        return result.credentials
 
     async def proxy_refresh() -> OAuthCredentials:
         await proxy.force_refresh()  # an upstream 401 on the stale token
@@ -987,7 +990,7 @@ async def test_refresh_profile_locked_skew_path_adopts_a_fresh_disk_token(tmp_pa
         )
 
     refresh.assert_not_awaited()
-    assert result.access_token == "peer-fresh"
+    assert (result.credentials.access_token, result.refreshed) == ("peer-fresh", False)
 
 
 @_POSIX_ONLY_CREDS
@@ -1022,7 +1025,7 @@ async def test_refresh_profile_locked_with_scope_refreshes_from_the_token_on_dis
     assert refresh.await_args is not None
     assert refresh.await_args.kwargs["refresh_token"] == "rtok-peer"
     assert refresh.await_args.kwargs["scope"] == "memory:read"
-    assert result.access_token == "narrowed"
+    assert (result.credentials.access_token, result.refreshed) == ("narrowed", True)
     on_disk = load_credentials_file(path).get_profile()
     assert on_disk is not None
     assert on_disk.access_token == "narrowed"
@@ -1054,7 +1057,7 @@ async def test_refresh_profile_locked_refreshes_the_fallback_when_the_profile_is
 
     assert refresh.await_args is not None
     assert refresh.await_args.kwargs["refresh_token"] == "rtok-mine"
-    assert result.access_token == "fresh"
+    assert (result.credentials.access_token, result.refreshed) == ("fresh", True)
     on_disk = load_credentials_file(path)
     mine, other = on_disk.get_profile("default"), on_disk.get_profile("other")
     assert mine is not None and other is not None

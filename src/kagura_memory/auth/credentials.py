@@ -664,7 +664,7 @@ class KaguraOAuth(httpx.Auth):
                 (a 401 is independent of ``expires_at``).
         """
         try:
-            self._state.credentials = await refresh_profile_locked(
+            result = await refresh_profile_locked(
                 self._state.profile_name,
                 expected_stale_token=expected_stale_token,
                 fallback=self._state.credentials,
@@ -679,6 +679,7 @@ class KaguraOAuth(httpx.Auth):
             self._state.credentials = e.credentials
             self._state.used_refresh_token = e.used_refresh_token
             raise
+        self._state.credentials = result.credentials
         self._state.used_refresh_token = None
 
 
@@ -703,6 +704,21 @@ class _RefreshNotSavedError(KaguraAuthError):
         self.used_refresh_token = used_refresh_token
 
 
+@dataclass(frozen=True)
+class RefreshResult:
+    """What :func:`refresh_profile_locked` did.
+
+    Attributes:
+        credentials: The profile now in force, as saved in the file.
+        refreshed: ``True`` when this call refreshed it; ``False`` when another
+            process had already rotated the token and its profile was adopted
+            without a network call.
+    """
+
+    credentials: OAuthCredentials
+    refreshed: bool
+
+
 async def refresh_profile_locked(
     profile_name: str,
     *,
@@ -711,7 +727,7 @@ async def refresh_profile_locked(
     used_refresh_token: str | None = None,
     scope: str | None = None,
     path: Path | None = None,
-) -> OAuthCredentials:
+) -> RefreshResult:
     """Refresh one profile at most once across processes and save the result.
 
     The one refresh path: :class:`KaguraOAuth` (``KaguraClient``, the REST
@@ -751,8 +767,9 @@ async def refresh_profile_locked(
         path: The credentials file (default :data:`DEFAULT_CREDENTIALS_PATH`).
 
     Returns:
-        The profile now in force: the one another process saved, or the one
-        this call refreshed and saved.
+        The profile now in force — the one another process saved
+        (``refreshed=False``), or the one this call refreshed and saved
+        (``refreshed=True``).
 
     Raises:
         KaguraAuthExpiredError: The profile holds no refresh token, or the
@@ -779,7 +796,7 @@ async def refresh_profile_locked(
         if disk is not None and used_refresh_token and disk.refresh_token == used_refresh_token:
             disk = None  # the file is behind the caller: refresh from its copy
         if disk is not None and scope is None and _already_rotated(disk, expected_stale_token):
-            return disk
+            return RefreshResult(disk, refreshed=False)
         refreshed = await _network_refresh(disk if disk is not None else fallback, scope=scope)
         # We already hold the cross-process lock; write directly rather than via
         # update_profile (which would re-acquire the same lock on a second fd
@@ -798,7 +815,7 @@ async def refresh_profile_locked(
                 refreshed,
                 on_file.refresh_token if on_file is not None else None,
             ) from e
-        return refreshed
+        return RefreshResult(refreshed, refreshed=True)
 
 
 def _already_rotated(disk: OAuthCredentials, expected_stale_token: str | None) -> bool:

@@ -1158,7 +1158,8 @@ def test_refresh_adopts_the_token_another_process_rotated_while_it_waited(
 
     assert result.exit_code == 0, result.output
     refresh.assert_not_awaited()
-    assert "✓ Refreshed profile 'default'." in result.output
+    assert "✓ Profile 'default' was already refreshed by another process." in result.output
+    assert "Refreshed profile" not in result.output
     assert "Scope: memory:read memory:write" in result.output
     assert rotated.expires_at.astimezone(UTC).replace(microsecond=0).isoformat() in result.output
     on_disk = load_credentials_file(patched_default_path).get_profile("default")
