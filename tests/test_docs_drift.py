@@ -310,6 +310,9 @@ def test_merge_example_reports_pending_embedding() -> None:
 
 
 COMPAT_PAGE = REPO_ROOT / "docs" / "compatibility.md"
+# README.md is the PyPI long description, where a relative link is dead (#323).
+COMPAT_URL = "https://github.com/kagura-ai/kagura-memory-python-sdk/blob/main/docs/compatibility.md"
+_MIN_LINE = "**Min memory-cloud:** "
 _CEILING = re.compile(r"checked against memory-cloud up to \*\*([\d.]+)\*\*")
 
 
@@ -319,9 +322,17 @@ def _compat_sections() -> dict[str, str]:
     return dict(zip(parts[1::2], parts[2::2], strict=True))
 
 
-def _ceiling(text: str) -> str:
-    found = _CEILING.search(text)
-    assert found, f"names no memory-cloud ceiling: {text[:60]!r}"
+def _min_line(section: str) -> str:
+    """A section's first paragraph, its ``**Min memory-cloud:**`` floor."""
+    first = section.strip().split("\n\n", 1)[0]
+    assert first.startswith(_MIN_LINE), f"the section does not open with its floor: {first[:60]!r}"
+    return first
+
+
+def _ceiling(section: str) -> str:
+    """The ceiling the section's Min memory-cloud line names, never one from its notes."""
+    found = _CEILING.search(_min_line(section))
+    assert found, f"the Min memory-cloud line names no ceiling: {_min_line(section)[:80]!r}"
     return found.group(1)
 
 
@@ -332,6 +343,10 @@ def _readme_compat_section() -> str:
 
 def _readme_compat_rows() -> list[str]:
     return [line for line in _readme_compat_section().splitlines() if re.match(r"\| \[?\d", line)]
+
+
+def _cells(row: str) -> list[str]:
+    return [cell.strip() for cell in re.split(r"(?<!\\)\|", row.strip()[1:-1])]
 
 
 def _version(text: str) -> tuple[int, ...]:
@@ -353,6 +368,12 @@ def test_compat_page_headings_are_versions_newest_first() -> None:
     assert starts == sorted(starts, reverse=True), f"sections out of order: {headings}"
 
 
+def test_compat_sections_open_with_their_floor() -> None:
+    """Each section's first paragraph is its ``**Min memory-cloud:**`` floor."""
+    missing = [h for h, s in _compat_sections().items() if not s.strip().startswith(_MIN_LINE)]
+    assert not missing, f"sections that do not open with their floor: {missing}"
+
+
 @pytest.mark.parametrize("where", ["page", "README"])
 def test_compat_docs_name_min_server_version(where: str) -> None:
     """The page intro and the README section give the client's ``MIN_SERVER_VERSION``."""
@@ -368,7 +389,7 @@ def test_compat_docs_name_min_server_version(where: str) -> None:
 def test_compat_0_44_section() -> None:
     """#314: the 0.44.0 section names its ceiling (memory-cloud v0.142.0) and its issues."""
     section = _compat_sections()["0.44.0"]
-    assert "checked against memory-cloud up to **0.142.0**" in section
+    assert _ceiling(section) == "0.142.0"
     issues = re.findall(r"kagura-memory-python-sdk/issues/(\d+)", section)
     for issue in ("301", "302", "309", "311", "313", "314", "315"):
         assert issue in issues, f"the 0.44.0 section does not link SDK #{issue}"
@@ -381,22 +402,31 @@ def test_readme_compat_rows_have_three_cells() -> None:
     """An unescaped ``|``, even inside a code span, splits a GFM table cell."""
     rows = _readme_compat_rows()
     assert rows, "the README compatibility section has no summary table"
-    split = [row[:24] for row in rows if len(re.split(r"(?<!\\)\|", row.strip()[1:-1])) != 3]
+    split = [row for row in rows if len(_cells(row)) != 3]
     assert not split, f"rows with an unescaped pipe: {split}"
 
 
 def test_readme_compat_summary_matches_the_page() -> None:
     """#323: the README summarises the page's five newest sections, ceiling for ceiling."""
-    sections = _compat_sections()
+    sections = list(_compat_sections().items())
     rows = _readme_compat_rows()
-    assert len(rows) == 5, "the README summary lists the last five releases"
-    for row, (heading, section) in zip(rows, sections.items(), strict=False):
-        sdk, ceiling, _ = (cell.strip() for cell in re.split(r"(?<!\\)\|", row.strip()[1:-1]))
-        assert sdk == f"[{heading}](docs/compatibility.md#{_github_anchor(heading)})", row[:60]
-        page_ceiling = _ceiling(section)
-        assert ceiling == page_ceiling, f"{heading}: README {ceiling}, page {page_ceiling}"
-    newest = _ceiling(next(iter(sections.values())))
-    assert f"checked against memory-cloud up to **{newest}**" in _readme_compat_section()
+    assert len(rows) == 5, f"the README summary lists the last five releases: {rows}"
+    for row, (heading, section) in zip(rows, sections[:5], strict=True):
+        sdk, ceiling, _ = _cells(row)
+        assert sdk == f"[{heading}]({COMPAT_URL}#{_github_anchor(heading)})", row
+        assert ceiling == _ceiling(section), (
+            f"the page's {heading} section says {_ceiling(section)}: {row}"
+        )
+    newest, section = sections[0]
+    sentence = f"SDK {newest} is checked against memory-cloud up to **{_ceiling(section)}**"
+    assert sentence in _readme_compat_section()
+
+
+def test_readme_links_the_docs_page_absolutely() -> None:
+    """README.md is the PyPI long description: a relative ``docs/`` link is dead there."""
+    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    assert "](docs/" not in readme
+    assert f"]({COMPAT_URL})" in _readme_compat_section()
 
 
 @pytest.mark.parametrize("name", ["CLAUDE.md", "AGENTS.md"])
