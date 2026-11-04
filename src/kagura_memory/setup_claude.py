@@ -271,12 +271,20 @@ def _lookup_context(
     for ctx in contexts_response.get("contexts") or []:
         if isinstance(ctx, dict) and ctx.get("id") and chosen in (ctx["id"], ctx.get("name")):
             return ctx
-    if contexts_response.get("has_more") is not True or _is_uuid(chosen):
-        return None
-    stripped = chosen.strip()  # as the server reads name_contains
-    if not stripped or len(stripped) > _CONTEXT_NAME_MAX_CHARS:
+    if contexts_response.get("has_more") is not True or not _is_lookup_name(chosen):
         return None
     return asyncio.run(_find_context_by_name(chosen, api_key, mcp_url, profile=profile))
+
+
+def _is_lookup_name(value: str) -> bool:
+    """Whether :func:`_lookup_context` looks ``value`` up past the first page.
+
+    Not a UUID, and 1-100 characters once trimmed, as the server reads
+    ``name_contains``: blank is no filter, and a longer value is refused
+    (and longer than any context name).
+    """
+    stripped = value.strip()
+    return bool(stripped) and len(stripped) <= _CONTEXT_NAME_MAX_CHARS and not _is_uuid(value)
 
 
 def _is_uuid(value: str) -> bool:
@@ -350,7 +358,10 @@ def _select_or_create_context(
     ``contexts_response`` is the first ``list_contexts`` page. A
     ``preselected`` id or exact name is matched there, and a name outside
     that page on every page (:func:`_lookup_context`); a value no page
-    matches is used as given. When ``profile`` is set, the lookup and any
+    matches is used as given. When the whole list was searched (the first
+    page is all of it, or the lookup paged to the end), a value that is
+    not a UUID gets a warning on stderr first: it names no context this
+    credential can see. When ``profile`` is set, the lookup and any
     context creation authenticate via the OAuth profile instead of
     ``api_key`` / ``mcp_url``.
     """
@@ -363,6 +374,13 @@ def _select_or_create_context(
             click.echo(f"  Using context: {match.get('name', '?')} ({ctx_id[:8]}...)")
             return ctx_id
         # A UUID setup does not look up, or a value no page matches: used as given.
+        searched = contexts_response.get("has_more") is not True or _is_lookup_name(preselected)
+        if searched and not _is_uuid(preselected):
+            click.echo(
+                f"  Warning: no context named {preselected!r} is visible to this "
+                "credential; using it as a raw context id.",
+                err=True,
+            )
         click.echo(f"  Using context: {preselected}")
         return preselected
 

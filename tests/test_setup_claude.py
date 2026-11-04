@@ -814,6 +814,70 @@ def test_setup_claude_does_not_look_up_a_uuid(
     assert paged.calls == []
 
 
+UNKNOWN_WARNING = (
+    "  Warning: no context named 'fa' is visible to this credential; "
+    "using it as a raw context id.\n"
+)
+
+
+@patch("kagura_memory.setup_claude._test_connection")
+def test_setup_claude_warns_on_a_name_no_page_matches(
+    mock_conn: AsyncMock, paged: PagedContexts, runner: CliRunner, tmp_path: Path
+) -> None:
+    mock_conn.return_value = paged.first_page()
+
+    result = runner.invoke(main, _setup_args(tmp_path, context_id="fa"))
+
+    # The fallback is kept: the value is written as given, exit 0.
+    assert result.exit_code == 0, result.output
+    assert json.loads((tmp_path / ".kagura.json").read_text())["context_id"] == "fa"
+    # The lookup paged to the end ("fa" matched the three far* contexts, none named
+    # "fa"), so the list was searched: one stderr line, before "Using context".
+    assert [c["cursor"] for c in paged.calls] == [None, "2"]
+    assert result.stderr == UNKNOWN_WARNING
+    assert result.output.index(UNKNOWN_WARNING) < result.output.index("Using context: fa\n")
+
+
+@patch("kagura_memory.setup_claude._test_connection")
+def test_setup_claude_warns_on_a_name_a_complete_page_lacks(
+    mock_conn: AsyncMock, paged: PagedContexts, runner: CliRunner, tmp_path: Path
+) -> None:
+    # No has_more: a server before 0.82.0, which returns every context at once.
+    mock_conn.return_value = {"count": 2, "contexts": paged.rows[:2]}
+
+    result = runner.invoke(main, _setup_args(tmp_path, context_id="fa"))
+
+    assert result.exit_code == 0, result.output
+    assert json.loads((tmp_path / ".kagura.json").read_text())["context_id"] == "fa"
+    assert paged.calls == []
+    assert result.stderr == UNKNOWN_WARNING
+    assert result.output.index(UNKNOWN_WARNING) < result.output.index("Using context: fa\n")
+
+
+@pytest.mark.parametrize(
+    ("chosen", "has_more"),
+    [
+        ("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", False),
+        ("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", True),
+        ("x" * 101, True),
+    ],
+    ids=["uuid-complete-page", "uuid-paged", "too-long-paged"],
+)
+def test_no_warning_unless_the_list_was_searched_for_a_name(
+    paged: PagedContexts, capsys: pytest.CaptureFixture[str], chosen: str, has_more: bool
+) -> None:
+    # A UUID is never a name; a value the lookup skips leaves the list unsearched.
+    first = {"contexts": paged.rows[:2], "has_more": has_more, "next_cursor": "2"}
+    result = _select_or_create_context(
+        first, "key", "url", chosen, Path("/tmp/test"), non_interactive=True
+    )
+    assert result == chosen
+    assert paged.calls == []
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert f"Using context: {chosen}" in captured.out
+
+
 @patch("kagura_memory.setup_claude._test_connection")
 def test_setup_claude_reports_a_lookup_that_does_not_add_up(
     mock_conn: AsyncMock, monkeypatch: pytest.MonkeyPatch, runner: CliRunner, tmp_path: Path
