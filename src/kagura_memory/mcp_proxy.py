@@ -186,7 +186,7 @@ def _downstream_response(message: dict[str, Any], resp: httpx.Response) -> dict[
         httpx.HTTPStatusError: A non-2xx with nothing to forward.
     """
     if not resp.is_success:
-        error = ErrorBody.read(resp)
+        error = ErrorBody(resp)
         if error.jsonrpc is not None and not _needs_login(resp, error):
             msg_id = message.get("id")
             if msg_id is None:  # a notification never gets a reply, not even an error
@@ -220,7 +220,7 @@ def _error_response(message: dict[str, Any], exc: Exception) -> dict[str, Any] |
                 "Run `kagura auth login` to re-authenticate."
             )
         else:
-            body = ErrorBody.read(exc.response)
+            body = ErrorBody(exc.response)
             scope_error = insufficient_scope_error(exc.response, body) if status == 403 else None
             if scope_error is not None:
                 detail = str(scope_error)
@@ -486,7 +486,7 @@ def _needs_login(resp: httpx.Response, body: ErrorBody) -> bool:
     ``403`` ``insufficient_scope`` (the sign-in lacks the tool's scope, e.g. a
     ``kagura auth login --read-only`` profile calling a write tool; a refresh
     keeps the same scope, so only a new sign-in helps). ``body`` is ``resp``'s
-    body, as :meth:`~kagura_memory._http.ErrorBody.read` read it.
+    body, as :class:`~kagura_memory._http.ErrorBody` reads it.
     """
     if resp.status_code == 401:
         return True

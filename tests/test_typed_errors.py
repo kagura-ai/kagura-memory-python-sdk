@@ -35,7 +35,7 @@ from kagura_memory import (
     KaguraServiceUnavailableError,
     UsageInfo,
 )
-from kagura_memory._http import gate_error, raise_for_kagura_status
+from kagura_memory._http import ErrorBody, gate_error, raise_for_kagura_status
 from kagura_memory.agents_client import AgentsClient
 from kagura_memory.cli import _cli_error_message, main
 from kagura_memory.client import KaguraClient
@@ -902,3 +902,35 @@ def test_raise_for_kagura_status_decodes_the_body_once(status, body, headers, de
             httpx.HTTPStatusError(str(status), request=request, response=response)
         )
     assert response.decodes == decodes
+
+
+def test_error_body_decodes_lazily_once_and_shares_no_dict():
+    """Nothing is decoded until a reader asks; then once, and no two readers share a dict."""
+    body = {"error": "AUTH-101", "message": "No.", "details": {"gate": "plan", "n": [1]}}
+    response = _CountingResponse(403, json=body)
+
+    error = ErrorBody(response)
+    assert response.decodes == 0
+
+    assert error.envelope == ("AUTH-101", "No.", {"gate": "plan", "n": [1]})
+    assert error.fields == ("AUTH-101", {"gate": "plan", "n": [1]})
+    assert (error.detail, error.jsonrpc) == ("No.", None)
+    assert response.decodes == 1
+    # Each reader is computed once and kept.
+    assert error.envelope is error.envelope
+    # The envelope's details and the fields are copies: changing one leaves the other.
+    envelope_details, fields = error.envelope[2], error.fields[1]
+    assert envelope_details is not fields
+    envelope_details["n"].append(2)
+    assert fields == {"gate": "plan", "n": [1]}
+    assert ErrorBody(_CountingResponse(403, json=body)).fields == ("AUTH-101", body["details"])
+
+
+@pytest.mark.parametrize(
+    "content",
+    [b"", b"not json", b"\xff\xfe", b"null", b"[1]", b'"x"'],
+    ids=["empty", "text", "bad-utf8", "null", "list", "string"],
+)
+def test_error_body_that_is_not_a_json_object_reads_as_nothing(content: bytes):
+    error = ErrorBody(httpx.Response(500, content=content))
+    assert (error.detail, error.envelope, error.fields, error.jsonrpc) == ("", None, None, None)

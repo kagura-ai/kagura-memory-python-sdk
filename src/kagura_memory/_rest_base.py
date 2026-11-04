@@ -91,9 +91,9 @@ class KaguraRestClient:
       error code as ``code`` and its ``details`` (the REST envelope's
       ``details``, or an OAuth-style body's fields) as ``details`` — set by
       :meth:`_request`, so every hook's error gets them too
-    - the error body is decoded once, by :meth:`_request`, and handed to
-      :meth:`_map_status_error` and the hooks as an
-      :class:`~kagura_memory._http.ErrorBody` (#311)
+    - the error body is decoded at most once: :meth:`_request` builds one
+      :class:`~kagura_memory._http.ErrorBody` and hands it to
+      :meth:`_map_status_error` and the hooks (#311)
     - a 2xx JSON body its model or envelope rejects →
       :class:`KaguraResponseError` (via :meth:`_parse` / :meth:`_expect_list`)
     """
@@ -277,7 +277,7 @@ class KaguraRestClient:
             response.raise_for_status()
             return response
         except httpx.HTTPStatusError as e:
-            body = ErrorBody.read(e.response)
+            body = ErrorBody(e.response)
             err = self._map_status_error(e, body, request_json=json, request_params=params)
             # One place for every hook: a typed error keeps what it already set.
             if body.fields is not None:
@@ -303,8 +303,9 @@ class KaguraRestClient:
         (CodeQL py/mixed-returns vs py/illegal-raise both flagged the
         raising-hook shape).
 
-        ``body`` is ``e.response``'s body, decoded once by :meth:`_request`;
-        the hooks read it from there rather than decoding it again.
+        ``body`` is ``e.response``'s :class:`~kagura_memory._http.ErrorBody`,
+        built once by :meth:`_request`; the hooks read it from there rather
+        than decoding the body again.
         """
         typed = self._gate_error(e, body)
         if typed is not None:

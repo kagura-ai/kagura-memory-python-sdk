@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import copy
 import re
 import uuid
 from collections.abc import Collection, Mapping, Sequence
-from dataclasses import dataclass
 from datetime import UTC, datetime, time, timedelta
+from functools import cached_property
 from importlib.metadata import version as _pkg_version
 from typing import Any, NamedTuple, NoReturn, TypeVar
 from urllib.parse import parse_qsl, quote, unquote_plus, urlencode, urlsplit, urlunsplit
@@ -664,7 +665,7 @@ def raise_for_kagura_status(e: httpx.HTTPStatusError) -> NoReturn:
     status = response.status_code
     if status == 401:
         raise KaguraAuthError("Authentication failed. Check your API key.") from e
-    body = ErrorBody.read(response)
+    body = ErrorBody(response)
     if status == 403 and (scope_error := insufficient_scope_error(response, body)) is not None:
         raise scope_error from e
     detail = body.detail or _exc_message(e)
@@ -1116,37 +1117,59 @@ def _fields_of(body: Any) -> tuple[str, dict[str, Any]] | None:
     return error, {k: v for k, v in body.items() if k != "error"}
 
 
-@dataclass(frozen=True)
 class ErrorBody:
-    """A non-2xx response's JSON body, decoded once and read each way the error mapping needs.
+    """A non-2xx response's JSON body, decoded at most once and read each way errors need it.
 
-    ``KaguraRestClient`` and :func:`raise_for_kagura_status` read one per
-    error response and pass it down, instead of decoding the body again in
-    every reader (#311); ``kagura-mcp`` reads one where it decides whether to
-    forward the reply and one where it words its own. A body that is not
-    JSON reads as nothing in every field.
+    Built from the response without reading it: the body is decoded the
+    first time a reader asks (a ``401`` path never does) and kept. Each
+    reader is computed once, from its own copy of the decoded body, so no
+    two of them share a mutable dict — as when every reader decoded the
+    body itself. A body that is not JSON reads as nothing in every field.
+
+    ``KaguraRestClient``, :func:`raise_for_kagura_status`, ``KaguraClient``'s
+    REST reads and ``kagura-mcp`` build one per error response and pass it
+    down instead of decoding the body again in every reader (#311).
+
+    Args:
+        response: A non-2xx response.
     """
 
-    #: What :func:`extract_detail` returns: the server's message, or ``""``.
-    detail: str
-    #: The canonical REST envelope ``{"error": <str>, "message": ..., "details": {...}}``
-    #: as ``(error, message, details)`` (``""`` / ``{}`` when missing); ``None``
-    #: for any other shape.
-    envelope: tuple[str, str, dict[str, Any]] | None
-    #: What :func:`server_error_fields` returns: ``(code, fields)``.
-    fields: tuple[str, dict[str, Any]] | None
-    #: What :func:`jsonrpc_error_body` returns: the JSON-RPC error envelope.
-    jsonrpc: dict[str, Any] | None
+    def __init__(self, response: httpx.Response) -> None:
+        self._response = response
 
-    @classmethod
-    def read(cls, response: httpx.Response) -> ErrorBody:
-        """Decode ``response``'s body once and read it every way.
+    @cached_property
+    def _decoded(self) -> Any:
+        """The decoded JSON body; ``None`` when it is not JSON."""
+        return _json_body(self._response)
 
-        Args:
-            response: A non-2xx response.
+    def _copy(self) -> Any:
+        """The decoded body for one reader, a deep copy of a JSON object (the only shape read)."""
+        decoded = self._decoded
+        return copy.deepcopy(decoded) if isinstance(decoded, dict) else decoded
+
+    @cached_property
+    def detail(self) -> str:
+        """What :func:`extract_detail` returns: the server's message, or ``""``."""
+        return _detail_of(self._decoded)
+
+    @cached_property
+    def envelope(self) -> tuple[str, str, dict[str, Any]] | None:
+        """The canonical REST envelope ``{"error": <str>, "message": ..., "details": {...}}``.
+
+        As ``(error, message, details)`` (``""`` / ``{}`` when missing);
+        ``None`` for any other shape.
         """
-        body = _json_body(response)
-        return cls(_detail_of(body), _envelope_of(body), _fields_of(body), _jsonrpc_error_of(body))
+        return _envelope_of(self._copy())
+
+    @cached_property
+    def fields(self) -> tuple[str, dict[str, Any]] | None:
+        """What :func:`server_error_fields` returns: ``(code, fields)``."""
+        return _fields_of(self._copy())
+
+    @cached_property
+    def jsonrpc(self) -> dict[str, Any] | None:
+        """What :func:`jsonrpc_error_body` returns: the JSON-RPC error envelope."""
+        return _jsonrpc_error_of(self._copy())
 
 
 def _bearer_challenge(response: httpx.Response) -> dict[str, str]:
@@ -1190,7 +1213,7 @@ def insufficient_scope_error(response: httpx.Response, body: ErrorBody) -> Kagur
 
     Args:
         response: A 403 response, for its ``WWW-Authenticate`` challenge.
-        body: Its body, as :meth:`ErrorBody.read` read it.
+        body: Its body, as :class:`ErrorBody` reads it.
 
     Returns:
         The error, with ``code`` ``"insufficient_scope"`` and
@@ -1228,7 +1251,7 @@ def service_unavailable_error(
     Args:
         response: The 503 response, for its ``Retry-After`` header.
         message: Message for the exception.
-        body: Its body, as :meth:`ErrorBody.read` read it.
+        body: Its body, as :class:`ErrorBody` reads it.
     """
     fields = body.fields
     code, data = fields if fields is not None else (None, {})
