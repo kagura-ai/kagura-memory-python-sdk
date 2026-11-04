@@ -33,7 +33,11 @@ from kagura_memory._auth import _OAuthAuth, _resolve_profile_auth
 from kagura_memory.auth import credentials
 from kagura_memory.auth.credentials import CredentialsFile, save_credentials_file
 from kagura_memory.cli import main
-from kagura_memory.exceptions import KaguraNotFoundError
+from kagura_memory.exceptions import (
+    KaguraAuthError,
+    KaguraConnectionError,
+    KaguraNotFoundError,
+)
 from kagura_memory.models import GuardrailDigest
 from kagura_memory.setup_harness import hermes_context_file, hermes_home, hermes_key_env
 
@@ -2813,6 +2817,35 @@ def test_a_hex_id_no_context_is_named_is_still_an_id(on_path, recorder, paged):
     [argv] = recorder.mutating()
     assert argv[-2:] == ["--guardrails", OTHER_CTX]
     assert len(paged.calls) == 1  # looked up by name first
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (
+            KaguraAuthError("token revoked"),
+            "Authentication failed: token revoked\n"
+            "  Your token may have expired — re-run: kagura auth login --profile default",
+        ),
+        (
+            KaguraConnectionError("connection reset"),
+            "Cannot connect to https://memory.kagura-ai.com: connection reset",
+        ),
+    ],
+    ids=["auth", "connection"],
+)
+def test_a_failed_context_lookup_carries_the_profile_hints(
+    on_path, recorder, connection, monkeypatch, error, expected
+):
+    on_path("codex")
+    connection.return_value = PagedContexts(["a", "b", "c"]).first_page()
+    fake = PagedContexts([], pages=[error])
+    monkeypatch.setattr("kagura_memory.setup_claude._make_client", fake.make_client)
+    result = run("codex", "--profile", "default", "--context-id", "far", "-y")
+    assert result.exit_code == 1
+    assert expected in result.output
+    assert "Setup failed" not in result.output
+    assert recorder.mutating() == []
 
 
 def test_dry_run_shows_a_dashless_uuid_as_a_placeholder(on_path, connection):

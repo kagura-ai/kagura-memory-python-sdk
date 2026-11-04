@@ -396,7 +396,8 @@ class PagedContexts:
     case-insensitive substring filter (on the name here), and each page holds
     ``page_size`` rows with ``has_more`` and an offset ``next_cursor``. Row ids
     are UUIDs derived from the position in ``names``. Every call is recorded as
-    its arguments; ``pages`` overrides the replies in order. Install it
+    its arguments; ``pages`` overrides the replies in order (an exception in
+    it is raised). Install it
     with ``monkeypatch.setattr("kagura_memory.setup_claude._make_client",
     fake.make_client)``.
     """
@@ -405,7 +406,7 @@ class PagedContexts:
         self,
         names: list[str],
         page_size: int = 2,
-        pages: list[dict[str, Any]] | None = None,
+        pages: list[dict[str, Any] | BaseException] | None = None,
     ) -> None:
         self.rows = [{"id": self.id_of(i), "name": name} for i, name in enumerate(names)]
         self.page_size = page_size
@@ -438,7 +439,10 @@ class PagedContexts:
     async def list_contexts(self, **kwargs: Any) -> dict[str, Any]:
         self.calls.append(kwargs)
         if self.pages is not None:
-            return self.pages.pop(0)
+            reply = self.pages.pop(0)
+            if isinstance(reply, BaseException):
+                raise reply
+            return reply
         needle = (kwargs.get("name_contains") or "").strip().casefold()
         matched = [row for row in self.rows if needle in row["name"].casefold()]
         start = int(kwargs.get("cursor") or 0)

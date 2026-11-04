@@ -9,12 +9,17 @@ import pytest
 from click.testing import CliRunner
 
 from kagura_memory.cli import main
-from kagura_memory.exceptions import KaguraResponseError
+from kagura_memory.exceptions import (
+    KaguraAuthError,
+    KaguraConnectionError,
+    KaguraResponseError,
+)
 from kagura_memory.setup_claude import (
     KAGURA_HOOK_MARKER,
     POSTTOOLUSE_HOOK_COMMAND,
     _auto_match_context,
     _check_gitignore,
+    _connection_hints,
     _find_context_by_name,
     _install_hooks,
     _install_skills,
@@ -951,6 +956,61 @@ def test_setup_claude_reports_a_lookup_that_does_not_add_up(
     assert result.exit_code == 1
     assert "has_more without a next_cursor" in result.output
     assert not (tmp_path / ".kagura.json").exists()
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (
+            KaguraAuthError("Invalid API key"),
+            "Authentication failed: Invalid API key\n"
+            "  Check your API key at: Kagura Web UI > Integrations > API Keys",
+        ),
+        (
+            KaguraConnectionError("connection refused"),
+            "Cannot connect to http://localhost:8080/mcp: connection refused\n"
+            "  Is the server running? Try: docker compose up -d",
+        ),
+    ],
+    ids=["auth", "connection"],
+)
+@patch("kagura_memory.setup_claude._test_connection")
+def test_setup_claude_lookup_failures_carry_the_connection_hints(
+    mock_conn: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+    runner: CliRunner,
+    tmp_path: Path,
+    error: Exception,
+    expected: str,
+) -> None:
+    # The lookup's own session fails after the connection check passed.
+    fake = PagedContexts([], pages=[error])
+    monkeypatch.setattr("kagura_memory.setup_claude._make_client", fake.make_client)
+    mock_conn.return_value = PagedContexts(NAMES).first_page()
+
+    result = runner.invoke(main, _setup_args(tmp_path, context_id="far"))
+
+    assert result.exit_code == 1
+    assert expected in result.output
+    assert "Setup failed" not in result.output
+    assert not (tmp_path / ".kagura.json").exists()
+
+
+class TestConnectionHints:
+    def test_profile_hints(self) -> None:
+        with pytest.raises(click.ClickException) as info, _connection_hints("https://x", "work"):
+            raise KaguraAuthError("expired")
+        assert info.value.message == (
+            "Authentication failed: expired\n"
+            "  Your token may have expired — re-run: kagura auth login --profile work"
+        )
+        with pytest.raises(click.ClickException) as info, _connection_hints("https://x", "work"):
+            raise KaguraConnectionError("down")
+        assert info.value.message == "Cannot connect to https://x: down"
+
+    def test_other_errors_propagate(self) -> None:
+        with pytest.raises(KaguraResponseError), _connection_hints("https://x", None):
+            raise KaguraResponseError("drift", operation="list_contexts")
 
 
 # =============================================================================

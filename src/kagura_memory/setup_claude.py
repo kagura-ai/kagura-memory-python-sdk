@@ -6,8 +6,8 @@ import os
 import re
 import shlex
 import subprocess
-from collections.abc import Sequence
-from contextlib import aclosing
+from collections.abc import Iterator, Sequence
+from contextlib import aclosing, contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -207,6 +207,39 @@ async def _test_connection(
         return await client.list_contexts()
 
 
+def _connection_error(
+    e: KaguraAuthError | KaguraConnectionError, server: str | None, profile: str | None
+) -> click.ClickException:
+    """Setup's error for a failed request, with the hint for its credential.
+
+    ``profile`` set: the OAuth profile's (sign in again); otherwise the API
+    key's. ``server`` is the URL the message names.
+    """
+    if isinstance(e, KaguraAuthError):
+        hint = (
+            f"Your token may have expired — re-run: kagura auth login --profile {profile}"
+            if profile is not None
+            else "Check your API key at: Kagura Web UI > Integrations > API Keys"
+        )
+        return click.ClickException(f"Authentication failed: {_exc_message(e)}\n  {hint}")
+    hint = "" if profile is not None else "\n  Is the server running? Try: docker compose up -d"
+    return click.ClickException(f"Cannot connect to {server}: {_exc_message(e)}{hint}")
+
+
+@contextmanager
+def _connection_hints(server: str | None, profile: str | None) -> Iterator[None]:
+    """Raise an auth or connection failure in the block as the connection check does.
+
+    For the requests setup sends after the check on the same credential (the
+    context lookup, creating a context), so their failures carry the same
+    hints (:func:`_connection_error`). Any other exception propagates.
+    """
+    try:
+        yield
+    except (KaguraAuthError, KaguraConnectionError) as e:
+        raise _connection_error(e, server, profile) from e
+
+
 async def _find_context_by_name(
     name: str,
     api_key: str | None = None,
@@ -376,7 +409,8 @@ def _select_or_create_context(
 
     Raises:
         KaguraAuthError: The name lookup or creating the context was
-            refused the credential.
+            refused the credential (the setup flows add their hints with
+            :func:`_connection_hints`).
         KaguraConnectionError: The same, unable to reach the server.
         KaguraResponseError: The name lookup's pages do not add up.
     """
@@ -1295,16 +1329,8 @@ def run_setup_claude(
     click.echo("\nVerifying connection...")
     try:
         contexts_response = asyncio.run(_test_connection(resolved_api_key, resolved_mcp_url))
-    except KaguraAuthError as e:
-        raise click.ClickException(
-            f"Authentication failed: {_exc_message(e)}\n"
-            "  Check your API key at: Kagura Web UI > Integrations > API Keys"
-        ) from e
-    except KaguraConnectionError as e:
-        raise click.ClickException(
-            f"Cannot connect to {resolved_mcp_url}: {_exc_message(e)}\n"
-            "  Is the server running? Try: docker compose up -d"
-        ) from e
+    except (KaguraAuthError, KaguraConnectionError) as e:
+        raise _connection_error(e, resolved_mcp_url, None) from e
     except Exception as e:
         raise click.ClickException(f"Connection failed: {_exc_message(e)}") from e
 
@@ -1313,15 +1339,16 @@ def run_setup_claude(
 
     # 5. Context selection (reuse existing if not overridden)
     effective_context_id = context_id or existing_config.get("context_id")
-    resolved_context_id = _select_or_create_context(
-        contexts_response,
-        resolved_api_key,
-        resolved_mcp_url,
-        effective_context_id,
-        project,
-        non_interactive,
-        no_auto_context,
-    )
+    with _connection_hints(resolved_mcp_url, None):
+        resolved_context_id = _select_or_create_context(
+            contexts_response,
+            resolved_api_key,
+            resolved_mcp_url,
+            effective_context_id,
+            project,
+            non_interactive,
+            no_auto_context,
+        )
 
     # 6. Validate context_id before interpolating into shell commands
     _validate_context_id(resolved_context_id)
@@ -1420,13 +1447,8 @@ def _verify_profile(profile: str, creds: OAuthCredentials) -> dict[str, Any]:
     click.echo("\nVerifying connection...")
     try:
         contexts_response = asyncio.run(_test_connection(profile=profile))
-    except KaguraAuthError as e:
-        raise click.ClickException(
-            f"Authentication failed: {_exc_message(e)}\n"
-            f"  Your token may have expired — re-run: kagura auth login --profile {profile}"
-        ) from e
-    except KaguraConnectionError as e:
-        raise click.ClickException(f"Cannot connect to {creds.server}: {_exc_message(e)}") from e
+    except (KaguraAuthError, KaguraConnectionError) as e:
+        raise _connection_error(e, creds.server, profile) from e
     except Exception as e:
         raise click.ClickException(f"Connection failed: {_exc_message(e)}") from e
 
@@ -1485,16 +1507,17 @@ def _run_setup_claude_oauth(
 
     contexts_response = _verify_profile(profile, creds)
 
-    resolved_context_id = _select_or_create_context(
-        contexts_response,
-        None,
-        creds.mcp_url,
-        context_id,
-        project,
-        non_interactive,
-        no_auto_context,
-        profile=profile,
-    )
+    with _connection_hints(creds.server, profile):
+        resolved_context_id = _select_or_create_context(
+            contexts_response,
+            None,
+            creds.mcp_url,
+            context_id,
+            project,
+            non_interactive,
+            no_auto_context,
+            profile=profile,
+        )
 
     _validate_context_id(resolved_context_id)
 

@@ -21,6 +21,7 @@ from click.testing import CliRunner, Result
 from kagura_memory import claude_code
 from kagura_memory.claude_code import MCP_SERVER_NAME, claude_json_label, claude_json_path
 from kagura_memory.cli import main
+from kagura_memory.exceptions import KaguraAuthError, KaguraConnectionError
 from kagura_memory.setup_claude import (
     POSTTOOLUSE_HOOK_COMMAND,
     SESSIONSTART_HOOK_COMMAND,
@@ -1293,3 +1294,35 @@ def test_context_name_past_the_first_page_resolves(
     assert fake.calls == [{"name_contains": "far"}, {"name_contains": "far", "cursor": "2"}]
     # The lookup runs on the credential the connection check used.
     assert fake.made_with == [(None, MCP_URL, "default") if oauth else (API_KEY, MCP_URL, None)]
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (
+            KaguraAuthError("token revoked"),
+            "Authentication failed: token revoked\n"
+            "  Your token may have expired — re-run: kagura auth login --profile default",
+        ),
+        (
+            KaguraConnectionError("connection reset"),
+            "Cannot connect to https://memory.example.com: connection reset",
+        ),
+    ],
+    ids=["auth", "connection"],
+)
+def test_a_failed_context_lookup_carries_the_profile_hints(
+    connection, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, error: Exception, expected: str
+) -> None:
+    # The OAuth path: the lookup's own session fails after the profile check passed.
+    connection.return_value = PagedContexts(["recent-a", "recent-b", "far"]).first_page()
+    fake = PagedContexts([], pages=[error])
+    monkeypatch.setattr("kagura_memory.setup_claude._make_client", fake.make_client)
+    args = ["setup", "claude", "--project-dir", str(tmp_path), "--context-id", "far"]
+
+    result = CliRunner().invoke(main, [*args, "--profile", "default", "-y"])
+
+    assert result.exit_code == 1
+    assert expected in result.output
+    assert "Setup failed" not in result.output
+    assert not (tmp_path / ".kagura.json").exists()

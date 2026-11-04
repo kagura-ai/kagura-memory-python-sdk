@@ -100,6 +100,7 @@ from .exceptions import KaguraAuthError, KaguraNotFoundError, _exc_message
 from .memory_client import MemoryClient
 from .models import GuardrailDigest
 from .setup_claude import (
+    _connection_hints,
     _load_profile,
     _lookup_context,
     _stdio_entry,
@@ -1659,7 +1660,8 @@ def _resolve_context(
         click.ClickException: The context is not a UUID (an unknown name), or
             the profile can see none to pick.
         KaguraAuthError: The name lookup was refused the profile's
-            credential.
+            credential (the caller adds the hint with
+            ``setup_claude._connection_hints``).
         KaguraConnectionError: The name lookup could not reach the server.
         KaguraResponseError: The name lookup's pages do not add up.
     """
@@ -1938,9 +1940,10 @@ def run_setup_harness(
         if dry_run:
             export_context = _dry_run_context(export_context)
         else:
-            export_context = _resolve_context(
-                export_context, contexts, interactive=interactive, profile=profile
-            )
+            with _connection_hints(creds.server if creds is not None else mcp_url, profile):
+                export_context = _resolve_context(
+                    export_context, contexts, interactive=interactive, profile=profile
+                )
     if lane_from_context:
         guardrails = export_context
     export_auth = None
