@@ -2366,13 +2366,44 @@ class KaguraClient:
         self,
         context_id: str,
         memory_id: str,
+        *,
+        version: int | None = None,
+        content_offset: int | None = None,
     ) -> dict[str, Any]:
         """
         Call reference MCP tool (get full memory details).
 
+        ``version`` and ``content_offset`` are keyword-only and sent only when
+        set. From memory-cloud v0.82.0 (#1742) a server refuses an argument it
+        does not declare (``KaguraError``, code ``invalid_argument``); one
+        before v0.82.0 ignores it.
+
+        Since memory-cloud v0.78.0 (#1685) the reply is bounded (20,000
+        characters by default): ``content`` that does not fit comes back
+        sliced with ``content_truncated`` / ``content_next_offset``, and a
+        ``details`` / ``context`` / links field that does not fit is left out
+        with ``<field>_omitted`` and ``<field>_total_chars`` — never cut
+        silently.
+
         Args:
             context_id: Context ID
             memory_id: Memory ID to retrieve full details for
+            version: Read an earlier version of the memory, an ``int`` ≥ 1
+                from its revision log (memory-cloud v0.113.0+, #2043). The
+                reply then carries ``historical: True``, ``current_version``
+                and, when the log could not rebuild some fields,
+                ``unavailable_fields``; the links and ``supersede_candidate``,
+                which describe the memory now, are left out. A version the
+                memory never had is ``KaguraError`` with ``code ==
+                "validation_error"`` and ``details["current_version"]``.
+                Keyword-only.
+            content_offset: Continue ``content`` from this character, an
+                ``int`` ≥ 0 — the ``content_next_offset`` of a cut
+                :meth:`recall` row or of the previous reference reply
+                (memory-cloud v0.78.0+, #1685). With an offset the server
+                returns that one field only (no ``details``, ``context`` or
+                links). An offset past the end is ``KaguraError`` with ``code
+                == "invalid_argument"``. Keyword-only.
 
         Returns:
             API response dict. Memory data is in ``result["memory"]``::
@@ -2381,19 +2412,41 @@ class KaguraClient:
                 memory = result["memory"]
                 print(memory["summary"], memory["content"])
 
-            A live ``supersede_candidate`` has :meth:`recall`'s keys
-            (``verified`` included) plus ``acceptance`` — ``{allowed,
-            reason}``, whether the caller may accept the suggestion
-            (memory-cloud v0.137.0+, #2427). ``reason`` is set only when
-            ``allowed`` is false: ``not_writable``, ``not_owner`` (both
-            memories must be the caller's own, see :meth:`create_edge`),
-            ``newer_candidate``, or ``edge_exists`` (another declared edge
-            already links the pair; v0.138.0+, #2518).
+            ``memory["version"]`` (memory-cloud v0.113.0+) is the version to
+            pass to :meth:`update_memory` as ``expected_version``, and
+            ``memory["observed_at"]`` (v0.127.0+, #2330) when the fact held,
+            when it is set. A live ``supersede_candidate`` has
+            :meth:`recall`'s keys (``verified`` included) plus
+            ``acceptance`` — ``{allowed, reason}``, whether the caller may
+            accept the suggestion (memory-cloud v0.137.0+, #2427). ``reason``
+            is set only when ``allowed`` is false: ``not_writable``,
+            ``not_owner`` (both memories must be the caller's own, see
+            :meth:`create_edge`), ``newer_candidate``, or ``edge_exists``
+            (another declared edge already links the pair; v0.138.0+, #2518).
+            Accept it with ``update_memory(accept_supersede_candidate=True)``.
+
+        A call without an offset counts as a read in the memory's access
+        stats; a continuation counts only when it is the session's first read
+        of the memory (v0.122.0+, #2139). REST ``POST /api/v1/memory/reference``
+        also takes ``record_access: false`` to read without counting
+        (v0.138.0+, #2518); the MCP tool has no such argument and this client
+        does not wrap the REST route.
+
+        Raises:
+            ValueError: ``version`` is not an ``int`` ≥ 1, or ``content_offset``
+                not an ``int`` ≥ 0 (``bool`` is neither, as on the server).
+                Checked before any request.
         """
-        arguments = {
+        arguments: dict[str, Any] = {
             "context_id": context_id,
             "memory_id": memory_id,
         }
+        if version is not None:
+            _validate_min_int("version", version, 1)
+            arguments["version"] = version
+        if content_offset is not None:
+            _validate_min_int("content_offset", content_offset, 0)
+            arguments["content_offset"] = content_offset
         return await self._call_tool_checked("reference", arguments)
 
     async def update_memory(

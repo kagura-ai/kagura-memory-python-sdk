@@ -176,7 +176,16 @@ def test_no_doc_says_a_non_uuid_is_a_500_without_the_422() -> None:
         (KaguraClient.update_edge, ["permission_denied", "#2313"]),
         (
             KaguraClient.reference,
-            ["``acceptance``", "``verified``", "``not_writable``", "``edge_exists``"],
+            [
+                "``acceptance``",
+                "``verified``",
+                "``not_writable``",
+                "``edge_exists``",
+                # #302: versions, continuation reads, and the REST-only flag.
+                "#2043",
+                "``content_next_offset``",
+                "``record_access: false``",
+            ],
         ),
         (KaguraClient.get_usage, ["#1946"]),
         (UsageInfo, ["#1946"]),

@@ -611,3 +611,106 @@ def test_version_conflict_properties_ignore_malformed_details() -> None:
     assert err.current_version is None
     assert err.expected_version is None
     assert err.memory_id is None
+
+
+# ============================================================================
+# reference(version=, content_offset=)
+# ============================================================================
+
+
+async def _reference(reply: dict[str, Any], **kwargs: Any) -> tuple[dict[str, Any], dict[str, Any]]:
+    sent: list[dict[str, Any]] = []
+    client = _wire_client(reply, sent)
+    try:
+        result = await client.reference(CTX, MEM, **kwargs)
+    finally:
+        await client.close()
+    return result, _arguments(sent)
+
+
+@pytest.mark.asyncio
+async def test_reference_omits_version_and_offset_by_default() -> None:
+    reply = {"status": "success", "memory": {"memory_id": MEM, "version": 5}}
+    result, arguments = await _reference(reply)
+    assert arguments == {"context_id": CTX, "memory_id": MEM}
+    assert result["memory"]["version"] == 5
+
+
+@pytest.mark.asyncio
+async def test_reference_reads_an_earlier_version() -> None:
+    reply = {
+        "status": "success",
+        "memory": {
+            "memory_id": MEM,
+            "summary": "Deploy target was us-east-1",
+            "version": 2,
+            "historical": True,
+            "current_version": 5,
+        },
+    }
+    result, arguments = await _reference(reply, version=2)
+    assert arguments == {"context_id": CTX, "memory_id": MEM, "version": 2}
+    assert result["memory"]["historical"] is True
+    assert result["memory"]["current_version"] == 5
+
+
+@pytest.mark.asyncio
+async def test_reference_continues_content() -> None:
+    """``content_offset=0`` is a value (the start), so it goes on the wire."""
+    reply = {
+        "status": "success",
+        "memory": {
+            "memory_id": MEM,
+            "content": "c" * 100,
+            "content_offset": 1500,
+            "content_total_chars": 1600,
+            "content_truncated": False,
+        },
+    }
+    _, arguments = await _reference(reply, content_offset=1500)
+    assert arguments["content_offset"] == 1500
+    _, arguments = await _reference(reply, content_offset=0)
+    assert arguments["content_offset"] == 0
+
+
+@pytest.mark.asyncio
+async def test_reference_unknown_version_is_a_validation_error() -> None:
+    reply = {
+        "status": "error",
+        "error": "validation_error",
+        "message": "Memory has no version 9.",
+        "received": 9,
+        "current_version": 5,
+    }
+    sent: list[dict[str, Any]] = []
+    client = _wire_client(reply, sent)
+    try:
+        with pytest.raises(KaguraError) as excinfo:
+            await client.reference(CTX, MEM, version=9)
+    finally:
+        await client.close()
+    assert excinfo.value.code == "validation_error"
+    assert excinfo.value.details["current_version"] == 5
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"version": 0}, "version must be an integer of at least 1"),
+        ({"version": True}, "version must be an integer"),
+        ({"version": 2.0}, "version must be an integer"),
+        ({"content_offset": -1}, "content_offset must be an integer of at least 0"),
+        ({"content_offset": False}, "content_offset must be an integer"),
+    ],
+    ids=["version-zero", "version-bool", "version-float", "offset-negative", "offset-bool"],
+)
+async def test_reference_refuses_locally(kwargs: dict[str, Any], match: str) -> None:
+    sent: list[dict[str, Any]] = []
+    client = _wire_client({"status": "success", "memory": {}}, sent)
+    try:
+        with pytest.raises(ValueError, match=match):
+            await client.reference(CTX, MEM, **kwargs)
+    finally:
+        await client.close()
+    assert sent == []
