@@ -3586,7 +3586,11 @@ def _user_id_param(_ctx: click.Context, _param: click.Parameter, value: str) -> 
 def _context_uuids_param(
     _ctx: click.Context, _param: click.Parameter, value: tuple[str, ...]
 ) -> tuple[str, ...]:
-    """``--context`` values as canonical UUIDs: a non-UUID got HTTP 500 from the server (#285)."""
+    """``--context`` values as canonical UUIDs, checked locally on every server.
+
+    memory-cloud answers a non-UUID context id with 422 ``VAL-001`` since
+    v0.80.0 (#1693) and failed on it before (#285).
+    """
     canonical = []
     for c in value:
         try:

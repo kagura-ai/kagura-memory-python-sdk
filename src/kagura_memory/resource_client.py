@@ -67,7 +67,8 @@ class ResourceClient(KaguraRestClient):
     Token management is workspace-scoped (memory-cloud v0.94.0+, #1863): an
     owner lists, updates and revokes every token of the workspace, whoever
     minted it, and a token stays reachable after its resource's contexts
-    are deleted. A token of another workspace answers 404.
+    are deleted. A token of another workspace answers 404 uniformly since
+    v0.97.0 (#1919); older servers answered some of those 403.
 
     All methods may raise:
         KaguraAuthError: Authentication failed (401)
@@ -205,10 +206,11 @@ class ResourceClient(KaguraRestClient):
             Updated token metadata.
 
         Raises:
-            KaguraNotFoundError: No such token in the caller's workspace. A
-                token of another workspace answers 404 since memory-cloud
-                v0.94.0 (#1863); older servers answered 403, raised as
-                :class:`KaguraConnectionError`.
+            KaguraNotFoundError: No such token in the caller's workspace.
+                Since memory-cloud v0.94.0 (#1863) any token of the workspace
+                can be updated; a token of another workspace answers 404
+                uniformly since v0.97.0 (#1919), where older servers answered
+                some of those 403, raised as :class:`KaguraConnectionError`.
         """
         segment = public_id_segment(token_id, label="token_id")
         body = ResourceTokenUpdate(
@@ -232,8 +234,9 @@ class ResourceClient(KaguraRestClient):
 
         Raises:
             KaguraNotFoundError: No such token in the caller's workspace (a
-                token of another workspace: 404 since v0.94.0, 403 raised as
-                :class:`KaguraConnectionError` before).
+                token of another workspace: 404 uniformly since v0.97.0,
+                #1919; older servers answered some of those 403, raised as
+                :class:`KaguraConnectionError`).
         """
         segment = public_id_segment(token_id, label="token_id")
         await self._request("DELETE", f"/api/v1/resource-tokens/{segment}")

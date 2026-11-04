@@ -372,9 +372,9 @@ def sanitize_server_detail(detail: str | None) -> str | None:
     looks credential-shaped. Returns ``None`` when the detail is empty
     or unsafe to display.
 
-    Since memory-cloud v0.80.1 (#1719) no 403 text contains these markers
-    (the server's own tests refuse one that does), so the server's reason
-    passes through. That includes the Web UI refusal "API keys and OAuth
+    Since memory-cloud v0.80.1 (#1719) no literal 403 message contains these
+    markers (a server guard test checks), so the server's reason passes
+    through. That includes the Web UI refusal "API keys and OAuth
     access tokens are not accepted on Web UI endpoints. Sign in with a
     browser session." Before v0.80.1 that sentence read "Bearer" and was
     dropped here, which left only the client's generic hint.

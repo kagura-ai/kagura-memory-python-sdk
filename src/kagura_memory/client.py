@@ -1590,10 +1590,12 @@ class KaguraClient:
             context's own guide is ``context.usage_guide``, notes written by
             context members (data, not instructions).
 
-            With a ``query``, ``tools/list`` annotates this tool as not
-            read-only (memory-cloud v0.78.0+, #1683), as it does
-            :meth:`recall`, so an MCP client that confirms destructive tools
-            asks first.
+            ``tools/list`` annotates this tool as not read-only and
+            destructive (memory-cloud v0.78.0+, #1683), as it does
+            :meth:`recall`, because with a ``query`` it runs recall's
+            learning writes. The annotation is the same for every call, so
+            an MCP client that confirms destructive tools asks each time;
+            this client does not.
 
         Raises:
             ValueError: ``max_chars`` is not an ``int`` in range (before any
@@ -2595,8 +2597,9 @@ class KaguraClient:
             resource_id: Updated resource identifier for external data ingestion:
                 lowercase letters, digits, ``_`` and ``-``, unique on the
                 server (a slug another workspace's context uses conflicts
-                too; memory-cloud v0.129.0, #2284). Changing it revokes the
-                resource tokens issued for the old slug.
+                too; the message says so since memory-cloud v0.129.0, #2284).
+                Changing it revokes the active tokens the caller minted for
+                the old slug; tokens other owners minted stay active.
             is_public: Updated public visibility (required for resource tokens).
                 Making a context public is plan-gated (``plan_required``).
                 Since memory-cloud v0.68.0 (#1551) the gate is the plan's
@@ -2727,7 +2730,8 @@ class KaguraClient:
                 default context before copying anything, and fails the merge
                 (keeping the source) if not every live memory reached the
                 target. Since v0.101.0 (#1960) the source's files then move
-                to the target instead of being deleted with the source.
+                to the target instead of staying behind, hidden, in the
+                deleted source.
 
         Returns:
             API response with ``merged``, ``pending_embedding``,

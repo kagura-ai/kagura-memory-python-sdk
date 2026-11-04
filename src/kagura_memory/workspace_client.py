@@ -89,14 +89,17 @@ class WorkspaceClient(KaguraRestClient):
     ``.kagura.json``) instead.
 
     Context access (memory-cloud v0.126.0+): an owner or admin reaches every
-    context of the workspace. A member or viewer reaches exactly the
+    shared context of the workspace. A member or viewer reaches exactly the
     contexts its ``allowed_context_ids`` list names. With no list, a viewer
     reaches every shared context and a member **none**, writes included.
-    Older servers refused only a member's reads there. A context outside
-    the list answers not-found (REST 404, MCP ``context_not_found``,
-    :class:`KaguraNotFoundError`) where some paths answered 403. A
-    workspace viewer is read-only everywhere, including a private context
-    it created. A role change keeps the list.
+    Older servers refused only a member's reads there. A private context
+    stays its creator's (or a linked account's), whatever the role or the
+    list. A context outside the list answers not-found (REST 404, MCP
+    ``context_not_found``, :class:`KaguraNotFoundError`) where some paths
+    answered 403. A workspace viewer is read-only everywhere, including a
+    private context it created. A role change keeps the list, except that
+    a ``member`` with no list who becomes a ``viewer`` gets an empty one,
+    so the change never widens its reach.
 
     The list is set by :meth:`create_invitation` (``allowed_context_ids``).
     memory-cloud's ``PUT /api/v1/workspaces/{workspace_id}/members/{user_id}
@@ -166,7 +169,7 @@ class WorkspaceClient(KaguraRestClient):
         no context access list. Since memory-cloud v0.126.0 a ``member``
         without a list reaches **no** context, writes included, and a
         ``viewer`` every shared context (see the class docstring). An admin
-        reaches every context either way. This client cannot set the list
+        reaches every shared context either way. This client cannot set the list
         afterwards: the server's context-access route takes a browser
         session only. Set it on the web members page, or onboard the user
         with :meth:`create_invitation` and ``allowed_context_ids`` instead.
@@ -186,9 +189,12 @@ class WorkspaceClient(KaguraRestClient):
     ) -> WorkspaceMember:
         """Change a member's role (member/admin/viewer only).
 
-        The member's context access list is kept (memory-cloud v0.126.0+).
-        It applies to the member and viewer roles; an admin reaches every
-        context whatever it says.
+        The member's context access list is kept (memory-cloud v0.126.0+),
+        except that a ``member`` with no list who becomes a ``viewer`` gets
+        an empty one: a viewer with no list would reach every shared
+        context, so the change never widens reach. The list applies to the
+        member and viewer roles; an admin reaches every shared context
+        whatever it says.
         """
         workspace_id = _normalize_workspace_id(workspace_id)
         self._validate_role(role)
