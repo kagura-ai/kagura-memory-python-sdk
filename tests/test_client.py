@@ -468,6 +468,31 @@ async def test_get_tool_definitions_empty():
 
 
 @pytest.mark.asyncio
+async def test_get_tool_definitions_passes_every_tool_key_through():
+    """Parsing the result keeps each definition as the server sent it (#311).
+
+    MCP tool definitions grow keys (``title``, ``outputSchema``,
+    ``annotations``, ``_meta``) and the result can carry ``nextCursor``.
+    """
+    tool = {
+        "name": "recall",
+        "title": "Recall",
+        "description": "Search memories",
+        "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}}},
+        "outputSchema": {"type": "object"},
+        "annotations": {"readOnlyHint": True},
+        "_meta": {"kagura/profile": "core"},
+    }
+    body = {"jsonrpc": "2.0", "id": 1, "result": {"tools": [tool], "nextCursor": "c1"}}
+    client = _client_on(lambda _req: httpx.Response(200, json=body))
+    client._session_id = "session"
+    try:
+        assert await client.get_tool_definitions() == [tool]
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "result",
     [None, ["recall"], {"tools": None}, {"tools": [{"name": "recall"}, "remember"]}],
