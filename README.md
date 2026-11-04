@@ -881,12 +881,15 @@ memory loop; the server knows `full` and `core` (case-sensitive), fails
 a `?tools=` allowlist. Older servers ignore both parameters.
 
 **Hooks and commands** — the SessionStart hook recalls project context with
-`kagura recall --trusted-only --verbosity full` (server v0.24.0+), so connector-ingested
-memories never reach the session unreviewed, and the hits come with their uncut
-summaries and tags: since memory-cloud 0.108.0, recall is compact unless asked. How
-many hits also carry content stays the deployment's default. A server from 0.82.0 to
-0.107.x refuses `--verbosity`, so the hook prints nothing there. Re-running setup
-replaces an earlier SDK-written hook in place. `--no-session-hook`, `--no-sync-hook` (the
+`kagura recall -k 5 --trusted-only --verbosity full --full 0 | head -c 5000` (`--trusted-only`
+needs server v0.24.0+), so connector-ingested memories never reach the session
+unreviewed, and the five hits arrive as uncut summaries with their tags and without
+content: since memory-cloud 0.108.0 recall is compact unless asked, and since 0.114.0
+it puts content on the top hits. Setup first asks the server for its version
+(`GET /api/v1/system/info`, no credentials). A server that reports a version below
+0.114.0, which would refuse those two flags, gets the hook without them; no answer
+gets the 0.114.0 form. Re-running setup, for example after a server upgrade, replaces an
+earlier SDK-written hook in place. `--no-session-hook`, `--no-sync-hook` (the
 `.claude/memory` sync) and `--no-commands` (`/kagura-recall` · `/kagura-remember`)
 skip them; re-running with one removes only what setup itself wrote. When the
 memory-cloud **`kagura-memory` plugin** is installed (`claude plugin list`), an

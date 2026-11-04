@@ -89,7 +89,9 @@ Search options:
   tags.
 - `--full N` puts `content` (up to 1,500 characters) on the top N hits;
   `--full 0` returns summaries only. Without it the server's default applies
-  (3 unless the deployment changes it; memory-cloud 0.114.0+).
+  (3 unless the deployment changes it; memory-cloud 0.114.0+). The
+  SessionStart hook passes `--verbosity full --full 0`: uncut summaries with
+  tags, no content.
 - `--max-chars N` (10000-100000, default 20000) bounds the whole reply.
 
 ## Consume the result
