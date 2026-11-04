@@ -2807,11 +2807,13 @@ class KaguraClient:
                 required, plus any of ``importance``, ``tags``,
                 ``source_uri``, ``source_type``, ``context_summary``,
                 ``details`` (a tool guardrail is
-                ``details={"tool_trigger": {...}}``), ``context``,
-                ``delivery_mode``, ``linked_memory_ids``,
-                ``linked_source_uris``, ``supersedes`` — no SDK defaults are
-                added. An undeclared key fails that item
-                (``invalid_argument``; a whole atomic batch is refused).
+                ``details={"tool_trigger": {...}}``), ``observed_at``
+                (memory-cloud v0.127.0+), ``context``, ``delivery_mode``,
+                ``linked_memory_ids``, ``linked_source_uris``,
+                ``supersedes`` — no SDK defaults are added. An item may
+                repeat the batch's ``context_id`` but name no other. An
+                undeclared key fails that item (``invalid_argument``; a
+                whole atomic batch is refused).
             atomic: ``True``: all or nothing. Server default ``False``.
             dedupe: As ``remember``'s, applied per item: ``"suggest"``
                 (server default), ``"check"`` (a near-duplicate is returned as
@@ -2829,29 +2831,31 @@ class KaguraClient:
 
         Raises:
             ValueError: ``items`` is empty or holds more than 50 items, an
-                item carries ``context_id``, ``dedupe``, ``tags_normalize`` or
-                ``verbose`` (batch-level here), or an item's ``tags`` break
-                the 50-tag / 100-character cap (all before any request).
+                item carries ``dedupe``, ``tags_normalize`` or ``verbose``
+                (batch-level here) or a ``context_id`` other than the
+                batch's, or an item's ``tags`` break the 50-tag /
+                100-character cap (all before any request).
             TypeError: ``items`` is not a list, or an item is not a dict.
             KaguraQuotaError: An atomic batch did not fit the daily quota
                 (``quota_exceeded``; nothing was written, a smaller batch may
                 fit).
             KaguraCapacityLockedError: The workspace is over its Free
                 capacity.
-            KaguraError: Nothing was written and an item failed —
-                ``code == "batch_failed"`` (or ``"batch_refused"`` for an
-                atomic batch with an invalid item, ``"timeout"`` for an atomic
-                batch rolled back at its time limit), with the per-item rows
-                in ``details["results"]``. A ``dedupe_unavailable`` item
-                (the duplicate check is down) is such a row; retry it or send
-                ``dedupe="off"``.
+            KaguraError: Nothing was written. ``code == "batch_failed"``
+                (every item failed) or ``"batch_refused"`` (an atomic batch
+                with an invalid item) carries the per-item rows in
+                ``details["results"]``; a ``dedupe_unavailable`` item (the
+                duplicate check is down) is such a row — retry it or send
+                ``dedupe="off"``. ``"timeout"`` (an atomic batch rolled back
+                at its time limit) carries no rows: send fewer items, or drop
+                ``atomic``.
             KaguraResponseError: The reply does not match
                 :class:`~kagura_memory.models.RememberBatchResult`
                 (``operation="remember_batch"``).
         """
         arguments: dict[str, Any] = {
             "context_id": context_id,
-            "items": _checked_batch_items(items),
+            "items": _checked_batch_items(items, context_id),
         }
         if atomic is not None:
             arguments["atomic"] = atomic
@@ -4429,9 +4433,9 @@ async def _collect_pages(client: KaguraClient, tool: str, model: type[_T], key: 
 # ---------------------------------------------------------------------------
 
 # remember_batch items (server ``MAX_BATCH_ITEMS``) and the remember arguments
-# that are set on the batch, never per item (``_BATCH_LEVEL`` + context_id).
+# that are set once, on the batch, never per item (server ``_BATCH_LEVEL``).
 _BATCH_MAX_ITEMS = 50
-_BATCH_LEVEL_KEYS = ("context_id", "dedupe", "tags_normalize", "verbose")
+_BATCH_LEVEL_KEYS = ("dedupe", "tags_normalize", "verbose")
 # forget(memory_ids=) ids per call (server ``FORGET_MAX_IDS``).
 _FORGET_MAX_IDS = 50
 # describe_tools names / guide topics per call (server ``MAX_NAMES`` / ``MAX_TOPICS``).
@@ -4439,17 +4443,20 @@ _DESCRIBE_MAX_NAMES = 20
 _GUIDE_MAX_TOPICS = 20
 
 
-def _checked_batch_items(items: Any) -> list[dict[str, Any]]:
-    """Reject a ``remember_batch`` ``items`` list the server would refuse whole.
+def _checked_batch_items(items: Any, context_id: str) -> list[dict[str, Any]]:
+    """Reject a ``remember_batch`` ``items`` list before any request.
 
     Per-item rules the server reports per item (a missing ``summary``, an
-    unknown key) stay the server's; only the batch-level keys and the tag
-    cap — which :meth:`KaguraClient.remember` also checks — are refused here.
+    unknown key) stay the server's. Refused here: the batch-level keys, an
+    item ``context_id`` other than the batch's (the server accepts one that
+    repeats it, compared as a string), and the tag cap that
+    :meth:`KaguraClient.remember` also checks.
 
     Raises:
         TypeError: ``items`` is not a list, or an item is not a dict.
-        ValueError: Not 1-50 items, an item carries a batch-level key, or an
-            item's ``tags`` list breaks the 50-tag / 100-character cap.
+        ValueError: Not 1-50 items, an item carries a batch-level key or
+            another context's ``context_id``, or an item's ``tags`` list
+            breaks the 50-tag / 100-character cap.
     """
     if not isinstance(items, list):
         raise TypeError(f"items must be a list of dicts, got {type(items).__name__}")
@@ -4461,8 +4468,13 @@ def _checked_batch_items(items: Any) -> list[dict[str, Any]]:
         batch_level = [key for key in _BATCH_LEVEL_KEYS if key in item]
         if batch_level:
             raise ValueError(
-                f"items[{index}] carries {', '.join(batch_level)}: set the context and "
-                "dedupe / tags_normalize / verbose on remember_batch itself, not on an item"
+                f"items[{index}] carries {', '.join(batch_level)}: set dedupe / "
+                "tags_normalize / verbose on remember_batch itself, not on an item"
+            )
+        if "context_id" in item and item["context_id"] != context_id:
+            raise ValueError(
+                f"items[{index}] carries another context_id: the batch's context_id "
+                "applies to every item"
             )
         tags = item.get("tags")
         if isinstance(tags, list):

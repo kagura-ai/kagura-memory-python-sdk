@@ -778,7 +778,7 @@ async def test_remember_batch_sends_the_batch_level_arguments_that_are_set():
         ([_ITEM] * 51, ValueError, "1 to 50"),
         ({"summary": "x"}, TypeError, "list"),
         ([_ITEM, "summary"], TypeError, r"items\[1\]"),
-        ([{**_ITEM, "context_id": CTX}], ValueError, "context_id"),
+        ([{**_ITEM, "context_id": str(uuid.uuid4())}], ValueError, "another context_id"),
         ([_ITEM, {**_ITEM, "dedupe": "off"}], ValueError, r"items\[1\] carries dedupe"),
         ([{**_ITEM, "tags_normalize": True}], ValueError, "tags_normalize"),
         ([{**_ITEM, "verbose": True}], ValueError, "verbose"),
@@ -796,6 +796,14 @@ async def test_remember_batch_accepts_fifty_items_and_tags_at_the_cap():
     items = [{**_ITEM, "tags": [f"t{i}" for i in range(50)]}] * 50
     _, params = await _call(BATCH_REPLY, "remember_batch", CTX, items)
     assert len(params["arguments"]["items"]) == 50
+
+
+@pytest.mark.asyncio
+async def test_remember_batch_sends_an_item_that_repeats_the_batch_context_id():
+    """The server accepts an item ``context_id`` equal to the batch's (``_request_from_item``)."""
+    items = [{**_ITEM, "context_id": CTX}]
+    _, params = await _call(BATCH_REPLY, "remember_batch", CTX, items)
+    assert params["arguments"]["items"] == items
 
 
 @pytest.mark.asyncio
@@ -888,6 +896,58 @@ async def test_remember_batch_with_nothing_written_raises_with_the_rows():
         await client.close()
     assert info.value.code == "batch_failed"
     assert info.value.details["results"][0]["error"] == "dedupe_unavailable"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("reply", "rows"),
+    [
+        (
+            _error(
+                "batch_refused",
+                "1 of 2 items are invalid; atomic=true writes nothing.",
+                results=[
+                    {"index": 0, "status": "error", "error": "missing_fields", "message": "x"},
+                    {
+                        "index": 1,
+                        "status": "skipped",
+                        "message": "batch refused: another item is invalid",
+                    },
+                ],
+                count=2,
+                succeeded=0,
+                candidates=0,
+                failed=1,
+                skipped=1,
+            ),
+            True,
+        ),
+        (
+            _error(
+                "timeout",
+                "The atomic batch did not finish in time and was rolled back; nothing was "
+                "written. Send fewer items, or drop atomic.",
+                count=2,
+                **_CONTEXT_FIELDS,
+            ),
+            False,
+        ),
+    ],
+    ids=["batch_refused", "timeout"],
+)
+async def test_remember_batch_atomic_refusals_raise_with_their_code(reply, rows):
+    """``batch_refused`` carries the rows; an atomic ``timeout`` (batch.py) carries none."""
+    sent: list[dict[str, Any]] = []
+    client = _wire_client(reply, sent)
+    try:
+        with pytest.raises(KaguraError) as info:
+            await client.remember_batch(CTX, [_ITEM, _ITEM], atomic=True)
+    finally:
+        await client.close()
+    err = info.value
+    assert type(err) is KaguraError and err.code == reply["error"]
+    assert ("results" in err.details) is rows
+    assert err.details["count"] == 2
 
 
 @pytest.mark.asyncio
