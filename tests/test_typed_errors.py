@@ -50,6 +50,7 @@ from kagura_memory.exceptions import (
 from kagura_memory.files_client import FilesClient
 from kagura_memory.models import ResourceEventRequest
 from kagura_memory.resource_client import ResourceClient
+from kagura_memory.secrets.client import SecretClient
 from kagura_memory.workspace_client import WorkspaceClient
 
 WS = "11111111-2222-3333-4444-555555555555"
@@ -689,3 +690,63 @@ def test_cli_command_prints_the_new_lines(mock_client_cls, mock_config):
     assert result.exit_code == 1
     assert "recall failed (capacity_locked): locked" in result.output
     assert f"Clean up or re-subscribe: {CLEANUP_URL}" in result.output
+
+
+# ---------------------------------------------------------------------------
+# Review follow-ups: code/details on every REST error, challenge position,
+# list_tags' remapped REST errors
+# ---------------------------------------------------------------------------
+
+_DENY_BODY = {"error": "AUTH-101", "message": "Insufficient permissions", "details": {}}
+
+
+async def _files_list(c: FilesClient) -> Any:
+    return await c.list(context_id=CTX)
+
+
+async def _workspace_members(c: WorkspaceClient) -> Any:
+    return await c.list_members(WS)
+
+
+async def _secret_pubkeys(c: SecretClient) -> Any:
+    return await c.list_pubkeys()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("cls", "call", "wording"),
+    [
+        (FilesClient, _files_list, "HTTP 403: Insufficient permissions"),
+        (WorkspaceClient, _workspace_members, "workspace OWNER"),
+        (SecretClient, _secret_pubkeys, "you may not have a grant"),
+    ],
+    ids=["files", "workspace", "secret"],
+)
+async def test_rest_client_403_hooks_keep_their_wording_and_the_code(cls, call, wording):
+    """A plain 403 still goes through each client's own hook, and keeps the code."""
+    async with _rest(cls, _respond(403, _DENY_BODY)) as c:
+        with pytest.raises(KaguraConnectionError, match=wording) as exc:
+            await call(c)
+    assert not isinstance(exc.value, KaguraAuthError)
+    assert (exc.value.code, exc.value.details) == ("AUTH-101", {})
+
+
+@pytest.mark.asyncio
+async def test_rest_409_and_404_keep_code_details_and_correlation_id():
+    conflict = {
+        "error": "RES-002",
+        "message": "Memory version is 4, not 3.",
+        "details": {"reason": "version_conflict", "correlation_id": "c0ffee"},
+    }
+    async with _rest(ResourceClient, _respond(409, conflict)) as c:
+        with pytest.raises(KaguraConnectionError, match="HTTP 409") as exc:
+            await c.list_tokens()
+    assert exc.value.code == "RES-002"
+    assert exc.value.details == {"reason": "version_conflict", "correlation_id": "c0ffee"}
+    assert exc.value.correlation_id == "c0ffee"
+
+    missing = {"error": "NOT-001", "message": "Agent not found", "details": {"agent_id": "a1"}}
+    async with _rest(AgentsClient, _respond(404, missing)) as c:
+        with pytest.raises(KaguraNotFoundError, match="Agent not found") as exc404:
+            await c.bootstrap(WS, context_id=CTX)
+    assert (exc404.value.code, exc404.value.details) == ("NOT-001", {"agent_id": "a1"})

@@ -30,6 +30,7 @@ from ._auth import _AuthSource, _OAuthAuth, _resolve_auth, _StaticAuth
 from ._http import (
     SDK_VERSION,
     _retry_after_seconds,
+    annotate_server_error,
     base_url_from_mcp,
     error_envelope,
     extract_detail,
@@ -38,6 +39,7 @@ from ._http import (
     parse_response,
     response_shape_error,
     sanitize_server_detail,
+    server_error_fields,
     service_unavailable_error,
     validate_https_url,
 )
@@ -87,6 +89,10 @@ class KaguraRestClient:
       with ``details.reason == "version_conflict"`` (v0.113.0+, #2043; typed
       by #302)
     - transport errors → :class:`KaguraConnectionError`
+    - whatever the class, an error built from a response keeps the body's
+      error code as ``code`` and its ``details`` (the REST envelope's
+      ``details``, or an OAuth-style body's fields) as ``details`` — set by
+      :meth:`_request`, so every hook's error gets them too
     - a 2xx JSON body its model or envelope rejects →
       :class:`KaguraResponseError` (via :meth:`_parse` / :meth:`_expect_list`)
     """
@@ -270,7 +276,11 @@ class KaguraRestClient:
             response.raise_for_status()
             return response
         except httpx.HTTPStatusError as e:
-            raise self._map_status_error(e, request_json=json, request_params=params) from e
+            err = self._map_status_error(e, request_json=json, request_params=params)
+            # One place for every hook: a typed error keeps what it already set.
+            if (fields := server_error_fields(e.response)) is not None:
+                annotate_server_error(err, *fields)
+            raise err from e
         except httpx.RequestError as e:
             raise KaguraConnectionError(f"Connection failed: {_exc_message(e)}") from e
 
