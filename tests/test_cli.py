@@ -1983,6 +1983,8 @@ def test_sleep_report_shows_degraded_run(degraded_mcp):
     assert result.exit_code == 0, result.output
     assert '"status": "degraded"' in result.output
     assert '"merge_retention_result"' in result.output
+    # CONTEXT_ID is not sent: memory-cloud v0.82.0+ refuses it (#296).
+    degraded_mcp.assert_called_once_with("get_sleep_report", {"report_id": "rid-d"})
 
 
 def test_sleep_rollback_prefetches_degraded_run_for_confirm(degraded_mcp):
@@ -1991,9 +1993,10 @@ def test_sleep_rollback_prefetches_degraded_run_for_confirm(degraded_mcp):
     assert result.exit_code == 0, result.output
     assert "4 action(s)" in result.output
     assert '"status": "rolled_back"' in result.output
-    assert [c.args[0] for c in degraded_mcp.call_args_list] == [
-        "get_sleep_report",
-        "rollback_sleep_run",
+    # CONTEXT_ID is not sent to either tool: memory-cloud v0.82.0+ refuses it (#296).
+    assert [c.args for c in degraded_mcp.call_args_list] == [
+        ("get_sleep_report", {"report_id": "rid-d"}),
+        ("rollback_sleep_run", {"report_id": "rid-d"}),
     ]
 
 

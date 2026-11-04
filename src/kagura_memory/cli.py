@@ -1382,7 +1382,12 @@ def sleep_history(context_id, limit):
 @click.argument("context_id")
 @click.argument("report_id")
 def sleep_report(context_id, report_id):
-    """Get a detailed Sleep Maintenance report including audit log."""
+    """Get a detailed Sleep Maintenance report including audit log.
+
+    CONTEXT_ID is kept for backwards compatibility and not sent: the server
+    finds the run by REPORT_ID (memory-cloud 0.126.0+ checks read access on
+    the run's own context).
+    """
 
     async def _op(client: KaguraClient, _ctx: str) -> dict[str, Any]:
         detail = await client.get_sleep_report(context_id=context_id, report_id=report_id)
@@ -1401,6 +1406,10 @@ def sleep_rollback(context_id, report_id, yes):
     Reverses edge creation, memory merges, importance updates, scope
     promotions, and archives. If some steps fail, the summary of what was
     reversed is still printed and the command exits non-zero.
+
+    CONTEXT_ID is kept for backwards compatibility and not sent: the server
+    finds the run by REPORT_ID (memory-cloud 0.126.0+ needs the editor or
+    owner role on the run's own context).
     """
     # Bundled inline (not via ``_run_client_command``) so a "no" answer to
     # ``click.confirm(..., abort=True)`` propagates as ``click.Abort`` and

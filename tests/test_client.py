@@ -4123,7 +4123,7 @@ async def test_get_sleep_report_success():
     assert isinstance(result.actions[0], SleepAction)
     assert result.actions[0].action_type == "create_edge"
     assert result.actions[0].details == {"weight": 0.9}
-    mock.assert_called_once_with("get_sleep_report", {"context_id": "ctx-1", "report_id": "rid-9"})
+    mock.assert_called_once_with("get_sleep_report", {"report_id": "rid-9"})
 
     await client.close()
 
@@ -4153,6 +4153,94 @@ async def test_rollback_sleep_run_success():
     assert result.rollback_summary.edges_deleted == 5
     assert result.rollback_summary.merges_reversed == 2
     assert result.rollback_summary.errors == []
+    mock.assert_called_once_with("rollback_sleep_run", {"report_id": "rid-9"})
+
+    await client.close()
+
+
+# The inputSchema properties of memory-cloud v0.141.0. Since v0.82.0
+# (memory-cloud#1742) every tool schema is ``additionalProperties: false``,
+# and an undeclared argument is refused with ``invalid_argument`` (#296).
+_SLEEP_TOOL_ARGUMENTS = {
+    "get_sleep_report": {"report_id", "actions_cursor", "actions_limit", "max_chars"},
+    "rollback_sleep_run": {"report_id"},
+}
+
+
+def _strict_sleep_tool(tool_name: str, arguments: dict) -> dict:
+    """Answer like memory-cloud v0.82.0+: refuse what the schema does not declare."""
+    declared = _SLEEP_TOOL_ARGUMENTS[tool_name]
+    unknown = sorted(set(arguments) - declared)
+    if unknown:
+        return {
+            "status": "error",
+            "error": "invalid_argument",
+            "message": (
+                f"{tool_name} does not accept the argument '{unknown[0]}'. "
+                f"Arguments its inputSchema declares: {', '.join(sorted(declared))}."
+            ),
+        }
+    if tool_name == "get_sleep_report":
+        return {
+            "status": "success",
+            "report": sleep_report_detail_dict(arguments["report_id"]),
+            "actions": [],
+            "action_count": 0,
+        }
+    return {
+        "status": "rolled_back",
+        "report_id": arguments["report_id"],
+        "rollback_summary": {"edges_deleted": 1, "errors": []},
+    }
+
+
+@pytest.mark.asyncio
+async def test_get_sleep_report_sends_only_report_id():
+    """``context_id`` stays a parameter but is not sent: v0.82.0+ refuses it (#296)."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new=AsyncMock(side_effect=_strict_sleep_tool)) as mock:
+        result = await client.get_sleep_report("ctx-1", "rid-9")
+
+    assert isinstance(result, SleepReportDetail)
+    assert result.report_id == "rid-9"
+    mock.assert_called_once_with("get_sleep_report", {"report_id": "rid-9"})
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_rollback_sleep_run_sends_only_report_id():
+    """``context_id`` stays a parameter but is not sent: v0.82.0+ refuses it (#296)."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new=AsyncMock(side_effect=_strict_sleep_tool)) as mock:
+        result = await client.rollback_sleep_run("ctx-1", "rid-9")
+
+    assert isinstance(result, RollbackResult)
+    assert result.rollback_summary.edges_deleted == 1
+    mock.assert_called_once_with("rollback_sleep_run", {"report_id": "rid-9"})
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_rollback_sleep_run_analysis_report_is_a_plain_error():
+    """``analysis_report`` (v0.140.0+, memory-cloud#2547) names its code, untyped."""
+    client = _make_initialized_client()
+
+    with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+        mock.return_value = {
+            "status": "error",
+            "error": "analysis_report",
+            "message": "Report rid-9 is an analysis report: ... nothing to roll back.",
+        }
+        with pytest.raises(
+            KaguraError, match=r"rollback_sleep_run failed \(analysis_report\)"
+        ) as exc:
+            await client.rollback_sleep_run(context_id="ctx-1", report_id="rid-9")
+
+    assert type(exc.value) is KaguraError
 
     await client.close()
 
