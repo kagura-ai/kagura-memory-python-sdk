@@ -834,12 +834,27 @@ def test_query_flags_add_up_repeated_add_tools_in_a_stdio_entry() -> None:
         ("?profile=&profile=full&guardrails=off&guardrails=x", {"--guardrails": "off"}),
         ("?guardrails=%20&guardrails=off&profile=%20core", {"--tool-profile": "core"}),
         ("?add_tools=,&add_tools=explore", {}),
+        (f"?context=%20&context={CTX}", {}),
         (
             f"?add_tools=explore,%20a,explore&tools=recall&context={CTX}",
             {"--add-tools": "explore,a", "--context": CTX},
         ),
+        # The server trims guardrails and context (select_guardrail_context /
+        # select_default_context) as it trims profile.
+        (
+            f"?guardrails=%20off%20&context=%20{CTX}%20",
+            {"--guardrails": "off", "--context": CTX},
+        ),
     ],
-    ids=["no-query", "blank-profile-first", "blank-guardrails-first", "no-names", "names"],
+    ids=[
+        "no-query",
+        "blank-profile-first",
+        "blank-guardrails-first",
+        "no-names",
+        "blank-context-first",
+        "names",
+        "guardrails-and-context-trimmed",
+    ],
 )
 def test_query_flags_of_an_http_entry_read_the_url_as_the_server_does(
     query: str, flags: dict[str, str]

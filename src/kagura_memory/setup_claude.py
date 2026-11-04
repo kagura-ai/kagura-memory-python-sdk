@@ -470,9 +470,14 @@ def _query_flags(entry: dict[str, Any]) -> dict[str, str]:
     Read from the ``kagura-mcp`` args of a stdio entry (the last value of a
     repeated flag, as the proxy reads it, except ``--add-tools``, whose
     values add up), or from the url's query of an http one, as the server
-    reads it: the first value of a repeated key, the tool view by
-    :func:`~kagura_memory._http.mcp_url_tool_view`. A blank first value is
-    no flag to re-run with, so it is left out.
+    reads it (memory-cloud v0.142.0): the first value of a repeated key wins
+    for all four keys, even a blank one, and is trimmed; the tool view is
+    read by :func:`~kagura_memory._http.mcp_url_tool_view`. A blank first
+    value still means something to the server — it refuses a blank
+    ``profile``, ignores a blank ``guardrails`` (no ``instructions`` digest),
+    fails a call without ``context_id`` under a blank ``context``, and adds
+    nothing for a blank ``add_tools`` — but setup refuses a blank value, so
+    it is no flag to re-run with and is left out.
     """
     found: dict[str, str] = {}
     if classify_mcp_entry(entry) == "stdio":
@@ -494,12 +499,12 @@ def _query_flags(entry: dict[str, Any]) -> dict[str, str]:
     query = mcp_url_query_values(url)
     view = mcp_url_tool_view(url)
     settings = {
-        "--guardrails": query.get("guardrails"),
+        "--guardrails": query.get("guardrails", "").strip(),
         "--tool-profile": view.profile,
         "--add-tools": ",".join(view.add_tools),
-        "--context": query.get("context"),
+        "--context": query.get("context", "").strip(),
     }
-    return {flag: value for flag, value in settings.items() if value and value.strip()}
+    return {flag: value for flag, value in settings.items() if value}
 
 
 def _dropped_query_flags(old: dict[str, Any], new: dict[str, Any]) -> list[str]:
