@@ -255,7 +255,9 @@ class KaguraClient:
     :class:`KaguraFeatureNotAvailableError` and the Free capacity lock
     (``capacity_locked``, memory-cloud v0.99.0+)
     :class:`KaguraCapacityLockedError`, each carrying the server's detail
-    fields (#256), and any other domain error raises :class:`KaguraError`.
+    fields (#256), a stale ``expected_version`` (``version_conflict``)
+    :class:`KaguraVersionConflictError` (#302), and any other domain error
+    raises :class:`KaguraError`.
     Every one keeps the envelope's ``error`` as ``code`` and its other
     fields (``help``, and on a server failure ``cause``, ``correlation_id``,
     ``retryable``, ``outcome``) in ``details`` — branch on ``code``, never
