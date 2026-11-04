@@ -1107,7 +1107,8 @@ class KaguraClient:
               (since memory-cloud v0.73.0 for the annotations; older servers
               send ``null`` / ``[]``, so test them for truthiness).
             - ``supersede_candidate`` (a suggestion, never an edge):
-              ``{memory_id, summary, similarity, detected_at, verified}``.
+              ``{memory_id, summary, similarity, detected_at, verified,
+              acceptance}`` (``acceptance`` from memory-cloud v0.142.0).
               ``verified`` is ``True`` when the deployment's judge confirmed
               that this memory replaces the candidate (memory-cloud
               v0.109.0+, #2016, ``SUPERSEDE_VERIFY_MODE=llm``) and absent
