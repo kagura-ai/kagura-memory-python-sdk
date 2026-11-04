@@ -856,6 +856,18 @@ async def test_remember_batch_reads_a_partial_reply_with_plan_headroom():
 
 
 @pytest.mark.asyncio
+async def test_remember_batch_plan_headroom_is_advisory_too():
+    """The same fail-open field type as bootstrap's: an unreadable entry is dropped."""
+    broken = {k: v for k, v in _HEADROOM_CRITICAL.items() if k != "limit"}
+    reply = {**BATCH_REPLY, "plan_headroom": [broken, _HEADROOM_WARNING_NO_HELP]}
+    result, _ = await _call(reply, "remember_batch", CTX, [_ITEM] * 4)
+    assert result.plan_headroom is not None
+    assert [n.dimension for n in result.plan_headroom] == ["memories"]
+    nothing, _ = await _call({**BATCH_REPLY, "plan_headroom": "x"}, "remember_batch", CTX, [_ITEM])
+    assert nothing.plan_headroom is None
+
+
+@pytest.mark.asyncio
 async def test_remember_batch_reads_an_atomic_reply_committed_after_timeout():
     reply = {
         "status": "success",
