@@ -2048,6 +2048,12 @@ def test_remember_new_flags_default_off(mock_client_cls, mock_config):
     assert kwargs["tags_normalize"] is False
 
 
+def test_remember_dedupe_help_says_a_candidate_exits_0():
+    result = CliRunner().invoke(main, ["remember", "--help"])
+    assert result.exit_code == 0
+    assert "exit 0: a result, not an error" in " ".join(result.output.split())
+
+
 def test_remember_rejects_an_unknown_dedupe_mode():
     result = CliRunner().invoke(
         main, ["remember", "-s", "summary text", "--content", "...", "--dedupe", "skip"]

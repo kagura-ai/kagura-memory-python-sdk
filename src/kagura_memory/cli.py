@@ -521,8 +521,8 @@ def doctor(profile, json_output):
     "--dedupe",
     type=click.Choice(get_args(DedupeMode)),
     help="suggest (server default); check: write nothing when a near-duplicate exists "
-    "and print it (status duplicate_candidate); off: never suggest a supersede for this "
-    "memory, permanently (server v0.93.0+).",
+    "and print it (status duplicate_candidate, exit 0: a result, not an error); off: "
+    "never suggest a supersede for this memory, permanently (server v0.93.0+).",
 )
 @click.option(
     "--tags-normalize",
