@@ -941,6 +941,12 @@ class KaguraClient:
                   come back as ``tag_suggestions`` instead.
                 - ``created_after`` / ``created_before``: ISO 8601 datetime
                 - ``updated_after`` / ``updated_before``: ISO 8601 datetime
+                - ``observed_after`` (inclusive) / ``observed_before``
+                  (exclusive): when the fact held (``details.observed_at``,
+                  set with :meth:`remember`'s ``observed_at``), an ISO 8601
+                  date or datetime; a date means the start of that UTC day,
+                  and a memory without ``observed_at`` never matches
+                  (memory-cloud v0.127.0+, #2330)
                 - ``trust_tier``: ``"trusted"`` EXCLUDES external/connector-ingested
                   memories from the results (opt-in; default recall returns them).
                   Pass it for behaviour-influencing reads where untrusted content
@@ -3715,8 +3721,13 @@ class KaguraClient:
         Returns:
             :class:`MemoryListResponse` with ``memories`` (ordered per
             ``order_by``; newest-first by default; each carrying ``location``
-            when it has one), ``total`` (matching rows across all pages), and
-            ``has_more``.
+            when it has one, and ``observed_at`` — when the fact held — on
+            memory-cloud v0.127.0+, #2330), ``total`` (matching rows across
+            all pages), and ``has_more``. This REST route has no
+            ``observed_at`` filter or sort (memory-cloud v0.142.0 accepts
+            ``order_by`` ``created_at`` / ``trigger_from`` only): filter with
+            :meth:`recall`'s ``observed_after`` / ``observed_before``, or the
+            MCP ``list`` tool, which this client does not wrap.
 
         Raises:
             ValueError: If a bbox bound is non-numeric or out of range — checked

@@ -133,8 +133,12 @@ def test_no_doc_says_a_non_uuid_is_a_500_without_the_422() -> None:
                 "``verified``",
                 "``acceptance``",
                 "#1683",
+                # #302: the event-time filter keys (memory-cloud v0.127.0).
+                "``observed_after``",
+                "``observed_before``",
             ],
         ),
+        (KaguraClient.list_memories, ["``observed_at``", "#2330"]),
         (KaguraClient.recall_nearby, ["``location``", "include_details", "details_omitted"]),
         (KaguraClient.recall_upcoming, ["details_omitted", "details_total_chars"]),
         (KaguraClient.forget, ["CLEANUP_DELETED_MEMORIES_RETENTION_DAYS", "degraded"]),

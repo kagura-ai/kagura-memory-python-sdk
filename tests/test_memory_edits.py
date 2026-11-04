@@ -23,6 +23,7 @@ from kagura_memory import (
     KaguraClient,
     KaguraConnectionError,
     KaguraError,
+    KaguraResponseError,
     KaguraVersionConflictError,
     MemoryClient,
 )
@@ -714,3 +715,71 @@ async def test_reference_refuses_locally(kwargs: dict[str, Any], match: str) -> 
     finally:
         await client.close()
     assert sent == []
+
+
+# ============================================================================
+# list_memories: MemoryListItem.observed_at (the REST route has no filter)
+# ============================================================================
+
+_LIST_ROW = {
+    "id": MEM,
+    "summary": "Deploy target moved",
+    "type": "decision",
+    "scope": "persistent",
+    "importance": 0.8,
+    "created_at": "2026-10-01T00:00:00Z",
+    "updated_at": "2026-10-02T00:00:00Z",
+}
+
+
+async def _list_memories(rows: list[dict[str, Any]], **kwargs: Any):
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"memories": rows, "total": len(rows), "has_more": False})
+
+    client = KaguraClient(api_key="test", mcp_url="https://test.com/mcp")
+    client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        page = await client.list_memories(context_id=CTX, **kwargs)
+    finally:
+        await client.close()
+    return page, requests
+
+
+@pytest.mark.asyncio
+async def test_list_memories_reads_observed_at() -> None:
+    """A datetime keeps its instant; a date is the start of that UTC day; absent is None."""
+    rows = [
+        {**_LIST_ROW, "observed_at": "2024-03-07T10:00:00Z"},
+        {**_LIST_ROW, "observed_at": "2024-03-07"},
+        {**_LIST_ROW, "observed_at": None},
+        _LIST_ROW,
+    ]
+    page, requests = await _list_memories(rows)
+    observed = [row.observed_at for row in page.memories]
+    assert observed == [
+        datetime(2024, 3, 7, 10, tzinfo=UTC),
+        datetime(2024, 3, 7, tzinfo=UTC),
+        None,
+        None,
+    ]
+    # Every value is aware, so rows sort and compare without a TypeError.
+    assert all(value.tzinfo is not None for value in observed if value is not None)
+    params = dict(requests[0].url.params)
+    assert not any(key.startswith("observed") for key in params)
+
+
+@pytest.mark.asyncio
+async def test_list_memories_ignores_fields_newer_than_the_sdk() -> None:
+    rows = [{**_LIST_ROW, "observed_at": "2024-03-07", "version": 4, "tags": ["deploy"]}]
+    page, _ = await _list_memories(rows)
+    assert page.memories[0].observed_at == datetime(2024, 3, 7, tzinfo=UTC)
+    assert not hasattr(page.memories[0], "version")
+
+
+@pytest.mark.asyncio
+async def test_list_memories_unreadable_observed_at_is_response_drift() -> None:
+    with pytest.raises(KaguraResponseError, match="list_memories"):
+        await _list_memories([{**_LIST_ROW, "observed_at": "last spring"}])

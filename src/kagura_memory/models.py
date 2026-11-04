@@ -399,6 +399,13 @@ class MemoryListItem(BaseModel):
     into ``datetime``, consistent with the other list models in this module.
     ``location`` is ``None`` for memories without a complete location, and
     always ``None`` against servers older than v0.54.0 (which omit it).
+
+    ``observed_at`` (memory-cloud v0.127.0+, #2330) is when the fact held —
+    ``details.observed_at`` — as an aware UTC ``datetime``, or ``None`` when
+    the memory has none (and always on older servers). The server keeps the
+    writer's precision: a date-only value (``2024-03-07``) reads as midnight
+    UTC of that day, the instant the server itself sorts and filters it by;
+    :meth:`KaguraClient.reference` returns the stored text.
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -411,6 +418,15 @@ class MemoryListItem(BaseModel):
     created_at: datetime
     updated_at: datetime
     location: MemoryListItemLocation | None = None
+    observed_at: datetime | None = None
+
+    @field_validator("observed_at", mode="before")
+    @classmethod
+    def _date_is_start_of_utc_day(cls, value: Any) -> Any:
+        # A date would otherwise parse as a naive midnight next to aware datetimes.
+        if isinstance(value, str) and len(value) == 10:
+            return f"{value}T00:00:00Z"
+        return value
 
 
 class MemoryListResponse(BaseModel):
