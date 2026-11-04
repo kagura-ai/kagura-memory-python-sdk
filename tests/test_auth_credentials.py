@@ -1061,6 +1061,49 @@ async def test_refresh_profile_locked_refreshes_the_fallback_when_the_profile_is
     assert (mine.access_token, other.access_token) == ("fresh", "other-token")
 
 
+@_POSIX_ONLY_CREDS
+@pytest.mark.asyncio
+async def test_refresh_profile_locked_saves_before_it_releases_the_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The refreshed profile is on disk when the lock is released.
+
+    The next holder re-reads the file under the lock; a save after the release
+    would let a peer in between read the used refresh token and send it again.
+    One event loop has no await between the release and the save, so the race
+    tests cannot show this — the release itself is observed instead.
+    """
+    import kagura_memory._filelock as fl
+
+    path = tmp_path / "creds.json"
+    stale = _sample_creds(access_token="old", refresh_token="rtok-old")
+    cf = CredentialsFile()
+    cf.set_profile("default", stale)
+    save_credentials_file(cf, path)
+
+    on_disk_at_release: list[str | None] = []
+    real_unlock_fd = fl._unlock_fd
+
+    def spy_unlock_fd(backend, mod, fd):
+        profile = load_credentials_file(path).get_profile()
+        on_disk_at_release.append(profile.access_token if profile else None)
+        real_unlock_fd(backend, mod, fd)
+
+    monkeypatch.setattr(fl, "_unlock_fd", spy_unlock_fd)
+    with (
+        patch(
+            "kagura_memory.auth.device_flow.refresh_access_token",
+            new=AsyncMock(return_value=_fresh_token("fresh")),
+        ),
+        patch("kagura_memory.auth.device_flow.make_oauth_client", return_value=_AsyncContextStub()),
+    ):
+        await refresh_profile_locked(
+            "default", expected_stale_token="old", fallback=stale, path=path
+        )
+
+    assert on_disk_at_release == ["fresh"]
+
+
 @pytest.mark.asyncio
 async def test_refresh_not_saved_is_typed_and_keeps_the_new_token_in_memory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
