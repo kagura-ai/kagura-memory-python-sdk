@@ -1,5 +1,6 @@
 """Tests for ResourceClient."""
 
+import json
 import warnings
 from datetime import UTC, datetime
 from pathlib import Path
@@ -511,6 +512,63 @@ async def test_list_resources():
         assert call_args[0][1].endswith("/api/v1/resources")
 
     await client.close()
+
+
+@pytest.mark.asyncio
+async def test_list_resources_context_less_row():
+    """A resource whose contexts were all deleted (server v0.94.0+) parses with None fields."""
+    client = ResourceClient(api_key="test", base_url="https://test.com")
+
+    response_data = {
+        "resources": [
+            {
+                "resource_id": "products",
+                "context_id": "ctx-uuid-1",
+                "context_name": "products",
+                "context_display_name": "Product Catalog",
+                "token_count": 2,
+                "memory_count": 150,
+                "current_schema_version": 3,
+                "created_at": "2026-03-01T00:00:00Z",
+                "updated_at": "2026-04-28T00:00:00Z",
+            },
+            {
+                "resource_id": "orphaned",
+                "context_id": None,
+                "context_name": None,
+                "context_display_name": None,
+                "token_count": 1,
+                "memory_count": 0,
+                "current_schema_version": None,
+                "created_at": "2026-04-01T00:00:00Z",
+                "updated_at": "2026-04-27T00:00:00Z",
+            },
+        ],
+        "total": 2,
+    }
+    mock_resp = _mock_response(200, response_data)
+
+    try:
+        with patch.object(client._client, "request", new_callable=AsyncMock) as mock_req:
+            mock_req.return_value = mock_resp
+
+            result = await client.list_resources()
+
+        assert result.total == 2
+        bound, orphaned = result.resources
+        assert bound.context_id == "ctx-uuid-1"
+        assert bound.context_name == "products"
+        assert orphaned.resource_id == "orphaned"
+        assert orphaned.token_count == 1
+        assert orphaned.context_id is None
+        assert orphaned.context_name is None
+        assert orphaned.context_display_name is None
+        # ``kagura resource list`` prints model_dump_json: the nulls come through.
+        dumped = json.loads(result.model_dump_json())["resources"][1]
+        assert dumped["context_id"] is None
+        assert dumped["context_name"] is None
+    finally:
+        await client.close()
 
 
 @pytest.mark.asyncio

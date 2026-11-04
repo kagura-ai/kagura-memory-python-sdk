@@ -317,6 +317,15 @@ class ResourceClient(KaguraRestClient):
         endpoint is currently non-paginated; the server caps a workspace
         at well under 50 resources by design.
 
+        A resource whose contexts were all deleted while it still holds
+        active tokens is listed with ``context_id`` / ``context_name`` set
+        to ``None`` (server v0.94.0+, kagura-ai/memory-cloud#1863). The
+        server keeps such a row only so its tokens stay reachable: list
+        them with :meth:`list_tokens` and drop the row by revoking the last
+        one with :meth:`revoke_token`. Resource-level reads such as
+        :meth:`get_resource_impact` / :meth:`get_resource_schema` answer
+        404 for it.
+
         Workspace owners only — non-owners receive 403.
 
         Returns:
