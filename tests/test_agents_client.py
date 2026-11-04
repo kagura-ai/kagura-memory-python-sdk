@@ -108,6 +108,7 @@ async def test_bootstrap_full_body():
             pinned_cap=50,
             upcoming_until="2026-08-01T00:00:00",
             include=["pinned", "recall"],
+            max_chars=40_000,
         )
 
     assert seen["body"] == {
@@ -118,7 +119,19 @@ async def test_bootstrap_full_body():
         "pinned_cap": 50,
         "upcoming_until": "2026-08-01T00:00:00",
         "include": ["pinned", "recall"],
+        "max_chars": 40_000,
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("max_chars", [9_999, 100_001, True])
+async def test_bootstrap_rejects_out_of_range_max_chars_before_request(max_chars):
+    def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover - never sent
+        raise AssertionError("no request may be sent")
+
+    async with make_client(handler) as client:
+        with pytest.raises(ValueError, match="max_chars"):
+            await client.bootstrap(AGENT, max_chars=max_chars)
 
 
 @pytest.mark.asyncio

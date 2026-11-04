@@ -1215,15 +1215,19 @@ def _bootstrap_payload(
     pinned_cap: int | None,
     upcoming_until: str | None,
     include: list[AgentBootstrapComponentName] | None,
+    max_chars: int | None,
 ) -> dict[str, Any]:
     """Build the omit-when-None bootstrap payload shared by both surfaces.
 
     ``KaguraClient.get_agent_bootstrap`` (MCP tool arguments) and
-    ``AgentsClient.bootstrap`` (REST JSON body) carry the same seven
+    ``AgentsClient.bootstrap`` (REST JSON body) carry the same eight
     optional keys; a single builder keeps the two surfaces in lockstep —
     ``agent_id`` stays transport-specific (MCP argument vs URL path).
     Lives beside the bootstrap models because it IS the request half of
     this wire contract.
+
+    Raises:
+        ValueError: ``max_chars`` is not an integer in [10,000, 100,000].
     """
     payload: dict[str, Any] = {}
     if context_id is not None:
@@ -1240,6 +1244,9 @@ def _bootstrap_payload(
         payload["upcoming_until"] = upcoming_until
     if include is not None:
         payload["include"] = include
+    if max_chars is not None:
+        _validate_max_chars(max_chars)
+        payload["max_chars"] = max_chars
     return payload
 
 
@@ -1301,6 +1308,11 @@ class AgentBootstrapResponse(BaseModel):
     ``context`` reuses :class:`ContextDetail` — the server emits the block
     byte-compatible with ``get_context_info`` (``search_config`` is not
     included in bootstrap and keeps its client-side default).
+
+    ``context_summary_omitted`` is ``True`` when the reply did not fit its
+    ``max_chars`` budget and the server left ``context_summary`` out of every
+    pinned / recall / upcoming item (memory-cloud v0.82.0+, #1743); a list
+    it then had to cut carries ``truncated: True`` in its component.
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -1313,6 +1325,7 @@ class AgentBootstrapResponse(BaseModel):
     components: dict[str, dict[str, Any]] = Field(default_factory=dict)
     correlation: AgentBootstrapCorrelation | None = None
     generated_at: datetime | None = None
+    context_summary_omitted: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -1570,7 +1583,10 @@ class GuardrailSet(BaseModel):
     (``load_guardrails`` raises :class:`~kagura_memory.exceptions.KaguraResponseError`)
     instead of reading as complete. ``version`` is an opaque hash of the
     served set (equal means unchanged). ``context_id`` / ``context_name`` are
-    filled on the MCP surface only.
+    filled on the MCP surface only. ``context_summary_omitted`` is ``True``
+    when an MCP reply passed its ``max_chars`` budget and the server left
+    ``context_summary`` out of the pinned items (memory-cloud v0.82.0+,
+    #1743); items it then had to cut set the lane's ``*_truncated`` flag.
 
     ``format`` is the shared cache/payload format version. It bumps only when
     an existing field changes meaning or is removed, so a consumer that sees
@@ -1595,6 +1611,7 @@ class GuardrailSet(BaseModel):
     tool_triggered_truncated: bool
     context_id: str | None = None
     context_name: str | None = None
+    context_summary_omitted: bool = False
 
 
 GuardrailDigestTarget = Literal["export", "instructions"]
@@ -1623,3 +1640,43 @@ class GuardrailDigest(BaseModel):
     text: str
     tool_triggered_version: str | None = None
     content_type: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Recall shape and response budgets (#298, memory-cloud #1743 / #2002 / #2124)
+# ---------------------------------------------------------------------------
+
+
+RecallVerbosity = Literal["compact", "full"]
+"""Valid ``recall`` ``verbosity`` values (memory-cloud v0.108.0+, #2002; request side only).
+
+``"compact"`` is the server default; ``"full"`` adds ``tags``,
+``context_summary``, ``scope``, ``version`` and the uncut ``summary``."""
+
+_MAX_CHARS_MIN = 10_000
+_MAX_CHARS_MAX = 100_000
+# recall's ``full``: how many top results carry content (memory-cloud
+# RECALL_MAX_FULL, recall's own ``k`` limit).
+_RECALL_FULL_MAX = 100
+
+
+def _validate_max_chars(max_chars: object) -> None:
+    """Reject a response budget the server would refuse (memory-cloud #1743).
+
+    ``recall``, ``load_pinned``, ``load_guardrails`` and ``get_agent_bootstrap``
+    (MCP, and the REST bootstrap) take ``max_chars`` as an integer in
+    [10,000, 100,000] — characters of the reply, not tokens. ``bool`` is not
+    an integer here, as on the server (``type(x) is int``).
+
+    Raises:
+        ValueError: If ``max_chars`` is not an ``int`` in that range.
+    """
+    if (
+        isinstance(max_chars, bool)
+        or not isinstance(max_chars, int)
+        or not _MAX_CHARS_MIN <= max_chars <= _MAX_CHARS_MAX
+    ):
+        raise ValueError(
+            f"max_chars must be an integer between {_MAX_CHARS_MIN} and {_MAX_CHARS_MAX} "
+            f"(characters, not tokens), got {max_chars!r}"
+        )

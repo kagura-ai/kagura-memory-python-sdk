@@ -72,6 +72,7 @@ from .models import (
     MemoryStatItem,
     MemoryStatsResponse,
     PaginatedResourceTokensResponse,
+    RecallVerbosity,
     ResourceEventBatchRequest,
     ResourceEventBatchResponse,
     ResourceEventItem,
@@ -149,6 +150,8 @@ __all__ = [
     "MeasurementResult",
     "MeasurementSeries",
     "SeriesBucket",
+    # Recall result shape (#298, server v0.108.0+)
+    "RecallVerbosity",
     # Memory stats & duplicates (v0.6.1)
     "MemoryStatItem",
     "MemoryStatsResponse",

@@ -5502,6 +5502,7 @@ async def test_get_agent_bootstrap_full_args():
             pinned_cap=50,
             upcoming_until="2026-08-01T00:00:00",
             include=["pinned", "recall"],
+            max_chars=40_000,
         )
         args = mock.call_args[0][1]
         assert args == {
@@ -5513,6 +5514,7 @@ async def test_get_agent_bootstrap_full_args():
             "pinned_cap": 50,
             "upcoming_until": "2026-08-01T00:00:00",
             "include": ["pinned", "recall"],
+            "max_chars": 40_000,
         }
 
     await client.close()
@@ -5535,6 +5537,7 @@ async def test_get_agent_bootstrap_optional_args_not_sent_when_none():
             "pinned_cap",
             "upcoming_until",
             "include",
+            "max_chars",
         ):
             assert key not in args
 
