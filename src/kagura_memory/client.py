@@ -2718,8 +2718,8 @@ class KaguraClient:
                 ``supersede_candidate.acceptance`` first, on :meth:`reference`
                 (v0.137.0+) or on the :meth:`recall` row (v0.142.0+, #2508):
                 it says whether the accept would be refused, and from v0.142.0
-                (#2614) reports that guardrail gate as ``reason ==
-                "not_writable"``. Sent only when ``True``. Keyword-only.
+                (#2614) reports that guardrail gate as the ``not_writable``
+                reason. Sent only when ``True``. Keyword-only.
             verbose: ``True`` asks for ``persistence.detail`` (memory-cloud
                 v0.93.0+, #1851). Sent only when ``True``. Keyword-only.
 
