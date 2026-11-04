@@ -2502,7 +2502,8 @@ class KaguraClient:
                 ambiguous no-op — or ``memory_ids`` is combined with another
                 target, is empty, holds more than 50 ids, an id that is not a
                 UUID, or the same id twice (all checked before any request).
-            TypeError: ``memory_ids`` is a bare ``str`` or holds a non-``str``.
+            TypeError: ``memory_ids`` is a bare ``str``, not a list, or holds a
+                non-``str``.
             KaguraError: Server-side rejection, e.g. a ``query`` delete while
                 recall is degraded. With ``memory_ids``, every id failing is
                 ``code == "batch_failed"`` with the rows in
@@ -2583,6 +2584,8 @@ class KaguraClient:
                 ``format`` is not ``"full"`` / ``"index"``, ``format="full"``
                 comes with ``max_chars`` below 10,000, or ``include`` is empty
                 or names an unknown lane (before any request).
+            TypeError: ``include`` is a bare ``str``, not a list, or holds a
+                non-``str`` (before any request).
             KaguraNotFoundError: The context does not exist or is not
                 accessible.
             KaguraError: Another server-side refusal, e.g. a malformed
@@ -2595,10 +2598,11 @@ class KaguraClient:
         if since is not None:
             arguments["since"] = _iso_arg(since)
         if include is not None:
+            lanes = _str_list("include", include)
             known = get_args(BootstrapComponentName)
-            if not include or any(name not in known for name in include):
+            if not lanes or any(name not in known for name in lanes):
                 raise ValueError(f"include must be a non-empty subset of {', '.join(known)}")
-            arguments["include"] = list(include)
+            arguments["include"] = lanes
         if max_chars is not None:
             _validate_int_range("max_chars", max_chars, _BOOTSTRAP_MIN_CHARS, _MAX_CHARS_MAX)
             arguments["max_chars"] = max_chars
@@ -2664,7 +2668,8 @@ class KaguraClient:
 
         Raises:
             ValueError: ``max_chars`` is out of range (before any request).
-            TypeError: ``kinds`` is a bare ``str`` (before any request).
+            TypeError: ``kinds`` is a bare ``str``, not a list, or holds a
+                non-``str`` (before any request).
             KaguraNotFoundError: The context does not exist or is not
                 accessible.
             KaguraError: Another server-side refusal (``validation_error``:
@@ -2680,10 +2685,7 @@ class KaguraClient:
         if until is not None:
             arguments["until"] = _iso_arg(until)
         if kinds is not None:
-            if isinstance(kinds, str):
-                # list("created") would send its characters as kinds.
-                raise TypeError("kinds must be a list of kind names, not a str")
-            arguments["kinds"] = list(kinds)
+            arguments["kinds"] = _str_list("kinds", kinds)
         if cursor is not None:
             arguments["cursor"] = cursor
         if limit is not None:
@@ -4489,6 +4491,24 @@ def _checked_batch_items(items: Any, context_id: str) -> list[dict[str, Any]]:
     return items
 
 
+def _str_list(name: str, values: Any) -> list[str]:
+    """A list-of-str argument, copied, or the ``TypeError`` naming it.
+
+    A bare ``str`` is refused rather than iterated: ``list("created")``
+    would send its characters as the list.
+
+    Raises:
+        TypeError: ``values`` is a ``str`` or not a list, or an entry is not
+            a ``str``.
+    """
+    if isinstance(values, str) or not isinstance(values, list):
+        raise TypeError(f"{name} must be a list of strings, not {type(values).__name__}")
+    for index, value in enumerate(values):
+        if not isinstance(value, str):
+            raise TypeError(f"{name}[{index}] must be a str, got {type(value).__name__}")
+    return list(values)
+
+
 def _checked_memory_ids(memory_ids: Any) -> list[str]:
     """Reject a ``forget(memory_ids=)`` list the server would refuse.
 
@@ -4499,14 +4519,11 @@ def _checked_memory_ids(memory_ids: Any) -> list[str]:
         TypeError: A bare ``str``, a non-list, or a non-``str`` id.
         ValueError: Not 1-50 ids, an id that is not a UUID, or a repeat.
     """
-    if isinstance(memory_ids, str) or not isinstance(memory_ids, list):
-        raise TypeError("memory_ids must be a list of memory UUID strings")
-    if not 1 <= len(memory_ids) <= _FORGET_MAX_IDS:
-        raise ValueError(f"memory_ids must hold 1 to {_FORGET_MAX_IDS} ids, got {len(memory_ids)}")
+    ids = _str_list("memory_ids", memory_ids)
+    if not 1 <= len(ids) <= _FORGET_MAX_IDS:
+        raise ValueError(f"memory_ids must hold 1 to {_FORGET_MAX_IDS} ids, got {len(ids)}")
     seen: set[uuid.UUID] = set()
-    for index, value in enumerate(memory_ids):
-        if not isinstance(value, str):
-            raise TypeError(f"memory_ids[{index}] must be a str, got {type(value).__name__}")
+    for index, value in enumerate(ids):
         try:
             parsed = uuid.UUID(value)
         except ValueError:
@@ -4514,7 +4531,7 @@ def _checked_memory_ids(memory_ids: Any) -> list[str]:
         if parsed in seen:
             raise ValueError(f"memory_ids lists {parsed} more than once")
         seen.add(parsed)
-    return list(memory_ids)
+    return ids
 
 
 def _checked_names(name: str, values: Any, limit: int) -> list[str]:
@@ -4524,10 +4541,7 @@ def _checked_names(name: str, values: Any, limit: int) -> list[str]:
         TypeError: A bare ``str``, a non-list, or a non-``str`` entry.
         ValueError: More than ``limit`` entries.
     """
-    if isinstance(values, str) or not isinstance(values, list):
-        raise TypeError(f"{name} must be a list of strings, not {type(values).__name__}")
-    if any(not isinstance(value, str) for value in values):
-        raise TypeError(f"{name} must hold strings only")
-    if len(values) > limit:
-        raise ValueError(f"{name} holds at most {limit} names, got {len(values)}")
-    return list(values)
+    names = _str_list(name, values)
+    if len(names) > limit:
+        raise ValueError(f"{name} holds at most {limit} names, got {len(names)}")
+    return names

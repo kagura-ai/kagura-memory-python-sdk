@@ -349,6 +349,14 @@ async def test_bootstrap_refuses_what_the_server_would_before_any_request(kwargs
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("include", ["pinned", ("pinned",), ["pinned", 1]])
+async def test_bootstrap_refuses_an_include_that_is_not_a_list_of_str(include):
+    """A bare ``"pinned"`` is not iterated into its characters."""
+    message = await _refused_locally("bootstrap", CTX, error=TypeError, include=include)
+    assert "include" in message
+
+
+@pytest.mark.asyncio
 async def test_bootstrap_accepts_the_index_floor_and_full_at_ten_thousand():
     _, params = await _call(INDEX_REPLY, "bootstrap", CTX, max_chars=2_000)
     assert params["arguments"]["max_chars"] == 2_000
@@ -586,10 +594,11 @@ async def test_changes_since_refuses_an_out_of_range_budget_locally():
 
 
 @pytest.mark.asyncio
-async def test_changes_since_refuses_a_bare_str_kinds():
+@pytest.mark.parametrize("kinds", ["created", ("created",), ["created", None]])
+async def test_changes_since_refuses_kinds_that_are_not_a_list_of_str(kinds):
     """``list("created")`` would send the characters as kinds."""
     message = await _refused_locally(
-        "changes_since", CTX, "2026-11-01T00:00:00Z", error=TypeError, kinds="created"
+        "changes_since", CTX, "2026-11-01T00:00:00Z", error=TypeError, kinds=kinds
     )
     assert "kinds" in message
 
