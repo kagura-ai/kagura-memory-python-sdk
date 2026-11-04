@@ -1660,23 +1660,32 @@ _MAX_CHARS_MAX = 100_000
 _RECALL_FULL_MAX = 100
 
 
+def _validate_int_range(name: str, value: object, lo: int, hi: int) -> None:
+    """Reject a request integer the server would refuse, before any request.
+
+    ``bool`` is not an integer here, as on the server (``type(x) is int``).
+
+    Args:
+        name: The argument's name, for the message.
+        value: The value the caller passed.
+        lo: The smallest accepted value.
+        hi: The largest accepted value.
+
+    Raises:
+        ValueError: If ``value`` is not an ``int`` in [``lo``, ``hi``].
+    """
+    if isinstance(value, bool) or not isinstance(value, int) or not lo <= value <= hi:
+        raise ValueError(f"{name} must be an integer between {lo} and {hi}, got {value!r}")
+
+
 def _validate_max_chars(max_chars: object) -> None:
     """Reject a response budget the server would refuse (memory-cloud #1743).
 
     ``recall``, ``load_pinned``, ``load_guardrails`` and ``get_agent_bootstrap``
-    (MCP, and the REST bootstrap) take ``max_chars`` as an integer in
-    [10,000, 100,000] — characters of the reply, not tokens. ``bool`` is not
-    an integer here, as on the server (``type(x) is int``).
+    (MCP, and the REST bootstrap) take ``max_chars`` — characters of the
+    reply, not tokens — as an integer in [10,000, 100,000].
 
     Raises:
         ValueError: If ``max_chars`` is not an ``int`` in that range.
     """
-    if (
-        isinstance(max_chars, bool)
-        or not isinstance(max_chars, int)
-        or not _MAX_CHARS_MIN <= max_chars <= _MAX_CHARS_MAX
-    ):
-        raise ValueError(
-            f"max_chars must be an integer between {_MAX_CHARS_MIN} and {_MAX_CHARS_MAX} "
-            f"(characters, not tokens), got {max_chars!r}"
-        )
+    _validate_int_range("max_chars", max_chars, _MAX_CHARS_MIN, _MAX_CHARS_MAX)

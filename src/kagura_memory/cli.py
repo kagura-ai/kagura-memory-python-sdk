@@ -35,6 +35,9 @@ from .files_client import FilesClient
 from .logger import VerboseLogger
 from .memory_client import MemoryClient
 from .models import (
+    _MAX_CHARS_MAX,
+    _MAX_CHARS_MIN,
+    _RECALL_FULL_MAX,
     FileObject,
     GuardrailDigest,
     MeasurementAggregate,
@@ -539,7 +542,7 @@ def remember(
 )
 @click.option(
     "--full",
-    type=click.IntRange(0, 100),
+    type=click.IntRange(0, _RECALL_FULL_MAX),
     help=(
         "How many top results carry content, up to 1,500 characters each "
         "(server v0.114.0+; default: the server's, 3 unless set; 0: summaries only)."
@@ -547,7 +550,7 @@ def remember(
 )
 @click.option(
     "--max-chars",
-    type=click.IntRange(10_000, 100_000),
+    type=click.IntRange(_MAX_CHARS_MIN, _MAX_CHARS_MAX),
     help="Response budget in characters, 10000-100000 (server v0.82.0+; default 20000).",
 )
 def recall(query, context_id, k, rerank, trusted_only, verbosity, full, max_chars):

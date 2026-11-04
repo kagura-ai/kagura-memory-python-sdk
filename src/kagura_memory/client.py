@@ -70,6 +70,7 @@ from .models import (
     _binding_scope_payload,
     _bootstrap_payload,
     _details_with_tool_trigger,
+    _validate_int_range,
     _validate_max_chars,
 )
 
@@ -873,14 +874,7 @@ class KaguraClient:
                 raise ValueError(f"verbosity must be 'compact' or 'full', got {verbosity!r}")
             arguments["verbosity"] = verbosity
         if full is not None:
-            if (
-                isinstance(full, bool)
-                or not isinstance(full, int)
-                or not 0 <= full <= _RECALL_FULL_MAX
-            ):
-                raise ValueError(
-                    f"full must be an integer between 0 and {_RECALL_FULL_MAX}, got {full!r}"
-                )
+            _validate_int_range("full", full, 0, _RECALL_FULL_MAX)
             arguments["full"] = full
         if max_chars is not None:
             _validate_max_chars(max_chars)
