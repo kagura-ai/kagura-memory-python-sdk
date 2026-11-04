@@ -174,20 +174,27 @@ def _observed_at_arg(value: object) -> str:
     """Render an ``observed_at`` argument and refuse a form the server refuses.
 
     A ``datetime`` becomes the server's stored form, ``YYYY-MM-DDTHH:MM:SSZ``:
-    naive means UTC (as for :meth:`KaguraClient.record_measurement`), an aware
-    one is converted, and fractional seconds are dropped as the server drops
-    them. A ``date`` becomes ``YYYY-MM-DD``. A string is sent as given once it
-    passes the server's own shape and calendar check: a date ``YYYY-MM-DD``,
-    or ``YYYY-MM-DDTHH:MM:SS`` with optional fractional seconds and an
-    optional ``Z`` / ``±HH:MM`` offset (memory-cloud v0.127.0, #2330; basic
-    forms such as ``20240307``, a space separator or a time without seconds
-    are refused there with ``validation_error``).
+    naive (no UTC offset) means UTC (as for
+    :meth:`KaguraClient.record_measurement`), an aware one is converted, and
+    fractional seconds are dropped as the server drops them. A ``date``
+    becomes ``YYYY-MM-DD``. A string is sent as given once it passes the
+    server's own checks: at most 40 characters as sent (the request model's
+    cap), then, stripped, a date ``YYYY-MM-DD`` or ``YYYY-MM-DDTHH:MM:SS``
+    with optional fractional seconds and an optional ``Z`` / ``±HH:MM``
+    offset, a real calendar day and time, and an instant in UTC years
+    1-9999 (memory-cloud v0.127.0, #2330; basic forms such as ``20240307``,
+    a space separator or a time without seconds are refused there with
+    ``validation_error``).
 
     Raises:
         ValueError: ``value`` is not such a string, ``date`` or ``datetime``.
     """
     if isinstance(value, datetime):
-        moment = value if value.tzinfo is None else value.astimezone(UTC)
+        try:
+            moment = value if value.utcoffset() is None else value.astimezone(UTC)
+        except OverflowError as e:
+            # The offset moves the instant out of years 1-9999, as the server finds.
+            raise ValueError(f"{_OBSERVED_AT_HINT}, got {value!r}") from e
         return (
             f"{moment.year:04d}-{moment.month:02d}-{moment.day:02d}"
             f"T{moment.hour:02d}:{moment.minute:02d}:{moment.second:02d}Z"
@@ -197,13 +204,21 @@ def _observed_at_arg(value: object) -> str:
     if not isinstance(value, str):
         raise ValueError(f"{_OBSERVED_AT_HINT}, got {type(value).__name__}")
     text = value.strip()
-    if not text or len(text) > _OBSERVED_AT_MAX_CHARS:
+    # The cap is on the argument as sent (``max_length=40``), before the strip.
+    if not text or len(value) > _OBSERVED_AT_MAX_CHARS:
         raise ValueError(f"{_OBSERVED_AT_HINT}, got {value!r}")
     try:
         if _OBSERVED_DATE.fullmatch(text):
             date.fromisoformat(text)
         elif _OBSERVED_DATETIME.fullmatch(text):
-            datetime.fromisoformat(text)
+            if text[11:13] == "24":
+                # Python 3.14 reads 24:00:00 as the next midnight; the
+                # server's parser (Python 3.11) refuses the hour.
+                raise ValueError(text)
+            parsed = datetime.fromisoformat(text)
+            if parsed.tzinfo is not None:
+                # OverflowError for an offset that leaves years 1-9999.
+                parsed.astimezone(UTC)
         else:
             raise ValueError(text)
     except (ValueError, OverflowError) as e:

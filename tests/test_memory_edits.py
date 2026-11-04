@@ -12,7 +12,8 @@ memory-cloud v0.142.0's ``mcp_server/tools/memory.py`` and
 from __future__ import annotations
 
 import json
-from datetime import UTC, date, datetime, timedelta, timezone
+import time
+from datetime import UTC, date, datetime, timedelta, timezone, tzinfo
 from typing import Any, get_args
 
 import httpx
@@ -111,6 +112,9 @@ _REMEMBERED = {
         (datetime(2024, 3, 7, 10, 0, 0, 500), "2024-03-07T10:00:00Z"),
         (datetime(2024, 3, 7, 19, 0, tzinfo=timezone(timedelta(hours=9))), "2024-03-07T10:00:00Z"),
         (datetime(2024, 3, 7, 10, 0, tzinfo=UTC), "2024-03-07T10:00:00Z"),
+        # The server strips the value; the 40-character cap is on it as sent.
+        (" 2024-03-07 ", " 2024-03-07 "),
+        ("2024-03-07T10:00:00." + "1" * 20, "2024-03-07T10:00:00." + "1" * 20),
     ],
     ids=[
         "date",
@@ -121,6 +125,8 @@ _REMEMBERED = {
         "naive-datetime-is-utc",
         "aware-datetime-converted",
         "utc-datetime",
+        "padded",
+        "40-chars",
     ],
 )
 def test_observed_at_arg_renders_the_accepted_forms(value: object, expected: str) -> None:
@@ -140,6 +146,13 @@ def test_observed_at_arg_renders_the_accepted_forms(value: object, expected: str
         "",
         "   ",
         "2024-03-07T10:00:00." + "1" * 30,
+        # Stripped it is short, but the request model caps the string as sent.
+        " 2024-03-07" + " " * 30,
+        # Python 3.14 reads it as the next midnight; the server (3.11) refuses it.
+        "2024-03-07T24:00:00Z",
+        # In UTC the instant falls before year 1 / after year 9999 (OverflowError there).
+        "0001-01-01T00:30:00+01:00",
+        "9999-12-31T23:30:00-01:00",
         20240307,
         True,
         None,
@@ -154,6 +167,10 @@ def test_observed_at_arg_renders_the_accepted_forms(value: object, expected: str
         "empty",
         "blank",
         "over-40-chars",
+        "over-40-as-sent",
+        "hour-24",
+        "before-year-1",
+        "after-year-9999",
         "int",
         "bool",
         "none",
@@ -162,6 +179,49 @@ def test_observed_at_arg_renders_the_accepted_forms(value: object, expected: str
 def test_observed_at_arg_refuses_what_the_server_refuses(value: object) -> None:
     with pytest.raises(ValueError, match="ISO 8601"):
         _observed_at_arg(value)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        datetime(1, 1, 1, 0, 30, tzinfo=timezone(timedelta(hours=1))),
+        datetime(9999, 12, 31, 23, 30, tzinfo=timezone(timedelta(hours=-1))),
+    ],
+    ids=["before-year-1", "after-year-9999"],
+)
+def test_observed_at_arg_out_of_range_datetime_is_a_value_error(value: datetime) -> None:
+    """Converting to UTC overflows: the documented ``ValueError``, never ``OverflowError``."""
+    with pytest.raises(ValueError, match="ISO 8601"):
+        _observed_at_arg(value)
+
+
+class _NoOffset(tzinfo):
+    """A tzinfo that knows no offset: Python counts such a datetime as naive."""
+
+    def utcoffset(self, dt: datetime | None) -> timedelta | None:
+        return None
+
+    def dst(self, dt: datetime | None) -> timedelta | None:
+        return None
+
+
+@pytest.mark.skipif(not hasattr(time, "tzset"), reason="time.tzset is POSIX-only")
+@pytest.mark.parametrize(
+    "value",
+    [datetime(2024, 3, 7, 10, 0), datetime(2024, 3, 7, 10, 0, tzinfo=_NoOffset())],
+    ids=["naive", "tzinfo-without-offset"],
+)
+def test_observed_at_arg_naive_is_utc_whatever_the_local_zone(
+    monkeypatch: pytest.MonkeyPatch, value: datetime
+) -> None:
+    """Naive means UTC, as on the server, never the machine's own zone."""
+    monkeypatch.setenv("TZ", "Asia/Tokyo")
+    time.tzset()
+    try:
+        assert _observed_at_arg(value) == "2024-03-07T10:00:00Z"
+    finally:
+        monkeypatch.undo()
+        time.tzset()
 
 
 # ============================================================================
