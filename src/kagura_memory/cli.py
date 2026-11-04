@@ -266,9 +266,10 @@ def _cli_error_message(e: BaseException, message: str | None = None) -> str:
     A quota refusal adds when it resets, and a quota or feature gate the
     plan that lifts it (``display (key)`` when the server sent both), so the
     operator does not have to dig them out of the prose. The capacity lock
-    adds its cleanup page, a 503 how long to wait, and any server error its
-    ``help`` and ``correlation_id`` (#299). ``message`` replaces the first
-    line when a command words the failure itself.
+    adds its cleanup page (unless the server's ``help`` already names it), a
+    503 how long to wait, and any server error its ``help`` and
+    ``correlation_id`` (#299). ``message`` replaces the first line when a
+    command words the failure itself.
     """
     lines = [_exc_message(e) if message is None else message]
     if isinstance(e, KaguraQuotaError) and e.resets_at is not None:
@@ -278,7 +279,11 @@ def _cli_error_message(e: BaseException, message: str | None = None) -> str:
         plan = f"{display} ({key})" if display and key and display != key else display or key
         if plan:
             lines.append(f"  Required plan: {plan}")
-    if isinstance(e, KaguraCapacityLockedError) and e.cleanup_url:
+    if (
+        isinstance(e, KaguraCapacityLockedError)
+        and e.cleanup_url
+        and e.cleanup_url not in (e.help or "")
+    ):
         lines.append(f"  Clean up or re-subscribe: {e.cleanup_url}")
     if isinstance(e, KaguraServiceUnavailableError) and e.retry_after is not None:
         lines.append(f"  Retry after: {e.retry_after:g} s")

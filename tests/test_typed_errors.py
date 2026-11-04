@@ -659,6 +659,22 @@ def test_cli_error_shows_the_cleanup_page():
     assert _cli_error_message(KaguraCapacityLockedError("locked")) == "locked"
 
 
+def test_cli_error_names_the_cleanup_page_once_when_help_has_it():
+    """MCP's ``help`` already names the page (CapacityLockedError.help_text): no second line."""
+    err = KaguraCapacityLockedError(
+        "locked", cleanup_url=CLEANUP_URL, details={"gate": "capacity", "help": _LOCK_HELP}
+    )
+    assert _cli_error_message(err) == f"locked\n  Help: {_LOCK_HELP}"
+    assert _cli_error_message(err).count(CLEANUP_URL) == 1
+    # A help that does not name the page keeps the cleanup line.
+    other = KaguraCapacityLockedError(
+        "locked", cleanup_url=CLEANUP_URL, details={"help": "Ask the workspace owner."}
+    )
+    assert _cli_error_message(other) == (
+        f"locked\n  Clean up or re-subscribe: {CLEANUP_URL}\n  Help: Ask the workspace owner."
+    )
+
+
 def test_cli_error_shows_the_retry_window():
     err = KaguraServiceUnavailableError("HTTP 503: busy", retry_after=5, reason="pool_exhausted")
     assert _cli_error_message(err) == "HTTP 503: busy\n  Retry after: 5 s"
