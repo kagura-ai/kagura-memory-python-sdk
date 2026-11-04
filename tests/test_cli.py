@@ -1271,6 +1271,130 @@ def test_update_memory_details_patch_fallback_names_its_flag(mock_client_cls, mo
     mock_client.update_memory.assert_awaited_once()
 
 
+_WIRE_CTX = "11111111-2222-3333-4444-555555555555"
+_WIRE_MEM = "aaaaaaaa-0000-0000-0000-000000000001"
+# memory-cloud 0.82.0-0.139.x: update_memory's closed schema refuses details_patch
+# (mcp_server/tools/__init__.py + _arg_coercion.find_unknown_arguments, #1742).
+_UNKNOWN_DETAILS_PATCH = {
+    "status": "error",
+    "error": "invalid_argument",
+    "message": "update_memory does not accept the argument 'details_patch' (did you mean "
+    "'details'?). Arguments its inputSchema declares: context_id, details, ...",
+    "unknown_arguments": ["details_patch"],
+    "allowed_arguments": ["context_id", "details", "expected_version", "memory_id"],
+    "suggestions": {"details_patch": "details"},
+    "help": "Remove the unknown arguments or rename them as suggested, then call the tool again.",
+}
+_WIRE_UPDATED = {
+    "status": "success",
+    "memory_id": _WIRE_MEM,
+    "operation": "updated",
+    "re_embedded": False,
+    "scope": "working",
+}
+
+
+@pytest.mark.parametrize(
+    ("first_reply", "expected_calls"),
+    [
+        (
+            {**_WIRE_UPDATED, "version": 5},
+            [("update_memory", "patch")],
+        ),
+        (
+            _UNKNOWN_DETAILS_PATCH,
+            [("update_memory", "patch"), ("reference", None), ("update_memory", "merged+edits")],
+        ),
+        (
+            _WIRE_UPDATED,
+            [("update_memory", "patch"), ("reference", None), ("update_memory", "merged")],
+        ),
+    ],
+    ids=["0.140.0+-one-call", "0.82.0-0.139.x-refused", "before-0.82.0-ignored"],
+)
+def test_update_memory_merge_details_on_the_wire(monkeypatch, first_reply, expected_calls):
+    """--merge-details through the real client and transport, per server generation.
+
+    The refusal is read from the MCP envelope as the client keeps it
+    (``KaguraError.details["unknown_arguments"]``), and every request carries
+    exactly the arguments named here.
+    """
+    import httpx
+
+    from kagura_memory import KaguraClient
+
+    stored = {"location": {"lat": 1.0, "lon": 2.0}, "client": "acme", "n": 1}
+    sent: list[tuple[str, dict]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        params = json.loads(request.content)["params"]
+        sent.append((params["name"], params["arguments"]))
+        if params["name"] == "reference":
+            reply = {"status": "success", "memory": {"memory_id": _WIRE_MEM, "details": stored}}
+        elif len(sent) == 1:
+            reply = first_reply
+        else:
+            reply = {**_WIRE_UPDATED, "version": 5}
+        text = json.dumps(reply)
+        return httpx.Response(
+            200,
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {"content": [{"type": "text", "text": text}]},
+            },
+        )
+
+    def wired_client(**_kwargs):
+        client = KaguraClient(api_key="test", mcp_url="https://test.com/mcp")
+        client._session_id = "pre-set-session"
+        client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        return client
+
+    monkeypatch.setattr("kagura_memory.cli.KaguraClient", wired_client)
+    monkeypatch.setattr(
+        "kagura_memory.cli.load_config",
+        lambda: {"api_key": "test", "mcp_url": "https://test.com/mcp"},
+    )
+    result = CliRunner().invoke(
+        main,
+        [
+            "update-memory",
+            "-c",
+            _WIRE_CTX,
+            "-m",
+            _WIRE_MEM,
+            "--location",
+            "35.68,139.76",
+            "--details",
+            '{"n": 2, "client": null}',
+            "--merge-details",
+            "--expected-version",
+            "4",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    ids = {"context_id": _WIRE_CTX, "memory_id": _WIRE_MEM}
+    new_location = {"lat": 35.68, "lon": 139.76}
+    bodies = {
+        None: ids,
+        "patch": {
+            **ids,
+            "details_patch": {"n": 2, "client": None, "location": new_location},
+            "expected_version": 4,
+        },
+        # The refused call wrote nothing: the merged object goes with every flag.
+        "merged+edits": {
+            **ids,
+            "details": {"location": new_location, "n": 2},
+            "expected_version": 4,
+        },
+        # The ignored call applied the other flags: only the details are left.
+        "merged": {**ids, "details": {"location": new_location, "n": 2}},
+    }
+    assert sent == [(name, bodies[body]) for name, body in expected_calls]
+
+
 @pytest.mark.parametrize(
     ("code", "details"),
     [
