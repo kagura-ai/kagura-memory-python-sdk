@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
-from ..client import KaguraClient
+from ..client import KaguraClient, _validate_memory_tags
 from ..exceptions import (
     KaguraFetchError,
     KaguraIngestError,
@@ -185,6 +185,10 @@ class FileIngestor:
         """Run a full ingestion against ``source``.
 
         Args:
+            tags: Tags for the overview and every section memory: at most 50,
+                each at most 100 characters (the :meth:`KaguraClient.remember`
+                caps). A list over either cap raises :exc:`ValueError` at
+                ``ingest()`` entry, before any fetch, summarization or upload.
             render: Route URL fetches through a headless browser (requires
                 the ``[ingest-browser]`` extra plus ``playwright install
                 chromium``). Use for JS-heavy / SPA pages whose content is
@@ -254,6 +258,9 @@ class FileIngestor:
                 an unhandled exception escapes the body.
         """
         log = normalize_logger(logger)
+        # remember() would refuse an over-cap list only after the LLM calls and
+        # the archive upload had run; check it before any of them.
+        _validate_memory_tags(tags)
         # Use `is not None` (not truthiness) so an empty dict still goes through
         # the validate-and-seal path. Otherwise a caller passing `{}` would skip
         # the shallow copy below and keep a live reference into the SDK, which

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 import uuid
-from collections.abc import Collection, Mapping
+from collections.abc import Collection, Mapping, Sequence
 from datetime import UTC, datetime, time, timedelta
 from importlib.metadata import version as _pkg_version
 from typing import Any, NoReturn, TypeVar
@@ -53,34 +53,61 @@ def base_url_from_mcp(mcp_url: str) -> str:
 
 
 def mcp_url_with_query(
-    mcp_url: str, *, guardrails: str | None = None, tool_profile: str | None = None
+    mcp_url: str,
+    *,
+    guardrails: str | None = None,
+    tool_profile: str | None = None,
+    add_tools: Sequence[str] | None = None,
+    context: str | None = None,
 ) -> str:
-    """Return ``mcp_url`` with memory-cloud's ``guardrails`` / ``profile`` query set.
+    """Return ``mcp_url`` with memory-cloud's endpoint query set.
 
+    The keys are ``guardrails``, ``profile``, ``add_tools`` and ``context``.
     The rest of the existing query is kept verbatim. A key being set replaces
     every earlier value of it rather than appending, because the server reads
-    only the first ``guardrails`` / ``profile`` it finds. ``None`` leaves that
-    key as it is.
+    only the first value of each. ``None`` leaves that key as it is.
 
     Args:
         mcp_url: The MCP endpoint URL, with or without a query.
         guardrails: ``?guardrails=`` value (see :func:`normalize_guardrails`).
         tool_profile: ``?profile=`` value, the tool profile ``tools/list``
-            serves (e.g. ``core``); the server rejects an unknown name.
+            serves (``core`` or ``full``); the server rejects an unknown name.
+            Without one, memory-cloud 0.93.0+ lists ``core`` (memory-cloud#1849).
+        add_tools: ``?add_tools=`` names, added to the listed profile
+            (server v0.129.0+, memory-cloud#2354), normalized by
+            :func:`normalize_add_tools`. A list that names no tool leaves the
+            key as it is, like ``None``.
+        context: ``?context=`` value, the connection's default context: a
+            context UUID (server v0.114.0+, memory-cloud#2125).
 
     Returns:
         The URL to POST MCP requests to.
+
+    Raises:
+        TypeError: ``add_tools`` is a ``str``, or holds a non-``str`` item.
+        ValueError: ``add_tools`` names more than 100 tools or one starting
+            with ``-``, or ``context`` is not a UUID.
     """
+    added = normalize_add_tools(add_tools) if add_tools is not None else ""
+    default_context = normalize_uuid(context, label="context") if context is not None else None
     updates = {
         key: value
-        for key, value in (("guardrails", guardrails), ("profile", tool_profile))
+        for key, value in (
+            ("guardrails", guardrails),
+            ("profile", tool_profile),
+            ("add_tools", added or None),
+            ("context", default_context),
+        )
         if value is not None
     }
     if not updates:
         return mcp_url
     parts = urlsplit(mcp_url)
     kept = _query_without(parts.query, updates)
-    return urlunsplit(parts._replace(query="&".join([*kept, urlencode(updates)])))
+    # A literal comma keeps an add_tools list readable in the stored entry; the
+    # server splits the decoded value either way.
+    query = urlencode(updates, safe=",")
+    return urlunsplit(parts._replace(query="&".join([*kept, query])))
 
 
 def _query_without(query: str, keys: Collection[str]) -> list[str]:
@@ -170,6 +197,48 @@ def normalize_guardrails(value: str) -> str:
         return normalize_uuid(stripped, label="guardrails")
     except ValueError:
         raise ValueError(f"guardrails must be 'off' or a context UUID, got {value!r}") from None
+
+
+#: The most names memory-cloud reads from one ``add_tools`` value (``MAX_TOOL_NAMES``).
+MAX_ADD_TOOLS = 100
+
+
+def normalize_add_tools(names: Sequence[str]) -> str:
+    """Validate ``?add_tools=`` tool names and join them as the server reads them.
+
+    memory-cloud (v0.129.0+, memory-cloud#2354) adds the names to the profile
+    the URL lists. It trims them, compares them case-sensitively, ignores an
+    unknown one, and reads at most 100. An item may itself be comma-separated
+    (``"explore,list_edges"``, as the CLI flags take them); blank names are
+    dropped and duplicates removed, keeping the order. A name starting with
+    ``-`` is refused: no tool has one, and ``kagura-mcp --add-tools -x`` in a
+    stored entry would stop the proxy from starting.
+
+    Args:
+        names: Tool names, e.g. ``["explore"]``.
+
+    Returns:
+        The names joined with ``,``; ``""`` when none is left.
+
+    Raises:
+        TypeError: ``names`` is a ``str`` (it would be read one character at
+            a time), or an item is not a ``str``.
+        ValueError: More than 100 names, which the server would cut off, or a
+            name starting with ``-``.
+    """
+    if isinstance(names, str):
+        raise TypeError("add_tools must be a list of tool names, not a str")
+    found: list[str] = []
+    for item in names:
+        if not isinstance(item, str):
+            raise TypeError(f"add_tools items must be str, got {type(item).__name__}")
+        found.extend(name for part in item.split(",") if (name := part.strip()))
+    unique = list(dict.fromkeys(found))
+    if dashed := next((name for name in unique if name.startswith("-")), None):
+        raise ValueError(f"add_tools names cannot start with '-': {dashed!r}")
+    if len(unique) > MAX_ADD_TOOLS:
+        raise ValueError(f"add_tools accepts at most {MAX_ADD_TOOLS} tool names, got {len(unique)}")
+    return ",".join(unique)
 
 
 def extract_detail(response: httpx.Response) -> str:
@@ -778,3 +847,21 @@ def validate_https_url(url: str, *, label: str = "URL") -> None:
             f"{label} must use HTTPS for security (got: {candidate}). "
             "HTTP is only allowed for localhost development."
         )
+
+
+def mcp_url_query_values(mcp_url: str) -> dict[str, str]:
+    """The first value of each parameter in ``mcp_url``'s query, as memory-cloud reads it.
+
+    The server reads only the first value of a repeated parameter. A blank
+    value is kept: ``?profile=`` is present (and refused), not absent.
+
+    Args:
+        mcp_url: The MCP endpoint URL.
+
+    Returns:
+        Decoded parameter name → its first decoded value.
+    """
+    values: dict[str, str] = {}
+    for key, value in parse_qsl(urlsplit(mcp_url).query, keep_blank_values=True):
+        values.setdefault(key, value)
+    return values

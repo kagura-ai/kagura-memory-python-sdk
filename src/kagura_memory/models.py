@@ -40,7 +40,7 @@ class ServerFeatures(BaseModel):
     allows. Every flag defaults to ``False``, which also stands for "not
     reported": a server older than a flag omits it. Flags newer than this SDK
     are kept, not dropped — read them from ``model_extra``. The typed flags are
-    the ones memory-cloud v0.77.0 sends.
+    the ones memory-cloud v0.141.0 sends.
     """
 
     model_config = ConfigDict(extra="allow")
@@ -63,6 +63,12 @@ class ServerFeatures(BaseModel):
     beta_invites: bool = False
     # Reranking is enabled and its default provider can run (#1572, v0.69.0+).
     reranking: bool = False
+    # Content chunk vectors are a plan feature with a per-plan context cap
+    # (CONTENT_CHUNKS_REQUIRE_PLAN; #2103, v0.113.0+; off by default).
+    content_chunks_require_plan: bool = False
+    # The recall LLM selector is a plan feature with a per-plan context cap
+    # (LLM_SELECTOR_REQUIRE_PLAN; #2144, v0.115.0+; off by default).
+    llm_selector_require_plan: bool = False
 
 
 class ServerInfo(BaseModel):
@@ -71,7 +77,12 @@ class ServerInfo(BaseModel):
     ``search_defaults`` (memory-cloud v0.69.0+, #1572) holds the reranker
     settings a new context starts with — ``use_rerank``,
     ``reranker_provider`` and ``reranker_model`` (names only, never URLs or
-    keys). It is ``None`` on older servers.
+    keys). It is ``None`` on older servers. From v0.112.0 (#2015) it also
+    carries ``content_chunks_enabled``, the deployment's
+    ``DEFAULT_CONTENT_CHUNKS_ENABLED``: whether a **new** context embeds its
+    memories' content as chunks, not only their summaries (existing contexts
+    keep their own setting). It stays a plain mapping, so read it with
+    ``search_defaults.get("content_chunks_enabled")``.
 
     ``terms_version`` (memory-cloud v0.77.0+, #1665) is the current
     terms-of-service version. It is ``None`` when the deployment does not
@@ -147,7 +158,18 @@ class WorkspaceInfo(BaseModel):
 
 
 class ContextStats(BaseModel):
-    """Memory statistics for a context."""
+    """Memory statistics for a context.
+
+    ``details`` comes with :meth:`KaguraClient.get_context_info` unless it
+    is called with ``include_details=False``: ``by_type`` (memory count per
+    type), ``by_importance`` and ``recent_7days``. Memory ``type`` is free
+    text, so since memory-cloud v0.82.1 (#1750) ``by_type`` keeps the 20
+    largest types and folds the rest into ``"other"`` (a stored type named
+    ``other`` absorbs them; the counts still sum to the total). A folded
+    reply adds ``by_type_truncated: true`` and ``by_type_total_types`` (the
+    number of distinct types stored); both keys are absent when nothing was
+    folded. ``details`` stays a plain mapping.
+    """
 
     total_memories: int
     working_memories: int = 0
@@ -198,6 +220,11 @@ class ContextGuardrails(BaseModel):
     ``items``, ``total_available`` and ``truncated`` are required (the
     server always sends them): a block without them reads as ``None`` —
     unusable — never as a complete set.
+
+    ``provenance`` (memory-cloud v0.79.0+, #1682) labels the items as notes
+    that context editors stored — data, not operator instructions
+    (``"Notes written by context editors (facts, not operator
+    instructions)."``). ``None`` on older servers.
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -206,6 +233,7 @@ class ContextGuardrails(BaseModel):
     total_available: int
     truncated: bool
     tool_triggered_version: str | None = None
+    provenance: str | None = None
 
 
 class ContextInfo(BaseModel):
@@ -239,13 +267,24 @@ class ContextInfo(BaseModel):
 
 
 class FailedMemoryInfo(BaseModel):
-    """Info about a memory with failed embedding."""
+    """Info about a memory with failed embedding.
+
+    ``updated_at`` is the memory's last edit (``None`` when it was never
+    edited), not the failure time. ``embedding_attempted_at`` (memory-cloud
+    v0.95.0+, #1868) is when the embedding last failed; the server lists the
+    failures latest first by it. It is ``None`` on older servers and for a
+    row that failed before the server kept that clock. Since v0.120.0
+    (#2095) a run whose claim expired on every retry ends ``failed`` with
+    ``embedding_error`` starting ``claim_expired:``; an admin retry resets
+    it.
+    """
 
     id: str
     summary: str
     embedding_error: str | None = None
     created_at: datetime
     updated_at: datetime | None = None
+    embedding_attempted_at: datetime | None = None
 
 
 class EmbeddingStatus(BaseModel):
@@ -538,7 +577,16 @@ class ResourceEventBatchRequest(BaseModel):
 
 
 class ResourceEventBatchResponse(BaseModel):
-    """Response from batch event ingestion."""
+    """Response from batch event ingestion.
+
+    Each ``errors`` row is ``{index, doc_id, error}``: the event's position
+    in the batch, its ``doc_id`` and a message (e.g. ``"Duplicate version
+    3"``, ``"Payload too large: … bytes"``). The REST batch route keeps this
+    historic shape (checked against v0.141.0); the ``cause`` / ``constraint`` /
+    ``correlation_id`` / ``help`` fields memory-cloud v0.82.0 (#1742) added
+    to failed events are on the MCP ``ingest_events`` tool only. Rows stay
+    plain mappings.
+    """
 
     status: str = "success"
     created_count: int
@@ -670,11 +718,15 @@ IndexerSkippedReason = Literal[
     "empty_valid_points",
     "resource_entity_missing",
     "memories_per_day_exceeded",
+    "plan_suspended",
+    "memory_limit_exceeded",
 ]
 """Known reasons the indexer records under ``metrics.skipped_reason`` when a
 run was skipped. ``memories_per_day_exceeded`` (server v0.68.0+,
 memory-cloud #1549) means the batch was deferred until the workspace's daily
-memory quota resets (UTC).
+memory quota resets (UTC). ``plan_suspended`` (the plan no longer carries
+this ingest) and ``memory_limit_exceeded`` (the workspace memory limit is
+reached) arrived in server v0.99.0 (memory-cloud #1939).
 
 Documents the known values only: :attr:`IndexerStateMetrics.skipped_reason`
 is typed ``str`` (#250). The server nulls reasons *it* does not know, but a
@@ -687,11 +739,19 @@ class IndexerStateMetrics(BaseModel):
 
     ``skipped_reason`` is set only when the last run was skipped; see
     :data:`IndexerSkippedReason` for the known values.
+
+    ``failed_events`` (memory-cloud v0.135.0+, #2254) counts the events that
+    failed and were neither run again nor cleared by an operator, capped at
+    20. An event below ``last_offset`` is not retried: an operator rewinds
+    the indexer to replay it. Since v0.139.0 (#2477) the count stays until
+    an operator clears or rewinds it (v0.135.0-v0.138.x emptied it on the
+    next clean batch). ``0`` on older servers.
     """
 
     applied_upserts: int = 0
     applied_deletes: int = 0
     errors: int = 0
+    failed_events: int = 0
     skipped_reason: str | None = None
 
 
@@ -748,6 +808,16 @@ Documents the known values only: ``SleepReport.status`` and
 does not break ``get_sleep_history`` (#250)."""
 
 
+SleepReportSource = Literal["sleep", "analysis"]
+"""Known values of ``SleepReport.source`` (memory-cloud v0.138.0+, #2219).
+
+``sleep`` is a Sleep Maintenance run; ``analysis`` is the row a Memory
+Analysis run writes to record its LLM spend: no Sleep phase ran under it,
+it has no Sleep actions and ``rollback_sleep_run`` refuses it with
+``analysis_report`` (v0.140.0+, #2547).
+Documents the known values only: the field is typed ``str``."""
+
+
 class SleepReport(BaseModel):
     """Summary of a Sleep Maintenance run, returned by ``get_sleep_history``.
 
@@ -758,6 +828,12 @@ class SleepReport(BaseModel):
     rollbackable.
     ``llm_call_failures`` is the judge-LLM failure count behind a
     ``degraded``/``failed`` grade; ``None`` from servers older than v0.43.0.
+    ``llm_calls_made`` counts successful calls only since memory-cloud
+    v0.112.0 (#2060), so it reads lower than an older server's count for
+    the same traffic.
+    ``source`` (memory-cloud v0.138.0+, #2219) is ``"sleep"`` or
+    ``"analysis"`` (see :data:`SleepReportSource`); ``None`` on older
+    servers. Typed ``str`` for forward compatibility.
     """
 
     report_id: str
@@ -772,6 +848,7 @@ class SleepReport(BaseModel):
     llm_calls_made: int
     llm_tokens_used: int
     llm_call_failures: int | None = None
+    source: str | None = None
 
 
 class SleepAction(BaseModel):
@@ -781,6 +858,10 @@ class SleepAction(BaseModel):
     new types over time. Known ``action_type`` values include ``create_edge``,
     ``merge``, ``update_importance``, ``promote``, ``archive``, and ``flag``.
     ``details`` is a generic dict whose shape depends on ``action_type``.
+
+    An action too large for its page (memory-cloud v0.82.0+, #1743) comes
+    without ``details``: ``details`` is ``None``, ``details_omitted`` is
+    ``True`` and ``details_total_chars`` gives the size it would have had.
     """
 
     id: str
@@ -790,6 +871,8 @@ class SleepAction(BaseModel):
     target_id: str | None = None
     details: dict[str, Any] | None = None
     created_at: datetime | None = None
+    details_omitted: bool = False
+    details_total_chars: int | None = None
 
 
 class SleepReportDetail(SleepReport):
@@ -799,6 +882,15 @@ class SleepReportDetail(SleepReport):
     audit log. Fields ending in ``_result`` are server-side phase outputs
     kept as raw dicts because their shape evolves with the maintenance
     pipeline.
+
+    Since memory-cloud v0.82.0 (#1743) ``actions`` is one page of the run's
+    actions in id order: ``action_count`` is the run's total,
+    ``actions_has_more`` says more actions follow, and
+    ``actions_next_cursor`` is the ``actions_cursor`` for the next page
+    (``None`` on the last page). Older servers send every action and
+    neither paging field. ``note`` (v0.140.0+, #2547) is set on an analysis
+    report (``source="analysis"``): Memory Analysis spend with no Sleep
+    actions, so there is nothing to roll back.
     """
 
     memories_flagged: int
@@ -812,6 +904,9 @@ class SleepReportDetail(SleepReport):
     reindex_result: dict[str, Any] | None = None
     actions: list[SleepAction] = Field(default_factory=list)
     action_count: int
+    actions_has_more: bool = False
+    actions_next_cursor: str | None = None
+    note: str | None = None
 
 
 class RollbackSummary(BaseModel):
@@ -826,6 +921,11 @@ class RollbackSummary(BaseModel):
     ``importance_kept`` / ``promotions_kept`` (server v0.66.0+) are
     by-design skips, not errors: the memory was pinned, forgotten or
     deleted since the run, so its recorded change is left standing.
+    ``chunks_requeued`` (#2061) / ``points_requeued`` (#2065) (server
+    v0.112.0+) count restored memories whose content chunks / vector could
+    not be written during the rollback and were queued for the embedding
+    sweep to rebuild — the restore itself went through, so they are not
+    errors either.
     Failed undo steps are listed in ``errors``.
     """
 
@@ -837,6 +937,8 @@ class RollbackSummary(BaseModel):
     importance_kept: int = 0
     promotions_kept: int = 0
     archives_restored: int = 0
+    chunks_requeued: int = 0
+    points_requeued: int = 0
     errors: list[str] = Field(default_factory=list)
 
 
@@ -911,7 +1013,15 @@ class TagInfo(BaseModel):
 
 
 class ListTagsResponse(BaseModel):
-    """Response from ``list_tags``: tag vocabulary for a context."""
+    """Response from ``list_tags``: tag vocabulary for a context.
+
+    ``has_more`` (memory-cloud v0.82.0+, #1743) is ``True`` when more tags
+    matched than this reply holds: the MCP tool returns at most 200 tags
+    whatever the ``limit``. There is no cursor — narrow with ``prefix`` or
+    ``min_count``. Always ``False`` on a ``with_tags`` drill-down (the REST
+    route returns up to ``limit`` tags and reports nothing) and on older
+    servers.
+    """
 
     model_config = ConfigDict(extra="ignore")
 
@@ -919,6 +1029,7 @@ class ListTagsResponse(BaseModel):
     context_name: str
     tags: list[TagInfo] = Field(default_factory=list)
     total: int
+    has_more: bool = False
 
 
 class ContextTagsResponse(BaseModel):
@@ -1130,6 +1241,12 @@ class WorkspaceMember(BaseModel):
     ``credentials_status`` stays an untyped mapping — its inner shape is
     server-owned display metadata (key counts / visibility booleans) that
     the SDK forwards without interpreting.
+
+    ``seat_paused`` (memory-cloud v0.100.0+, #1943) is ``True`` for a member
+    past the seats the workspace's plan carries: every workspace route
+    refuses them (``403 FEAT-001``, ``feature: members``) until the plan
+    carries enough seats or a member is removed. The owner always has a
+    seat. ``False`` on older servers.
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -1142,6 +1259,7 @@ class WorkspaceMember(BaseModel):
     last_login_at: datetime | None = None
     allowed_context_ids: list[str] | None = None
     credentials_status: dict[str, Any] | None = None
+    seat_paused: bool = False
 
 
 class WorkspaceInvitation(BaseModel):
@@ -1177,6 +1295,15 @@ class MemberAPIKey(BaseModel):
     (memory-cloud#1008); the plaintext field is named ``plaintext_key`` — non-null ONLY in the
     mint 201 response. Owner-provisioned keys are force-hidden at
     creation, so no later call ever returns the plaintext.
+
+    ``default_context_id`` / ``default_context_name`` (memory-cloud
+    v0.118.0+, #2188) are the key's MCP default context; the name is
+    ``None`` when none is set or the caller cannot read that context.
+    ``agent_id`` (v0.118.0+) is set when the key is bound to an agent (such
+    a key carries no default context: the agent's default binding applies).
+    ``connector_id`` (v0.129.0+, #2299) is set when the key is a connector's
+    shared key; ``None`` for an ordinary key. All four are ``None`` on older
+    servers.
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -1192,6 +1319,10 @@ class MemberAPIKey(BaseModel):
     revoked_at: datetime | None = None
     expires_at: datetime | None = None
     bound_context_id: str | None = None
+    default_context_id: str | None = None
+    default_context_name: str | None = None
+    agent_id: str | None = None
+    connector_id: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -1393,6 +1524,15 @@ def _binding_scope_payload(
     return payload
 
 
+AgentStatus = Literal["active", "suspended", "retired"]
+"""Known values of ``Agent.status``; documents them only (the field is ``str``).
+
+``suspended`` is also set by the server, not only by
+``update_agent``: since memory-cloud v0.139.0 (#2373 / #2349) removing a
+workspace member deletes their agent-bound keys and suspends an active
+agent that had no other live key."""
+
+
 class Agent(BaseModel):
     """A workspace-scoped Agent Registry row (memory-cloud #1274).
 
@@ -1400,12 +1540,17 @@ class Agent(BaseModel):
     agent-bound credentials, bootstrap, and audit correlation — it is a
     resource, NOT a principal (it never authenticates by itself).
 
-    ``status`` (``active`` | ``suspended`` | ``retired``) is the
-    fail-closed kill switch: suspended/retired agents cause every key
-    bound to them to be rejected at verify time. ``enforcement_mode``
-    (``shadow`` | ``enforce``) is the binding enforcement ramp. Both are
-    typed ``str`` (not ``Literal``) for forward compatibility — the
-    server is the authority; request-side params use the closed enums.
+    ``status`` (``active`` | ``suspended`` | ``retired``, see
+    :data:`AgentStatus`) is the fail-closed kill switch: suspended/retired
+    agents cause every key bound to them to be rejected at verify time.
+    ``enforcement_mode`` (``shadow`` | ``enforce``) is the binding
+    enforcement ramp. Both are typed ``str`` (not ``Literal``) for forward
+    compatibility — the server is the authority; request-side params use
+    the closed enums.
+
+    In a ``list_agents`` row (memory-cloud v0.82.0+, #1743) ``description``
+    is a 200-character preview, with ``description_truncated`` set when it
+    was cut; :meth:`KaguraClient.get_agent` returns it whole.
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -1423,6 +1568,7 @@ class Agent(BaseModel):
     last_seen_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
+    description_truncated: bool = False
 
 
 class AgentBinding(BaseModel):

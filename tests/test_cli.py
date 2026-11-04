@@ -2087,7 +2087,7 @@ def test_sleep_history(mock_client_cls, mock_config):
     result = runner.invoke(main, ["sleep", "history", "ctx-1", "--limit", "5"])
     assert result.exit_code == 0, result.output
     assert "rid-9" in result.output
-    mock_client.get_sleep_history.assert_called_once_with(context_id="ctx-1", limit=5)
+    mock_client.get_sleep_history.assert_called_once_with(context_id="ctx-1", limit=5, source=None)
 
 
 @patch("kagura_memory.cli.load_config")
@@ -2116,7 +2116,9 @@ def test_sleep_report(mock_client_cls, mock_config):
     assert result.exit_code == 0, result.output
     assert "rid-9" in result.output
     assert "memories_flagged" in result.output
-    mock_client.get_sleep_report.assert_called_once_with(context_id="ctx-1", report_id="rid-9")
+    mock_client.get_sleep_report.assert_called_once_with(
+        context_id="ctx-1", report_id="rid-9", actions_cursor=None, actions_limit=None
+    )
 
 
 @patch("kagura_memory.cli.load_config")
@@ -2247,6 +2249,41 @@ def test_sleep_report_shows_degraded_run(degraded_mcp):
     assert '"merge_retention_result"' in result.output
     # CONTEXT_ID is not sent: memory-cloud v0.82.0+ refuses it (#296).
     degraded_mcp.assert_called_once_with("get_sleep_report", {"report_id": "rid-d"})
+
+
+def test_sleep_history_source_option_is_sent(degraded_mcp):
+    """``--source`` reaches get_sleep_history (memory-cloud v0.138.0+, #2219)."""
+    result = CliRunner().invoke(main, ["sleep", "history", "ctx-1", "--source", "all"])
+    assert result.exit_code == 0, result.output
+    degraded_mcp.assert_called_once_with(
+        "get_sleep_history", {"context_id": "ctx-1", "limit": 10, "source": "all"}
+    )
+
+
+def test_sleep_history_rejects_an_unknown_source(degraded_mcp):
+    result = CliRunner().invoke(main, ["sleep", "history", "ctx-1", "--source", "everything"])
+    assert result.exit_code == 2
+    degraded_mcp.assert_not_called()
+
+
+def test_sleep_report_paging_options_are_sent(degraded_mcp):
+    """``--actions-cursor`` / ``--actions-limit`` page the audit log (v0.82.0+, #1743)."""
+    result = CliRunner().invoke(
+        main,
+        ["sleep", "report", "ctx-1", "rid-d", "--actions-cursor", "41", "--actions-limit", "20"],
+    )
+    assert result.exit_code == 0, result.output
+    degraded_mcp.assert_called_once_with(
+        "get_sleep_report", {"report_id": "rid-d", "actions_cursor": "41", "actions_limit": 20}
+    )
+
+
+def test_sleep_report_rejects_an_actions_limit_over_200(degraded_mcp):
+    result = CliRunner().invoke(
+        main, ["sleep", "report", "ctx-1", "rid-d", "--actions-limit", "201"]
+    )
+    assert result.exit_code == 2
+    degraded_mcp.assert_not_called()
 
 
 def test_sleep_rollback_prefetches_degraded_run_for_confirm(degraded_mcp):

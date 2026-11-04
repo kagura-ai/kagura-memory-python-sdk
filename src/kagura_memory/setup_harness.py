@@ -69,6 +69,7 @@ import sys
 import textwrap
 import tomllib
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
@@ -82,6 +83,7 @@ from ._guardrail_export import has_guardrail_block, write_guardrail_block
 from ._http import (
     base_url_from_mcp,
     mcp_url_guardrails_off,
+    mcp_url_query_values,
     mcp_url_with_query,
     mcp_url_without_query_param,
     normalize_url,
@@ -96,7 +98,7 @@ from .config import load_config
 from .exceptions import KaguraAuthError, KaguraNotFoundError, _exc_message
 from .memory_client import MemoryClient
 from .models import GuardrailDigest
-from .setup_claude import _load_profile, _stdio_entry, _verify_profile
+from .setup_claude import _load_profile, _stdio_entry, _verify_profile, _warn_tools_allowlist
 
 HarnessName = Literal["codex", "hermes", "openclaw"]
 
@@ -1735,13 +1737,18 @@ def _echo_block(block: str) -> None:
 
 
 def _preview_command(
-    context_id: str, entry: _Entry, profile: str | None, cf: CredentialsFile | None
+    context_id: str,
+    entry: _Entry,
+    profile: str | None,
+    cf: CredentialsFile | None,
+    view: Sequence[str] = (),
 ) -> str | None:
     """``kagura guardrails digest <ctx> --target instructions`` on the entry's own credential.
 
     An ``--oauth`` entry's token stays with the harness, so its preview runs
     on the profile (on the entry's server, as setup checked) or on the CLI's
-    usual chain when that is on the entry's server too.
+    usual chain when that is on the entry's server too. ``view`` is the
+    entry's tool view as digest flags (:func:`_digest_view_args`).
 
     Returns:
         The command; None for an ``--oauth`` entry without ``--profile`` when
@@ -1749,7 +1756,7 @@ def _preview_command(
         server with ``KAGURA_MCP_URL`` would send ``KAGURA_API_KEY``, a key
         for another server, to it.
     """
-    args = ["guardrails", "digest", context_id, "--target", "instructions"]
+    args = ["guardrails", "digest", context_id, "--target", "instructions", *view]
     if entry.url is None:
         return _kagura_command(args, profile, cf)
     if entry.oauth:
@@ -1777,10 +1784,16 @@ def run_setup_harness(
     force: bool,
     non_interactive: bool,
     dry_run: bool,
+    tool_profile: str | None = None,
+    add_tools: Sequence[str] | None = None,
 ) -> None:
     """Set up the ``name`` MCP entry of ``harness``, and the AGENTS.md export if asked.
 
-    ``guardrails`` must already be normalized (``off`` or a canonical UUID).
+    ``guardrails`` must already be normalized (``off`` or a canonical UUID),
+    ``add_tools`` by ``normalize_add_tools``. ``tool_profile`` / ``add_tools``
+    become ``kagura-mcp --tool-profile/--add-tools`` on the stdio entry and
+    ``?profile=`` / ``?add_tools=`` on a URL entry, where a value already in
+    ``mcp_url`` is kept when they are None (#300).
     ``agents_md`` is None without ``--agents-md`` and ``""`` for the
     harness's default file. Setup prompts only with a terminal on stdin and
     without ``-y``; otherwise it behaves as ``-y`` does. With ``oauth`` (and
@@ -1832,6 +1845,8 @@ def run_setup_harness(
             )
         else:
             _check_oauth_server(h, mcp_url)
+    if mcp_url is not None:  # a stdio entry's kagura-mcp warns at run time instead
+        _warn_tools_allowlist(mcp_url, tool_profile, add_tools)
 
     # 1. What the harness has now (read-only)
     existing = h.detect(name, exe)
@@ -1917,16 +1932,20 @@ def run_setup_harness(
     # 5. The entry
     if proxy is not None:
         assert profile is not None
-        entry = _Entry(
-            command=proxy, args=tuple(_stdio_entry(profile, guardrails=guardrails)["args"])
+        stdio = _stdio_entry(
+            profile, guardrails=guardrails, tool_profile=tool_profile, add_tools=add_tools
         )
+        entry = _Entry(command=proxy, args=tuple(stdio["args"]))
     else:
         assert mcp_url is not None
-        url = mcp_url_with_query(mcp_url, guardrails=guardrails)
+        url = mcp_url_with_query(
+            mcp_url, guardrails=guardrails, tool_profile=tool_profile, add_tools=add_tools
+        )
         if guardrails is not None and guardrails.startswith("<"):
             # A dry run's placeholder for a context name (a UUID or "off" never
             # starts with "<"), shown as it is rather than URL-encoded.
-            url = url.replace(f"guardrails={quote_plus(guardrails)}", f"guardrails={guardrails}")
+            encoded = quote_plus(guardrails, safe=",")
+            url = url.replace(f"guardrails={encoded}", f"guardrails={guardrails}")
         if oauth:
             entry = _Entry(url=url, oauth=True)
         else:
@@ -1983,7 +2002,8 @@ def run_setup_harness(
         click.echo(f"  {h.key_note(entry, ran=reason is None)}")
     if h.reads_instructions and guardrails not in (None, "off"):
         assert guardrails is not None
-        command = _preview_command(guardrails, entry, profile, cf)
+        view = _digest_view_args(entry, tool_profile, add_tools)
+        command = _preview_command(guardrails, entry, profile, cf, view)
         if command is None:
             # An --oauth entry without --profile, and the CLI's usual chain is
             # not on its server: a stored profile there, else a login there.
@@ -2003,7 +2023,7 @@ def run_setup_harness(
                     f"  `kagura auth login --server {deployment} --profile NAME`,\n"
                     "  then preview it (Codex gets what the account it signed in with can read):"
                 )
-            digest = ["guardrails", "digest", guardrails, "--target", "instructions"]
+            digest = ["guardrails", "digest", guardrails, "--target", "instructions", *view]
             profile_name = on_server[0] if on_server else "NAME"
             command = _on_profile(profile_name, shlex.join(["kagura", *digest]))
         elif entry.oauth:
@@ -2078,3 +2098,28 @@ def _echo_dry_run_export(
         else:
             when = "not offered with -y" if non_interactive else "not offered without a terminal"
         click.echo(f"\n  AGENTS.md: {_path_label(default_path)} ({when}; --agents-md writes it)")
+
+
+def _digest_view_args(
+    entry: _Entry, tool_profile: str | None, add_tools: Sequence[str] | None
+) -> list[str]:
+    """The entry's tool view as ``kagura guardrails digest --target instructions`` flags.
+
+    The preview's truncation note names a tool the entry's ``tools/list``
+    shows, so the preview carries the entry's ``profile`` / ``tools`` /
+    ``add_tools`` (#300): from the query of a URL entry (the first value, as
+    the server reads it), else the stdio entry's ``kagura-mcp`` flags.
+    """
+    if entry.url is not None:
+        query = mcp_url_query_values(entry.url)
+        added = query.get("add_tools", "")
+        # A list naming no tool adds nothing, and `--add-tools` would refuse it.
+        names = added if added.replace(",", "").strip() else None
+        view = [query.get("profile"), query.get("tools"), names]
+    else:
+        view = [tool_profile, None, ",".join(add_tools) if add_tools else None]
+    args: list[str] = []
+    for flag, value in zip(("--profile", "--tools", "--add-tools"), view, strict=True):
+        if value:
+            args += [flag, value]
+    return args

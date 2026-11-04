@@ -3714,6 +3714,14 @@ _V076_SEARCH_DEFAULTS = {
     "reranker_provider": "self_hosted",
     "reranker_model": "bge-reranker-v2-m3",
 }
+# memory-cloud v0.141.0 adds two flags (#2103 v0.113.0, #2144 v0.115.0) and
+# ``search_defaults.content_chunks_enabled`` (#2015, v0.112.0) — #299.
+_V0141_FEATURES = {
+    **_V076_FEATURES,
+    "content_chunks_require_plan": True,
+    "llm_selector_require_plan": False,
+}
+_V0141_SEARCH_DEFAULTS = {**_V076_SEARCH_DEFAULTS, "content_chunks_enabled": True}
 
 
 def _server_info_response(payload: dict) -> MagicMock:
@@ -3724,26 +3732,28 @@ def _server_info_response(payload: dict) -> MagicMock:
 
 
 @pytest.mark.asyncio
-async def test_get_server_info_exposes_v076_features_and_search_defaults():
-    """Every v0.76.0 flag and ``search_defaults`` survive parsing (#257)."""
+async def test_get_server_info_exposes_v0141_features_and_search_defaults():
+    """Every v0.141.0 flag and ``search_defaults`` survive parsing (#257, #299)."""
     client = _make_initialized_client()
     payload = {
         "name": "Kagura Memory Cloud",
-        "version": "0.76.0",
+        "version": "0.141.0",
         "description": "Remote MCP Server + Web Management",
         "environment": "production",
-        "search_defaults": _V076_SEARCH_DEFAULTS,
-        "features": _V076_FEATURES,
+        "search_defaults": _V0141_SEARCH_DEFAULTS,
+        "features": _V0141_FEATURES,
     }
 
     with patch.object(client._client, "get", new_callable=AsyncMock) as mock_get:
         mock_get.return_value = _server_info_response(payload)
         result = await client.get_server_info()
 
-    assert set(ServerFeatures.model_fields) == set(_V076_FEATURES)
+    assert set(ServerFeatures.model_fields) == set(_V0141_FEATURES)
     assert result.features.model_extra == {}
-    assert result.features.model_dump() == _V076_FEATURES
-    assert result.search_defaults == _V076_SEARCH_DEFAULTS
+    assert result.features.model_dump() == _V0141_FEATURES
+    assert result.features.content_chunks_require_plan is True
+    assert result.search_defaults == _V0141_SEARCH_DEFAULTS
+    assert result.search_defaults["content_chunks_enabled"] is True
     await client.close()
 
 

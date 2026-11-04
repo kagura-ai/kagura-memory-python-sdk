@@ -81,7 +81,8 @@ def test_sleep_run_status_alias_tracks_server_check_constraint():
 
 def test_indexer_skipped_reason_alias_tracks_server_enum():
     # memory-cloud backend/src/api/routes/resource_indexer.py
-    # ``IndexerSkippedReason``; ``memories_per_day_exceeded`` since v0.68.0 (#1549).
+    # ``IndexerSkippedReason``; ``memories_per_day_exceeded`` since v0.68.0 (#1549),
+    # ``plan_suspended`` / ``memory_limit_exceeded`` since v0.99.0 (#1939).
     assert set(get_args(IndexerSkippedReason)) == {
         "no_pending_events",
         "schema_not_found",
@@ -89,6 +90,8 @@ def test_indexer_skipped_reason_alias_tracks_server_enum():
         "empty_valid_points",
         "resource_entity_missing",
         "memories_per_day_exceeded",
+        "plan_suspended",
+        "memory_limit_exceeded",
     }
 
 
