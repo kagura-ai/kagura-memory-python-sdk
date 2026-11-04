@@ -75,6 +75,12 @@ class FilesClient(KaguraRestClient):
             binding (R2 returned 400 BadDigest)
         KaguraConnectionError: Connection or other HTTP error
         KaguraQuotaError: Quota exceeded (429)
+        KaguraCapacityLockedError: An upload into a Free workspace over its
+            capacity (403 ``CAPACITY-001``, server v0.99.0+); listing and
+            deleting keep working
+        KaguraFeatureNotAvailableError: An upload into a context without a
+            writable slot (``FEAT-001``, ``feature == "contexts"``, server
+            v0.100.0+)
     """
 
     def __init__(

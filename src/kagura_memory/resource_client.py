@@ -462,6 +462,14 @@ class ResourceClient(KaguraRestClient):
 
         Returns:
             Ingestion result with event_id.
+
+        Raises:
+            KaguraQuotaError: The resource-token events-per-hour ceiling or
+                another quota was hit.
+            KaguraFeatureNotAvailableError: The workspace's plan allowance
+                for resource ingest is 0, e.g. back on Free (``FEAT-001``,
+                memory-cloud v0.99.0+, #1939); nothing is deleted and a plan
+                that includes it resumes ingest.
         """
         response = await self._request(
             "POST",
@@ -491,6 +499,12 @@ class ResourceClient(KaguraRestClient):
 
         Returns:
             Batch ingestion result with created/failed counts.
+
+        Raises:
+            KaguraQuotaError: As :meth:`ingest_event`.
+            KaguraFeatureNotAvailableError: As :meth:`ingest_event` — the
+                plan allowance for resource ingest is 0 (memory-cloud
+                v0.99.0+).
         """
         log = normalize_logger(logger)
         log.action(
