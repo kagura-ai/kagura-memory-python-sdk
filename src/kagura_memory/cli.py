@@ -595,6 +595,22 @@ def remember(
 _RECALL_SHAPE_FLOORS = {"verbosity": "0.108.0", "full": "0.114.0", "max_chars": "0.82.0"}
 
 
+def _unknown_arguments(err: BaseException) -> list[str] | None:
+    """The argument names an ``invalid_argument`` refusal lists, else ``None`` (#1742).
+
+    From memory-cloud 0.82.0 a tool refuses an argument it does not declare
+    and names it in the envelope's ``unknown_arguments``, which the client
+    keeps in ``KaguraError.details``. Read from there, never from the
+    message. ``None`` when ``err`` carries no such list (another error, an
+    older server, or a ``details`` that is not an object).
+    """
+    details = getattr(err, "details", None)
+    listed = details.get("unknown_arguments") if isinstance(details, dict) else None
+    if not isinstance(listed, list):
+        return None
+    return [name for name in listed if isinstance(name, str)]
+
+
 def _refused_shape_args(err: KaguraError, shape: dict[str, Any]) -> list[str]:
     """The recall shape arguments to retry without after ``err``; ``[]``: no retry (#298).
 
@@ -608,9 +624,8 @@ def _refused_shape_args(err: KaguraError, shape: dict[str, Any]) -> list[str]:
     if getattr(err, "code", None) != "invalid_argument":
         return []
     sent = [name for name, value in shape.items() if value is not None]
-    details = getattr(err, "details", None)
-    listed = details.get("unknown_arguments") if isinstance(details, dict) else None
-    if not isinstance(listed, list):
+    listed = _unknown_arguments(err)
+    if listed is None:
         return sent
     return [name for name in sent if name in listed]
 
@@ -1053,8 +1068,8 @@ def _details_patch_refused(err: KaguraError) -> bool:
     """
     if getattr(err, "code", None) != "invalid_argument":
         return False
-    listed = getattr(err, "details", {}).get("unknown_arguments")
-    return isinstance(listed, list) and set(listed) == {"details_patch"}
+    listed = _unknown_arguments(err)
+    return listed is not None and set(listed) == {"details_patch"}
 
 
 @main.command(name="update-memory")

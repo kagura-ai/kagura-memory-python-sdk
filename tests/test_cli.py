@@ -9,7 +9,7 @@ import pytest
 from click.testing import CliRunner
 
 from kagura_memory.auth.credentials import reset_state_cache
-from kagura_memory.cli import _cli_error_message, _parse_tags, main
+from kagura_memory.cli import _cli_error_message, _parse_tags, _unknown_arguments, main
 from kagura_memory.exceptions import (
     KaguraConnectionError,
     KaguraError,
@@ -1147,6 +1147,33 @@ def test_update_memory_rejects_non_object_details_patch(mock_client_cls, mock_co
     assert result.exit_code != 0
     assert "--details-patch must be a JSON object" in result.output
     mock_client.update_memory.assert_not_called()
+
+
+class _OddDetailsError(Exception):
+    """An error whose ``details`` is not an object (a subclass outside the SDK)."""
+
+    details = ["unknown_arguments"]
+
+
+@pytest.mark.parametrize(
+    ("details", "expected"),
+    [
+        ({"unknown_arguments": ["details_patch", "add_tags"]}, ["details_patch", "add_tags"]),
+        ({"unknown_arguments": ["details_patch", 7, None]}, ["details_patch"]),
+        ({"unknown_arguments": "details_patch"}, None),
+        ({}, None),
+    ],
+    ids=["listed", "non-str-dropped", "not-a-list", "absent"],
+)
+def test_unknown_arguments_reads_the_envelope_list(details, expected):
+    err = KaguraError("refused")
+    err.code, err.details = "invalid_argument", details
+    assert _unknown_arguments(err) == expected
+
+
+def test_unknown_arguments_tolerates_details_that_are_not_an_object():
+    assert _unknown_arguments(_OddDetailsError()) is None
+    assert _unknown_arguments(ValueError("no details at all")) is None
 
 
 def _patch_refused(*names: str) -> KaguraError:
