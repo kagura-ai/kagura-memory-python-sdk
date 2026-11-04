@@ -2043,8 +2043,8 @@ class KaguraClient:
             arguments["cursor"] = cursor
         if limit is not None:
             _validate_int_range("limit", limit, 1, _LIST_CONTEXTS_MAX_LIMIT)
-            # The server trims name_contains, so a blank one is no filter there.
-            filtered = bool(name_contains and name_contains.strip())
+            # As the server reads it: a blank or non-string name_contains is no filter.
+            filtered = isinstance(name_contains, str) and bool(name_contains.strip())
             if include_details and not filtered and limit > _LIST_CONTEXTS_DETAILS_MAX_LIMIT:
                 raise ValueError(
                     "include_details returns full summaries: pass name_contains or a limit "

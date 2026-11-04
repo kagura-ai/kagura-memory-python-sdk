@@ -186,6 +186,8 @@ async def test_list_contexts_include_details_pages(kwargs: dict, sent: dict):
         ({"include_details": True, "limit": 21}, "at most 20"),
         # A blank name_contains is trimmed to no filter on the server.
         ({"include_details": True, "name_contains": "   ", "limit": 21}, "at most 20"),
+        # So is a non-string one (the cap is checked before its type there).
+        ({"include_details": True, "name_contains": 123, "limit": 21}, "at most 20"),
     ],
 )
 @pytest.mark.asyncio
