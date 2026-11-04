@@ -774,12 +774,13 @@ def _tool_view(mcp_url: str, version: str | None = None) -> dict[str, Any]:
     each key wins. ``tools`` is an allowlist that replaces the profile and
     ignores ``add_tools``. With no ``profile``, ``version`` (the server's, when
     known) decides the label: ``core (default)`` from 0.93.0, else
-    :data:`_NO_PROFILE`. A blank ``profile=`` is not the default: the server
-    fails ``tools/list`` for it.
+    :data:`_NO_PROFILE`. A blank ``profile=`` is not the default, and a
+    ``tools=`` naming no tool is no allowlist: the server fails ``tools/list``
+    for both, shown as ``(empty)``.
     """
     asked = mcp_url_tool_view(mcp_url)
     if asked.tools is not None:
-        return {"tools": ",".join(asked.tools)}
+        return {"tools": ",".join(asked.tools) or "(empty)"}
     if asked.profile is not None:
         profile = asked.profile or "(empty)"
     elif meets_minimum(version, _CORE_DEFAULT_SINCE):

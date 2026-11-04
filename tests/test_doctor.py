@@ -1038,7 +1038,8 @@ def test_check_server_constructor_failure(monkeypatch):
             {"tools": "recall,remember"},
         ),
         ("?tools=recall,%20remember,recall,", None, {"tools": "recall,remember"}),
-        ("?tools=&tools=recall", None, {"tools": ""}),  # the first value wins: refused
+        ("?tools=&tools=recall", None, {"tools": "(empty)"}),  # the first value wins: refused
+        ("?tools=,%20,", None, {"tools": "(empty)"}),  # names no tool: refused too
     ],
     ids=[
         "bare",
@@ -1052,6 +1053,7 @@ def test_check_server_constructor_failure(monkeypatch):
         "tools-allowlist",
         "tools-names-read-as-the-server-does",
         "blank-tools",
+        "tools-naming-none",
     ],
 )
 def test_tool_view_reads_the_query_as_the_server_does(query, version, view):
@@ -1114,6 +1116,21 @@ def test_check_tool_listing_failure_is_a_failed_tools_check(exc):
 
     assert (check.section, check.status) == ("tools", "fail")
     assert check.message == f"tools/list on the CLI's MCP URL failed (profile Core): {exc}"
+
+
+def test_check_tool_listing_names_an_empty_tools_allowlist():
+    """A blank ?tools= is refused by the server; the message names it, not a bare label."""
+    import asyncio
+
+    exc = KaguraConnectionError("MCP error: Invalid params: the 'tools' query parameter ...")
+
+    [check] = asyncio.run(
+        _check_tool_listing(_ListingClient(exc=exc), "https://example.com/mcp?tools=")
+    )
+
+    assert check.message.startswith(
+        "tools/list on the CLI's MCP URL failed (tools allowlist (empty)): "
+    )
 
 
 @pytest.mark.parametrize(
