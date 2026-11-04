@@ -46,6 +46,7 @@ from tests.conftest import (
     agent_binding_dict,
     agent_dict,
     bootstrap_envelope_dict,
+    kagura_client_on,
     measurement_dict,
     measurement_series_dict,
     sleep_report_detail_dict,
@@ -223,12 +224,6 @@ async def test_make_jsonrpc_request_connection_error_surfaces():
 _SESSION_EXPIRED_MESSAGE = SESSION_EXPIRED_BODY["error"]["message"]
 
 
-def _client_on(handler) -> KaguraClient:
-    client = KaguraClient(api_key="test", mcp_url="https://test.com/mcp")
-    client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    return client
-
-
 def _slow(server: FakeMcpServer):
     """``server.handler`` behind a short await, so concurrent calls interleave."""
 
@@ -243,8 +238,7 @@ def _slow(server: FakeMcpServer):
 async def test_expired_session_reinitializes_and_retries_once():
     """A 404 on a session request re-opens the session and retries the call once."""
     server = FakeMcpServer()
-    client = _client_on(server.handler)
-    try:
+    async with kagura_client_on(server.handler) as client:
         assert await client._call_tool("list_contexts", {}) == {
             "status": "success",
             "session": "sess-1",
@@ -264,8 +258,6 @@ async def test_expired_session_reinitializes_and_retries_once():
         # The recovered session is kept: no further initialize on the next call.
         await client._call_tool("list_contexts", {})
         assert server.methods().count("initialize") == 2
-    finally:
-        await client.close()
 
 
 @pytest.mark.asyncio
@@ -276,8 +268,7 @@ async def test_concurrent_calls_on_an_expired_session_share_one_reinitialize():
     spans a server restart would otherwise leave N-1 orphan sessions.
     """
     server = FakeMcpServer()
-    client = _client_on(_slow(server))
-    try:
+    async with kagura_client_on(_slow(server)) as client:
         await client._call_tool("list_contexts", {})
         server.restart()
 
@@ -286,20 +277,15 @@ async def test_concurrent_calls_on_an_expired_session_share_one_reinitialize():
         assert results == [{"status": "success", "session": "sess-2"}] * 5
         assert server.methods().count("initialize") == 2  # the handshake + ONE re-open
         assert client._session_id == "sess-2"
-    finally:
-        await client.close()
 
 
 @pytest.mark.asyncio
 async def test_concurrent_first_calls_share_one_initialize():
     """Concurrent calls on a fresh client share the first handshake too."""
     server = FakeMcpServer()
-    client = _client_on(_slow(server))
-    try:
+    async with kagura_client_on(_slow(server)) as client:
         await asyncio.gather(*[client._call_tool("list_contexts", {}) for _ in range(3)])
         assert server.methods() == ["initialize"] + ["tools/call"] * 3
-    finally:
-        await client.close()
 
 
 @pytest.mark.asyncio
@@ -312,23 +298,19 @@ async def test_expired_session_second_404_raises_with_server_message():
         server.restart()  # every session dies as soon as it is opened
         return response
 
-    client = _client_on(handler)
-    try:
+    async with kagura_client_on(handler) as client:
         with pytest.raises(KaguraConnectionError, match=_SESSION_EXPIRED_MESSAGE) as exc_info:
             await client._call_tool("list_contexts", {})
         assert str(exc_info.value).startswith("HTTP 404: ")
         # initialize → call (404) → ONE re-initialize → ONE retry (404) → raise; no loop.
         assert server.methods() == ["initialize", "tools/call", "initialize", "tools/call"]
-    finally:
-        await client.close()
 
 
 @pytest.mark.asyncio
 async def test_expired_session_reinitialize_failure_raises_without_retry():
     """A failing re-initialize surfaces its own error; the call is not re-sent."""
     server = FakeMcpServer()
-    client = _client_on(server.handler)
-    try:
+    async with kagura_client_on(server.handler) as client:
         await client._call_tool("list_contexts", {})
         server.restart()
 
@@ -344,8 +326,6 @@ async def test_expired_session_reinitialize_failure_raises_without_retry():
             await client._call_tool("list_contexts", {})
         assert server.methods()[2:] == ["tools/call", "initialize"]
         assert client._session_id is None  # next call starts a fresh session
-    finally:
-        await client.close()
 
 
 @pytest.mark.asyncio
@@ -359,13 +339,10 @@ async def test_401_on_session_request_raises_auth_error_without_reinitialize():
             return httpx.Response(401, json={"error": "invalid_token"})
         return server.handler(request)
 
-    client = _client_on(handler)
-    try:
+    async with kagura_client_on(handler) as client:
         with pytest.raises(KaguraAuthError):
             await client._call_tool("list_contexts", {})
         assert server.methods() == ["initialize", "tools/call"]
-    finally:
-        await client.close()
 
 
 @pytest.mark.asyncio
@@ -403,12 +380,9 @@ async def test_mcp_4xx_surfaces_server_message(status: int, body: dict, expected
             return httpx.Response(status, json=body)
         return server.handler(request)
 
-    client = _client_on(handler)
-    try:
+    async with kagura_client_on(handler) as client:
         with pytest.raises(KaguraConnectionError, match=expected):
             await client._call_tool("list_contexts", {})
-    finally:
-        await client.close()
 
 
 # ============================================================================
@@ -484,12 +458,9 @@ async def test_get_tool_definitions_passes_every_tool_key_through():
         "_meta": {"kagura/profile": "core"},
     }
     body = {"jsonrpc": "2.0", "id": 1, "result": {"tools": [tool], "nextCursor": "c1"}}
-    client = _client_on(lambda _req: httpx.Response(200, json=body))
-    client._session_id = "session"
-    try:
+    async with kagura_client_on(lambda _req: httpx.Response(200, json=body)) as client:
+        client._session_id = "session"
         assert await client.get_tool_definitions() == [tool]
-    finally:
-        await client.close()
 
 
 @pytest.mark.asyncio
@@ -503,13 +474,10 @@ async def test_get_tool_definitions_malformed_result_is_a_response_error(result)
     from kagura_memory import KaguraResponseError
 
     body = {"jsonrpc": "2.0", "id": 1, "result": result}
-    client = _client_on(lambda _req: httpx.Response(200, json=body))
-    client._session_id = "session"
-    try:
+    async with kagura_client_on(lambda _req: httpx.Response(200, json=body)) as client:
+        client._session_id = "session"
         with pytest.raises(KaguraResponseError, match="ToolListResponse") as exc:
             await client.get_tool_definitions()
-    finally:
-        await client.close()
     assert exc.value.operation == "KaguraClient.get_tool_definitions"
 
 

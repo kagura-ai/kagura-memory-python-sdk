@@ -14,7 +14,6 @@ from kagura_memory._http import _UPGRADE_HINT, parse_response
 from kagura_memory.auth.credentials import CredentialsFile, reset_state_cache, save_credentials_file
 from kagura_memory.claude_code import McpEntry, claude_json_label
 from kagura_memory.cli import main
-from kagura_memory.client import KaguraClient
 from kagura_memory.doctor import DoctorCheck, DoctorReport, _check_tool_listing, _tool_view
 from kagura_memory.exceptions import (
     KaguraAuthError,
@@ -23,7 +22,7 @@ from kagura_memory.exceptions import (
     KaguraResponseError,
 )
 from kagura_memory.models import ServerInfo
-from tests.conftest import make_oauth_creds
+from tests.conftest import kagura_client_on, make_oauth_creds
 
 
 @pytest.fixture(autouse=True)
@@ -1143,17 +1142,14 @@ def test_check_tool_listing_malformed_result_is_a_failed_tools_check(result):
     import asyncio
 
     body = {"jsonrpc": "2.0", "id": 1, "result": result}
-    client = KaguraClient(api_key="kagura_test", mcp_url="https://example.com/mcp")
-    client._client = httpx.AsyncClient(
-        transport=httpx.MockTransport(lambda _req: httpx.Response(200, json=body))
-    )
-    client._session_id = "session"
+    url = "https://example.com/mcp"
 
     async def run():
-        try:
-            return await _check_tool_listing(client, "https://example.com/mcp", version="0.141.0")
-        finally:
-            await client.close()
+        async with kagura_client_on(
+            lambda _req: httpx.Response(200, json=body), api_key="kagura_test", mcp_url=url
+        ) as client:
+            client._session_id = "session"
+            return await _check_tool_listing(client, url, version="0.141.0")
 
     [check] = asyncio.run(run())
 
