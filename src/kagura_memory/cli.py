@@ -27,7 +27,7 @@ from ._http import (
 )
 from .auth.cli import auth as _auth_group
 from .claude_code import MCP_SERVER_NAME
-from .client import KaguraClient
+from .client import _LIST_CONTEXTS_MAX_LIMIT, KaguraClient
 from .config import load_config
 from .doctor import run_doctor
 from .exceptions import (
@@ -304,6 +304,7 @@ def _run_client_command(
     context_id: str | None,
     *,
     needs_context: bool = True,
+    footer: Callable[[dict[str, Any]], str | None] | None = None,
 ) -> None:
     """
     Execute a client operation with standard boilerplate.
@@ -313,6 +314,9 @@ def _run_client_command(
     itself runs the full credential resolution chain (env → OAuth
     profile → .kagura.json), so commands work seamlessly after a
     ``kagura auth login`` even if .kagura.json is absent.
+
+    ``footer`` builds an optional line from the result, printed on stderr
+    after the JSON so stdout stays parseable.
     """
     try:
         config = load_config()
@@ -330,6 +334,9 @@ def _run_client_command(
 
         result = asyncio.run(_run())
         click.echo(json.dumps(result, indent=2, ensure_ascii=False))
+        note = footer(result) if footer is not None else None
+        if note:
+            click.echo(note, err=True)
 
     except click.ClickException:
         raise
@@ -1127,6 +1134,23 @@ def context():
     pass
 
 
+def _next_page_footer(result: dict[str, Any]) -> str | None:
+    """The stderr line after a cut ``context list`` page (memory-cloud 0.82.0+, #1743).
+
+    ``None`` on the last page, and from a server before 0.82.0, which sends
+    no ``has_more``. The cursor is shown JSON-quoted, so a control character
+    from the server cannot reach the terminal as is.
+    """
+    cursor = result.get("next_cursor")
+    if result.get("has_more") is not True or not isinstance(cursor, str) or not cursor:
+        return None
+    shown = json.dumps(cursor)
+    return (
+        f"has_more: true; next_cursor: {shown}. For the next page, run the command again "
+        f"with the same options and --cursor {shown}."
+    )
+
+
 @context.command(name="list")
 @click.option(
     "--name-contains",
@@ -1138,18 +1162,39 @@ def context():
     "--details", is_flag=True, default=False, help="Add full summaries and embedding_model"
 )
 @click.option("--stats", is_flag=True, default=False, help="Add memory_count per context")
-def context_list(name_contains, summary, details, stats):
+@click.option(
+    "--limit",
+    type=click.IntRange(1, _LIST_CONTEXTS_MAX_LIMIT),
+    default=None,
+    help=(
+        "Contexts per page, 1-200 (server default 100; with --details and no "
+        "--name-contains at most 20, the default there; memory-cloud 0.82.0+)."
+    ),
+)
+@click.option(
+    "--cursor",
+    default=None,
+    help="next_cursor of the previous page, with the same other options (memory-cloud 0.82.0+).",
+)
+def context_list(name_contains, summary, details, stats, limit, cursor):
     """
     List available contexts.
 
     Rows are slim by default (id, name, is_private, is_locked, last_used_at);
     memory-cloud v0.73.0+ is needed for --name-contains/--summary/--details.
 
+    From memory-cloud 0.82.0 the list comes a page at a time (100 contexts by
+    default, and a page also stops at 20,000 characters). When a page was cut,
+    has_more and next_cursor follow the JSON on stderr: pass next_cursor as
+    --cursor, with the same other options, for the next page. Older servers
+    return every context and ignore --limit and --cursor.
+
     \b
     Examples:
       kagura context list
       kagura context list --name-contains auth --summary
       kagura context list --stats
+      kagura context list --limit 50 --cursor 50
     """
     _run_client_command(
         lambda client, _: client.list_contexts(
@@ -1157,9 +1202,12 @@ def context_list(name_contains, summary, details, stats):
             include_summary=summary,
             include_details=details,
             include_stats=stats,
+            cursor=cursor,
+            limit=limit,
         ),
         context_id=None,
         needs_context=False,
+        footer=_next_page_footer,
     )
 
 

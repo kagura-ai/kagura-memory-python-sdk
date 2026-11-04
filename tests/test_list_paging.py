@@ -1,4 +1,4 @@
-"""Page sizes on ``list_contexts`` / ``get_state`` (#315).
+"""Page sizes on ``list_contexts`` / ``get_state`` and ``kagura context list`` paging (#315).
 
 memory-cloud v0.82.0 (#1743) pages both lists and declares ``limit`` on
 ``list_contexts`` (1-200; 20 with ``include_details`` and no ``name_contains``)
@@ -15,11 +15,14 @@ from __future__ import annotations
 import inspect
 import json
 from typing import Any
+from unittest.mock import patch
 
 import httpx
 import pytest
+from click.testing import CliRunner
 
 from kagura_memory import KaguraClient, KaguraError
+from kagura_memory.cli import _next_page_footer, main
 
 CTX = "11111111-2222-3333-4444-555555555555"
 _CONFIG = {"api_key": "key", "mcp_url": "https://test.com/mcp"}
@@ -295,3 +298,113 @@ async def test_get_state_refuses_list_arguments_with_a_key(kwargs: dict, named: 
     finally:
         await client.close()
     assert server.arguments == []
+
+
+# ===========================================================================
+# kagura context list --limit/--cursor
+# ===========================================================================
+
+
+def _invoke(server: _Server, *args: str):
+    with (
+        patch("kagura_memory.cli.load_config", return_value=dict(_CONFIG)),
+        patch("kagura_memory.cli.KaguraClient", side_effect=server.client),
+    ):
+        return CliRunner().invoke(main, ["context", "list", *args])
+
+
+def test_context_list_pages_with_the_footer_cursor():
+    """Page 1 names next_cursor on stderr; passing it back returns page 2 and no footer."""
+    contexts = [_context(n) for n in range(3)]
+    server = _Server(_directory(contexts))
+
+    first = _invoke(server, "--limit", "2")
+    assert first.exit_code == 0, first.output
+    page1 = json.loads(first.stdout)  # stdout stays the reply's JSON
+    assert [c["name"] for c in page1["contexts"]] == ["ctx-0", "ctx-1"]
+    assert (page1["has_more"], page1["next_cursor"]) == (True, "2")
+    assert first.stderr == (
+        'has_more: true; next_cursor: "2". For the next page, run the command again '
+        'with the same options and --cursor "2".\n'
+    )
+
+    second = _invoke(server, "--limit", "2", "--cursor", page1["next_cursor"])
+    assert second.exit_code == 0, second.output
+    page2 = json.loads(second.stdout)
+    assert [c["name"] for c in page2["contexts"]] == ["ctx-2"]
+    assert (page2["has_more"], page2["next_cursor"]) == (False, None)
+    assert second.stderr == ""
+
+    assert server.arguments == [{"limit": 2}, {"cursor": "2", "limit": 2}]
+
+
+def test_context_list_forwards_the_paging_flags_with_the_filters():
+    server = _Server(_directory([_context(1)]))
+    result = _invoke(
+        server, "--name-contains", "ctx", "--details", "--limit", "50", "--cursor", "100"
+    )
+    assert result.exit_code == 0, result.output
+    assert server.arguments == [
+        {"name_contains": "ctx", "include_details": True, "cursor": "100", "limit": 50}
+    ]
+
+
+def test_context_list_from_an_older_server_prints_no_footer():
+    """Before 0.82.0 the reply has no has_more / next_cursor and nothing is paged."""
+    server = _Server({"status": "success", "contexts": [_context(1)], "count": 1})
+    result = _invoke(server)
+    assert result.exit_code == 0, result.output
+    assert server.arguments == [{}]
+    assert result.stderr == ""
+
+
+def test_context_list_refused_limit_is_a_clean_error():
+    server = _Server(_REFUSED_LIMIT)
+    result = _invoke(server, "--limit", "50")
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    assert result.stderr.startswith(
+        "Error: list_contexts failed (invalid_argument): list_contexts does not accept "
+        "the argument 'limit'."
+    )
+    assert "  Help: Remove the unknown arguments" in result.stderr
+    assert "Traceback" not in result.output
+    assert server.arguments == [{"limit": 50}]
+
+
+def test_context_list_refuses_a_details_page_over_20_before_any_request():
+    server = _Server(_directory([]))
+    result = _invoke(server, "--details", "--limit", "21")
+    assert result.exit_code == 1
+    assert "pass name_contains or a limit of at most 20, got 21" in result.stderr
+    assert server.arguments == []
+
+
+@pytest.mark.parametrize("limit", ["0", "201"])
+def test_context_list_limit_is_checked_by_the_option(limit: str):
+    server = _Server(_directory([]))
+    result = _invoke(server, "--limit", limit)
+    assert result.exit_code == 2
+    assert "1<=x<=200" in result.stderr
+    assert server.arguments == []
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        {"has_more": False, "next_cursor": None},
+        {"has_more": True, "next_cursor": None},  # nothing to continue from
+        {"has_more": True, "next_cursor": ""},
+        {"has_more": "true", "next_cursor": "2"},  # not the JSON boolean
+        {"contexts": []},
+    ],
+)
+def test_next_page_footer_needs_has_more_and_a_cursor(result: dict):
+    assert _next_page_footer(result) is None
+
+
+def test_next_page_footer_escapes_the_cursor():
+    note = _next_page_footer({"has_more": True, "next_cursor": "2\x1b[31m"})
+    assert note is not None
+    assert "\x1b" not in note
+    assert 'next_cursor: "2\\u001b[31m"' in note

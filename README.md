@@ -782,6 +782,7 @@ kagura update-memory -m "memory-uuid" --details '{"location": {"lat": 35.68, "lo
 kagura update-memory -m "memory-uuid" --location "35.68,139.76,Tokyo HQ" --merge-details
 kagura contexts
 kagura context list --name-contains auth --summary   # server v0.73.0+; --details, --stats
+kagura context list --limit 50 --cursor 50          # server v0.82.0+; a cut page names next_cursor on stderr
 
 # Resource tokens
 kagura resource setup -r products                   # context named after the resource; --name to override
