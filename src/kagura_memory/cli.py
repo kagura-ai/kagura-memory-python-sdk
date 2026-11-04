@@ -1202,7 +1202,14 @@ def _contexts_footer(result: dict[str, Any]) -> str | None:
         "is ignored (memory-cloud 0.82.0+)."
     ),
 )
-def context_list(name_contains, summary, details, stats, limit, cursor):
+def context_list(
+    name_contains: str | None,
+    summary: bool,
+    details: bool,
+    stats: bool,
+    limit: int | None,
+    cursor: str | None,
+) -> None:
     """
     List available contexts.
 
