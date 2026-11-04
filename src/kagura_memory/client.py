@@ -864,10 +864,10 @@ class KaguraClient:
             (the total cap) or ``wait`` (a daily cap), then ``upgrade`` when
             a higher tier raises that cap, or ``admin`` on a deployment
             without billing; ``help`` says what to do and what fails at
-            100 %. Below 80 % the key is absent (never
-            ``[]`` or ``null``), and a write shows each workspace, dimension
-            and level at most once an hour, so a missing key does not mean
-            the plan has room. The entries stay dicts here;
+            100 %. Below 80 % the key is absent (never ``[]`` or ``null``),
+            and writes show an entry at most once an hour per workspace,
+            dimension and level, so a missing key does not mean the plan has
+            room. The entries stay dicts here;
             :class:`~kagura_memory.models.PlanHeadroomNotice` is the typed
             form :meth:`bootstrap` and :meth:`remember_batch` return.
 
