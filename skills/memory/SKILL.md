@@ -1,6 +1,6 @@
 ---
 name: memory
-description: Store and search memories with the `kagura` CLI — `kagura remember` (with `--tags`, `--details`, `--location`) and `kagura recall` (`--trusted-only`, `--rerank/--no-rerank`), plus `reference`, `update-memory` and `forget`. Use when the user wants to save a fact, decision or note to Kagura Memory, or search what is already stored.
+description: Store and search memories with the `kagura` CLI — `kagura remember` (with `--tags`, `--details`, `--location`) and `kagura recall` (`--trusted-only`, `--rerank/--no-rerank`, `--verbosity`, `--full`, `--max-chars`), plus `reference`, `update-memory` and `forget`. Use when the user wants to save a fact, decision or note to Kagura Memory, or search what is already stored.
 ---
 
 # kagura memory — remember and recall
