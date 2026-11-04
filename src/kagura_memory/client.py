@@ -2514,10 +2514,10 @@ class KaguraClient:
             "memory_id": memory_id,
         }
         if version is not None:
-            _validate_min_int("version", version, 1)
+            _validate_int_range("version", version, 1)
             arguments["version"] = version
         if content_offset is not None:
-            _validate_min_int("content_offset", content_offset, 0)
+            _validate_int_range("content_offset", content_offset, 0)
             arguments["content_offset"] = content_offset
         return await self._call_tool_checked("reference", arguments)
 
@@ -2753,7 +2753,7 @@ class KaguraClient:
                 "give one or the other."
             )
         if expected_version is not None:
-            _validate_min_int("expected_version", expected_version, 1)
+            _validate_int_range("expected_version", expected_version, 1)
         _validate_memory_tags(tags)
         _validate_memory_tags(add_tags, "add_tags")
         if details_patch is not None:
@@ -4240,18 +4240,6 @@ def _validate_memory_tags(tags: list[str] | None, name: str = "tags") -> None:
         raise ValueError(
             f"each tag must be at most {_MEMORY_TAG_MAX_CHARS} characters, got {longest}"
         )
-
-
-def _validate_min_int(name: str, value: object, minimum: int) -> None:
-    """Reject a request integer below ``minimum``, as the server does.
-
-    ``bool`` is not an integer here, as on the server (``type(x) is int``).
-
-    Raises:
-        ValueError: ``value`` is not an ``int`` of at least ``minimum``.
-    """
-    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
-        raise ValueError(f"{name} must be an integer of at least {minimum}, got {value!r}")
 
 
 def _validate_state_value(value: Any) -> None:

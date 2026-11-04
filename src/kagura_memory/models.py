@@ -1971,7 +1971,7 @@ _MAX_CHARS_MAX = 100_000
 _RECALL_FULL_MAX = 100
 
 
-def _validate_int_range(name: str, value: object, lo: int, hi: int) -> None:
+def _validate_int_range(name: str, value: object, lo: int, hi: int | None = None) -> None:
     """Reject a request integer the server would refuse, before any request.
 
     ``bool`` is not an integer here, as on the server (``type(x) is int``).
@@ -1980,13 +1980,19 @@ def _validate_int_range(name: str, value: object, lo: int, hi: int) -> None:
         name: The argument's name, for the message.
         value: The value the caller passed.
         lo: The smallest accepted value.
-        hi: The largest accepted value.
+        hi: The largest accepted value; ``None`` leaves the range open above.
 
     Raises:
         ValueError: If ``value`` is not an ``int`` in [``lo``, ``hi``].
     """
-    if isinstance(value, bool) or not isinstance(value, int) or not lo <= value <= hi:
-        raise ValueError(f"{name} must be an integer between {lo} and {hi}, got {value!r}")
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or value < lo
+        or (hi is not None and value > hi)
+    ):
+        bounds = f"of at least {lo}" if hi is None else f"between {lo} and {hi}"
+        raise ValueError(f"{name} must be an integer {bounds}, got {value!r}")
 
 
 def _validate_max_chars(max_chars: object) -> None:
