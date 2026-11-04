@@ -628,7 +628,8 @@ async def _check_server(
                             "(expected: REST validates API keys, not OAuth bearers; the MCP "
                             "connection is unaffected)."
                         ),
-                    )
+                    ),
+                    *await _check_tool_listing(client, resolved.mcp_url),
                 ]
             return [DoctorCheck(section="server", status="fail", message=str(exc))]
         except KaguraConnectionError as exc:
@@ -656,6 +657,12 @@ async def _check_server(
             # e.g. KaguraRateLimitError (HTTP 429) is no KaguraConnectionError
             # and used to escape as a traceback.
             return [DoctorCheck(section="server", status="fail", message=str(exc))]
+        # tools/list on the same client (#300), unless the version check fails below.
+        listing = (
+            await _check_tool_listing(client, resolved.mcp_url, version=info.version)
+            if meets_minimum(info.version, _MIN_SERVER_VERSION_TUPLE) is not False
+            else []
+        )
 
     checks.append(DoctorCheck(section="server", status="pass", message="Server reachable"))
 
@@ -671,7 +678,7 @@ async def _check_server(
                 details={"version": info.version},
             )
         )
-        return checks
+        return [*checks, *listing]
 
     if not meets:
         checks.append(
@@ -692,7 +699,7 @@ async def _check_server(
             )
         )
 
-    return checks
+    return [*checks, *listing]
 
 
 def run_doctor(*, project_dir: Path | None = None, profile: str | None = None) -> DoctorReport:
@@ -713,11 +720,7 @@ def run_doctor(*, project_dir: Path | None = None, profile: str | None = None) -
         https_check = _check_https(resolved.mcp_url)
         checks.append(https_check)
         if https_check.status == "pass":
-            server_checks = asyncio.run(_check_server(resolved, profile=profile))
-            checks.extend(server_checks)
-            # A server check that failed already says why tools/list would fail.
-            if all(check.status != "fail" for check in server_checks):
-                checks.extend(asyncio.run(_check_tool_listing(resolved, profile=profile)))
+            checks.extend(asyncio.run(_check_server(resolved, profile=profile)))
         else:
             checks.append(
                 DoctorCheck(
@@ -738,25 +741,30 @@ def run_doctor(*, project_dir: Path | None = None, profile: str | None = None) -
     return DoctorReport(checks=checks)
 
 
-def _doctor_client(resolved: _StaticAuth | _OAuthAuth, profile: str | None) -> KaguraClient:
-    """A :class:`KaguraClient` on the credential doctor resolved, as ``_check_server`` builds it."""
-    if isinstance(resolved, _StaticAuth):
-        return KaguraClient(api_key=resolved.api_key, mcp_url=resolved.mcp_url)
-    return KaguraClient(mcp_url=resolved.mcp_url, profile=profile)
+#: memory-cloud lists the ``core`` profile for a URL without ``?profile=`` since
+#: 0.93.0 (memory-cloud#1849); an older server lists every tool.
+_CORE_DEFAULT_SINCE = (0, 93, 0)
+_NO_PROFILE = "(no ?profile=)"
 
 
-def _tool_view(mcp_url: str) -> dict[str, Any]:
+def _tool_view(mcp_url: str, version: str | None = None) -> dict[str, Any]:
     """What ``mcp_url``'s query asks ``tools/list`` for, read as memory-cloud reads it.
 
     The first value of each key wins. ``tools`` is an allowlist that replaces
-    the profile and ignores ``add_tools``; with no ``profile`` memory-cloud
-    0.93.0+ lists ``core`` (memory-cloud#1849). A blank ``profile=`` is not
-    the default: the server fails ``tools/list`` for it.
+    the profile and ignores ``add_tools``. With no ``profile``, ``version``
+    (the server's, when known) decides the label: ``core (default)`` from
+    0.93.0, else :data:`_NO_PROFILE`. A blank ``profile=`` is not the
+    default: the server fails ``tools/list`` for it.
     """
     query = mcp_url_query_values(mcp_url)
     if "tools" in query:
         return {"tools": query["tools"]}
-    profile = (query["profile"].strip() or "(empty)") if "profile" in query else "core (default)"
+    if "profile" in query:
+        profile = query["profile"].strip() or "(empty)"
+    elif meets_minimum(version, _CORE_DEFAULT_SINCE):
+        profile = "core (default)"
+    else:
+        profile = _NO_PROFILE
     view: dict[str, Any] = {"profile": profile}
     add_tools = [name for part in query.get("add_tools", "").split(",") if (name := part.strip())]
     if add_tools:
@@ -765,40 +773,44 @@ def _tool_view(mcp_url: str) -> dict[str, Any]:
 
 
 async def _check_tool_listing(
-    resolved: _StaticAuth | _OAuthAuth, *, profile: str | None = None
+    client: KaguraClient, mcp_url: str, *, version: str | None = None
 ) -> list[DoctorCheck]:
-    """``tools/list`` over the resolved MCP URL: how many tools, and which view (#300).
+    """``tools/list`` on the client ``_check_server`` opened: how many tools, which view (#300).
 
-    A profile is a view, not an authorization boundary: ``tools/call`` reaches
-    an unlisted tool too, so a short list never breaks a ``KaguraClient``
-    method. It does decide what an MCP client following ``tools/list`` sees.
+    It reads the CLI's MCP URL, not a Claude Code entry's ``kagura-mcp``
+    flags, and says so. A profile is a view, not an authorization boundary:
+    ``tools/call`` reaches an unlisted tool too, so a short list never breaks
+    a ``KaguraClient`` method. It does decide what an MCP client following
+    ``tools/list`` sees.
     """
-    view = _tool_view(resolved.mcp_url)
+    view = _tool_view(mcp_url, version)
     if "tools" in view:
         shown = f"tools allowlist {view['tools']}"
     else:
-        shown = f"profile {view['profile']}"
+        shown = "no ?profile=" if view["profile"] == _NO_PROFILE else f"profile {view['profile']}"
         if "add_tools" in view:
             shown += f" + add_tools {', '.join(view['add_tools'])}"
-    details: dict[str, Any] = {"mcp_url": resolved.mcp_url, **view}
+    details: dict[str, Any] = {"mcp_url": mcp_url, **view}
     try:
-        async with _doctor_client(resolved, profile) as client:
-            tools = await client.get_tool_definitions()
+        tools = await client.get_tool_definitions()
     except (KaguraError, ValueError) as exc:
         return [
             DoctorCheck(
-                section="mcp",
+                section="tools",
                 status="fail",
-                message=f"tools/list failed ({shown}): {_exc_message(exc)}",
+                message=f"tools/list on the CLI's MCP URL failed ({shown}): {_exc_message(exc)}",
                 details=details,
             )
         ]
     details["tool_count"] = count = len(tools)
     return [
         DoctorCheck(
-            section="mcp",
+            section="tools",
             status="pass",
-            message=f"tools/list: {count} tool{'' if count == 1 else 's'} ({shown})",
+            message=(
+                f"tools/list on the CLI's MCP URL: {count} tool{'' if count == 1 else 's'} "
+                f"({shown})"
+            ),
             details=details,
         )
     ]

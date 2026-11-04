@@ -76,11 +76,10 @@ def _patch_server(monkeypatch, checks: list[DoctorCheck] | None = None):
         ]
 
     monkeypatch.setattr("kagura_memory.doctor._check_server", _fake_server)
-    # run_doctor follows a passing server check with tools/list (#300): offline here.
-    monkeypatch.setattr("kagura_memory.doctor._check_tool_listing", _no_tool_listing)
 
 
-async def _no_tool_listing(_resolved, *, profile=None) -> list[DoctorCheck]:
+async def _no_tool_listing(_client, _mcp_url, *, version=None) -> list[DoctorCheck]:
+    """_check_server follows a passing version check with tools/list (#300): offline here."""
     return []
 
 
@@ -846,6 +845,7 @@ def test_check_server_version_branches(monkeypatch, version, expected_status):
             return ServerInfo(name="memory-cloud", version=version)
 
     monkeypatch.setattr("kagura_memory.doctor.KaguraClient", FakeClient)
+    monkeypatch.setattr("kagura_memory.doctor._check_tool_listing", _no_tool_listing)
     resolved = _OAuthAuth(
         oauth=object(),
         mcp_url="https://profile.example.com/mcp",
@@ -878,6 +878,7 @@ def test_check_server_agrees_with_check_server_version(
         return ServerInfo(name="memory-cloud", version=version)
 
     monkeypatch.setattr(KaguraClient, "get_server_info", fake_server_info)
+    monkeypatch.setattr("kagura_memory.doctor._check_tool_listing", _no_tool_listing)
     resolved = _StaticAuth(
         api_key="kagura_test_key", mcp_url="https://api.example.com/mcp", source="env"
     )
@@ -966,6 +967,9 @@ def test_check_server_oauth_auth_error_is_informational(monkeypatch):
         async def check_server_version(self):
             raise KaguraAuthError("REST rejected OAuth bearer")
 
+        async def get_tool_definitions(self):
+            return [{"name": "recall"}]
+
     monkeypatch.setattr("kagura_memory.doctor.KaguraClient", FakeClient)
     resolved = _OAuthAuth(
         oauth=object(),
@@ -979,6 +983,10 @@ def test_check_server_oauth_auth_error_is_informational(monkeypatch):
 
     assert checks[0].status == "info"
     assert "REST validates API keys" in checks[0].message
+    # #300: the MCP connection is unaffected, so tools/list still runs; no version
+    # is known, so a bare URL is not labelled as the 0.93.0+ core default.
+    assert (checks[1].section, checks[1].status) == ("tools", "pass")
+    assert checks[1].message == "tools/list on the CLI's MCP URL: 1 tool (no ?profile=)"
 
 
 def test_check_server_constructor_failure(monkeypatch):
@@ -1008,141 +1016,141 @@ def test_check_server_constructor_failure(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("query", "view"),
+    ("query", "version", "view"),
     [
-        ("", {"profile": "core (default)"}),
-        ("?add_tools=", {"profile": "core (default)"}),
-        ("?profile=%20&profile=full", {"profile": "(empty)"}),  # the server refuses it
+        ("", "0.141.0", {"profile": "core (default)"}),
+        ("", "0.93.0", {"profile": "core (default)"}),
+        ("", "0.92.9", {"profile": "(no ?profile=)"}),  # lists every tool
+        ("", None, {"profile": "(no ?profile=)"}),  # version unknown
+        ("", "dev", {"profile": "(no ?profile=)"}),  # unparseable
+        ("?add_tools=", "0.141.0", {"profile": "core (default)"}),
+        ("?profile=%20&profile=full", "0.141.0", {"profile": "(empty)"}),  # refused
         (
             "?profile=full&add_tools=explore,%20a,&profile=core",
+            None,
             {"profile": "full", "add_tools": ["explore", "a"]},
         ),
-        ("?add_tools=explore&tools=recall,remember&profile=full", {"tools": "recall,remember"}),
+        (
+            "?add_tools=explore&tools=recall,remember&profile=full",
+            None,
+            {"tools": "recall,remember"},
+        ),
     ],
-    ids=["bare", "blank-add-tools", "blank-profile", "full-plus-add-tools", "tools-allowlist"],
+    ids=[
+        "bare",
+        "bare-0.93.0",
+        "bare-older",
+        "bare-unknown",
+        "bare-unparseable",
+        "blank-add-tools",
+        "blank-profile",
+        "full-plus-add-tools",
+        "tools-allowlist",
+    ],
 )
-def test_tool_view_reads_the_query_as_the_server_does(query, view):
-    assert _tool_view(f"https://h.example/mcp{query}") == view
+def test_tool_view_reads_the_query_as_the_server_does(query, version, view):
+    assert _tool_view(f"https://h.example/mcp{query}", version) == view
 
 
-def _listing_client(monkeypatch, *, tools=None, exc=None) -> dict:
-    """Fake doctor's KaguraClient; return what it was built with."""
-    seen: dict = {}
+class _ListingClient:
+    """The client _check_server opened, as _check_tool_listing sees it."""
 
-    class FakeClient:
-        def __init__(self, api_key=None, mcp_url=None, profile=None):
-            seen.update({"api_key": api_key, "mcp_url": mcp_url, "profile": profile})
+    def __init__(self, *, tools=None, exc=None):
+        self.tools, self.exc = tools or [], exc
 
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc_value, tb):
-            return None
-
-        async def get_tool_definitions(self):
-            if exc is not None:
-                raise exc
-            return tools or []
-
-    monkeypatch.setattr("kagura_memory.doctor.KaguraClient", FakeClient)
-    return seen
+    async def get_tool_definitions(self):
+        if self.exc is not None:
+            raise self.exc
+        return self.tools
 
 
 @pytest.mark.parametrize(
-    ("query", "message"),
+    ("query", "version", "message"),
     [
-        ("", "tools/list: 21 tools (profile core (default))"),
+        ("", "0.141.0", "21 tools (profile core (default))"),
+        ("", "0.80.0", "21 tools (no ?profile=)"),
         (
             "?profile=full&add_tools=explore,list_edges",
-            "tools/list: 21 tools (profile full + add_tools explore, list_edges)",
+            "0.141.0",
+            "21 tools (profile full + add_tools explore, list_edges)",
         ),
-        ("?tools=recall", "tools/list: 21 tools (tools allowlist recall)"),
+        ("?tools=recall", "0.141.0", "21 tools (tools allowlist recall)"),
     ],
 )
-def test_check_tool_listing_reports_the_count_and_the_view(monkeypatch, query, message):
+def test_check_tool_listing_reports_the_count_and_the_view(query, version, message):
     import asyncio
 
-    seen = _listing_client(monkeypatch, tools=[{"name": f"t{i}"} for i in range(21)])
-    resolved = _StaticAuth(
-        api_key="kagura_12345678abcdef", mcp_url=f"https://example.com/mcp{query}", source="env"
-    )
+    client = _ListingClient(tools=[{"name": f"t{i}"} for i in range(21)])
+    url = f"https://example.com/mcp{query}"
 
-    [check] = asyncio.run(_check_tool_listing(resolved))
+    [check] = asyncio.run(_check_tool_listing(client, url, version=version))
 
-    assert (check.section, check.status, check.message) == ("mcp", "pass", message)
+    assert (check.section, check.status) == ("tools", "pass")
+    assert check.message == f"tools/list on the CLI's MCP URL: {message}"
     assert check.details["tool_count"] == 21
-    assert check.details["mcp_url"] == resolved.mcp_url
-    assert seen["api_key"] == "kagura_12345678abcdef"
-
-
-def test_check_tool_listing_uses_the_oauth_profile(monkeypatch):
-    import asyncio
-
-    seen = _listing_client(monkeypatch, tools=[{"name": "recall"}])
-    resolved = _OAuthAuth(
-        oauth=object(), mcp_url="https://profile.example.com/mcp", workspace_id="ws"
-    )
-
-    [check] = asyncio.run(_check_tool_listing(resolved, profile="dev"))
-
-    assert check.message == "tools/list: 1 tool (profile core (default))"
-    assert (seen["profile"], seen["mcp_url"]) == ("dev", "https://profile.example.com/mcp")
+    assert check.details["mcp_url"] == url
 
 
 @pytest.mark.parametrize(
     "exc",
     [
         KaguraConnectionError("MCP error: Invalid params: unknown tool profile 'Core'"),
-        ValueError("MCP URL must use HTTPS"),
+        ValueError("Expecting value: line 1 column 1 (char 0)"),  # a non-JSON body
     ],
-    ids=["unknown-profile", "constructor"],
+    ids=["unknown-profile", "non-json"],
 )
-def test_check_tool_listing_failure_is_a_failed_mcp_check(monkeypatch, exc):
+def test_check_tool_listing_failure_is_a_failed_tools_check(exc):
     import asyncio
 
-    if isinstance(exc, ValueError):
+    url = "https://example.com/mcp?profile=Core"
 
-        def bad_client(**kwargs):
-            raise exc
+    [check] = asyncio.run(_check_tool_listing(_ListingClient(exc=exc), url))
 
-        monkeypatch.setattr("kagura_memory.doctor.KaguraClient", bad_client)
-    else:
-        _listing_client(monkeypatch, exc=exc)
-    resolved = _StaticAuth(
-        api_key="kagura_12345678abcdef",
-        mcp_url="https://example.com/mcp?profile=Core",
-        source="env",
-    )
-
-    [check] = asyncio.run(_check_tool_listing(resolved))
-
-    assert (check.section, check.status) == ("mcp", "fail")
-    assert check.message == f"tools/list failed (profile Core): {exc}"
+    assert (check.section, check.status) == ("tools", "fail")
+    assert check.message == f"tools/list on the CLI's MCP URL failed (profile Core): {exc}"
 
 
 @pytest.mark.parametrize(
-    ("server_status", "listed"), [("pass", True), ("info", True), ("fail", False)]
+    ("version", "listed"),
+    [("0.141.0", True), ("dev", True), ("0.17.0", False)],
+    ids=["supported", "unparseable", "below-minimum"],
 )
-def test_run_doctor_lists_tools_unless_a_server_check_failed(monkeypatch, server_status, listed):
+def test_check_server_lists_tools_on_the_same_client(monkeypatch, version, listed):
+    """One client for the version check and tools/list; a failed version check skips it."""
+    import asyncio
+
+    from kagura_memory.doctor import _check_server
+
+    built: list[dict] = []
+
+    class FakeClient(_ListingClient):
+        def __init__(self, **kwargs):
+            built.append(kwargs)
+            super().__init__(tools=[{"name": "recall"}, {"name": "remember"}])
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def check_server_version(self):
+            return ServerInfo(name="memory-cloud", version=version)
+
+    monkeypatch.setattr("kagura_memory.doctor.KaguraClient", FakeClient)
     resolved = _StaticAuth(
         api_key="kagura_12345678abcdef", mcp_url="https://example.com/mcp", source="env"
     )
-    _patch_common_doctor_surface(monkeypatch, resolved=resolved, creds_file=CredentialsFile())
-    _patch_server(monkeypatch, [DoctorCheck(section="server", status=server_status, message="x")])
-    calls: list = []
 
-    async def fake_listing(_resolved, *, profile=None):
-        calls.append(profile)
-        return [DoctorCheck(section="mcp", status="pass", message="tools/list: 21 tools")]
+    checks = asyncio.run(_check_server(resolved))
 
-    monkeypatch.setattr("kagura_memory.doctor._check_tool_listing", fake_listing)
-
-    from kagura_memory.doctor import run_doctor
-
-    report = run_doctor(profile="dev")
-
-    assert calls == (["dev"] if listed else [])
-    assert any(c.message == "tools/list: 21 tools" for c in report.checks) is listed
+    assert len(built) == 1
+    tools_checks = [c for c in checks if c.section == "tools"]
+    assert [c.status for c in tools_checks] == (["pass"] if listed else [])
+    if listed:
+        assert checks[-1] is tools_checks[0]
+        label = "profile core (default)" if version == "0.141.0" else "no ?profile="
+        assert checks[-1].message == f"tools/list on the CLI's MCP URL: 2 tools ({label})"
 
 
 def test_doctor_cli_json_output(monkeypatch):

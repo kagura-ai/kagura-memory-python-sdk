@@ -660,7 +660,8 @@ The report covers effective auth source, OAuth/static API-key health,
 the Claude Code `kagura-memory` MCP entry in effect (from local, project
 `.mcp.json` or user scope, plus any entry it shadows), `kagura-mcp` PATH wiring, MCP URL HTTPS,
 server reachability/version, the `tools/list` view of the CLI's MCP URL (tool count, and the
-profile and `add_tools` it lists: `core (default)` without `?profile=`), optional ingestion extras, LiteLLM supply-chain
+profile and `add_tools` it lists: `core (default)` without `?profile=` on memory-cloud 0.93.0+;
+a `kagura-mcp` entry's own `--tool-profile`/`--add-tools` are not applied), optional ingestion extras, LiteLLM supply-chain
 status, and local LLM provider key/model diagnostics. Provider diagnostics are
 local-only: `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, and
 `OLLAMA_API_KEY` are reported with redacted previews, and model/key mismatches
@@ -879,7 +880,7 @@ writes under that session (`changes_since(session_id=…)`). Claude Code speaks 
 to the proxy, so there is no request header to pass on; a tool call's
 `params._meta["ai.kagura/sessionId"]` still passes through and wins for that call.
 `kagura doctor` reports how many tools `tools/list` returns on the CLI's MCP URL
-and which profile it lists.
+and which profile it lists (its `tools` section).
 
 **Hooks and commands** — the SessionStart hook recalls project context with
 `kagura recall --trusted-only` (server v0.24.0+), so connector-ingested memories
