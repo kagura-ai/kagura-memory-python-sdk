@@ -46,6 +46,10 @@ from .models import (
     AgentBinding,
     AgentBootstrapComponentName,
     AgentBootstrapResponse,
+    BootstrapComponentName,
+    BootstrapFormat,
+    BootstrapResponse,
+    ChangesSinceResponse,
     ContextInfo,
     ContextTagsResponse,
     DuplicatesResponse,
@@ -53,6 +57,8 @@ from .models import (
     EmbeddingModelsResponse,
     EmbeddingStatus,
     GuardrailSet,
+    ListMatchingResponse,
+    ListOrderBy,
     ListTagsResponse,
     MeasurementAggregate,
     MeasurementPeriod,
@@ -61,6 +67,7 @@ from .models import (
     MemoryListResponse,
     MemoryStatsResponse,
     RecallVerbosity,
+    RememberBatchResult,
     RollbackResult,
     RollbackSummary,
     ServerInfo,
@@ -2456,6 +2463,342 @@ class KaguraClient:
             arguments["k"] = k
         return await self._call_tool_checked("forget", arguments)
 
+    async def bootstrap(
+        self,
+        context_id: str,
+        *,
+        since: str | datetime | None = None,
+        include: list[BootstrapComponentName] | None = None,
+        max_chars: int | None = None,
+        format: BootstrapFormat | None = None,
+    ) -> BootstrapResponse:
+        """Open an interactive session on one context in one call.
+
+        Calls the ``bootstrap`` MCP tool (memory-cloud v0.93.0+, #1851): the
+        context block, its tool ``guardrails``, the trusted pinned set
+        (cap 20), the upcoming Time Memories (k = 20) and the change log
+        since ``since`` (at most 50), each bounded and **fail-soft** — a
+        failing lane is ``status="error"`` while the rest return, with
+        ``degraded`` set. Deterministic: no recall runs; search by topic with
+        :meth:`recall` if the change list does not answer the question.
+        Not :meth:`get_agent_bootstrap`, which rehydrates a registered agent.
+
+        The memory-cloud session-start skill calls it as
+        ``bootstrap(ctx, since="7d", format="index", max_chars=5000)``.
+
+        Args:
+            context_id: Context UUID.
+            since: Start of the ``changes`` window: ISO 8601 (naive = UTC), a
+                ``datetime`` (naive = UTC), or ``"<N>d"`` for N days back
+                (``"0d"`` to ``"999d"``). Omit for the server's ``"7d"``.
+            include: The lanes to compose, a non-empty subset of
+                ``"pinned"``, ``"upcoming"``, ``"changes"``. Omit for all.
+            max_chars: Reply budget in characters, not tokens, 2,000-100,000
+                (server default 20,000). Over budget the full format first
+                leaves ``context_summary`` out of the pinned rows
+                (``context_summary_omitted``), then each lane keeps the prefix
+                that fits (``truncated``). Below 10,000 needs memory-cloud
+                v0.115.0+ (#2126); an older server refuses it
+                (``validation_error``).
+            format: ``"index"`` for pointer rows (pinned keeps its text;
+                guardrail, upcoming and change rows carry an 80-character
+                ``summary`` with ``summary_cut``; no ``instructions``) or
+                ``"full"``. Omitted, the server picks ``"index"`` below
+                ``max_chars`` 10,000 and ``"full"`` otherwise. Needs
+                memory-cloud v0.115.0+ (#2126): v0.93.0-v0.114.x refuse the
+                argument (``invalid_argument``).
+
+        Returns:
+            :class:`~kagura_memory.models.BootstrapResponse`. Since
+            memory-cloud v0.142.0 (#2615) ``plan_headroom`` lists every plan
+            dimension at 80 % or more of its limit on every call.
+
+        Raises:
+            ValueError: ``max_chars`` is not an ``int`` in [2,000, 100,000],
+                ``format`` is not ``"full"`` / ``"index"``, ``format="full"``
+                comes with ``max_chars`` below 10,000, or ``include`` is empty
+                or names an unknown lane (before any request).
+            KaguraNotFoundError: The context does not exist or is not
+                accessible.
+            KaguraError: Another server-side refusal, e.g. a malformed
+                ``since`` (``validation_error``).
+            KaguraResponseError: The reply does not match
+                :class:`~kagura_memory.models.BootstrapResponse`
+                (``operation="bootstrap"``).
+        """
+        arguments: dict[str, Any] = {"context_id": context_id}
+        if since is not None:
+            arguments["since"] = _iso_arg(since)
+        if include is not None:
+            known = get_args(BootstrapComponentName)
+            if not include or any(name not in known for name in include):
+                raise ValueError(f"include must be a non-empty subset of {', '.join(known)}")
+            arguments["include"] = list(include)
+        if max_chars is not None:
+            _validate_int_range("max_chars", max_chars, _BOOTSTRAP_MIN_CHARS, _MAX_CHARS_LIMIT)
+            arguments["max_chars"] = max_chars
+        if format is not None:
+            if format not in get_args(BootstrapFormat):
+                raise ValueError(f"format must be 'full' or 'index', got {format!r}")
+            if format == "full" and max_chars is not None and max_chars < _FULL_FORMAT_MIN_CHARS:
+                raise ValueError(
+                    f'format="full" needs max_chars of at least {_FULL_FORMAT_MIN_CHARS}; '
+                    'pass format="index" (or omit format) under it'
+                )
+            arguments["format"] = format
+        result = await self._call_tool_checked("bootstrap", arguments)
+        return parse_response(BootstrapResponse, result, operation="bootstrap")
+
+    async def changes_since(
+        self,
+        context_id: str,
+        since: str | datetime,
+        *,
+        until: str | datetime | None = None,
+        kinds: list[str] | None = None,
+        cursor: str | None = None,
+        limit: int | None = None,
+        session_id: str | None = None,
+        by_me: bool | None = None,
+        max_chars: int | None = None,
+    ) -> ChangesSinceResponse:
+        """List what changed in a context since a time, oldest first.
+
+        Calls the ``changes_since`` MCP tool (memory-cloud v0.93.0+, #1852): a
+        deterministic memory-level change log — ``created``, ``updated``
+        (Sleep maintenance included), ``superseded`` (with
+        ``superseded_by``) and ``forgotten`` events — keyset-paged. A soft
+        delete logs ``forgotten`` only (v0.98.0+, #1924), and every event of
+        a memory that is forgotten now has no ``summary`` (v0.96.0+, #1876).
+        No ranking, no embedding, no Hebbian write. In a private context only
+        the caller's own memories (and a linked account's) are listed.
+
+        Args:
+            context_id: Context UUID.
+            since: Window start, inclusive: ISO 8601 or a ``datetime`` (naive
+                = UTC).
+            until: Window end, exclusive (later than ``since``). Omit for now.
+            kinds: Kinds to include, a non-empty subset of ``created``,
+                ``updated``, ``superseded``, ``forgotten`` — or, with
+                ``session_id`` / ``by_me``, of ``created``, ``updated``,
+                ``forgotten``, ``restored``. Omit for all.
+            cursor: ``next_cursor`` of the previous page.
+            limit: Changes per page (server default 50, clamped to 1-100).
+            session_id: Only that session's writes (a ``session_id`` a write
+                returned; memory-cloud v0.113.0+, #2044). Another principal's
+                session lists nothing, unless the caller owns the context.
+            by_me: ``True`` lists only the caller's own writes, in any session
+                (memory-cloud v0.114.0+, #2121) — what
+                ``rollback_session(since=...)`` would address.
+            max_chars: Reply budget in characters, 10,000-100,000 (server
+                default 20,000); a cut page sets ``truncated``.
+
+        Returns:
+            :class:`~kagura_memory.models.ChangesSinceResponse`; call again
+            with ``cursor=result.next_cursor`` while ``result.has_more``.
+
+        Raises:
+            ValueError: ``max_chars`` is out of range (before any request).
+            KaguraNotFoundError: The context does not exist or is not
+                accessible.
+            KaguraError: Another server-side refusal (``validation_error``:
+                a malformed time, ``until`` not after ``since``, a bad
+                ``kinds`` / ``session_id`` / ``cursor``). Each argument after
+                ``cursor``/``limit`` is refused as ``invalid_argument`` by a
+                server older than its floor.
+            KaguraResponseError: The reply does not match
+                :class:`~kagura_memory.models.ChangesSinceResponse`
+                (``operation="changes_since"``).
+        """
+        arguments: dict[str, Any] = {"context_id": context_id, "since": _iso_arg(since)}
+        if until is not None:
+            arguments["until"] = _iso_arg(until)
+        if kinds is not None:
+            arguments["kinds"] = list(kinds)
+        if cursor is not None:
+            arguments["cursor"] = cursor
+        if limit is not None:
+            arguments["limit"] = limit
+        if session_id is not None:
+            arguments["session_id"] = session_id
+        if by_me is not None:
+            arguments["by_me"] = by_me
+        if max_chars is not None:
+            _validate_max_chars(max_chars)
+            arguments["max_chars"] = max_chars
+        result = await self._call_tool_checked("changes_since", arguments)
+        return parse_response(ChangesSinceResponse, result, operation="changes_since")
+
+    async def list_matching(
+        self,
+        context_id: str,
+        *,
+        filters: dict[str, Any] | None = None,
+        order_by: ListOrderBy | None = None,
+        direction: Literal["asc", "desc"] | None = None,
+        cursor: str | None = None,
+        limit: int | None = None,
+        include_details: bool = False,
+        max_chars: int | None = None,
+    ) -> ListMatchingResponse:
+        """List every live memory of a context that matches exact filters.
+
+        Calls the ``list`` MCP tool (memory-cloud v0.93.0+, #1852): no
+        ranking, a stable order and a ``total``, e.g. the open backlog
+        ``filters={"type": ["tech-debt"], "tags": ["status:open"]}`` or
+        ``{"type": "task", "details.status": "open"}``. Use :meth:`recall`
+        for meaning.
+
+        :meth:`list_memories` is a different call: REST
+        ``GET /api/v1/memory/list``, with a summary substring (``q``), a
+        trigger window, a bounding box and the cross-context "my memories"
+        view. This method is MCP and takes ``recall``'s exact filter
+        vocabulary plus ``details.<key>`` equality, orders by
+        ``updated_at`` / ``created_at`` / ``importance`` / ``observed_at``
+        and pages with a cursor. In a private context both list only the
+        caller's own memories.
+
+        Args:
+            context_id: Context UUID.
+            filters: Exact-match filters, ANDed: ``type``, ``scope``,
+                ``source_type``, ``delivery_mode``, ``tags`` (+ ``tags_match``
+                ``any`` | ``all``, ``tags_normalize``), ``importance``
+                ``{gte|lte|gt|lt}``, ``created_after`` / ``created_before`` /
+                ``updated_after`` / ``updated_before`` (ISO 8601),
+                ``observed_after`` / ``observed_before`` (v0.127.0+),
+                ``source_uri_prefix``, ``trust_tier="trusted"``, and
+                ``details.<key>`` — a scalar matched with its stored JSON type
+                (``2`` is not ``2.0`` or ``"2"``). The server refuses an
+                unknown filter (``validation_error``).
+            order_by: ``"updated_at"`` (server default; a never-edited memory
+                sorts by ``created_at``), ``"created_at"``, ``"importance"``
+                or ``"observed_at"`` (memory-cloud v0.127.0+, #2330; memories
+                without one go last). The id breaks ties.
+            direction: ``"asc"`` or ``"desc"`` (server default).
+            cursor: ``next_cursor`` of the previous page.
+            limit: Memories per page (server default 50, clamped to 1-100).
+            include_details: ``True`` adds each memory's ``details`` (dropped
+                first when the reply passes ``max_chars``:
+                ``details_omitted``). Sent only when ``True``.
+            max_chars: Reply budget in characters, 10,000-100,000 (server
+                default 20,000); a cut page sets ``truncated``.
+
+        Returns:
+            :class:`~kagura_memory.models.ListMatchingResponse`; call again
+            with ``cursor=result.next_cursor`` while ``result.has_more``.
+
+        Raises:
+            ValueError: ``max_chars`` is out of range (before any request).
+            KaguraNotFoundError: The context does not exist or is not
+                accessible.
+            KaguraError: Another server-side refusal (``validation_error``:
+                an unknown filter, ``order_by`` or ``direction``).
+            KaguraResponseError: The reply does not match
+                :class:`~kagura_memory.models.ListMatchingResponse`
+                (``operation="list"``).
+        """
+        arguments: dict[str, Any] = {"context_id": context_id}
+        if filters is not None:
+            arguments["filters"] = filters
+        if order_by is not None:
+            arguments["order_by"] = order_by
+        if direction is not None:
+            arguments["direction"] = direction
+        if cursor is not None:
+            arguments["cursor"] = cursor
+        if limit is not None:
+            arguments["limit"] = limit
+        if include_details:
+            arguments["include_details"] = True
+        if max_chars is not None:
+            _validate_max_chars(max_chars)
+            arguments["max_chars"] = max_chars
+        result = await self._call_tool_checked("list", arguments)
+        return parse_response(ListMatchingResponse, result, operation="list")
+
+    async def remember_batch(
+        self,
+        context_id: str,
+        items: list[dict[str, Any]],
+        *,
+        atomic: bool | None = None,
+        dedupe: Literal["suggest", "check", "off"] | None = None,
+        tags_normalize: bool | None = None,
+        verbose: bool | None = None,
+    ) -> RememberBatchResult:
+        """Store up to 50 memories in one call.
+
+        Calls the ``remember_batch`` MCP tool (memory-cloud v0.93.0+, #1853).
+        Each item is validated and limited like a single :meth:`remember`.
+        Without ``atomic`` each item is written and reported on its own; with
+        ``atomic=True`` the batch is one transaction — a failing item, or a
+        ``dedupe="check"`` candidate, rolls everything back and the other
+        items come back ``skipped``.
+
+        Args:
+            context_id: Context UUID; it applies to every item.
+            items: 1-50 dicts of the server's ``remember`` arguments, by
+                their wire names: ``summary``, ``content`` and ``type`` are
+                required, plus any of ``importance``, ``tags``,
+                ``source_uri``, ``source_type``, ``context_summary``,
+                ``details`` (a tool guardrail is
+                ``details={"tool_trigger": {...}}``), ``context``,
+                ``delivery_mode``, ``linked_memory_ids``,
+                ``linked_source_uris``, ``supersedes`` — no SDK defaults are
+                added. An undeclared key fails that item
+                (``invalid_argument``; a whole atomic batch is refused).
+            atomic: ``True``: all or nothing. Server default ``False``.
+            dedupe: As ``remember``'s, applied per item: ``"suggest"``
+                (server default), ``"check"`` (a near-duplicate is returned as
+                a ``duplicate_candidate`` row instead of written) or
+                ``"off"``.
+            tags_normalize: ``True`` stores each item's tags under the
+                context's established spelling (reported in ``lint``).
+            verbose: ``True`` keeps ``persistence.detail`` on each row.
+
+        Returns:
+            :class:`~kagura_memory.models.RememberBatchResult` with one row
+            per item. Check ``failed`` / ``candidates`` / ``skipped`` and
+            each row's ``status``; on ``committed_after_timeout`` every item
+            is stored — do not resend.
+
+        Raises:
+            ValueError: ``items`` is empty or holds more than 50 items, an
+                item carries ``context_id``, ``dedupe``, ``tags_normalize`` or
+                ``verbose`` (batch-level here), or an item's ``tags`` break
+                the 50-tag / 100-character cap (all before any request).
+            TypeError: ``items`` is not a list, or an item is not a dict.
+            KaguraQuotaError: An atomic batch did not fit the daily quota
+                (``quota_exceeded``; nothing was written, a smaller batch may
+                fit).
+            KaguraCapacityLockedError: The workspace is over its Free
+                capacity.
+            KaguraError: Nothing was written and an item failed —
+                ``code == "batch_failed"`` (or ``"batch_refused"`` for an
+                atomic batch with an invalid item, ``"timeout"`` for an atomic
+                batch rolled back at its time limit), with the per-item rows
+                in ``details["results"]``. A ``dedupe_unavailable`` item
+                (the duplicate check is down) is such a row; retry it or send
+                ``dedupe="off"``.
+            KaguraResponseError: The reply does not match
+                :class:`~kagura_memory.models.RememberBatchResult`
+                (``operation="remember_batch"``).
+        """
+        arguments: dict[str, Any] = {
+            "context_id": context_id,
+            "items": _checked_batch_items(items),
+        }
+        if atomic is not None:
+            arguments["atomic"] = atomic
+        if dedupe is not None:
+            arguments["dedupe"] = dedupe
+        if tags_normalize is not None:
+            arguments["tags_normalize"] = tags_normalize
+        if verbose is not None:
+            arguments["verbose"] = verbose
+        result = await self._call_tool_checked("remember_batch", arguments)
+        return parse_response(RememberBatchResult, result, operation="remember_batch")
+
     async def create_context(
         self,
         name: str,
@@ -3807,3 +4150,52 @@ async def _collect_pages(client: KaguraClient, tool: str, model: type[_T], key: 
     raise KaguraResponseError(
         f"{tool}: the list did not end within {_MAX_AUTO_PAGES} pages", operation=tool
     )
+
+
+# ---------------------------------------------------------------------------
+# Session tools (#301): local checks mirroring the server's own bounds
+# ---------------------------------------------------------------------------
+
+# bootstrap's max_chars floor (server ``BOOTSTRAP_INDEX_MIN_CHARS``, v0.115.0+)
+# and the budget below which ``format="full"`` is refused (``MIN_MAX_CHARS``).
+_BOOTSTRAP_MIN_CHARS = 2_000
+_FULL_FORMAT_MIN_CHARS = 10_000
+_MAX_CHARS_LIMIT = 100_000
+# remember_batch items (server ``MAX_BATCH_ITEMS``) and the remember arguments
+# that are set on the batch, never per item (``_BATCH_LEVEL`` + context_id).
+_BATCH_MAX_ITEMS = 50
+_BATCH_LEVEL_KEYS = ("context_id", "dedupe", "tags_normalize", "verbose")
+
+
+def _checked_batch_items(items: Any) -> list[dict[str, Any]]:
+    """Reject a ``remember_batch`` ``items`` list the server would refuse whole.
+
+    Per-item rules the server reports per item (a missing ``summary``, an
+    unknown key) stay the server's; only the batch-level keys and the tag
+    cap — which :meth:`KaguraClient.remember` also checks — are refused here.
+
+    Raises:
+        TypeError: ``items`` is not a list, or an item is not a dict.
+        ValueError: Not 1-50 items, an item carries a batch-level key, or an
+            item's ``tags`` list breaks the 50-tag / 100-character cap.
+    """
+    if not isinstance(items, list):
+        raise TypeError(f"items must be a list of dicts, got {type(items).__name__}")
+    if not 1 <= len(items) <= _BATCH_MAX_ITEMS:
+        raise ValueError(f"items must hold 1 to {_BATCH_MAX_ITEMS} items, got {len(items)}")
+    for index, item in enumerate(items):
+        if not isinstance(item, dict):
+            raise TypeError(f"items[{index}] must be a dict, got {type(item).__name__}")
+        batch_level = [key for key in _BATCH_LEVEL_KEYS if key in item]
+        if batch_level:
+            raise ValueError(
+                f"items[{index}] carries {', '.join(batch_level)}: set the context and "
+                "dedupe / tags_normalize / verbose on remember_batch itself, not on an item"
+            )
+        tags = item.get("tags")
+        if isinstance(tags, list):
+            try:
+                _validate_memory_tags(tags)
+            except ValueError as e:
+                raise ValueError(f"items[{index}]: {e}") from None
+    return items
