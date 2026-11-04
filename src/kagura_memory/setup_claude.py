@@ -195,8 +195,9 @@ async def _test_connection(
     """Test the connection; return the first page of ``list_contexts``.
 
     A connectivity check, so one page is enough: from memory-cloud 0.82.0
-    (#1743) it holds the 100 most recently used contexts, with ``has_more``
-    when more follow (an older server returns every context). The
+    (#1743) it holds at most the 100 most recently used contexts (fewer when
+    the page reaches the server's character budget), with ``has_more`` when
+    more follow (an older server returns every context). The
     suggested context and the pick lists offer this page only; a context
     given by name is also looked up past it (:func:`_lookup_context`).
     """
@@ -260,9 +261,9 @@ def _lookup_context(
     0.82.0+) is a name outside it looked up on every page with
     :func:`_find_context_by_name`, on the credential ``api_key`` /
     ``mcp_url`` / ``profile`` name (as for :func:`_make_client`). A UUID is
-    not looked up, and neither is a value the server's ``name_contains``
-    refuses (blank, or longer than a context name can be): the caller uses
-    those as given.
+    not looked up, and neither is a value ``name_contains`` cannot narrow
+    by: blank (the server reads it as no filter) or longer than a context
+    name can be (the server refuses it). The caller uses those as given.
 
     Raises:
         KaguraResponseError: See :func:`_find_context_by_name`.
