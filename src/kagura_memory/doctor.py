@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from ._auth import _SOURCE_LABEL, _OAuthAuth, _resolve_auth, _StaticAuth
-from ._http import validate_https_url
+from ._http import mcp_url_query_values, validate_https_url
 from ._version import meets_minimum, parse_version
 from .auth.cli import _redact_token
 from .auth.credentials import REFRESH_SKEW_SEC, load_credentials_file
@@ -713,7 +713,11 @@ def run_doctor(*, project_dir: Path | None = None, profile: str | None = None) -
         https_check = _check_https(resolved.mcp_url)
         checks.append(https_check)
         if https_check.status == "pass":
-            checks.extend(asyncio.run(_check_server(resolved, profile=profile)))
+            server_checks = asyncio.run(_check_server(resolved, profile=profile))
+            checks.extend(server_checks)
+            # A server check that failed already says why tools/list would fail.
+            if all(check.status != "fail" for check in server_checks):
+                checks.extend(asyncio.run(_check_tool_listing(resolved, profile=profile)))
         else:
             checks.append(
                 DoctorCheck(
@@ -732,3 +736,69 @@ def run_doctor(*, project_dir: Path | None = None, profile: str | None = None) -
         )
 
     return DoctorReport(checks=checks)
+
+
+def _doctor_client(resolved: _StaticAuth | _OAuthAuth, profile: str | None) -> KaguraClient:
+    """A :class:`KaguraClient` on the credential doctor resolved, as ``_check_server`` builds it."""
+    if isinstance(resolved, _StaticAuth):
+        return KaguraClient(api_key=resolved.api_key, mcp_url=resolved.mcp_url)
+    return KaguraClient(mcp_url=resolved.mcp_url, profile=profile)
+
+
+def _tool_view(mcp_url: str) -> dict[str, Any]:
+    """What ``mcp_url``'s query asks ``tools/list`` for, read as memory-cloud reads it.
+
+    The first value of each key wins. ``tools`` is an allowlist that replaces
+    the profile and ignores ``add_tools``; with no ``profile`` memory-cloud
+    0.93.0+ lists ``core`` (memory-cloud#1849). A blank ``profile=`` is not
+    the default: the server fails ``tools/list`` for it.
+    """
+    query = mcp_url_query_values(mcp_url)
+    if "tools" in query:
+        return {"tools": query["tools"]}
+    profile = (query["profile"].strip() or "(empty)") if "profile" in query else "core (default)"
+    view: dict[str, Any] = {"profile": profile}
+    add_tools = [name for part in query.get("add_tools", "").split(",") if (name := part.strip())]
+    if add_tools:
+        view["add_tools"] = add_tools
+    return view
+
+
+async def _check_tool_listing(
+    resolved: _StaticAuth | _OAuthAuth, *, profile: str | None = None
+) -> list[DoctorCheck]:
+    """``tools/list`` over the resolved MCP URL: how many tools, and which view (#300).
+
+    A profile is a view, not an authorization boundary: ``tools/call`` reaches
+    an unlisted tool too, so a short list never breaks a ``KaguraClient``
+    method. It does decide what an MCP client following ``tools/list`` sees.
+    """
+    view = _tool_view(resolved.mcp_url)
+    if "tools" in view:
+        shown = f"tools allowlist {view['tools']}"
+    else:
+        shown = f"profile {view['profile']}"
+        if "add_tools" in view:
+            shown += f" + add_tools {', '.join(view['add_tools'])}"
+    details: dict[str, Any] = {"mcp_url": resolved.mcp_url, **view}
+    try:
+        async with _doctor_client(resolved, profile) as client:
+            tools = await client.get_tool_definitions()
+    except (KaguraError, ValueError) as exc:
+        return [
+            DoctorCheck(
+                section="mcp",
+                status="fail",
+                message=f"tools/list failed ({shown}): {_exc_message(exc)}",
+                details=details,
+            )
+        ]
+    details["tool_count"] = count = len(tools)
+    return [
+        DoctorCheck(
+            section="mcp",
+            status="pass",
+            message=f"tools/list: {count} tool{'' if count == 1 else 's'} ({shown})",
+            details=details,
+        )
+    ]
