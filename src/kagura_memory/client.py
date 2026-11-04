@@ -5,8 +5,9 @@ import itertools
 import json
 import logging
 import math
+import re
 import warnings
-from datetime import datetime
+from datetime import UTC, date, datetime
 from typing import Any, Literal, Self, TypeVar, get_args
 from urllib.parse import quote
 
@@ -48,6 +49,7 @@ from .models import (
     AgentBootstrapResponse,
     ContextInfo,
     ContextTagsResponse,
+    DedupeMode,
     DuplicatesResponse,
     Edge,
     EmbeddingModelsResponse,
@@ -153,6 +155,76 @@ def _iso_arg(value: str | datetime) -> str:
     string passes through untouched for the server to parse.
     """
     return value.isoformat() if isinstance(value, datetime) else value
+
+
+# ``observed_at`` input forms memory-cloud accepts (utils/observed_at.py, #2330):
+# extended ISO 8601 only, at most 40 characters, checked before the calendar.
+_OBSERVED_AT_MAX_CHARS = 40
+_OBSERVED_DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
+_OBSERVED_DATETIME = re.compile(
+    r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})?"
+)
+_OBSERVED_AT_HINT = (
+    "observed_at must be an ISO 8601 date (2024-03-07) or datetime (2024-03-07T10:00:00Z)"
+)
+
+
+def _observed_at_arg(value: object) -> str:
+    """Render an ``observed_at`` argument and refuse a form the server refuses.
+
+    A ``datetime`` becomes the server's stored form, ``YYYY-MM-DDTHH:MM:SSZ``:
+    naive means UTC (as for :meth:`KaguraClient.record_measurement`), an aware
+    one is converted, and fractional seconds are dropped as the server drops
+    them. A ``date`` becomes ``YYYY-MM-DD``. A string is sent as given once it
+    passes the server's own shape and calendar check: a date ``YYYY-MM-DD``,
+    or ``YYYY-MM-DDTHH:MM:SS`` with optional fractional seconds and an
+    optional ``Z`` / ``±HH:MM`` offset (memory-cloud v0.127.0, #2330; basic
+    forms such as ``20240307``, a space separator or a time without seconds
+    are refused there with ``validation_error``).
+
+    Raises:
+        ValueError: ``value`` is not such a string, ``date`` or ``datetime``.
+    """
+    if isinstance(value, datetime):
+        moment = value if value.tzinfo is None else value.astimezone(UTC)
+        return (
+            f"{moment.year:04d}-{moment.month:02d}-{moment.day:02d}"
+            f"T{moment.hour:02d}:{moment.minute:02d}:{moment.second:02d}Z"
+        )
+    if isinstance(value, date):
+        return value.isoformat()
+    if not isinstance(value, str):
+        raise ValueError(f"{_OBSERVED_AT_HINT}, got {type(value).__name__}")
+    text = value.strip()
+    if not text or len(text) > _OBSERVED_AT_MAX_CHARS:
+        raise ValueError(f"{_OBSERVED_AT_HINT}, got {value!r}")
+    try:
+        if _OBSERVED_DATE.fullmatch(text):
+            date.fromisoformat(text)
+        elif _OBSERVED_DATETIME.fullmatch(text):
+            datetime.fromisoformat(text)
+        else:
+            raise ValueError(text)
+    except (ValueError, OverflowError) as e:
+        raise ValueError(f"{_OBSERVED_AT_HINT}, got {value!r}") from e
+    return value
+
+
+def _check_observed_at_agrees(observed_at: str, details: dict[str, Any] | None, name: str) -> None:
+    """Refuse an ``observed_at`` that ``details`` contradicts, as the server does.
+
+    The server folds the argument into ``details.observed_at`` and compares
+    the two values as sent (``MemoryService._fold_observed_at``), so a
+    ``details_patch`` ``"observed_at": None`` — a key delete — disagrees too.
+
+    Raises:
+        ValueError: ``details`` holds an ``observed_at`` other than ``observed_at``.
+    """
+    if details is not None and "observed_at" in details and details["observed_at"] != observed_at:
+        raise ValueError(
+            f"{name}['observed_at'] and observed_at disagree; give one of them "
+            "(the server answers validation_error)"
+        )
 
 
 class KaguraClient:
@@ -593,8 +665,18 @@ class KaguraClient:
         supersedes: str | None = None,
         *,
         tool_trigger: ToolTrigger | dict[str, Any] | None = None,
+        observed_at: str | date | datetime | None = None,
+        tags_normalize: bool = False,
+        dedupe: DedupeMode | None = None,
+        verbose: bool = False,
     ) -> dict[str, Any]:
         """Call remember MCP tool.
+
+        ``observed_at``, ``tags_normalize``, ``dedupe`` and ``verbose`` are
+        keyword-only and sent only when set, so a server that predates one
+        never sees it. From memory-cloud v0.82.0 (#1742) a server refuses an
+        argument it does not declare (``KaguraError``, code
+        ``invalid_argument``); one before v0.82.0 ignores it.
 
         Args:
             context_id: Context ID.
@@ -673,29 +755,70 @@ class KaguraClient:
                 validates the patterns and returns
                 ``invalid details.tool_trigger: <code>: ...`` on a bad one.
                 Keyword-only.
+            observed_at: When the fact held or the event happened — never the
+                write time (memory-cloud v0.127.0+, #2330). A ``YYYY-MM-DD``
+                date or an extended ISO 8601 datetime string, or a ``date`` /
+                ``datetime`` (a naive ``datetime`` means UTC). The server
+                stores it as ``details.observed_at``: a date as written, a
+                datetime in UTC as ``YYYY-MM-DDTHH:MM:SSZ``. :meth:`recall`
+                filters on it (``observed_after`` / ``observed_before``) and
+                its rows, :meth:`reference` and :meth:`list_memories` carry
+                it. Checked locally like the server checks it. Keyword-only.
+            tags_normalize: ``True`` stores each tag under the context's
+                established spelling when the two differ only by case,
+                separators, a simple plural or (v0.110.0+, #2028) hiragana /
+                katakana or one word-final ``ー``, and reports each mapping in
+                ``lint`` as ``{code: "tag_normalized", subject, replacement}``
+                (memory-cloud v0.93.0+, #1853; tags whose numbers differ are
+                never mapped, v0.95.0+, #1871). Sent only when ``True``.
+                Keyword-only.
+            dedupe: ``"suggest"`` (the server default), ``"check"`` or
+                ``"off"`` (memory-cloud v0.93.0+, #1853; see
+                :data:`~kagura_memory.models.DedupeMode`). With ``"check"`` a
+                near-duplicate (similarity ≥ 0.85 to a live memory of the
+                context) writes nothing and the reply is ``{status:
+                "duplicate_candidate", candidate: {memory_id, summary,
+                similarity, supersedable?}}`` — returned, not raised: store
+                with ``supersedes=<id>``, update the existing memory, or
+                repeat with ``"off"`` (``supersedable: False`` marks another
+                member's memory, which ``supersedes`` cannot take). ``"off"``
+                writes and opts this memory out of supersede suggestions for
+                good (#2024). Keyword-only.
+            verbose: ``True`` asks for ``persistence.detail``, the lifecycle
+                prose the server sends only with ``verbose=true`` since
+                memory-cloud v0.93.0 (#1851). Sent only when ``True``.
+                Keyword-only.
 
         Returns:
-            API response with ``memory_id``, ``scope`` and the context fields.
-            Since memory-cloud v0.65.0 two optional keys may follow, each
-            absent (never ``null``) when it does not apply:
-            ``persistence`` — ``{scope, committed, promotes_via,
+            API response with ``memory_id``, ``scope``, ``version`` (the
+            memory's version, :meth:`update_memory`'s ``expected_version``;
+            memory-cloud v0.113.0+, #2043) and the context fields. Since
+            memory-cloud v0.65.0 two optional keys may follow, each absent
+            (never ``null``) when it does not apply: ``persistence`` —
+            ``{scope, committed, promotes_via,
             consolidation_archive_min_age_days}``, how the scope the memory
             landed in is consolidated; since memory-cloud v0.93.0 (#1851) the
-            ``detail`` prose comes only with the server's ``verbose=true``,
-            which this method does not send — and ``lint`` —
-            ``[{code, hint, subject?}]``, advisory hints about a write that
-            will recall poorly (``summary_short``, ``summary_long``,
-            ``summary_narrative``, ``no_tags``, ``tag_near_duplicate``). The
-            memory is stored either way; act on a hint with
-            :meth:`update_memory`. Since v0.108.0 a cut summary adds
-            ``summary_truncated: true`` and ``summary_original_length`` (the
-            ``summary_long`` hint is then left out).
+            ``detail`` prose comes only with the server's ``verbose=true``
+            (``verbose=True`` here) — and ``lint`` — ``[{code, hint,
+            subject?}]``, advisory hints about a write that will recall
+            poorly (``summary_short``, ``summary_long``,
+            ``summary_narrative``, ``no_tags``, ``tag_near_duplicate``; and
+            ``tag_normalized`` with ``tags_normalize``). The memory is stored
+            either way; act on a hint with :meth:`update_memory`. Since
+            v0.108.0 a cut summary adds ``summary_truncated: true`` and
+            ``summary_original_length`` (the ``summary_long`` hint is then
+            left out). With ``dedupe="check"`` the reply may instead be the
+            ``duplicate_candidate`` one described there, with nothing
+            written: check ``result["status"]``.
 
         Raises:
             ValueError: ``tool_trigger`` is given and ``details`` already has
                 a ``"tool_trigger"`` key — pass the guardrail one way only;
-                or ``tags`` holds more than 50 tags or a tag longer than
-                100 characters.
+                ``tags`` holds more than 50 tags or a tag longer than 100
+                characters; ``observed_at`` is not a form the server accepts,
+                or disagrees with ``details["observed_at"]`` (the server's
+                ``validation_error``); or ``dedupe`` is not ``"suggest"`` /
+                ``"check"`` / ``"off"``. Checked before any request.
             KaguraCapacityLockedError: The workspace is over its Free
                 capacity (memory-cloud v0.99.0+); ``cleanup_url`` says where
                 to clean up.
@@ -707,10 +830,18 @@ class KaguraClient:
                 "payload_too_large"`` for a memory over 1 MB across summary,
                 context_summary, content and details (v0.108.0+, with
                 ``limit`` / ``actual`` in ``details``; older servers send an
-                untyped ``quota_exceeded``). Match ``code``, not the message.
+                untyped ``quota_exceeded``), or ``code ==
+                "dedupe_unavailable"`` when ``dedupe="check"`` could not embed
+                the summary (nothing written). Match ``code``, not the
+                message.
         """
         _validate_memory_tags(tags)
         details = _details_with_tool_trigger(details, tool_trigger)
+        observed = None if observed_at is None else _observed_at_arg(observed_at)
+        if observed is not None:
+            _check_observed_at_agrees(observed, details, "details")
+        if dedupe is not None and dedupe not in get_args(DedupeMode):
+            raise ValueError(f"dedupe must be 'suggest', 'check' or 'off', got {dedupe!r}")
         arguments: dict[str, Any] = {
             "context_id": context_id,
             "summary": summary,
@@ -740,6 +871,14 @@ class KaguraClient:
             arguments["linked_source_uris"] = linked_source_uris
         if supersedes is not None:
             arguments["supersedes"] = supersedes
+        if observed is not None:
+            arguments["observed_at"] = observed
+        if tags_normalize:
+            arguments["tags_normalize"] = True
+        if dedupe is not None:
+            arguments["dedupe"] = dedupe
+        if verbose:
+            arguments["verbose"] = True
 
         return await self._call_tool_checked("remember", arguments)
 

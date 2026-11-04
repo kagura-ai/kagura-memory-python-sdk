@@ -1856,6 +1856,15 @@ RecallVerbosity = Literal["compact", "full"]
 ``"compact"`` is the server default; ``"full"`` adds ``tags``,
 ``context_summary``, ``scope``, ``version`` and the uncut ``summary``."""
 
+DedupeMode = Literal["suggest", "check", "off"]
+"""Valid ``remember`` ``dedupe`` values (memory-cloud v0.93.0+, #1853; request side only).
+
+``"suggest"`` is the server default: write, and flag an older near-duplicate
+later as ``supersede_candidate``. ``"check"`` writes nothing when a live
+memory of the context is a near-duplicate and replies ``status:
+"duplicate_candidate"`` instead. ``"off"`` writes and never suggests for this
+memory, permanently (#2024)."""
+
 _MAX_CHARS_MIN = 10_000
 _MAX_CHARS_MAX = 100_000
 # recall's ``full``: how many top results carry content (memory-cloud
