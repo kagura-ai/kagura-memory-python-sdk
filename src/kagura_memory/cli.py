@@ -7,7 +7,7 @@ import sys
 from collections.abc import Awaitable, Callable, Iterable
 from datetime import datetime
 from pathlib import Path
-from typing import Any, get_args
+from typing import Any, Literal, get_args
 
 import click
 
@@ -532,22 +532,23 @@ def doctor(profile, json_output):
     "mapping as tag_normalized (server v0.93.0+).",
 )
 def remember(
-    context_id,
-    summary,
-    content,
-    memory_type,
-    importance,
-    tags,
-    source_uri,
-    source_type,
-    linked_memory_ids,
-    linked_source_uris,
-    details,
-    location,
-    observed_at,
-    dedupe,
-    tags_normalize,
-):
+    context_id: str | None,
+    summary: str,
+    content: str,
+    memory_type: str,
+    importance: float,
+    tags: str | None,
+    source_uri: str | None,
+    # click.Choice(case_sensitive=False) returns the choice as listed.
+    source_type: Literal["file", "url", "vault", "api", "manual"] | None,
+    linked_memory_ids: str | None,
+    linked_source_uris: str | None,
+    details: str | None,
+    location: str | None,
+    observed_at: str | None,
+    dedupe: DedupeMode | None,
+    tags_normalize: bool,
+) -> None:
     """
     Store a memory directly (without AI analysis).
 
@@ -1158,25 +1159,25 @@ def _details_patch_refused(err: KaguraError) -> bool:
     "--memory-id; not with --details/--location/--merge-details (server v0.140.0+)",
 )
 def update_memory(
-    context_id,
-    memory_id,
-    external_id,
-    summary,
-    content,
-    memory_type,
-    importance,
-    tags,
-    add_tags,
-    remove_tags,
-    dismiss_supersede_candidate,
-    accept_supersede_candidate,
-    expected_version,
-    observed_at,
-    details,
-    location,
-    merge_details,
-    details_patch,
-):
+    context_id: str | None,
+    memory_id: str | None,
+    external_id: str | None,
+    summary: str | None,
+    content: str | None,
+    memory_type: str | None,
+    importance: float | None,
+    tags: str | None,
+    add_tags: tuple[str, ...],
+    remove_tags: tuple[str, ...],
+    dismiss_supersede_candidate: bool,
+    accept_supersede_candidate: bool,
+    expected_version: int | None,
+    observed_at: str | None,
+    details: str | None,
+    location: str | None,
+    merge_details: bool,
+    details_patch: str | None,
+) -> None:
     """
     Update an existing memory or upsert by external ID.
 
@@ -1280,6 +1281,9 @@ def update_memory(
     async def op(client: KaguraClient, ctx: str) -> dict[str, Any]:
         if patch is None:
             return await client.update_memory(context_id=ctx, details=details_payload, **edit)
+        # A patch without --memory-id was refused above.
+        assert memory_id is not None
+        target: str = memory_id
         one_call_patch: dict[str, Any] = patch
 
         async def _merge_via_reference(note: str, **write: Any) -> dict[str, Any]:
@@ -1289,7 +1293,7 @@ def update_memory(
                 f"0.140.0+; this server {note}",
                 err=True,
             )
-            current = await _current_details_for_merge(client, ctx, memory_id, flag)
+            current = await _current_details_for_merge(client, ctx, target, flag)
             merged = _apply_details_patch(current, one_call_patch, edit["observed_at"])
             return await client.update_memory(context_id=ctx, details=merged, **write)
 
@@ -1327,7 +1331,7 @@ def update_memory(
             )
         merged_reply = await _merge_via_reference(
             "ignored it (before 0.82.0), merging via reference() in a second call.",
-            memory_id=memory_id,
+            memory_id=target,
         )
         # The same server ignored the other arguments it does not know too.
         dropped = [
@@ -1624,16 +1628,16 @@ def context_update(context_id, display_name, description, summary, usage_guide, 
     "(server v0.115.0+)",
 )
 def context_search_config(
-    context_id,
-    semantic,
-    bm25,
-    fetch_factor,
-    rerank,
-    reranker,
-    reranker_model,
-    content_chunks,
-    llm_selector,
-):
+    context_id: str,
+    semantic: float | None,
+    bm25: float | None,
+    fetch_factor: int | None,
+    rerank: bool | None,
+    reranker: str | None,
+    reranker_model: str | None,
+    content_chunks: bool | None,
+    llm_selector: bool | None,
+) -> None:
     """
     Update search configuration for a context.
 
