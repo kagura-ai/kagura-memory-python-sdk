@@ -11,6 +11,7 @@ not wording, so a docstring can be reworded without breaking CI.
 from __future__ import annotations
 
 import inspect
+import re
 from pathlib import Path
 
 import pytest
@@ -52,10 +53,8 @@ _STALE_PHRASES = [
     "_HARNESS_OAUTH_UNVERIFIED",
     # memory-cloud v0.135.0 (#2470): a URL without explore gets explore_hints_omitted.
     "present whenever ``include_explore_hints``",
-    # #299: memory-cloud v0.80.0 (#1693) answers a non-UUID context id with 422.
-    "answers a non-UUID here with an HTTP 500",
     # #299: memory-cloud v0.82.0 (#1740) re-adopts only server-minted session ids.
-    "as deployed (v0.75.0)",
+    "re-adopts the unknown id as a new session",
     "v0.75.0 skips that session check",
     "v0.75.0 as deployed re-adopts",
     # #299: persistence.detail needs verbose=true since memory-cloud v0.93.0 (#1851).
@@ -84,6 +83,24 @@ def test_no_stale_server_behaviour_in_docs(phrase: str) -> None:
         if phrase in path.read_text(encoding="utf-8")
     ]
     assert not offenders, f"{phrase!r} is stale server behaviour, found in {offenders}"
+
+
+def test_no_doc_says_a_non_uuid_is_a_500_without_the_422() -> None:
+    """memory-cloud v0.80.0 (#1693) answers a non-UUID context id with 422 ``VAL-001``.
+
+    The old HTTP 500 (#285) may be named only in the sentence or clause that
+    also names the 422 replacing it.
+    """
+    offenders = [
+        f"{path.relative_to(REPO_ROOT)}: {clause}"
+        for path in _doc_files()
+        for clause in re.split(r"(?<=[.;])\s+", " ".join(path.read_text(encoding="utf-8").split()))
+        if "non-UUID" in clause
+        and "500" in clause
+        and "422" not in clause
+        and "VAL-001" not in clause
+    ]
+    assert not offenders, "a non-UUID is a 422 since memory-cloud v0.80.0: " + " | ".join(offenders)
 
 
 @pytest.mark.parametrize(
