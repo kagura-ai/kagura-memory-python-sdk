@@ -50,10 +50,12 @@ _CONTEXT_ID_PATTERN = r"^[a-zA-Z0-9_-]+$"
 # (#298): memory-cloud v0.108.0+ answers recall with 160-character summaries
 # and no tags unless asked, and v0.114.0+ puts up to 1,500 characters of
 # content on the top 3 hits, ahead of their tags; the hook asks for uncut
-# summaries with tags and no content. On a server below 0.114.0, which refuses
-# an argument it does not declare from 0.82.0, `kagura recall` drops the three
-# shape arguments itself and retries once, so this one command works on every
-# server (compact rows on 0.108.0-0.113.x; full rows before 0.108.0). 5,000
+# summaries with tags and no content. From 0.82.0 a server refuses an argument
+# it does not declare and names it; `kagura recall` then retries once without
+# the arguments named, so this one command gets uncut summaries with tags on
+# every server: 0.108.0-0.113.x keep --verbosity full and drop --full,
+# 0.82.0-0.107.x drop both (the full shape is their only one), and older
+# servers ignore both. No server before 0.114.0 sends content. 5,000
 # bytes hold five such rows (about 4,040 characters with 200-character ASCII
 # summaries; CJK text takes up to 3 bytes a character). Install and removal
 # match this command's fixed prefix (see _sdk_prefix), which every earlier
@@ -1094,10 +1096,11 @@ def run_setup_claude(
     ``normalize_add_tools`` and ``default_context`` to a canonical UUID.
 
     The SessionStart hook runs ``kagura recall --trusted-only --verbosity full
-    --full 0`` (uncut summaries with tags, no content; memory-cloud 0.114.0+).
-    On an older server the CLI drops ``--verbosity`` / ``--full`` /
-    ``--max-chars`` itself and retries once, so the same hook works there too
-    (compact rows on 0.108.0-0.113.x, full rows before 0.108.0).
+    --full 0``: uncut summaries with tags, no content. A server that refuses
+    one of those flags (memory-cloud 0.82.0-0.113.x) names it, and the CLI
+    retries once without the ones named, so the same hook gets that shape on
+    every server (0.108.0-0.113.x keep ``--verbosity full``; the full shape is
+    the only one before 0.108.0, and no server before 0.114.0 sends content).
     """
     if profile is not None:
         if api_key is not None:

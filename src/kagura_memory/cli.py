@@ -521,9 +521,30 @@ def remember(
     _run_client_command(op, context_id)
 
 
-# The memory-cloud release that declares each recall shape flag (#298). From
-# 0.82.0 the server refuses an argument it does not declare (invalid_argument).
-_RECALL_SHAPE_FLOORS = {"--verbosity": "0.108.0", "--full": "0.114.0", "--max-chars": "0.82.0"}
+# The memory-cloud release that declares each recall shape argument (#298).
+# From 0.82.0 the server refuses an argument it does not declare
+# (invalid_argument) and lists it in the envelope's ``unknown_arguments``.
+_RECALL_SHAPE_FLOORS = {"verbosity": "0.108.0", "full": "0.114.0", "max_chars": "0.82.0"}
+
+
+def _refused_shape_args(err: KaguraError, shape: dict[str, Any]) -> list[str]:
+    """The recall shape arguments to retry without after ``err``; ``[]``: no retry (#298).
+
+    Only an ``invalid_argument`` refusal of a call that sent one of them
+    counts, read from the code and never from the message. The server lists
+    what it refused in ``unknown_arguments`` (``KaguraError.details``), so
+    only those are dropped: 0.108.0-0.113.x keeps ``verbosity``. A refusal
+    that lists none of them is not about them. Without a readable list
+    (``details`` missing or without it), every one that was sent is dropped.
+    """
+    if getattr(err, "code", None) != "invalid_argument":
+        return []
+    sent = [name for name, value in shape.items() if value is not None]
+    details = getattr(err, "details", None)
+    listed = details.get("unknown_arguments") if isinstance(details, dict) else None
+    if not isinstance(listed, list):
+        return sent
+    return [name for name in sent if name in listed]
 
 
 @main.command()
@@ -576,8 +597,8 @@ def recall(query, context_id, k, rerank, trusted_only, verbosity, full, max_char
     sends it) right after its summary. --verbosity, --full and --max-chars
     are sent only when given. A server from v0.82.0 that predates one of
     them refuses it (invalid_argument); the command then retries once
-    without all three and says so on stderr, so on such a server you get
-    its default shape.
+    without the ones the server lists as refused (all three it sent when the
+    reply does not list them) and says so on stderr.
 
     \b
     Examples:
@@ -590,31 +611,33 @@ def recall(query, context_id, k, rerank, trusted_only, verbosity, full, max_char
       kagura recall "release notes" --full 0
     """
     filters = {"trust_tier": "trusted"} if trusted_only else None
-    shape = {"verbosity": verbosity, "full": full, "max_chars": max_chars}
-    sent = [f"--{name.replace('_', '-')}" for name, value in shape.items() if value is not None]
+    shape: dict[str, Any] = {"verbosity": verbosity, "full": full, "max_chars": max_chars}
 
     async def op(client: KaguraClient, ctx: str) -> dict[str, Any]:
-        async def call(**shape_args: Any) -> dict[str, Any]:
+        async def call(shape_args: dict[str, Any]) -> dict[str, Any]:
             return await client.recall(
                 context_id=ctx, query=query, k=k, use_rerank=rerank, filters=filters, **shape_args
             )
 
         try:
-            return await call(**shape)
+            return await call(shape)
         except KaguraError as e:
-            # #298: from 0.82.0 memory-cloud refuses an argument it does not
-            # declare, so a server below 0.114.0 refuses the SessionStart
-            # hook's --verbosity / --full. The rule is the code and "did we
-            # send one" — never the message, which the server words for people.
-            if not sent or getattr(e, "code", None) != "invalid_argument":
+            # #298: a server below 0.114.0 refuses the SessionStart hook's
+            # --full, and below 0.108.0 its --verbosity too. One retry.
+            dropped = _refused_shape_args(e, shape)
+            if not dropped:
                 raise
-        floors = ", ".join(f"{flag} {_RECALL_SHAPE_FLOORS[flag]}+" for flag in sent)
+        flags = [f"--{name.replace('_', '-')}" for name in dropped]
+        needs = ", ".join(
+            f"{flag} needs memory-cloud {_RECALL_SHAPE_FLOORS[name]}+"
+            for flag, name in zip(flags, dropped, strict=True)
+        )
         click.echo(
-            f"note: the server refused a recall with {', '.join(sent)} (invalid_argument; "
-            f"memory-cloud declares {floors}); retried without them.",
+            f"note: the server refused the recall (invalid_argument); "
+            f"retried without {', '.join(flags)} ({needs}).",
             err=True,
         )
-        return await call(verbosity=None, full=None, max_chars=None)
+        return await call({**shape, **dict.fromkeys(dropped)})
 
     _run_client_command(op, context_id)
 

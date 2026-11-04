@@ -707,7 +707,7 @@ kagura recall "project context" --trusted-only     # exclude connector-ingested 
 kagura recall "project context" --verbosity full   # uncut summaries + tags; compact is the server default (v0.108.0+)
 kagura recall "deploy runbook" --full 1 --max-chars 40000   # content on the top hit only (v0.114.0+); reply budget (v0.82.0+)
 # A server that refuses one of --verbosity/--full/--max-chars (invalid_argument) gets one
-# retry without all three, with a note on stderr.
+# retry without the ones it names (all three sent when it names none), with a note on stderr.
 kagura explore -m "memory-uuid" --depth 3
 kagura forget -m "memory-uuid"
 kagura update-memory -m "memory-uuid" --dismiss-supersede-candidate   # server v0.65.0+
@@ -920,10 +920,12 @@ and which profile it lists (its `tools` section).
 server v0.24.0+), so connector-ingested memories never reach the session unreviewed,
 and on memory-cloud 0.114.0+ the five hits arrive as uncut summaries with their tags
 and without content: since 0.108.0 recall is compact unless asked, and since 0.114.0
-it puts content on the top hits. On an older server, which from 0.82.0 refuses an
-argument it does not declare, `kagura recall` retries once without `--verbosity` /
-`--full`, so the same hook works on every server: compact rows on 0.108.0–0.113.x,
-full rows before 0.108.0. Re-running setup replaces an earlier SDK-written hook in
+it puts content on the top hits. From 0.82.0 a server refuses an argument it does
+not declare and names it, and `kagura recall` retries once without the ones named,
+so the same hook gets uncut summaries with tags on every server: 0.108.0–0.113.x
+keep `--verbosity full` and drop `--full`, 0.82.0–0.107.x drop both (the full shape
+is their only one), older servers ignore both, and no server before 0.114.0 sends
+content. Re-running setup replaces an earlier SDK-written hook in
 place. `--no-session-hook`, `--no-sync-hook` (the
 `.claude/memory` sync) and `--no-commands` (`/kagura-recall` · `/kagura-remember`)
 skip them; re-running with one removes only what setup itself wrote. When the

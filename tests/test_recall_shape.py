@@ -456,11 +456,12 @@ def test_bootstrap_envelope_without_the_marker_reads_false():
 )
 @pytest.mark.asyncio
 async def test_an_undeclared_argument_refusal_carries_the_code_kagura_recall_retries_on():
-    """`kagura recall` retries without its shape flags on exactly this error (#298).
+    """`kagura recall` retries without the refused shape flags on exactly this error (#298).
 
     From 0.82.0 a server answers an argument its schema does not declare with
-    an ``invalid_argument`` envelope (memory-cloud ``find_unknown_arguments``);
-    the CLI keys on the code, never on the message.
+    an ``invalid_argument`` envelope listing it in ``unknown_arguments``
+    (memory-cloud ``find_unknown_arguments``); the CLI keys on the code and
+    that list, never on the message.
     """
     reply = {
         "status": "error",
@@ -480,3 +481,5 @@ async def test_an_undeclared_argument_refusal_carries_the_code_kagura_recall_ret
     finally:
         await client.close()
     assert getattr(excinfo.value, "code", None) == "invalid_argument"
+    # The CLI drops only the arguments listed here (top level in the envelope).
+    assert getattr(excinfo.value, "details", {}).get("unknown_arguments") == ["full"]

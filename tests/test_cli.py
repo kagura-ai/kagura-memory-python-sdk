@@ -338,10 +338,19 @@ def test_session_start_hook_cap_keeps_five_full_rows_with_tags(mock_client_cls, 
         assert f'"row-{i}"\n      ]' in head  # row i's tags list, closed
 
 
-def _server_error(code: str | None, message: str = "refused") -> KaguraError:
-    """A KaguraError as the client raises it for an MCP error envelope with ``code``."""
+def _server_error(
+    code: str | None, message: str = "refused", unknown: list[str] | None = None
+) -> KaguraError:
+    """A KaguraError as the client raises it for an MCP error envelope with ``code``.
+
+    ``unknown`` is the envelope's ``unknown_arguments`` (memory-cloud
+    ``find_unknown_arguments``, top level since 0.82.0), which the client keeps
+    in ``KaguraError.details``; ``None`` leaves ``details`` unset.
+    """
     err = KaguraError(f"recall failed ({code}): {message}")
     err.code = code  # what the client's MCP error mapping sets (KaguraError.code)
+    if unknown is not None:
+        err.details = {"unknown_arguments": unknown, "allowed_arguments": ["context_id", "query"]}
     return err
 
 
@@ -361,40 +370,111 @@ def _recall_cli_raising(mock_client_cls, mock_config, side_effect, *args):
     return result, mock_client
 
 
+_HOOK_SHAPE_FLAGS = ("--trusted-only", "--verbosity", "full", "--full", "0")
+
+
+def _shape(call) -> tuple:
+    return call.kwargs["verbosity"], call.kwargs["full"], call.kwargs["max_chars"]
+
+
+@pytest.mark.parametrize(
+    ("unknown", "retried", "note"),
+    [
+        # 0.108.0-0.113.x: verbosity is declared, full is not.
+        (
+            ["full"],
+            ("full", None, None),
+            "retried without --full (--full needs memory-cloud 0.114.0+).",
+        ),
+        # 0.82.0-0.107.x: neither is declared.
+        (
+            ["full", "verbosity"],
+            (None, None, None),
+            "retried without --verbosity, --full (--verbosity needs memory-cloud 0.108.0+, "
+            "--full needs memory-cloud 0.114.0+).",
+        ),
+        # No readable list (details absent): every shape flag that was sent goes.
+        (
+            None,
+            (None, None, None),
+            "retried without --verbosity, --full (--verbosity needs memory-cloud 0.108.0+, "
+            "--full needs memory-cloud 0.114.0+).",
+        ),
+    ],
+    ids=["0.108-0.113-drops-full", "0.82-0.107-drops-both", "no-details-drops-all"],
+)
 @patch("kagura_memory.cli.load_config")
 @patch("kagura_memory.cli.KaguraClient")
-def test_recall_retries_once_without_shape_flags_on_invalid_argument(mock_client_cls, mock_config):
-    """#298: a server below 0.114.0 refuses --verbosity / --full; the hook still gets rows."""
+def test_recall_retries_once_without_the_refused_shape_flags(
+    mock_client_cls, mock_config, unknown, retried, note
+):
+    """#298: the SessionStart hook's flags on an older server — one retry, still rows."""
     reply = {"results": [{"memory_id": "m1", "summary": "found"}]}
+    error = _server_error("invalid_argument", unknown=unknown)
     result, mock_client = _recall_cli_raising(
-        mock_client_cls,
-        mock_config,
-        [_server_error("invalid_argument"), reply],
-        "--trusted-only",
-        "--verbosity",
-        "full",
-        "--full",
-        "0",
+        mock_client_cls, mock_config, [error, reply], *_HOOK_SHAPE_FLAGS
     )
 
     assert result.exit_code == 0, result.output
     assert json.loads(result.stdout) == reply
-    first, second = (call.kwargs for call in mock_client.recall.await_args_list)
-    assert (first["verbosity"], first["full"], first["max_chars"]) == ("full", 0, None)
-    assert (second["verbosity"], second["full"], second["max_chars"]) == (None, None, None)
+    first, second = mock_client.recall.await_args_list
+    assert _shape(first) == ("full", 0, None)
+    assert _shape(second) == retried
     same = ("context_id", "query", "k", "use_rerank", "filters")
-    assert {key: second[key] for key in same} == {key: first[key] for key in same}
-    assert second["filters"] == {"trust_tier": "trusted"}
+    assert {key: second.kwargs[key] for key in same} == {key: first.kwargs[key] for key in same}
+    assert second.kwargs["filters"] == {"trust_tier": "trusted"}
     assert result.stderr.count("note:") == 1
-    assert "--verbosity 0.108.0+, --full 0.114.0+" in result.stderr
+    assert note in result.stderr
     assert "--max-chars" not in result.stderr
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_recall_keeps_an_accepted_shape_flag_on_retry(mock_client_cls, mock_config):
+    """--max-chars is declared from 0.82.0, so a refusal of --full alone keeps it."""
+    reply = {"results": []}
+    result, mock_client = _recall_cli_raising(
+        mock_client_cls,
+        mock_config,
+        [_server_error("invalid_argument", unknown=["full"]), reply],
+        "--full",
+        "1",
+        "--max-chars",
+        "40000",
+    )
+
+    assert result.exit_code == 0, result.output
+    assert [_shape(call) for call in mock_client.recall.await_args_list] == [
+        (None, 1, 40_000),
+        (None, None, 40_000),
+    ]
+
+
+@pytest.mark.parametrize(
+    "unknown", [["k"], [], ["verbosity"]], ids=["other-arg", "empty", "unsent"]
+)
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_recall_does_not_retry_a_refusal_of_other_arguments(mock_client_cls, mock_config, unknown):
+    """A listed refusal that names none of the shape flags sent is not about them."""
+    result, mock_client = _recall_cli_raising(
+        mock_client_cls,
+        mock_config,
+        _server_error("invalid_argument", unknown=unknown),
+        "--full",
+        "0",
+    )
+
+    assert result.exit_code == 1
+    assert mock_client.recall.await_count == 1
+    assert "note:" not in result.stderr
 
 
 @patch("kagura_memory.cli.load_config")
 @patch("kagura_memory.cli.KaguraClient")
 def test_recall_does_not_retry_when_no_shape_flag_was_sent(mock_client_cls, mock_config):
     result, mock_client = _recall_cli_raising(
-        mock_client_cls, mock_config, _server_error("invalid_argument")
+        mock_client_cls, mock_config, _server_error("invalid_argument", unknown=["verbosity"])
     )
 
     assert result.exit_code == 1
@@ -409,21 +489,25 @@ def test_recall_retry_error_propagates_unchanged(mock_client_cls, mock_config):
     result, mock_client = _recall_cli_raising(
         mock_client_cls,
         mock_config,
-        [_server_error("invalid_argument"), _server_error("context_locked", "second failure")],
-        "--max-chars",
-        "40000",
+        [
+            _server_error("invalid_argument", unknown=["full"]),
+            _server_error("invalid_argument", "second failure", unknown=["full"]),
+        ],
+        "--full",
+        "0",
     )
 
+    # The second refusal is not retried again, even though it names --full.
     assert result.exit_code == 1
     assert mock_client.recall.await_count == 2
-    assert "recall failed (context_locked): second failure" in result.output
-    assert "--max-chars 0.82.0+" in result.stderr
+    assert "recall failed (invalid_argument): second failure" in result.output
+    assert result.stderr.count("note:") == 1
 
 
 @pytest.mark.parametrize(
     "error",
     [
-        _server_error("validation_error"),
+        _server_error("validation_error", unknown=["verbosity"]),
         _server_error(None),
         KaguraNotFoundError("recall: Context not found"),
     ],
