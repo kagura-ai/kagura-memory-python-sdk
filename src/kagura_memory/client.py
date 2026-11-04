@@ -3789,21 +3789,49 @@ async def _collect_pages(client: KaguraClient, tool: str, model: type[_T], key: 
         rows.extend(row for row in page if getattr(row, "id", None) not in returned_ids)
         returned_ids.update(getattr(row, "id", None) for row in page)
         returned_ids.discard(None)
-        if result.get("has_more") is not True:
+        cursor = _next_page_cursor(result, tool, seen)
+        if cursor is None:
             return rows
-        cursor = result.get("next_cursor")
-        if not isinstance(cursor, str) or not cursor:
-            raise KaguraResponseError(
-                f"{tool}: unexpected server response (has_more without a next_cursor)",
-                operation=tool,
-            )
-        if cursor in seen:
-            raise KaguraResponseError(
-                f"{tool}: unexpected server response (a page repeated an earlier next_cursor)",
-                operation=tool,
-            )
-        seen.add(cursor)
         arguments = {"cursor": cursor}
-    raise KaguraResponseError(
+    raise _unfinished_list_error(tool)
+
+
+def _next_page_cursor(result: dict[str, Any], tool: str, seen: set[str]) -> str | None:
+    """The ``cursor`` for the page after ``result``, or None when it is the last.
+
+    A page is the last unless it says ``has_more: true`` (an older server,
+    which pages nothing, never does). The cursor returned is added to
+    ``seen``, the cursors earlier pages of the same list sent.
+
+    Args:
+        result: One page of a cursor-paged MCP list tool (memory-cloud
+            v0.82.0+, #1743).
+        tool: The MCP list tool; also the error's ``operation``.
+        seen: The cursors earlier pages sent; updated in place.
+
+    Raises:
+        KaguraResponseError: ``has_more`` came without a usable
+            ``next_cursor``, or with one an earlier page already sent.
+    """
+    if result.get("has_more") is not True:
+        return None
+    cursor = result.get("next_cursor")
+    if not isinstance(cursor, str) or not cursor:
+        raise KaguraResponseError(
+            f"{tool}: unexpected server response (has_more without a next_cursor)",
+            operation=tool,
+        )
+    if cursor in seen:
+        raise KaguraResponseError(
+            f"{tool}: unexpected server response (a page repeated an earlier next_cursor)",
+            operation=tool,
+        )
+    seen.add(cursor)
+    return cursor
+
+
+def _unfinished_list_error(tool: str) -> KaguraResponseError:
+    """The error for a paged list still unfinished after ``_MAX_AUTO_PAGES`` pages."""
+    return KaguraResponseError(
         f"{tool}: the list did not end within {_MAX_AUTO_PAGES} pages", operation=tool
     )
