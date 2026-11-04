@@ -1099,6 +1099,40 @@ async def test_refresh_not_saved_is_typed_and_keeps_the_new_token_in_memory(
     assert on_disk.access_token == "old"
 
 
+@pytest.mark.asyncio
+async def test_force_refresh_coalesces_with_an_in_flight_skew_refresh(tmp_path: Path):
+    """A 401 force_refresh queued behind a skew refresh of one state → one token call.
+
+    force_refresh captures the rejected token before it waits on the in-process
+    lock, so it finds the file already rotated and adopts it (kagura-mcp's 401
+    path racing a request that entered the skew window).
+    """
+    reset_state_cache()
+    path = tmp_path / "creds.json"
+    near = datetime.now(UTC) + timedelta(seconds=10)  # within REFRESH_SKEW_SEC
+    cf = CredentialsFile()
+    cf.set_profile("default", _sample_creds(access_token="old", expires_at=near))
+    save_credentials_file(cf, path)
+    auth = KaguraOAuth(_independent_state(path, _sample_creds(access_token="old", expires_at=near)))
+
+    calls = 0
+
+    async def fake_refresh(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(0.02)  # the 401 arrives while this refresh is in flight
+        return _fresh_token(f"fresh-{calls}")
+
+    with (
+        patch("kagura_memory.auth.device_flow.refresh_access_token", new=fake_refresh),
+        patch("kagura_memory.auth.device_flow.make_oauth_client", return_value=_AsyncContextStub()),
+    ):
+        await asyncio.gather(auth._maybe_refresh(), auth.force_refresh())
+
+    assert calls == 1, f"expected one token call, got {calls}"
+    assert auth._state.credentials.access_token == "fresh-1"
+
+
 def test_update_profile_is_file_lock_guarded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """update_profile wraps its read-modify-write in the cross-process file lock."""
     import kagura_memory._filelock as fl
