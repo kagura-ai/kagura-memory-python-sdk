@@ -455,7 +455,7 @@ async def test_get_state_refuses_a_cursor_with_a_key():
 def _agents_page(*names: str, next_cursor: str | None = None) -> dict:
     return {
         "status": "success",
-        "agents": [agent_dict(name=n) for n in names],
+        "agents": [agent_dict(agent_id=f"agent-{n}", name=n) for n in names],
         "count": len(names),
         "has_more": next_cursor is not None,
         "next_cursor": next_cursor,
@@ -479,6 +479,21 @@ async def test_list_agents_follows_next_cursor():
         ("list_agents", {}),
         ("list_agents", {"cursor": "2"}),
     ]
+
+
+@pytest.mark.asyncio
+async def test_list_agents_drops_a_row_an_earlier_page_returned():
+    """The offset cursor shifts when an agent is registered between two calls."""
+    client = _client()
+    # "new" was registered after page 1, so "b" moved down onto page 2.
+    pages = [_agents_page("a", "b", next_cursor="2"), _agents_page("b", "c")]
+    try:
+        with patch.object(client, "_call_tool", new=AsyncMock(side_effect=pages)):
+            agents = await client.list_agents()
+    finally:
+        await client.close()
+
+    assert [a.id for a in agents] == ["agent-a", "agent-b", "agent-c"]
 
 
 @pytest.mark.asyncio

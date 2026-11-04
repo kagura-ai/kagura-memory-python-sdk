@@ -1439,7 +1439,11 @@ class KaguraClient:
         Since memory-cloud v0.82.0 (#1743) the tool returns 50 agents a page
         with ``has_more`` / ``next_cursor``; this method follows the cursor
         and returns every agent, at most 50 pages (an older server answers in
-        one page). Each row's ``description`` is a 200-character preview
+        one page). The cursor is an offset, so an agent registered or deleted
+        between two calls shifts the rows: an agent an earlier page returned
+        is dropped from a later one (each ``id`` once), but one deleted
+        between calls can make the next page skip an agent. Each row's
+        ``description`` is a 200-character preview
         there, with ``description_truncated`` set when it was cut —
         :meth:`get_agent` returns it whole.
 
@@ -1448,7 +1452,8 @@ class KaguraClient:
 
         Raises:
             KaguraResponseError: A row does not match :class:`Agent`, a page
-                repeats a cursor, or the list is not complete after 50 pages.
+                repeats a cursor or says ``has_more`` without one, or the
+                list is not complete after 50 pages.
         """
         return await _collect_pages(self, "list_agents", Agent, "agents")
 
@@ -3400,6 +3405,7 @@ def _validate_state_value(value: Any) -> None:
     Raises:
         ValueError: The value is longer than 16,384 characters as compact JSON.
     """
+    # Mirrors the server's ``utils.response_budget.json_chars`` exactly.
     size = len(json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str))
     if size > _STATE_VALUE_MAX_CHARS:
         raise ValueError(
@@ -3415,6 +3421,11 @@ async def _collect_pages(client: KaguraClient, tool: str, model: type[_T], key: 
     nothing and sends no ``has_more``, answers in one call. Each later call
     sends only ``cursor``, the ``next_cursor`` of the page before.
 
+    The cursor is an offset, so a row added or removed between two calls
+    shifts the rows after it. A row whose ``id`` an earlier page already
+    returned is dropped (the first occurrence is kept). A row removed
+    between calls can still make the next page skip the row after it.
+
     Args:
         client: The client whose MCP session runs the calls.
         tool: The MCP list tool; also the error's ``operation``.
@@ -3422,7 +3433,7 @@ async def _collect_pages(client: KaguraClient, tool: str, model: type[_T], key: 
         key: The envelope key that holds a page's rows.
 
     Returns:
-        The rows of every page, in order.
+        The rows of every page, in order, each ``id`` once.
 
     Raises:
         KaguraResponseError: A row does not match ``model``; ``has_more`` came
@@ -3430,11 +3441,15 @@ async def _collect_pages(client: KaguraClient, tool: str, model: type[_T], key: 
             already sent; or the list is not complete after 50 pages.
     """
     rows: list[_T] = []
+    returned_ids: set[Any] = set()
     arguments: dict[str, Any] = {}
     seen: set[str] = set()
     for _ in range(_MAX_AUTO_PAGES):
         result = await client._call_tool_checked(tool, arguments)
-        rows.extend(parse_response_list(model, result.get(key, []), operation=tool))
+        page = parse_response_list(model, result.get(key, []), operation=tool)
+        rows.extend(row for row in page if getattr(row, "id", None) not in returned_ids)
+        returned_ids.update(getattr(row, "id", None) for row in page)
+        returned_ids.discard(None)
         if result.get("has_more") is not True:
             return rows
         cursor = result.get("next_cursor")
