@@ -18,7 +18,13 @@ from ._auth import (
     _StaticAuth,
 )
 from ._guardrail_export import write_guardrail_block
-from ._http import normalize_guardrails, normalize_uuid, path_segment, validate_lat_lon
+from ._http import (
+    normalize_add_tools,
+    normalize_guardrails,
+    normalize_uuid,
+    path_segment,
+    validate_lat_lon,
+)
 from .auth.cli import auth as _auth_group
 from .claude_code import MCP_SERVER_NAME
 from .client import KaguraClient
@@ -1381,11 +1387,20 @@ def sleep():
     type=click.IntRange(1, 50),
     help="Max runs to return (1-50, default: 10).",
 )
-def sleep_history(context_id, limit):
+@click.option(
+    "--source",
+    type=click.Choice(["sleep", "analysis", "all"]),
+    default=None,
+    help=(
+        "Sleep runs (the server's default), Memory Analysis spend rows, or all "
+        "(memory-cloud 0.138.0+)."
+    ),
+)
+def sleep_history(context_id, limit, source):
     """List recent Sleep Maintenance runs for a context."""
 
     async def _op(client: KaguraClient, _ctx: str) -> dict[str, Any]:
-        reports = await client.get_sleep_history(context_id=context_id, limit=limit)
+        reports = await client.get_sleep_history(context_id=context_id, limit=limit, source=source)
         return {"reports": [r.model_dump(mode="json") for r in reports]}
 
     _run_client_command(_op, context_id=None, needs_context=False)
@@ -1394,16 +1409,34 @@ def sleep_history(context_id, limit):
 @sleep.command(name="report")
 @click.argument("context_id")
 @click.argument("report_id")
-def sleep_report(context_id, report_id):
+@click.option(
+    "--actions-cursor",
+    default=None,
+    help="actions_next_cursor of the previous page (memory-cloud 0.82.0+).",
+)
+@click.option(
+    "--actions-limit",
+    type=click.IntRange(1, 200),
+    default=None,
+    help="Actions per page (1-200; the server's default is 50; memory-cloud 0.82.0+).",
+)
+def sleep_report(context_id, report_id, actions_cursor, actions_limit):
     """Get a detailed Sleep Maintenance report including audit log.
 
     CONTEXT_ID is kept for backwards compatibility and not sent: the server
     finds the run by REPORT_ID (memory-cloud 0.126.0+ checks read access on
-    the run's own context).
+    the run's own context). From memory-cloud 0.82.0 the audit log comes a
+    page at a time: while actions_has_more is true, pass actions_next_cursor
+    as --actions-cursor.
     """
 
     async def _op(client: KaguraClient, _ctx: str) -> dict[str, Any]:
-        detail = await client.get_sleep_report(context_id=context_id, report_id=report_id)
+        detail = await client.get_sleep_report(
+            context_id=context_id,
+            report_id=report_id,
+            actions_cursor=actions_cursor,
+            actions_limit=actions_limit,
+        )
         return detail.model_dump(mode="json")
 
     _run_client_command(_op, context_id=None, needs_context=False)
@@ -1480,6 +1513,22 @@ def _nonblank_path_option(ctx, param, value: Path | None) -> Path | None:
     return value
 
 
+def _add_tools_option(ctx, param, value: tuple[str, ...]) -> tuple[str, ...] | None:
+    """``--add-tools NAME[,NAME...]`` (repeatable) as one normalized tuple; None when absent.
+
+    A value that names no tool is a typo, so it is refused rather than
+    dropped; so are more than 100 names (#300).
+    """
+    if not value:
+        return None
+    try:
+        if any(not normalize_add_tools([item]) for item in value):
+            raise click.BadParameter("must name at least one tool")
+        return tuple(normalize_add_tools(value).split(","))
+    except ValueError as e:
+        raise click.BadParameter(str(e)) from None
+
+
 @main.group()
 def guardrails():
     """Inspect a context's tool guardrails (server v0.74.0+)."""
@@ -1538,7 +1587,17 @@ def guardrails_load(context_id, cap):
     "--tools",
     help="With --target instructions: the MCP URL's ?tools= allowlist",
 )
-def guardrails_digest(context_id, target, out_path, profile, tools):
+@click.option(
+    "--add-tools",
+    multiple=True,
+    metavar="NAME[,NAME...]",
+    callback=_add_tools_option,
+    help=(
+        "With --target instructions: the MCP URL's ?add_tools= names (server v0.129.0+); "
+        "comma-separated, may repeat"
+    ),
+)
+def guardrails_digest(context_id, target, out_path, profile, tools, add_tools):
     """
     Render the tool guardrails for clients without tool hooks.
 
@@ -1553,9 +1612,10 @@ def guardrails_digest(context_id, target, out_path, profile, tools):
     update-index --skip-worktree AGENTS.md) — in a public repository a
     committed block publishes the guardrail summaries.
 
-    --target instructions previews a bare MCP URL (the full tool view). For
-    a URL with ?profile= or ?tools=, repeat them with --profile / --tools:
-    they decide which tool the truncation note names.
+    --target instructions previews a bare MCP URL (on memory-cloud 0.93.0+
+    the core tool view). For a URL with ?profile=, ?tools= or ?add_tools=,
+    repeat them with --profile / --tools / --add-tools: they decide which
+    tool the truncation note names.
 
     \b
     Examples:
@@ -1565,9 +1625,10 @@ def guardrails_digest(context_id, target, out_path, profile, tools):
     """
     if out_path is not None and target != "export":
         raise click.UsageError("--out writes the export block; drop --target instructions")
-    if (profile is not None or tools is not None) and target != "instructions":
+    if (profile is not None or tools is not None or add_tools) and target != "instructions":
         raise click.UsageError(
-            "--profile / --tools shape the instructions preview; add --target instructions"
+            "--profile / --tools / --add-tools shape the instructions preview; "
+            "add --target instructions"
         )
     try:
         config = load_config()
@@ -1577,7 +1638,7 @@ def guardrails_digest(context_id, target, out_path, profile, tools):
         async def _run() -> GuardrailDigest:
             async with client:
                 return await client.get_guardrail_digest(
-                    ctx_id, target=target, profile=profile, tools=tools
+                    ctx_id, target=target, profile=profile, tools=tools, add_tools=add_tools
                 )
 
         digest = asyncio.run(_run())
@@ -1771,6 +1832,37 @@ def _tool_profile_option(ctx, param, value: str | None) -> str | None:
     return value.strip() if value is not None else None
 
 
+def _default_context_option(ctx, param, value: str | None) -> str | None:
+    """``--context``: a context UUID, canonicalized.
+
+    memory-cloud refuses every call that relies on any other value
+    (``invalid_context_id_format``), so it is refused here instead.
+    """
+    if value is None:
+        return None
+    try:
+        return normalize_uuid(value.strip(), label="--context")
+    except ValueError as e:
+        raise click.BadParameter(str(e)) from None
+
+
+# `--tool-profile` / `--add-tools` on `kagura setup claude|codex|hermes|openclaw` (#300).
+_TOOL_PROFILE_HELP = (
+    "Add ?profile=NAME to the upstream MCP URL (server v0.73.0+): the tools tools/list "
+    "shows. Without it memory-cloud 0.93.0+ lists 'core' (21 tools on 0.141.0); 'full' "
+    "lists every tool (72). The server knows only these two (case-sensitive) and fails "
+    "tools/list for any other name. A profile is a view, not an authorization boundary: "
+    "tools/call reaches an unlisted tool too. A ?tools= allowlist already on the URL wins "
+    "over it."
+)
+_ADD_TOOLS_HELP = (
+    "Add ?add_tools= to the upstream MCP URL (server v0.129.0+): tools listed on top of "
+    "the profile, e.g. explore, which recall's explore_hints need (or --tool-profile "
+    "full). Comma-separated, may repeat. The server ignores an unknown name, and the list "
+    "under a ?tools= allowlist."
+)
+
+
 @setup.command(name="claude")
 @click.option("--api-key", help="Kagura API key (skip prompt)")
 @click.option("--mcp-url", help="MCP URL (skip prompt)")
@@ -1822,11 +1914,26 @@ def _tool_profile_option(ctx, param, value: str | None) -> str | None:
     default=None,
     metavar="NAME",
     callback=_tool_profile_option,
+    help=_TOOL_PROFILE_HELP + " An unknown name leaves Claude Code with no Kagura tools.",
+)
+@click.option(
+    "--add-tools",
+    multiple=True,
+    metavar="NAME[,NAME...]",
+    callback=_add_tools_option,
+    help=_ADD_TOOLS_HELP + " A re-run without it drops an earlier list.",
+)
+@click.option(
+    "--context",
+    "default_context",
+    default=None,
+    metavar="CONTEXT_ID",
+    callback=_default_context_option,
     help=(
-        "Add ?profile=NAME to the upstream MCP URL to limit tools/list (server "
-        "v0.73.0+). The server knows 'full' and 'core' (case-sensitive) and fails "
-        "tools/list for any other name, which leaves Claude Code with no Kagura tools. "
-        "A ?tools= allowlist already on the URL wins over it."
+        "Add ?context= to the upstream MCP URL (server v0.114.0+): the default context "
+        "for context-scoped tools called without context_id, so a session can skip "
+        "list_contexts. An explicit context_id wins, and the default is checked like one. "
+        "Unlike --context-id (the project's hooks and commands), it is a UUID."
     ),
 )
 @click.option(
@@ -1864,6 +1971,8 @@ def setup_claude(
     scope,
     guardrails,
     tool_profile,
+    add_tools,
+    default_context,
     session_hook,
     sync_hook,
     commands,
@@ -1890,6 +1999,7 @@ def setup_claude(
       kagura setup claude --profile default        # OAuth via kagura-mcp (recommended)
       kagura setup claude --profile default --scope user   # one entry for every project
       kagura setup claude --profile default --guardrails off --tool-profile core
+      kagura setup claude --profile default --add-tools explore --context CTX_UUID
       kagura setup claude --api-key kagura_xxx --mcp-url http://localhost:8080/mcp/w/{workspace_id}
       kagura setup claude -y --api-key kagura_xxx --context-id my-project
       kagura setup claude --no-commands      # plugin users: its /kagura-memory:* instead
@@ -1907,6 +2017,8 @@ def setup_claude(
             scope=scope,
             guardrails=guardrails,
             tool_profile=tool_profile,
+            add_tools=add_tools,
+            default_context=default_context,
             session_hook=session_hook,
             sync_hook=sync_hook,
             commands=commands,
@@ -2034,6 +2146,24 @@ def _harness_command(harness: HarnessName):
                 metavar="off|CONTEXT_ID",
                 callback=_guardrails_option,
                 help=_HARNESS_GUARDRAILS_HELP[harness],
+            ),
+            click.option(
+                "--tool-profile",
+                default=None,
+                metavar="NAME",
+                callback=_tool_profile_option,
+                help=_TOOL_PROFILE_HELP
+                + " On the stdio entry it becomes `kagura-mcp --tool-profile`; with "
+                "--url-form, a ?profile= already in --mcp-url is kept without it.",
+            ),
+            click.option(
+                "--add-tools",
+                multiple=True,
+                metavar="NAME[,NAME...]",
+                callback=_add_tools_option,
+                help=_ADD_TOOLS_HELP
+                + " On the stdio entry it becomes `kagura-mcp --add-tools`; with "
+                "--url-form, an ?add_tools= already in --mcp-url is kept without it.",
             ),
             click.option(
                 "--agents-md",

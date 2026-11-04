@@ -6,6 +6,7 @@ import os
 import re
 import shlex
 import subprocess
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -318,19 +319,30 @@ _API_KEY_REF = f"${{{MCP_API_KEY_ENV}}}"
 
 
 def _stdio_entry(
-    profile: str, *, guardrails: str | None = None, tool_profile: str | None = None
+    profile: str,
+    *,
+    guardrails: str | None = None,
+    tool_profile: str | None = None,
+    add_tools: Sequence[str] | None = None,
+    default_context: str | None = None,
 ) -> dict[str, Any]:
     """The OAuth server entry: Claude Code launches the ``kagura-mcp`` proxy.
 
-    ``--guardrails`` / ``--tool-profile`` make the proxy put ``?guardrails=`` /
-    ``?profile=`` on the upstream URL at run time (#258), so the entry never
-    copies the profile's URL and changing them never forces a re-login.
+    ``--guardrails`` / ``--tool-profile`` / ``--add-tools`` / ``--context``
+    make the proxy put ``?guardrails=`` / ``?profile=`` / ``?add_tools=`` /
+    ``?context=`` on the upstream URL at run time (#258, #300), so the entry
+    never copies the profile's URL and changing them never forces a re-login.
+    ``add_tools`` must already be normalized (``normalize_add_tools``).
     """
     args = ["--profile", profile]
     if guardrails is not None:
         args += ["--guardrails", guardrails]
     if tool_profile is not None:
         args += ["--tool-profile", tool_profile]
+    if add_tools:
+        args += ["--add-tools", ",".join(add_tools)]
+    if default_context is not None:
+        args += ["--context", default_context]
     return {"type": "stdio", "command": MCP_PROXY_COMMAND, "args": args}
 
 
@@ -393,8 +405,9 @@ class _McpPlan:
     replaces: dict[str, Any] | None = None
     #: The user-scope entry already matches; nothing to write.
     unchanged: bool = False
-    #: ``--guardrails`` / ``--tool-profile`` the replaced same-scope entry had
-    #: and this run leaves out, e.g. ``["--guardrails off"]``.
+    #: Query flags (``--guardrails``, ``--tool-profile``, ``--add-tools``,
+    #: ``--context``) the replaced same-scope entry had and this run leaves
+    #: out, e.g. ``["--guardrails off"]``.
     dropped: list[str] = field(default_factory=list)
 
 
@@ -425,25 +438,35 @@ def _redact_entry(entry: dict[str, Any]) -> dict[str, Any]:
     return {**entry, "headers": masked}
 
 
-_QUERY_FLAGS = (("--guardrails", "guardrails"), ("--tool-profile", "profile"))
+_QUERY_FLAGS = (
+    ("--guardrails", "guardrails"),
+    ("--tool-profile", "profile"),
+    ("--add-tools", "add_tools"),
+    ("--context", "context"),
+)
 
 
 def _query_flags(entry: dict[str, Any]) -> dict[str, str]:
-    """The ``--guardrails`` / ``--tool-profile`` values an entry puts on the upstream URL.
+    """The query flag values an entry puts on the upstream URL, by flag.
 
-    Read from the ``kagura-mcp`` args of a stdio entry, or from the url's
-    query (first value, as the server reads it) of an http one.
+    Read from the ``kagura-mcp`` args of a stdio entry (the last value of a
+    repeated flag, as the proxy reads it, except ``--add-tools``, whose
+    values add up), or from the url's query (first value, as the server
+    reads it) of an http one.
     """
     found: dict[str, str] = {}
     if classify_mcp_entry(entry) == "stdio":
         args = entry.get("args")
         argv = [a for a in args if isinstance(a, str)] if isinstance(args, list) else []
         for flag, _ in _QUERY_FLAGS:
+            values: list[str] = []
             for i, arg in enumerate(argv):
                 if arg == flag and i + 1 < len(argv):
-                    found[flag] = argv[i + 1]
+                    values.append(argv[i + 1])
                 elif arg.startswith(f"{flag}="):
-                    found[flag] = arg.partition("=")[2]
+                    values.append(arg.partition("=")[2])
+            if values:
+                found[flag] = ",".join(values) if flag == "--add-tools" else values[-1]
         return found
     url = entry.get("url")
     params = parse_qsl(urlsplit(url).query) if isinstance(url, str) else []
@@ -455,7 +478,7 @@ def _query_flags(entry: dict[str, Any]) -> dict[str, str]:
 
 
 def _dropped_query_flags(old: dict[str, Any], new: dict[str, Any]) -> list[str]:
-    """``--guardrails`` / ``--tool-profile`` settings ``old`` has and ``new`` leaves out."""
+    """Query flag settings (see :func:`_query_flags`) ``old`` has and ``new`` leaves out."""
     kept = _query_flags(new)
     return [f"{flag} {value}" for flag, value in _query_flags(old).items() if flag not in kept]
 
@@ -745,7 +768,14 @@ def _resolve_extras(
 
 
 def _plugin_server_url(upstream_url: str) -> str:
-    """The plugin's ``server_url``: the MCP URL with only ``guardrails=off`` kept in its query."""
+    """The plugin's ``server_url``: the MCP URL with only ``guardrails=off`` kept in its query.
+
+    As the plugin's own setup derives it (memory-cloud ``claude-skills/setup.md``:
+    "Drop the query, except that ``guardrails=off`` may stay"). Its hooks POST
+    ``load_guardrails`` with their own ``context_id``, so ``context=``,
+    ``profile=`` and ``add_tools=`` would change nothing there; they stay on the
+    MCP entry, which is where the plugin recommends ``context=`` (#300).
+    """
     parts = urlsplit(upstream_url)
     query = "guardrails=off" if mcp_url_guardrails_off(upstream_url) else ""
     return urlunsplit(parts._replace(query=query, fragment=""))
@@ -993,12 +1023,17 @@ def _check_gitignore(
     return [f for f in secret_files if f not in content]
 
 
-def _warn_tools_allowlist(mcp_url: str, tool_profile: str | None) -> None:
-    """Warn that ``--tool-profile`` has no effect on a URL with a ``?tools=`` allowlist."""
-    if tool_profile is not None and mcp_url_has_tools_allowlist(mcp_url):
+def _warn_tools_allowlist(
+    mcp_url: str, tool_profile: str | None, add_tools: Sequence[str] | None = None
+) -> None:
+    """Warn that ``--tool-profile`` / ``--add-tools`` do nothing under a ``?tools=`` allowlist."""
+    flags = [f"--tool-profile {tool_profile}"] if tool_profile is not None else []
+    if add_tools:
+        flags.append(f"--add-tools {','.join(add_tools)}")
+    if flags and mcp_url_has_tools_allowlist(mcp_url):
         click.echo(
             "\n  Warning: the MCP URL has a ?tools= allowlist, which the server applies\n"
-            f"  instead of --tool-profile {tool_profile}."
+            f"  instead of {' and '.join(flags)}."
         )
 
 
@@ -1023,6 +1058,8 @@ def run_setup_claude(
     scope: McpScope = "project",
     guardrails: str | None = None,
     tool_profile: str | None = None,
+    add_tools: Sequence[str] | None = None,
+    default_context: str | None = None,
     session_hook: bool | None = None,
     sync_hook: bool = True,
     commands: bool | None = None,
@@ -1038,10 +1075,12 @@ def run_setup_claude(
 
     Both write the entry at ``scope`` (``project``: ``<project>/.mcp.json``;
     ``user``: through ``claude mcp add-json --scope user``), with
-    ``guardrails`` / ``tool_profile`` on the upstream URL, then the project's
-    ``.kagura.json`` and the hooks and commands that ``session_hook`` /
-    ``sync_hook`` / ``commands`` select (``None``: not given, on by default).
-    ``guardrails`` must already be normalized (``off`` or a canonical UUID).
+    ``guardrails`` / ``tool_profile`` / ``add_tools`` / ``default_context``
+    on the upstream URL, then the project's ``.kagura.json`` and the hooks and
+    commands that ``session_hook`` / ``sync_hook`` / ``commands`` select
+    (``None``: not given, on by default). ``guardrails`` must already be
+    normalized (``off`` or a canonical UUID), ``add_tools`` by
+    ``normalize_add_tools`` and ``default_context`` to a canonical UUID.
     """
     if profile is not None:
         if api_key is not None:
@@ -1057,6 +1096,8 @@ def run_setup_claude(
             scope=scope,
             guardrails=guardrails,
             tool_profile=tool_profile,
+            add_tools=add_tools,
+            default_context=default_context,
             session_hook=session_hook,
             sync_hook=sync_hook,
             commands=commands,
@@ -1078,9 +1119,13 @@ def run_setup_claude(
     resolved_mcp_url = _prompt_mcp_url(resolved_mcp_url, non_interactive)
 
     # 3. Where the entry goes — settled before any request or write
-    _warn_tools_allowlist(resolved_mcp_url, tool_profile)
+    _warn_tools_allowlist(resolved_mcp_url, tool_profile, add_tools)
     upstream_url = mcp_url_with_query(
-        resolved_mcp_url, guardrails=guardrails, tool_profile=tool_profile
+        resolved_mcp_url,
+        guardrails=guardrails,
+        tool_profile=tool_profile,
+        add_tools=add_tools,
+        context=default_context,
     )
     # A user-scope entry goes on `claude mcp add-json`'s command line, which other
     # local users can read in the process list, so it names the variable Claude
@@ -1243,6 +1288,8 @@ def _run_setup_claude_oauth(
     scope: McpScope = "project",
     guardrails: str | None = None,
     tool_profile: str | None = None,
+    add_tools: Sequence[str] | None = None,
+    default_context: str | None = None,
     session_hook: bool | None = None,
     sync_hook: bool = True,
     commands: bool | None = None,
@@ -1269,8 +1316,14 @@ def _run_setup_claude_oauth(
             "  installed (pip install kagura-memory)."
         )
 
-    _warn_tools_allowlist(creds.mcp_url, tool_profile)
-    entry = _stdio_entry(profile, guardrails=guardrails, tool_profile=tool_profile)
+    _warn_tools_allowlist(creds.mcp_url, tool_profile, add_tools)
+    entry = _stdio_entry(
+        profile,
+        guardrails=guardrails,
+        tool_profile=tool_profile,
+        add_tools=add_tools,
+        default_context=default_context,
+    )
     plan = _plan_mcp_entry(project, scope, entry, non_interactive)
 
     contexts_response = _verify_profile(profile, creds)
@@ -1322,7 +1375,11 @@ def _run_setup_claude_oauth(
 
     if plugin_id is not None:
         upstream_url = mcp_url_with_query(
-            creds.mcp_url, guardrails=guardrails, tool_profile=tool_profile
+            creds.mcp_url,
+            guardrails=guardrails,
+            tool_profile=tool_profile,
+            add_tools=add_tools,
+            context=default_context,
         )
         _echo_plugin_notes(plugin_id, upstream_url, resolved_context_id, guardrails)
 

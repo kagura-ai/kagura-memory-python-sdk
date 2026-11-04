@@ -24,10 +24,17 @@ Design (see issue #101, gate1 review):
   ``kagura auth login``.
 - **mcp_url comes from the profile** (or ``--server``) explicitly — never via
   ``KaguraClient`` env resolution, which ignores ``KAGURA_MCP_URL`` and would
-  silently fall back to the hardcoded cloud URL. ``--guardrails`` and
-  ``--tool-profile`` set memory-cloud's ``?guardrails=`` / ``?profile=`` on it
-  at run time (issue #258), so the profile's URL never has to be copied into
-  ``--server`` to carry a query.
+  silently fall back to the hardcoded cloud URL. ``--guardrails``,
+  ``--tool-profile``, ``--add-tools`` and ``--context`` set memory-cloud's
+  ``?guardrails=`` / ``?profile=`` / ``?add_tools=`` / ``?context=`` on it at
+  run time (issues #258, #300), so the profile's URL never has to be copied
+  into ``--server`` to carry a query.
+- **The proxy can name the session** (issue #300). Claude Code talks stdio, so
+  there is no incoming HTTP header to pass on: ``--session-id`` (or
+  ``KAGURA_MCP_SESSION_ID``) is sent as memory-cloud's ``Kagura-Session-Id``
+  header on every upstream request (v0.114.0+, memory-cloud#2122). A
+  ``params._meta["ai.kagura/sessionId"]`` in a message is forwarded untouched
+  and wins over the header for that call.
 - **The proxy owns the upstream session** (issue #252). When an upstream
   drops the MCP session it answers the next request with ``404`` (MCP
   Streamable HTTP), and Claude Code, which only talks stdio to us, can neither
@@ -49,6 +56,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
+import re
 import sys
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -64,7 +73,9 @@ from ._http import (
     mcp_session_header,
     mcp_url_has_tools_allowlist,
     mcp_url_with_query,
+    normalize_add_tools,
     normalize_guardrails,
+    normalize_uuid,
     validate_https_url,
 )
 from .auth.credentials import KaguraOAuth, get_shared_state
@@ -267,6 +278,40 @@ def _tool_profile_arg(value: str) -> str:
     return value.strip()
 
 
+def _add_tools_arg(value: str) -> str:
+    try:
+        names = normalize_add_tools([value])
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from None
+    if not names:
+        raise argparse.ArgumentTypeError("must name at least one tool")
+    return names
+
+
+def _context_arg(value: str) -> str:
+    try:
+        return normalize_uuid(value.strip(), label="context")
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from None
+
+
+#: SESSION_ENV names the session when ``--session-id`` is not given.
+SESSION_ENV = "KAGURA_MCP_SESSION_ID"
+#: memory-cloud's session id rule (``api/correlation.py``); it silently drops
+#: any other value instead of failing the request, so the proxy refuses it.
+_SESSION_ID_RE = re.compile(r"[A-Za-z0-9._-]{1,128}")
+_SESSION_HEADER = "Kagura-Session-Id"
+
+
+def _session_id_arg(value: str) -> str:
+    session_id = value.strip()
+    if not _SESSION_ID_RE.fullmatch(session_id):
+        raise argparse.ArgumentTypeError(
+            "use 1-128 letters, digits, '.', '_' or '-' (memory-cloud drops any other value)"
+        )
+    return session_id
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="kagura-mcp",
@@ -303,16 +348,69 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="NAME",
         help=(
-            "Set ?profile= on the upstream URL to limit tools/list (server v0.73.0+). "
-            "The server knows 'full' and 'core' (case-sensitive) and fails tools/list "
-            "for any other name. A ?tools= allowlist already on the URL wins over it."
+            "Set ?profile= on the upstream URL: the tools tools/list shows (server "
+            "v0.73.0+). Without it memory-cloud 0.93.0+ lists 'core' (21 tools on 0.141.0); "
+            "'full' lists every tool (72). The server knows only these two (case-sensitive) "
+            "and fails tools/list for any other name. A profile is a view, not an "
+            "authorization boundary: tools/call reaches unlisted tools too. A ?tools= "
+            "allowlist already on the URL wins over it."
+        ),
+    )
+    parser.add_argument(
+        "--add-tools",
+        type=_add_tools_arg,
+        action="append",
+        default=None,
+        metavar="NAME[,NAME...]",
+        help=(
+            "Set ?add_tools= on the upstream URL (server v0.129.0+): tools listed on top "
+            "of the profile, e.g. 'explore', which recall's explore_hints need (or "
+            "--tool-profile full). Comma-separated, may repeat; at most 100 names. The "
+            "server ignores an unknown name, and the whole list next to a ?tools= allowlist."
+        ),
+    )
+    parser.add_argument(
+        "--context",
+        type=_context_arg,
+        default=None,
+        metavar="CONTEXT_ID",
+        help=(
+            "Set ?context= on the upstream URL (server v0.114.0+): the default context for "
+            "context-scoped tools called without context_id. An explicit context_id wins; "
+            "it is checked like one, so it never widens access."
+        ),
+    )
+    parser.add_argument(
+        "--session-id",
+        type=_session_id_arg,
+        default=None,
+        metavar="NAME",
+        help=(
+            f"Send NAME as the {_SESSION_HEADER} header on every upstream request "
+            f"(server v0.114.0+; default: ${SESSION_ENV}), so writes are recorded under "
+            "that session for changes_since. 1-128 letters, digits, '.', '_' or '-' "
+            "(an invalid variable is ignored with a warning). "
+            'A tools/call\'s params._meta["ai.kagura/sessionId"] passes through and wins.'
         ),
     )
     return parser
 
 
 async def _amain(argv: list[str] | None = None) -> int:
-    args = _build_parser().parse_args(argv)
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+    try:
+        add_tools = normalize_add_tools(args.add_tools or [])
+    except ValueError as exc:  # over 100 names across repeated --add-tools
+        parser.error(f"argument --add-tools: {exc}")
+    session_id = args.session_id
+    if session_id is None and (from_env := os.environ.get(SESSION_ENV, "").strip()):
+        try:
+            session_id = _session_id_arg(from_env)
+        except argparse.ArgumentTypeError as exc:
+            # The variable may come from the ambient environment: a value the
+            # server would drop must not take every Kagura tool down with it.
+            print(f"kagura-mcp: warning: ignoring {SESSION_ENV}: {exc}", file=sys.stderr)
 
     state = get_shared_state(profile=args.profile)
     if state is None:
@@ -325,23 +423,35 @@ async def _amain(argv: list[str] | None = None) -> int:
         return 1
 
     base_url = args.server or state.credentials.mcp_url
-    if args.tool_profile is not None and mcp_url_has_tools_allowlist(base_url):
+    view_flags = [
+        flag
+        for flag, value in (("--tool-profile", args.tool_profile), ("--add-tools", add_tools))
+        if value
+    ]
+    if view_flags and mcp_url_has_tools_allowlist(base_url):
         print(
             "kagura-mcp: warning: the upstream URL has a ?tools= allowlist, which the "
-            "server applies instead of --tool-profile.",
+            f"server applies instead of {' and '.join(view_flags)}.",
             file=sys.stderr,
         )
     mcp_url = mcp_url_with_query(
-        base_url, guardrails=args.guardrails, tool_profile=args.tool_profile
+        base_url,
+        guardrails=args.guardrails,
+        tool_profile=args.tool_profile,
+        add_tools=[add_tools] if add_tools else None,
+        context=args.context,
     )
     # Enforce HTTPS (localhost allowed for dev), matching KaguraClient.
     validate_https_url(mcp_url, label="MCP URL")
 
     oauth = KaguraOAuth(state)
+    headers = {"User-Agent": f"kagura-mcp/{SDK_VERSION}"}
+    if session_id is not None:
+        headers[_SESSION_HEADER] = session_id
     async with httpx.AsyncClient(
         timeout=_PROXY_TIMEOUT_SEC,
         auth=oauth,
-        headers={"User-Agent": f"kagura-mcp/{SDK_VERSION}"},
+        headers=headers,
     ) as http:
         upstream = _Upstream(http, mcp_url, oauth)
 

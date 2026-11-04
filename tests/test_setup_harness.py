@@ -1424,6 +1424,107 @@ class TestNoInstructionsUrl:
 
 
 # =============================================================================
+# --tool-profile / --add-tools (#300)
+# =============================================================================
+
+
+@pytest.mark.parametrize("harness", ["codex", "hermes", "openclaw"])
+class TestToolView:
+    def test_stdio_entry_runs_kagura_mcp_with_the_view_flags(self, harness, on_path, recorder, tty):
+        on_path(harness)
+        result = run(
+            harness,
+            *("--profile", "default", "--tool-profile", "full"),
+            *("--add-tools", "explore", "--add-tools", "list_edges,explore", "--dry-run"),
+        )
+        assert result.exit_code == 0, result.output
+        [command] = [line for line in result.output.splitlines() if "Would run:" in line]
+        args = [
+            "--profile",
+            "default",
+            "--tool-profile",
+            "full",
+            "--add-tools",
+            "explore,list_edges",
+        ]
+        if harness == "openclaw":  # one --arg per kagura-mcp argument
+            args = [item for arg in args for item in ("--arg", arg)]
+        elif harness == "hermes":  # --args takes the rest of the line
+            args = ["--args", *args]
+        assert command.endswith(f"{PROXY} {' '.join(args)}")
+        assert recorder.mutating() == []
+
+    def test_url_entry_gets_the_view_on_its_query(self, harness, recorder):
+        url = f"{MCP_URL}?add_tools=old&k=1"
+        result = run(
+            harness,
+            *("--url-form", "--mcp-url", url, "--tool-profile", "full"),
+            *("--add-tools", "explore", "--dry-run"),
+        )
+        assert result.exit_code == 0, result.output
+        assert f"{MCP_URL}?k=1&profile=full&add_tools=explore" in result.output
+
+    def test_url_entry_keeps_a_view_already_in_mcp_url(self, harness, recorder):
+        url = f"{MCP_URL}?profile=full&add_tools=explore"
+        result = run(harness, "--url-form", "--mcp-url", url, "--dry-run")
+        assert result.exit_code == 0, result.output
+        assert url in result.output
+
+    def test_a_tools_allowlist_warns(self, harness, recorder):
+        url = f"{MCP_URL}?tools=recall"
+        result = run(harness, "--url-form", "--mcp-url", url, "--add-tools", "explore", "-y")
+        assert result.exit_code == 0, result.output
+        assert "?tools= allowlist, which the server applies" in result.output
+        assert "instead of --add-tools explore." in result.output
+
+    @pytest.mark.parametrize("flags", [("--add-tools", " "), ("--tool-profile", " ")])
+    def test_a_blank_value_is_a_usage_error(self, harness, recorder, flags):
+        result = run(harness, "--profile", "default", *flags, "-y")
+        assert result.exit_code == 2
+        assert flags[0] in result.output
+        assert recorder.calls == []
+
+
+class TestToolViewCodexPreview:
+    def test_stdio_preview_carries_the_view(self, on_path, recorder):
+        on_path("codex")
+        result = run(
+            "codex",
+            *("--profile", "work", "--context-id", CTX),
+            *("--tool-profile", "full", "--add-tools", "explore", "-y"),
+        )
+        assert result.exit_code == 0, result.output
+        [argv] = recorder.mutating()
+        assert argv[argv.index("--") + 1 :] == [
+            *(PROXY, "--profile", "work", "--guardrails", CTX),
+            *("--tool-profile", "full", "--add-tools", "explore"),
+        ]
+        assert (
+            f"KAGURA_PROFILE=work kagura guardrails digest {CTX} --target instructions "
+            "--profile full --add-tools explore"
+        ) in result.output
+
+    @pytest.mark.parametrize(
+        ("query", "flags"),
+        [
+            # A blank tools= is not repeated; the first value of each key is.
+            (
+                "profile=full&tools=&add_tools=explore&profile=core",
+                "--profile full --add-tools explore",
+            ),
+            ("profile=full&add_tools=,", "--profile full"),  # names no tool
+        ],
+    )
+    def test_url_preview_reads_the_view_from_the_entry_url(self, on_path, recorder, query, flags):
+        on_path("codex")
+        url = f"{MCP_URL}?{query}"
+        result = run("codex", "--url-form", "--mcp-url", url, "--context-id", CTX, "-y")
+        assert result.exit_code == 0, result.output
+        preview = f"kagura guardrails digest {CTX} --target instructions {flags}\n"
+        assert preview in result.output
+
+
+# =============================================================================
 # The OAuth URL form (--url-form --oauth, #282)
 # =============================================================================
 

@@ -115,8 +115,11 @@ class WorkspaceClient(KaguraRestClient):
     async def list_members(self, workspace_id: str) -> list[WorkspaceMember]:
         """List workspace members (owner key required).
 
-        Rows are ordered owner→viewer then by join date and include
-        ``user_name``/``user_email`` when the member has logged in.
+        Rows include ``user_name``/``user_email`` when the member has logged
+        in. Since memory-cloud v0.100.0 (#1943) they come in seat order —
+        the owner first, then earliest joined — and the members past the
+        seats the plan carries have ``seat_paused`` set. Older servers sorted
+        them by the role name as a string.
         """
         workspace_id = _normalize_workspace_id(workspace_id)
         resp = await self._request("GET", f"/api/v1/workspaces/{workspace_id}/members")
@@ -167,7 +170,17 @@ class WorkspaceClient(KaguraRestClient):
         return self._parse(WorkspaceMember, self._json(resp), "update_member_role")
 
     async def remove_member(self, workspace_id: str, user_id: str) -> None:
-        """Remove a member from the workspace (server returns 204)."""
+        """Remove a member from the workspace (server returns 204).
+
+        The server hands the member's memories, contexts and resource tokens
+        to the workspace owner and deletes their credentials and context
+        memberships. Since memory-cloud v0.129.0 (#2352) it also hands their
+        live connector write keys in this workspace to the owner, so the
+        connector keeps working. Since v0.139.0 (#2373 / #2349) their
+        agent-bound keys are deleted, an active agent left with no live key
+        is set ``suspended``, and an agent they registered is re-owned to
+        the workspace owner.
+        """
         workspace_id = _normalize_workspace_id(workspace_id)
         await self._request(
             "DELETE",

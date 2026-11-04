@@ -455,6 +455,9 @@ class ResourceClient(KaguraRestClient):
     ) -> ResourceEventResponse:
         """Ingest a single resource event.
 
+        The indexer applies an ``upsert`` to the memory that holds the
+        document (see :meth:`ingest_events` for what a re-index keeps).
+
         Args:
             resource_id: Resource identifier.
             resource_api_key: Resource API key (X-Resource-API-Key header).
@@ -487,6 +490,22 @@ class ResourceClient(KaguraRestClient):
         logger: VerboseLogger | None = None,
     ) -> ResourceEventBatchResponse:
         """Ingest a batch of resource events (max 100).
+
+        How the indexer applies an ``upsert`` on newer servers:
+
+        - Since memory-cloud v0.135.0 (#2254), indexing a document again at
+          the same ``version`` keeps the memory's ``external_blob``,
+          ``trigger``, ``location``, ``tool_trigger`` and ``importance``
+          instead of overwriting them.
+        - Since v0.141.0 (#2481), the lookup of the memory a document
+          already has (by resource, ``doc_id`` and ``version``) no longer
+          filters on the context's creator: a row written under those keys
+          by a linked account, another member or a context merge is updated
+          in place (it keeps its author) instead of being created again.
+
+        A failed event is one ``errors`` row on the result (see
+        :class:`ResourceEventBatchResponse`); the rest of the batch is
+        stored.
 
         Args:
             resource_id: Resource identifier.
