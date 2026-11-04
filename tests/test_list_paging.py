@@ -403,8 +403,20 @@ def test_next_page_footer_needs_has_more_and_a_cursor(result: dict):
     assert _next_page_footer(result) is None
 
 
-def test_next_page_footer_escapes_the_cursor():
-    note = _next_page_footer({"has_more": True, "next_cursor": "2\x1b[31m"})
-    assert note is not None
-    assert "\x1b" not in note
-    assert 'next_cursor: "2\\u001b[31m"' in note
+@pytest.mark.parametrize(
+    "cursor",
+    [
+        "2\x1b[31m",  # a terminal escape
+        "$(touch pwned)",  # expanded by a shell inside double quotes
+        "`id`",
+        "2\n3",
+        "\u0662",  # an Arabic-Indic digit: isdigit(), but not ASCII
+    ],
+)
+def test_next_page_footer_shows_only_a_cursor_the_server_takes_back(cursor: str):
+    """memory-cloud takes back ASCII digits only; anything else stays in the JSON."""
+    note = _next_page_footer({"has_more": True, "next_cursor": cursor})
+    assert note == (
+        "has_more: true. For the next page, run the command again with the same "
+        "options and --cursor set to next_cursor from the JSON."
+    )

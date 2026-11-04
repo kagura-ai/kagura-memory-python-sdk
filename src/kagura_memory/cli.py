@@ -1138,16 +1138,23 @@ def _next_page_footer(result: dict[str, Any]) -> str | None:
     """The stderr line after a cut ``context list`` page (memory-cloud 0.82.0+, #1743).
 
     ``None`` on the last page, and from a server before 0.82.0, which sends
-    no ``has_more``. The cursor is shown JSON-quoted, so a control character
-    from the server cannot reach the terminal as is.
+    no ``has_more``. The line is a command to paste into a shell, so the
+    cursor is shown only in the form the server takes back as ``cursor``
+    (ASCII digits): nothing a shell expands inside double quotes (``$``, a
+    backtick) and no control character reaches the terminal. Any other
+    ``next_cursor`` is left to the JSON on stdout.
     """
     cursor = result.get("next_cursor")
     if result.get("has_more") is not True or not isinstance(cursor, str) or not cursor:
         return None
-    shown = json.dumps(cursor)
+    if not (cursor.isascii() and cursor.isdigit()):
+        return (
+            "has_more: true. For the next page, run the command again with the same "
+            "options and --cursor set to next_cursor from the JSON."
+        )
     return (
-        f"has_more: true; next_cursor: {shown}. For the next page, run the command again "
-        f"with the same options and --cursor {shown}."
+        f'has_more: true; next_cursor: "{cursor}". For the next page, run the command again '
+        f'with the same options and --cursor "{cursor}".'
     )
 
 
