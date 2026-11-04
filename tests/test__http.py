@@ -20,8 +20,10 @@ from kagura_memory._http import (
     mcp_session_header,
     mcp_url_guardrails_off,
     mcp_url_has_tools_allowlist,
+    mcp_url_query_values,
     mcp_url_with_query,
     mcp_url_without_query_param,
+    normalize_add_tools,
     normalize_guardrails,
     normalize_url,
     normalize_uuid,
@@ -647,6 +649,68 @@ def test_mcp_url_with_query_none_is_a_no_op():
     url = "https://h.example/mcp?guardrails=off"
     assert mcp_url_with_query(url) == url
     assert mcp_url_with_query(url, tool_profile="core") == url + "&profile=core"
+
+
+def test_mcp_url_with_query_sets_add_tools_and_context():
+    ctx = "11111111-2222-3333-4444-555555555555"
+    url = mcp_url_with_query(
+        "https://h.example/mcp?add_tools=old&context=x&k=1",
+        tool_profile="full",
+        add_tools=["explore", "list_edges"],
+        context=ctx.upper(),
+    )
+    # The comma stays literal; the context UUID is canonical; old values are replaced.
+    assert (
+        url == f"https://h.example/mcp?k=1&profile=full&add_tools=explore,list_edges&context={ctx}"
+    )
+
+
+@pytest.mark.parametrize("add_tools", [[], [" ", ","]], ids=["empty", "blank"])
+def test_mcp_url_with_query_add_tools_naming_no_tool_leaves_the_key(add_tools):
+    url = "https://h.example/mcp?add_tools=explore"
+    assert mcp_url_with_query(url, add_tools=add_tools) == url
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "error"),
+    [
+        ({"add_tools": "explore"}, TypeError),
+        ({"add_tools": ["explore", None]}, TypeError),
+        ({"add_tools": [f"t{i}" for i in range(101)]}, ValueError),
+        ({"context": "my-context"}, ValueError),
+    ],
+    ids=["bare-str", "non-str-item", "over-100", "context-not-uuid"],
+)
+def test_mcp_url_with_query_rejects_bad_add_tools_and_context(kwargs, error):
+    with pytest.raises(error):
+        mcp_url_with_query("https://h.example/mcp", **kwargs)
+
+
+@pytest.mark.parametrize(
+    ("names", "expected"),
+    [
+        (["explore"], "explore"),
+        ([" explore , list_edges", "explore", ""], "explore,list_edges"),
+        (["Explore", "explore"], "Explore,explore"),  # case-sensitive, as the server reads
+        ([",", " "], ""),
+        ((), ""),
+    ],
+)
+def test_normalize_add_tools(names, expected):
+    assert normalize_add_tools(names) == expected
+
+
+def test_mcp_url_query_values_keeps_the_first_value_and_blanks():
+    url = "https://h.example/mcp?profile=full&tools=&profile=core&add%5Ftools=a,b#f"
+    assert mcp_url_query_values(url) == {"profile": "full", "tools": "", "add_tools": "a,b"}
+    assert mcp_url_query_values("https://h.example/mcp") == {}
+
+
+def test_normalize_add_tools_caps_distinct_names_at_100():
+    names = [f"t{i}" for i in range(100)]
+    assert normalize_add_tools([*names, "t0"]) == ",".join(names)
+    with pytest.raises(ValueError, match="at most 100"):
+        normalize_add_tools([*names, "t100"])
 
 
 @pytest.mark.parametrize(
