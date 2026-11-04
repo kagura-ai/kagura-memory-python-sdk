@@ -52,7 +52,8 @@ Options (all optional; the defaults write the same files as before):
   again. A blank `--tool-profile` or one starting with `-` is refused (exit 2).
 - `--context-id <id|name>` — the context for the project's hooks and
   commands. A name is matched exactly (not a display name) on every page of
-  the context list (memory-cloud 0.82.0+ pages it, at most 100 contexts a page).
+  the context list (memory-cloud 0.82.0+ pages it, 100 contexts a page by
+  default; the lookup follows every page).
 - `--no-session-hook`, `--no-sync-hook`, `--no-commands` — skip the SessionStart
   recall hook (`kagura recall --trusted-only --verbosity full --full 0`: trusted
   memories, uncut summaries with tags, no content, at most 5000 bytes), the
