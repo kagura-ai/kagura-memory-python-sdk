@@ -996,7 +996,22 @@ def mcp_url_tool_view(mcp_url: str) -> McpToolView:
     Returns:
         The view; every field empty for a URL without these parameters.
     """
-    query = mcp_url_query_values(mcp_url)
+    return mcp_query_tool_view(mcp_url_query_values(mcp_url))
+
+
+def mcp_query_tool_view(query: Mapping[str, str]) -> McpToolView:
+    """:func:`mcp_url_tool_view` of a query already read by :func:`mcp_url_query_values`.
+
+    For a caller that reads other parameters of the same URL too, so the
+    query is parsed once.
+
+    Args:
+        query: Parameter name → its first value, as
+            :func:`mcp_url_query_values` returns it.
+
+    Returns:
+        The view; every field empty for a query without these parameters.
+    """
     profile = query.get("profile")
     tools = query.get("tools")
     return McpToolView(

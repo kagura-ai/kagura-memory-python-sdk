@@ -17,10 +17,10 @@ import click
 from . import claude_code
 from ._auth import _resolve_profile_auth
 from ._http import (
+    mcp_query_tool_view,
     mcp_url_guardrails_off,
     mcp_url_has_tools_allowlist,
     mcp_url_query_values,
-    mcp_url_tool_view,
     mcp_url_with_query,
 )
 from .auth.credentials import CredentialsFile, OAuthCredentials
@@ -497,7 +497,7 @@ def _query_flags(entry: dict[str, Any]) -> dict[str, str]:
     if not isinstance(url, str):
         return found
     query = mcp_url_query_values(url)
-    view = mcp_url_tool_view(url)
+    view = mcp_query_tool_view(query)
     settings = {
         "--guardrails": query.get("guardrails", "").strip(),
         "--tool-profile": view.profile,

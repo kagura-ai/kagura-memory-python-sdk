@@ -17,6 +17,7 @@ from kagura_memory._http import (
     base_url_from_mcp,
     extract_detail,
     jsonrpc_error_body,
+    mcp_query_tool_view,
     mcp_session_expired,
     mcp_session_header,
     mcp_url_guardrails_off,
@@ -768,6 +769,15 @@ def test_mcp_url_query_values_keeps_the_first_value_and_blanks():
 )
 def test_mcp_url_tool_view_reads_the_query_as_the_server_does(query: str, view: McpToolView):
     assert mcp_url_tool_view(f"https://h.example/mcp{query}") == view
+
+
+def test_mcp_query_tool_view_reads_an_already_parsed_query():
+    """The same view from values mcp_url_query_values already read (one parse per URL)."""
+    url = "https://h.example/mcp?profile=%20full&add_tools=explore,%20explore&guardrails=off"
+    query = mcp_url_query_values(url)
+    assert mcp_query_tool_view(query) == mcp_url_tool_view(url)
+    assert mcp_query_tool_view(query) == McpToolView("full", None, ("explore",))
+    assert mcp_query_tool_view({}) == McpToolView(None, None, ())
 
 
 def test_mcp_url_tool_view_reads_the_first_100_items_of_a_list():
