@@ -86,8 +86,8 @@ class AgentsClient(KaguraRestClient):
                 trusted-only recall component; omit to skip recall.
             recall_k: Number of recall results.
             pinned_cap: Override for the pinned-set cap (clamped server-side
-                to [1, 1000]). Omit for the server default: 20 since
-                memory-cloud v0.82.0 (#1743; 100 before).
+                to [1, 1000]). Omit for the server default,
+                20 since memory-cloud v0.82.0 (#1743; 100 before).
             upcoming_until: ISO upper bound for upcoming time memories.
             include: Component selector — a subset of ``"pinned"``,
                 ``"recall"``, ``"upcoming"``, ``"state"``, ``"policy"``.

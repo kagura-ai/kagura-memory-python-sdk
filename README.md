@@ -177,7 +177,7 @@ async with KaguraClient(api_key="kagura_...", mcp_url="https://...") as client:
     for hit in detailed["results"]:
         print(hit["summary"], hit.get("tags", []))  # empty tags are omitted, not []
     top = await client.recall(context_id="dev", query="deploy runbook", full=1, max_chars=40_000)
-    # top["results"][0]["content"]; content_next_offset → reference(content_offset=...)
+    # top["results"][0]["content"]; with content_truncated, reference() has the whole memory
 
     # explore_hints follow the MCP URL's tool list (v0.135.0+): add ?add_tools=explore
     # or ?profile=full to mcp_url, or the reply carries explore_hints_omitted instead.

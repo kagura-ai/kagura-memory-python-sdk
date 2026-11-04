@@ -774,9 +774,10 @@ class KaguraClient:
             full: How many of the top results carry ``content``, 0-100
                 (memory-cloud v0.114.0+, #2124). Each carries up to 1,500
                 characters; a longer one adds ``content_truncated: True`` and
-                ``content_next_offset``, which :meth:`reference` reads on
-                from. ``0`` returns summaries only. ``None`` omits the
-                argument, so the deployment default applies
+                ``content_next_offset`` (where the server's ``reference`` tool
+                continues; :meth:`reference` returns the whole memory, bounded
+                on memory-cloud 0.78.0+). ``0`` returns summaries only.
+                ``None`` omits the argument, so the deployment default applies
                 (``MCP_RECALL_DEFAULT_FULL``, 3 unless set; v0.115.0+, #2140)
                 — and a defaulted ``full`` puts content on trusted,
                 non-connector rows only, while an explicit value makes every
@@ -1449,7 +1450,7 @@ class KaguraClient:
             recall_k: Number of recall results; forwarded to recall's
                 ``k`` validation.
             pinned_cap: Override for the pinned-set cap; clamped by
-                ``load_pinned`` to [1, 1000]. Omit for the server default:
+                ``load_pinned`` to [1, 1000]. Omit for the server default,
                 20 since memory-cloud v0.82.0 (#1743; 100 before, and
                 :meth:`load_pinned` still defaults to 100).
             upcoming_until: ISO upper bound for upcoming time memories
