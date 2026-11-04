@@ -1597,10 +1597,8 @@ def guardrails_digest(context_id, target, out_path, profile, tools, add_tools):
 
         async def _run() -> GuardrailDigest:
             async with client:
-                # Passed only when given, as the client sends it only when set.
-                extra = {"add_tools": add_tools} if add_tools else {}
                 return await client.get_guardrail_digest(
-                    ctx_id, target=target, profile=profile, tools=tools, **extra
+                    ctx_id, target=target, profile=profile, tools=tools, add_tools=add_tools
                 )
 
         digest = asyncio.run(_run())

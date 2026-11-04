@@ -998,7 +998,7 @@ def test_cli_guardrails_digest_prints_block():
     assert result.exit_code == 0, result.output
     assert result.output == EXPORT_BLOCK
     client.get_guardrail_digest.assert_awaited_once_with(
-        CTX, target="export", profile=None, tools=None
+        CTX, target="export", profile=None, tools=None, add_tools=None
     )
 
 
@@ -1007,7 +1007,7 @@ def test_cli_guardrails_digest_instructions_target():
     assert result.exit_code == 0, result.output
     assert result.output == "base text\n"  # no trailing newline in the body → CLI adds one
     client.get_guardrail_digest.assert_awaited_once_with(
-        CTX, target="instructions", profile=None, tools=None
+        CTX, target="instructions", profile=None, tools=None, add_tools=None
     )
 
 
@@ -1024,7 +1024,7 @@ def test_cli_guardrails_digest_instructions_forwards_tool_view():
     )
     assert result.exit_code == 0, result.output
     client.get_guardrail_digest.assert_awaited_once_with(
-        CTX, target="instructions", profile="core", tools="remember,recall"
+        CTX, target="instructions", profile="core", tools="remember,recall", add_tools=None
     )
 
 
