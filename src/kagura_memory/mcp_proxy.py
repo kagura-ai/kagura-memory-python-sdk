@@ -38,7 +38,8 @@ Design (see issue #101, gate1 review):
 - **Upstream JSON-RPC errors pass through.** A non-2xx whose body is a
   JSON-RPC ``error`` (``-32600``, ``-32022`` …) is forwarded with its own
   code/message/data rather than flattened into ``-32000``. Only the ``401``
-  (the proxy's re-login message) and a failed ``initialize`` replay (the
+  and the ``403`` ``insufficient_scope`` (the proxy's re-login message) and a
+  failed ``initialize`` replay (the
   proxy's own ``-32000``, since the error is not about the message being
   answered) are reported by the proxy itself.
 """
@@ -57,6 +58,7 @@ import httpx
 from ._http import (
     SDK_VERSION,
     extract_detail,
+    insufficient_scope_error,
     jsonrpc_error_body,
     mcp_session_expired,
     mcp_session_header,
@@ -164,13 +166,14 @@ def _downstream_response(message: dict[str, Any], resp: httpx.Response) -> dict[
 
     A non-2xx carrying a JSON-RPC error body is forwarded unchanged — only a
     ``null`` id (the server could not read one) is replaced with the
-    downstream's. A ``401`` always raises so :func:`_error_response` can
-    attach the re-login hint.
+    downstream's. A ``401`` and a ``403`` ``insufficient_scope`` (memory-cloud
+    v0.79.0+: the OAuth sign-in lacks the tool's scope) always raise so
+    :func:`_error_response` can attach the re-login hint.
 
     Raises:
         httpx.HTTPStatusError: A non-2xx with nothing to forward.
     """
-    if not resp.is_success and resp.status_code != 401:
+    if not resp.is_success and not _needs_login(resp):
         body = jsonrpc_error_body(resp)
         if body is not None:
             msg_id = message.get("id")
@@ -200,11 +203,14 @@ def _error_response(message: dict[str, Any], exc: Exception) -> dict[str, Any] |
     detail = str(exc)
     if isinstance(exc, httpx.HTTPStatusError):
         status = exc.response.status_code
+        scope_error = insufficient_scope_error(exc.response) if status == 403 else None
         if status == 401:
             detail = (
                 "Kagura authentication failed and the token could not be refreshed. "
                 "Run `kagura auth login` to re-authenticate."
             )
+        elif scope_error is not None:
+            detail = str(scope_error)
         elif server_detail := extract_detail(exc.response):
             detail = f"HTTP {status}: {server_detail}"
     return {
@@ -358,6 +364,19 @@ def main(argv: list[str] | None = None) -> int:
         return asyncio.run(_amain(argv))
     except KeyboardInterrupt:  # pragma: no cover - interactive interrupt
         return 130
+
+
+def _needs_login(resp: httpx.Response) -> bool:
+    """Whether ``resp`` is answered with the proxy's re-login hint, not forwarded.
+
+    A ``401`` (the token was rejected even after the forced refresh) and a
+    ``403`` ``insufficient_scope`` (the sign-in lacks the tool's scope, e.g. a
+    ``kagura auth login --read-only`` profile calling a write tool; a refresh
+    keeps the same scope, so only a new sign-in helps).
+    """
+    if resp.status_code == 401:
+        return True
+    return resp.status_code == 403 and insufficient_scope_error(resp) is not None
 
 
 if __name__ == "__main__":  # pragma: no cover
