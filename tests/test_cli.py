@@ -16,6 +16,7 @@ from kagura_memory.exceptions import (
     KaguraNotFoundError,
     KaguraVersionConflictError,
 )
+from kagura_memory.models import ServerInfo
 from kagura_memory.setup_claude import SESSIONSTART_HOOK_COMMAND
 from tests.conftest import (
     indexer_status_dict,
@@ -807,6 +808,7 @@ def _update_memory_cli(
     reference=None,
     reference_exc=None,
     update_side_effect=None,
+    server_info=None,
 ):
     """Invoke `kagura update-memory` with a wired mock client and return (result, client).
 
@@ -816,7 +818,9 @@ def _update_memory_cli(
     default a memory whose details are ``null``. ``reference_exc`` makes that
     read raise instead (a failed reference() call). ``update_memory`` answers
     as memory-cloud 0.113.0+ does (with a ``version``) unless
-    ``update_side_effect`` says otherwise.
+    ``update_side_effect`` says otherwise. ``get_server_info`` (the probe
+    before the ignored-``details_patch`` fallback) reports 0.81.0 unless
+    ``server_info`` gives another reply or an exception to raise.
     """
     mock_config.return_value = {
         "api_key": "key",
@@ -838,6 +842,12 @@ def _update_memory_cli(
     )
     if reference_exc is not None:
         mock_client.reference.side_effect = reference_exc
+    if isinstance(server_info, BaseException):
+        mock_client.get_server_info.side_effect = server_info
+    else:
+        mock_client.get_server_info.return_value = server_info or ServerInfo(
+            name="Kagura Memory Cloud", version="0.81.0"
+        )
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=None)
     mock_client_cls.return_value = mock_client
@@ -1260,6 +1270,85 @@ def test_update_memory_merge_details_falls_back_when_ignored(mock_client_cls, mo
 
 @patch("kagura_memory.cli.load_config")
 @patch("kagura_memory.cli.KaguraClient")
+def test_update_memory_ignored_patch_names_the_other_ignored_flags(mock_client_cls, mock_config):
+    """The server that ignored details_patch ignored the other new flags too: say so, exit 1.
+
+    The details merge still runs (the first write already happened), and its
+    reply is printed before the error.
+    """
+    result, mock_client = _update_memory_cli(
+        mock_client_cls,
+        mock_config,
+        "-m",
+        "mem-1",
+        "--details-patch",
+        '{"status": "done"}',
+        "--add-tag",
+        "status:done",
+        "--remove-tag",
+        "status:open",
+        "--expected-version",
+        "3",
+        "--observed-at",
+        "2026-11-04",
+        reference=_reference_reply({"status": "open"}),
+        update_side_effect=[{"status": "success"}, {"status": "success", "memory_id": "mem-1"}],
+    )
+    assert result.exit_code == 1, result.output
+    assert '"memory_id": "mem-1"' in result.stdout
+    assert (
+        "ignored --add-tag, --remove-tag, --expected-version, --observed-at "
+        "(--observed-at went into details.observed_at only" in result.stderr
+    )
+    assert "Both writes happened" in result.stderr
+    first, second = mock_client.update_memory.await_args_list
+    assert first.kwargs["add_tags"] == ["status:done"]
+    assert second.kwargs == {
+        "context_id": "ctx",
+        "memory_id": "mem-1",
+        "details": {"status": "done", "observed_at": "2026-11-04"},
+    }
+
+
+@pytest.mark.parametrize(
+    ("server_info", "probe"),
+    [
+        (ServerInfo(name="Kagura Memory Cloud", version="0.82.0"), "reports version 0.82.0"),
+        (ServerInfo(name="Kagura Memory Cloud", version="0.130.2"), "reports version 0.130.2"),
+        (ServerInfo(name="Kagura Memory Cloud", version="dev"), "reports version dev"),
+        (KaguraConnectionError("HTTP 502"), "its version could not be read (HTTP 502)"),
+    ],
+    ids=["0.82.0", "newer", "unparseable", "probe-failed"],
+)
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_update_memory_reply_without_version_from_a_newer_server_is_not_merged(
+    mock_client_cls, mock_config, server_info, probe
+):
+    """Only a server before 0.82.0 ignores details_patch; any other reply without
+    a version is not understood, so nothing is read or written again.
+    """
+    result, mock_client = _update_memory_cli(
+        mock_client_cls,
+        mock_config,
+        "-m",
+        "mem-1",
+        "--location",
+        "35.68,139.76",
+        "--merge-details",
+        update_side_effect=[{"status": "success"}],
+        server_info=server_info,
+    )
+    assert result.exit_code == 1, result.output
+    assert f"without 'version' and {probe}" in result.output
+    assert "whether it applied --merge-details cannot be confirmed" in result.output
+    mock_client.get_server_info.assert_awaited_once()
+    mock_client.reference.assert_not_called()
+    mock_client.update_memory.assert_awaited_once()
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
 def test_update_memory_fallback_folds_observed_at_into_the_details(mock_client_cls, mock_config):
     """The server folds observed_at into the patch; the fallback's merge must too.
 
@@ -1326,39 +1415,73 @@ _WIRE_UPDATED = {
 }
 
 
+_SYSTEM_INFO = ("GET", "/api/v1/system/info")
+
+
 @pytest.mark.parametrize(
-    ("first_reply", "expected_calls"),
+    ("first_reply", "server_version", "expected_calls", "exit_code"),
     [
         (
             {**_WIRE_UPDATED, "version": 5},
+            None,
             [("update_memory", "patch")],
+            0,
         ),
         (
             _UNKNOWN_DETAILS_PATCH,
+            None,
             [("update_memory", "patch"), ("reference", None), ("update_memory", "merged+edits")],
+            0,
         ),
         (
+            # Merged, then exit 1: --expected-version was ignored as well.
             _WIRE_UPDATED,
-            [("update_memory", "patch"), ("reference", None), ("update_memory", "merged")],
+            "0.81.0",
+            [
+                ("update_memory", "patch"),
+                _SYSTEM_INFO,
+                ("reference", None),
+                ("update_memory", "merged"),
+            ],
+            1,
+        ),
+        (
+            # A reply without version from a server that would have refused an
+            # unknown argument: not understood, so nothing is read or written again.
+            _WIRE_UPDATED,
+            "0.130.0",
+            [("update_memory", "patch"), _SYSTEM_INFO],
+            1,
         ),
     ],
-    ids=["0.140.0+-one-call", "0.82.0-0.139.x-refused", "before-0.82.0-ignored"],
+    ids=[
+        "0.140.0+-one-call",
+        "0.82.0-0.139.x-refused",
+        "before-0.82.0-ignored",
+        "no-version-from-0.82.0+",
+    ],
 )
-def test_update_memory_merge_details_on_the_wire(monkeypatch, first_reply, expected_calls):
+def test_update_memory_merge_details_on_the_wire(
+    monkeypatch, first_reply, server_version, expected_calls, exit_code
+):
     """--merge-details through the real client and transport, per server generation.
 
     The refusal is read from the MCP envelope as the client keeps it
-    (``KaguraError.details["unknown_arguments"]``), and every request carries
-    exactly the arguments named here.
+    (``KaguraError.details["unknown_arguments"]``), the server version from
+    ``GET /api/v1/system/info``, and every request carries exactly the
+    arguments named here.
     """
     import httpx
 
     from kagura_memory import KaguraClient
 
     stored = {"location": {"lat": 1.0, "lon": 2.0}, "client": "acme", "n": 1}
-    sent: list[tuple[str, dict]] = []
+    sent: list[tuple[str, object]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            sent.append((request.method, request.url.path))
+            return httpx.Response(200, json={"name": "kagura", "version": server_version})
         params = json.loads(request.content)["params"]
         sent.append((params["name"], params["arguments"]))
         if params["name"] == "reference":
@@ -1405,7 +1528,7 @@ def test_update_memory_merge_details_on_the_wire(monkeypatch, first_reply, expec
             "4",
         ],
     )
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == exit_code, result.output
     ids = {"context_id": _WIRE_CTX, "memory_id": _WIRE_MEM}
     new_location = {"lat": 35.68, "lon": 139.76}
     bodies = {
@@ -1424,7 +1547,11 @@ def test_update_memory_merge_details_on_the_wire(monkeypatch, first_reply, expec
         # The ignored call applied the other flags: only the details are left.
         "merged": {**ids, "details": {"location": new_location, "n": 2}},
     }
-    assert sent == [(name, bodies[body]) for name, body in expected_calls]
+    assert sent == [
+        call if call == _SYSTEM_INFO else (call[0], bodies[call[1]]) for call in expected_calls
+    ]
+    if server_version == "0.81.0":
+        assert "ignored --expected-version." in result.stderr
 
 
 @pytest.mark.parametrize(

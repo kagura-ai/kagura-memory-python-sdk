@@ -25,6 +25,7 @@ from ._http import (
     path_segment,
     validate_lat_lon,
 )
+from ._version import meets_minimum
 from .auth.cli import auth as _auth_group
 from .claude_code import MCP_SERVER_NAME
 from .client import (
@@ -1057,6 +1058,11 @@ def _apply_details_patch(
     return merged
 
 
+# memory-cloud refuses an undeclared argument from 0.82.0 (#1742); an older
+# server ignores it.
+_REFUSES_UNKNOWN_ARGUMENTS_SINCE = (0, 82, 0)
+
+
 def _details_patch_refused(err: KaguraError) -> bool:
     """Whether ``err`` is a server refusing ``details_patch``, and nothing else, as unknown.
 
@@ -1188,9 +1194,12 @@ def update_memory(
     before memory-cloud 0.140.0 either falls back to reading the memory
     first with reference() and writing the merged object: two calls, not one
     atomic update (--expected-version still guards the write on 0.113.0+),
-    and the read counts in the memory's access stats. Coordinates must be
-    JSON numbers, not strings: the server rejects string-typed lat/lon with a
-    422 by design.
+    and the read counts in the memory's access stats. A server before 0.82.0
+    ignores the patch instead of refusing it; the command confirms that
+    version first, writes the merged details in a second call, and exits 1
+    naming any other new flag that server ignored (--add-tag, --remove-tag,
+    --expected-version, --observed-at). Coordinates must be JSON numbers, not
+    strings: the server rejects string-typed lat/lon with a 422 by design.
 
     --add-tag/--remove-tag edit the stored tags without resending them, and
     --expected-version makes the update fail, writing nothing, when another
@@ -1299,11 +1308,55 @@ def update_memory(
             return result
         # Only a server before 0.82.0 (which ignores an argument it does not
         # declare) succeeds without a version (0.113.0+): the other edits were
-        # applied and the details were not, so write them now.
-        return await _merge_via_reference(
+        # applied and the details were not. Confirm the version before
+        # writing again: a reply without one from any other server is not
+        # understood, and merging onto it could undo what it did.
+        try:
+            info = await client.get_server_info()
+        except KaguraError as e:
+            older, probe = None, f"its version could not be read ({_exc_message(e)})"
+        else:
+            older = meets_minimum(info.version, _REFUSES_UNKNOWN_ARGUMENTS_SINCE)
+            older, probe = older is False, f"reports version {info.version}"
+        if not older:
+            raise click.ClickException(
+                f"the server answered update_memory without 'version' and {probe}, "
+                f"so whether it applied {flag} cannot be confirmed. Nothing more was "
+                "written, but the call's other changes may have been: read the "
+                "memory with `kagura reference` before trying again."
+            )
+        merged_reply = await _merge_via_reference(
             "ignored it (before 0.82.0), merging via reference() in a second call.",
             memory_id=memory_id,
         )
+        # The same server ignored the other arguments it does not know too.
+        dropped = [
+            name
+            for name, given in (
+                ("--add-tag", edit["add_tags"] is not None),
+                ("--remove-tag", edit["remove_tags"] is not None),
+                ("--expected-version", edit["expected_version"] is not None),
+                ("--accept-supersede-candidate", edit["accept_supersede_candidate"]),
+                ("--observed-at", edit["observed_at"] is not None),
+            )
+            if given
+        ]
+        if dropped:
+            click.echo(json.dumps(merged_reply, indent=2, ensure_ascii=False))
+            observed = (
+                " (--observed-at went into details.observed_at only, which this "
+                "server does not read)"
+                if edit["observed_at"] is not None
+                else ""
+            )
+            raise click.ClickException(
+                f"the server (before memory-cloud 0.82.0) ignored {', '.join(dropped)}"
+                f"{observed}. Both writes happened (the first call applied the other "
+                "changes, the second the merged details); those flags need a newer "
+                "server, so check the memory with `kagura reference` before editing it "
+                "again."
+            )
+        return merged_reply
 
     _run_client_command(op, context_id)
 
