@@ -719,6 +719,53 @@ async def test_rest_guardrail_digest_instructions_target_forwards_tool_view():
 
 
 @pytest.mark.asyncio
+async def test_rest_guardrail_digest_sends_add_tools_joined_once():
+    """The route reads one comma-separated ``add_tools`` value (memory-cloud#2354)."""
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, text="base text")
+
+    async with make_rest_client(handler) as client:
+        await client.get_guardrail_digest(
+            CTX, target="instructions", add_tools=["explore", " list_edges ,explore", ""]
+        )
+
+    assert seen[0].url.params.get_list("add_tools") == ["explore,list_edges"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("add_tools", [None, [], [" ", ","]], ids=["none", "empty", "blank"])
+async def test_rest_guardrail_digest_omits_add_tools_naming_no_tool(add_tools):
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, text="base text")
+
+    async with make_rest_client(handler) as client:
+        await client.get_guardrail_digest(CTX, target="instructions", add_tools=add_tools)
+
+    assert "add_tools" not in seen[0].url.params
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("add_tools", "error"),
+    [("explore", TypeError), ([1], TypeError), ([f"t{i}" for i in range(101)], ValueError)],
+    ids=["bare-str", "non-str-item", "over-100"],
+)
+async def test_rest_guardrail_digest_rejects_bad_add_tools_before_any_request(add_tools, error):
+    def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover - never reached
+        raise AssertionError("no request expected")
+
+    async with make_rest_client(handler) as client:
+        with pytest.raises(error):
+            await client.get_guardrail_digest(CTX, target="instructions", add_tools=add_tools)
+
+
+@pytest.mark.asyncio
 async def test_rest_guardrail_digest_empty_set():
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
@@ -951,7 +998,7 @@ def test_cli_guardrails_digest_prints_block():
     assert result.exit_code == 0, result.output
     assert result.output == EXPORT_BLOCK
     client.get_guardrail_digest.assert_awaited_once_with(
-        CTX, target="export", profile=None, tools=None
+        CTX, target="export", profile=None, tools=None, add_tools=None
     )
 
 
@@ -960,7 +1007,7 @@ def test_cli_guardrails_digest_instructions_target():
     assert result.exit_code == 0, result.output
     assert result.output == "base text\n"  # no trailing newline in the body → CLI adds one
     client.get_guardrail_digest.assert_awaited_once_with(
-        CTX, target="instructions", profile=None, tools=None
+        CTX, target="instructions", profile=None, tools=None, add_tools=None
     )
 
 
@@ -977,7 +1024,7 @@ def test_cli_guardrails_digest_instructions_forwards_tool_view():
     )
     assert result.exit_code == 0, result.output
     client.get_guardrail_digest.assert_awaited_once_with(
-        CTX, target="instructions", profile="core", tools="remember,recall"
+        CTX, target="instructions", profile="core", tools="remember,recall", add_tools=None
     )
 
 
@@ -986,6 +1033,31 @@ def test_cli_guardrails_digest_tool_view_needs_instructions_target(flag):
     result, client = _digest(CTX, flag, "core")
     assert result.exit_code != 0
     assert "--target instructions" in result.output
+    client.get_guardrail_digest.assert_not_called()
+
+
+def test_cli_guardrails_digest_instructions_forwards_add_tools():
+    result, client = _digest(
+        CTX, "--target", "instructions", "--add-tools", "explore", "--add-tools", "a, b,explore"
+    )
+    assert result.exit_code == 0, result.output
+    client.get_guardrail_digest.assert_awaited_once_with(
+        CTX, target="instructions", profile=None, tools=None, add_tools=("explore", "a", "b")
+    )
+
+
+def test_cli_guardrails_digest_add_tools_needs_instructions_target():
+    result, client = _digest(CTX, "--add-tools", "explore")
+    assert result.exit_code == 2
+    assert "--target instructions" in result.output
+    client.get_guardrail_digest.assert_not_called()
+
+
+@pytest.mark.parametrize("value", [" ", ",", ",".join(f"t{i}" for i in range(101))])
+def test_cli_guardrails_digest_add_tools_that_names_no_tool_or_too_many(value):
+    result, client = _digest(CTX, "--target", "instructions", "--add-tools", value)
+    assert result.exit_code == 2
+    assert "--add-tools" in result.output
     client.get_guardrail_digest.assert_not_called()
 
 

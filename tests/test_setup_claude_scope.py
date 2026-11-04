@@ -26,6 +26,7 @@ from kagura_memory.setup_claude import (
     SESSIONSTART_HOOK_COMMAND,
     _install_hooks,
     _plugin_server_url,
+    _query_flags,
     _remove_sdk_hook,
 )
 
@@ -757,6 +758,96 @@ def test_empty_tool_profile_is_rejected(tmp_path: Path) -> None:
     assert result.exit_code == 2
 
 
+def test_stdio_entry_carries_add_tools_and_context(connection, tmp_path: Path) -> None:
+    """#300: --add-tools (repeatable, comma-separated) and --context become kagura-mcp args."""
+    result = run_setup(
+        tmp_path, "--add-tools", "explore", "--add-tools", "list_edges,explore", "--context", CTX
+    )
+
+    assert result.exit_code == 0, result.output
+    assert mcp_entry(tmp_path)["args"] == [
+        *("--profile", "default"),
+        *("--add-tools", "explore,list_edges"),
+        *("--context", CTX),
+    ]
+    assert read_json(tmp_path / ".kagura.json")["mcp_url"] == MCP_URL
+
+
+def test_static_token_url_carries_add_tools_and_context(connection, tmp_path: Path) -> None:
+    result = run_setup(
+        tmp_path,
+        "--tool-profile",
+        "core",
+        "--add-tools",
+        "explore",
+        "--context",
+        CTX.upper(),
+        oauth=False,
+    )
+
+    assert result.exit_code == 0, result.output
+    assert mcp_entry(tmp_path)["url"] == (f"{MCP_URL}?profile=core&add_tools=explore&context={CTX}")
+
+
+@pytest.mark.parametrize("oauth", [True, False], ids=["oauth", "api-key"])
+def test_rerun_notes_dropped_add_tools_and_context(connection, tmp_path: Path, oauth: bool) -> None:
+    first = run_setup(tmp_path, "--add-tools", "explore,a", "--context", CTX, oauth=oauth)
+    assert first.exit_code == 0, first.output
+
+    result = run_setup(tmp_path, oauth=oauth)
+
+    assert result.exit_code == 0, result.output
+    text = " ".join(result.output.split())
+    assert f"also had --add-tools explore,a and --context {CTX}, which" in text
+
+
+def test_query_flags_add_up_repeated_add_tools_in_a_stdio_entry() -> None:
+    args = ["--profile", "p", "--add-tools", "a", "--add-tools=b,c", "--context", CTX]
+    assert _query_flags({**STDIO_DEFAULT, "args": args}) == {
+        "--add-tools": "a,b,c",
+        "--context": CTX,
+    }
+
+
+def test_add_tools_under_a_tools_allowlist_warns(connection, tmp_path: Path) -> None:
+    args = ["setup", "claude", "--project-dir", str(tmp_path), "--context-id", CTX, "-y"]
+    args += ["--api-key", API_KEY, "--mcp-url", f"{MCP_URL}?tools=recall"]
+    result = CliRunner().invoke(main, [*args, "--add-tools", "explore"])
+
+    assert result.exit_code == 0, result.output
+    assert "instead of --add-tools explore." in result.output
+
+
+@pytest.mark.parametrize(
+    "flags",
+    [
+        ("--context", "my-project"),
+        ("--add-tools", " , "),
+        ("--add-tools", "a", "--add-tools", ""),
+        ("--add-tools", "explore,-x"),  # kagura-mcp would read it as a flag
+    ],
+    ids=["context-not-uuid", "blank-add-tools", "one-blank-add-tools", "dashed-name"],
+)
+def test_bad_add_tools_or_context_is_a_usage_error(tmp_path: Path, flags) -> None:
+    result = run_setup(tmp_path, *flags)
+    assert result.exit_code == 2, result.output
+    assert flags[-2] in result.output
+    assert not (tmp_path / ".mcp.json").exists()
+
+
+@pytest.mark.parametrize(
+    "upstream",
+    [
+        f"{MCP_URL}?guardrails=off&context={CTX}&add_tools=explore&profile=full",
+        f"{MCP_URL}?context={CTX}&guardrails=off",
+    ],
+)
+def test_plugin_server_url_drops_the_tool_view_and_context(upstream: str) -> None:
+    """The plugin's setup keeps only guardrails=off in server_url: its hooks send their
+    own context_id, so context= belongs on the MCP entry (#300)."""
+    assert _plugin_server_url(upstream) == f"{MCP_URL}?guardrails=off"
+
+
 def test_help_documents_the_new_options() -> None:
     result = CliRunner().invoke(main, ["setup", "claude", "--help"])
     text = " ".join(result.output.split())
@@ -764,6 +855,8 @@ def test_help_documents_the_new_options() -> None:
         "--scope [project|user]",
         "--guardrails",
         "--tool-profile",
+        "--add-tools",
+        "--context CONTEXT_ID",
         "--session-hook / --no-session-hook",
         "--sync-hook / --no-sync-hook",
         "--commands / --no-commands",

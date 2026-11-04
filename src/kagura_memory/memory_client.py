@@ -19,9 +19,10 @@ module keeps only the wire calls.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
-from ._http import normalize_uuid
+from ._http import normalize_add_tools, normalize_uuid
 from ._rest_base import KaguraRestClient
 from .models import GuardrailDigest, GuardrailDigestTarget, GuardrailSet
 
@@ -86,6 +87,7 @@ class MemoryClient(KaguraRestClient):
         target: GuardrailDigestTarget = "export",
         profile: str | None = None,
         tools: str | None = None,
+        add_tools: Sequence[str] | None = None,
     ) -> GuardrailDigest:
         """Render a context's tool guardrails (``GET /api/v1/memory/guardrails/digest``).
 
@@ -102,20 +104,35 @@ class MemoryClient(KaguraRestClient):
                 would receive for this context.
             profile: ``target="instructions"`` only — the MCP URL's
                 ``?profile=`` value (``full`` | ``core``), so the truncation
-                suffix names the tool that URL lists.
+                suffix names the tool that URL lists. Without it (and without
+                ``tools``), memory-cloud 0.93.0+ previews the ``core`` view
+                a bare MCP URL lists (memory-cloud#1849).
             tools: ``target="instructions"`` only — the MCP URL's ``?tools=``
                 allowlist.
+            add_tools: ``target="instructions"`` only — the MCP URL's
+                ``?add_tools=`` names (server v0.129.0+, memory-cloud#2354),
+                validated and joined by
+                :func:`~kagura_memory._http.normalize_add_tools`. Sent only
+                when it names a tool; an older server ignores it.
 
         Returns:
             :class:`~kagura_memory.models.GuardrailDigest` with the body text
             and the ``X-Kagura-Guardrails-Tool-Triggered-Version`` header.
+
+        Raises:
+            TypeError: ``add_tools`` is a ``str``, or holds a non-``str`` item.
+            ValueError: ``context_id`` is not a UUID, or ``add_tools`` names
+                more than 100 tools or one starting with ``-``.
         """
         ctx = normalize_uuid(context_id, label="context_id")
+        added = normalize_add_tools(add_tools) if add_tools is not None else ""
         params: dict[str, Any] = {"context_id": ctx, "target": target}
         if profile is not None:
             params["profile"] = profile
         if tools is not None:
             params["tools"] = tools
+        if added:
+            params["add_tools"] = added
         resp = await self._request("GET", "/api/v1/memory/guardrails/digest", params=params)
         return GuardrailDigest(
             context_id=ctx,
