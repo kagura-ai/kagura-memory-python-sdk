@@ -17,6 +17,7 @@ from ._auth import _OAuthAuth, _resolve_auth, _StaticAuth
 from ._http import (
     SDK_VERSION,
     _opt_int,
+    annotate_server_error,
     base_url_from_mcp,
     extract_detail,
     gate_error,
@@ -152,8 +153,15 @@ class KaguraClient:
     Low-level REST API client for Kagura Memory Cloud MCP tools.
 
     All methods may raise:
-        KaguraAuthError: Authentication failed
-        KaguraConnectionError: Connection to server failed
+        KaguraAuthError: Authentication failed — also an OAuth token that
+            lacks the scope a tool needs (HTTP 403 ``insufficient_scope``,
+            memory-cloud v0.79.0+: ``memory:read`` for the read-only tools,
+            ``recall`` and ``get_agent_bootstrap``, ``memory:write`` for the
+            rest), whose message names the scope
+        KaguraConnectionError: Connection to server failed; its subclass
+            :class:`KaguraServiceUnavailableError` for an HTTP 503 (``/mcp``
+            could not verify the credential or reach a dependency), with
+            ``retry_after`` and ``reason``
         KaguraRateLimitError: Rate limit exceeded — any HTTP 429, including
             the daily MCP quota when the server's rate-limit middleware
             refuses the request before the tool runs
@@ -163,10 +171,15 @@ class KaguraClient:
     returning them as data (issue #180): a missing context/memory/report
     raises :class:`KaguraNotFoundError`, a quota refusal (including the
     in-band daily MCP call cap, ``rate_limit_exceeded``)
-    :class:`KaguraQuotaError` and a plan/feature gate
-    :class:`KaguraFeatureNotAvailableError`, each carrying the server's
-    detail fields (#256), and any other domain error raises
-    :class:`KaguraError`. Callers should use ``try/except`` rather than
+    :class:`KaguraQuotaError`, a plan/feature gate
+    :class:`KaguraFeatureNotAvailableError` and the Free capacity lock
+    (``capacity_locked``, memory-cloud v0.99.0+)
+    :class:`KaguraCapacityLockedError`, each carrying the server's detail
+    fields (#256), and any other domain error raises :class:`KaguraError`.
+    Every one keeps the envelope's ``error`` as ``code`` and its other
+    fields (``help``, and on a server failure ``cause``, ``correlation_id``,
+    ``retryable``, ``outcome``) in ``details`` — branch on ``code``, never
+    on the message. Callers should use ``try/except`` rather than
     inspecting ``result["status"]``. On the tool methods that return a
     model, a success payload that does not match it (a server newer than
     the SDK) raises :class:`KaguraResponseError` naming the tool (#250).
@@ -175,7 +188,7 @@ class KaguraClient:
     ``list_memories``, ``list_embedding_models``) do the same with
     ``operation="KaguraClient.<method>"`` (#254, #277); from them a network
     failure, a non-JSON 2xx body and a non-2xx status other than 401/429
-    raise :class:`KaguraConnectionError`.
+    (and a 403 ``insufficient_scope``) raise :class:`KaguraConnectionError`.
     """
 
     def __init__(
@@ -562,7 +575,10 @@ class KaguraClient:
 
         Args:
             context_id: Context ID.
-            summary: Memory summary (10-500 chars).
+            summary: Memory summary (10-500 chars). Since memory-cloud
+                v0.108.0 (#2003) a longer one is cut at a sentence end instead
+                of refused, its full text kept at the head of ``content``; the
+                reply then says so (see Returns).
             content: Memory content.
             type: Memory type. Server validates against its own vocabulary;
                 the SDK passes through.
@@ -630,13 +646,25 @@ class KaguraClient:
             will recall poorly (``summary_short``, ``summary_long``,
             ``summary_narrative``, ``no_tags``, ``tag_near_duplicate``). The
             memory is stored either way; act on a hint with
-            :meth:`update_memory`.
+            :meth:`update_memory`. Since v0.108.0 a cut summary adds
+            ``summary_truncated: true`` and ``summary_original_length`` (the
+            ``summary_long`` hint is then left out).
 
         Raises:
             ValueError: ``tool_trigger`` is given and ``details`` already has
                 a ``"tool_trigger"`` key — pass the guardrail one way only.
+            KaguraCapacityLockedError: The workspace is over its Free
+                capacity (memory-cloud v0.99.0+); ``cleanup_url`` says where
+                to clean up.
+            KaguraFeatureNotAvailableError: ``feature == "contexts"``: the
+                context has no writable slot because the plan dropped below
+                the workspace's contexts (v0.100.0+); reads keep working.
             KaguraError: Server-side rejection, e.g. ``permission_denied`` or
-                ``validation_error`` for a guardrail write.
+                ``validation_error`` for a guardrail write, or ``code ==
+                "payload_too_large"`` for a memory over 1 MB across summary,
+                context_summary, content and details (v0.108.0+, with
+                ``limit`` / ``actual`` in ``details``; older servers send an
+                untyped ``quota_exceeded``). Match ``code``, not the message.
         """
         details = _details_with_tool_trigger(details, tool_trigger)
         arguments: dict[str, Any] = {
@@ -2008,8 +2036,15 @@ class KaguraClient:
                 replaces the memory and its suggestion); or if
                 ``tool_trigger`` is given together with a
                 ``details["tool_trigger"]`` key.
+            KaguraFeatureNotAvailableError: ``feature == "contexts"``: the
+                context has no writable slot because the plan dropped below
+                the workspace's contexts (memory-cloud v0.100.0+).
             KaguraError: Server-side rejection, e.g. ``permission_denied`` for
-                a guardrail edit below context editor.
+                a guardrail edit below context editor. Since memory-cloud
+                v0.113.0 (#2043) a server-side ``expected_version`` mismatch is
+                ``code == "version_conflict"`` (REST ``PATCH``: ``409
+                RES-002`` with ``details.reason == "version_conflict"``);
+                #302 adds the argument and a typed error.
         """
         if not memory_id and not external_id:
             raise ValueError("Provide exactly one of memory_id or external_id")
@@ -2998,14 +3033,25 @@ class KaguraClient:
 
         A plan or quota refusal raises :class:`KaguraQuotaError` or
         :class:`KaguraFeatureNotAvailableError` carrying the envelope's gate
-        fields, and ``partial_rollback`` raises
-        :class:`KaguraPartialRollbackError` (#256). Every other code raises
-        :class:`KaguraError`.
+        fields, the Free capacity lock (``capacity_locked``, memory-cloud
+        v0.99.0+) :class:`KaguraCapacityLockedError`, and
+        ``partial_rollback`` raises :class:`KaguraPartialRollbackError`
+        (#256). Every other code raises :class:`KaguraError` — e.g.
+        ``payload_too_large`` (a memory over 1 MB, v0.108.0+, with ``limit``
+        / ``actual``) and ``version_conflict`` (``update_memory`` with a stale
+        ``expected_version``, v0.113.0+; typed by #302).
+
+        Every error keeps the envelope: ``code`` is its ``error`` and
+        ``details`` everything but ``status`` / ``error`` / ``message`` —
+        ``help`` (v0.78.0+) and, on a server failure, ``cause``,
+        ``correlation_id``, ``retryable`` and for a write ``outcome``
+        (v0.82.0+), which :class:`KaguraError` exposes as properties.
         """
         if result.get("status") != "error":
             return
         code = result.get("error", "unknown")
         message = result.get("message", "Unknown error")
+        err: KaguraError
         if code in (
             "report_not_found",
             "context_not_found",
@@ -3013,7 +3059,8 @@ class KaguraClient:
             "agent_not_found",
             "binding_not_found",
         ):
-            raise KaguraNotFoundError(f"{operation}: {message}")
+            err = KaguraNotFoundError(f"{operation}: {message}")
+            raise annotate_server_error(err, str(code), result)
         text = f"{operation} failed ({code}): {message}"
         if code == "partial_rollback":
             report_id = result.get("report_id")
@@ -3025,11 +3072,14 @@ class KaguraClient:
             except KaguraResponseError as drift:
                 # The partial reversal is already committed; a summary the
                 # SDK cannot read must not hide that (#256).
-                raise KaguraPartialRollbackError(
+                err = KaguraPartialRollbackError(
                     f"{text} (rollback_summary could not be read)", report_id=report_id
-                ) from drift
-            raise KaguraPartialRollbackError(text, report_id=report_id, summary=summary)
-        raise gate_error(str(code), text, result) or KaguraError(text)
+                )
+                raise annotate_server_error(err, str(code), result) from drift
+            err = KaguraPartialRollbackError(text, report_id=report_id, summary=summary)
+            raise annotate_server_error(err, str(code), result)
+        err = gate_error(str(code), text, result) or KaguraError(text)
+        raise annotate_server_error(err, str(code), result)
 
     async def get_sleep_history(
         self,

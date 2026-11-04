@@ -34,9 +34,11 @@ from ._http import (
     error_envelope,
     extract_detail,
     gate_error,
+    insufficient_scope_error,
     parse_response,
     response_shape_error,
     sanitize_server_detail,
+    service_unavailable_error,
     validate_https_url,
 )
 from .auth.credentials import KaguraOAuth
@@ -67,11 +69,23 @@ class KaguraRestClient:
       applies to every subclass); a ``QUOTA-001`` with no gate, no known
       ``quota_type`` and no ``Retry-After`` (e.g. the 1 MB memory-size
       guard) → a plain :class:`KaguraError`
+    - the Free capacity lock (``403 CAPACITY-001``, ``details.gate ==
+      "capacity"``, memory-cloud v0.99.0+) →
+      :class:`KaguraCapacityLockedError`, typed by the same rule
     - 401 → :class:`KaguraAuthError` with an OAuth-aware recovery hint
+    - 403 ``insufficient_scope`` (an OAuth token without the scope the
+      method needs, v0.79.0+) → :class:`KaguraAuthError` naming the scope,
+      before any client's 403 hook
     - 403 → the generic ``HTTP 403: <detail>`` mapping
     - 404 → :class:`KaguraNotFoundError` (server detail or "Not found")
     - any other 429 → :class:`KaguraQuotaError` with a tolerant ``Retry-After``
-    - other statuses → :class:`KaguraConnectionError`
+    - 503 (``DB-002``, the database unavailable) →
+      :class:`KaguraServiceUnavailableError` with ``retry_after`` from
+      ``Retry-After`` and ``reason`` from ``details.reason``
+    - other statuses → :class:`KaguraConnectionError`, e.g. a 409: memory
+      ``PATCH`` with a stale ``expected_version`` answers ``409 RES-002``
+      with ``details.reason == "version_conflict"`` (v0.113.0+, #2043; typed
+      by #302)
     - transport errors → :class:`KaguraConnectionError`
     - a 2xx JSON body its model or envelope rejects →
       :class:`KaguraResponseError` (via :meth:`_parse` / :meth:`_expect_list`)
@@ -283,20 +297,30 @@ class KaguraRestClient:
         if status == 401:
             return self._error_401(e)
         if status == 403:
+            scope_error = insufficient_scope_error(e.response)
+            if scope_error is not None:
+                return scope_error
             return self._error_403(e, request_json=request_json, request_params=request_params)
         if status == 404:
             return KaguraNotFoundError(extract_detail(e.response) or "Not found")
         if status == 429:
             return self._error_429(e)
+        if status == 503:
+            detail = extract_detail(e.response)
+            return service_unavailable_error(
+                e.response, f"HTTP 503: {detail}" if detail else "HTTP 503"
+            )
         return self._generic_error(e)
 
     def _gate_error(self, e: httpx.HTTPStatusError) -> KaguraError | None:
-        """Type a plan or quota refusal from the canonical envelope (#256).
+        """Type a plan, quota or capacity refusal from the canonical envelope (#256).
 
         Runs before the per-status hooks: a refusal is typed by its
         ``gate`` / error code (see :func:`gate_error`), whatever the status
         and whichever client hook would otherwise word it — e.g. the 403
-        ``QUOTA-001`` resource-token cap is a quota, not an access problem.
+        ``QUOTA-001`` resource-token cap is a quota and the 403
+        ``CAPACITY-001`` capacity lock a :class:`KaguraCapacityLockedError`,
+        not an access problem.
         """
         envelope = error_envelope(e.response)
         if envelope is None:

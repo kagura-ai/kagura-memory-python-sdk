@@ -102,14 +102,55 @@ class UsageQuotaLimitOnly(BaseModel):
     limit: int
 
 
+class CapacityLock(BaseModel):
+    """How far a Free workspace is over its capacity (memory-cloud v0.99.0+, #1941).
+
+    While the workspace is locked, search and saving raise
+    :class:`~kagura_memory.exceptions.KaguraCapacityLockedError`; listing,
+    deleting, export and usage keep working. ``over_*`` is 0 on an axis that
+    is within its limit. Every field is optional so a reply that leaves one
+    out still parses.
+
+    Attributes:
+        memory_count: Live memories in the workspace.
+        memory_limit: The effective memory limit.
+        over_memories: Memories to remove to unlock.
+        used_bytes: File bytes the owner can still delete.
+        storage_limit_bytes: The effective storage limit in bytes.
+        over_bytes: File bytes to remove to unlock.
+        cleanup_url: The web page to clean up or re-subscribe.
+        help: The server's next step: how much to remove and what still works
+            (MCP ``get_usage``).
+        purge_at: When the workspace's data is deleted if it is still over
+            capacity, ISO 8601 UTC (REST ``GET /api/v1/workspace/usage/current``
+            only). ``None`` until the daily sweep has seen it and while the
+            deployment cannot purge; it may move later (v0.126.0, #1971).
+    """
+
+    memory_count: int | None = None
+    memory_limit: int | None = None
+    over_memories: int | None = None
+    used_bytes: int | None = None
+    storage_limit_bytes: int | None = None
+    over_bytes: int | None = None
+    cleanup_url: str | None = None
+    help: str | None = None
+    purge_at: str | None = None
+
+
 class UsageInfo(BaseModel):
-    """Workspace usage and quota information."""
+    """Workspace usage and quota information.
+
+    ``capacity_lock`` is ``None`` unless the workspace is over its Free
+    capacity (memory-cloud v0.99.0+), and always on older servers.
+    """
 
     plan: str
     memories: UsageQuota
     contexts: UsageQuota
     members: UsageQuota
     mcp_calls_per_day: UsageQuotaLimitOnly
+    capacity_lock: CapacityLock | None = None
 
 
 class SearchConfig(BaseModel):
@@ -1459,6 +1500,13 @@ class ToolTrigger(BaseModel):
     ``on="pre"``; the error or result text for ``on="result"``). ``on`` is
     ``"pre"`` (default) or ``"result"``; ``action`` is ``"inform"`` (default)
     or ``"block"`` (deny the call, with the summary as the reason).
+
+    For ``on="result"`` on a Kagura tool, match the error envelope's
+    ``error`` code (``"error": "capacity_locked"``, ``payload_too_large``,
+    ``insufficient_scope`` …), never its message: since memory-cloud
+    v0.78.0 (#1684) messages are worded for people and may change, and a
+    server failure's message is fixed text that names no cause (the
+    envelope's ``cause`` / ``correlation_id`` do).
 
     The server is the validator and the SDK does not re-implement it: both
     patterns must fit a safe-regex subset shared by Python and JavaScript

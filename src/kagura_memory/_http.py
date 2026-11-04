@@ -15,12 +15,14 @@ from pydantic import BaseModel, ValidationError
 
 from .exceptions import (
     KaguraAuthError,
+    KaguraCapacityLockedError,
     KaguraConnectionError,
     KaguraError,
     KaguraFeatureNotAvailableError,
     KaguraQuotaError,
     KaguraRateLimitError,
     KaguraResponseError,
+    KaguraServiceUnavailableError,
     _exc_message,
 )
 
@@ -351,6 +353,8 @@ _TIER_QUOTA_TYPES = frozenset(
         "agents",
         "resource_tokens",
         "connectors",
+        "content_chunk_contexts",  # v0.113.0, memory-cloud#2103
+        "llm_selector_contexts",  # v0.115.0, memory-cloud#2144
         "embedding_spend_daily",
         "embedding_spend_monthly",
         "api_mcp_daily",
@@ -389,18 +393,21 @@ def gate_error(
     *,
     retry_after: int | None = None,
 ) -> KaguraError | None:
-    """Build the typed exception for a plan or quota refusal (#256).
+    """Build the typed exception for a plan, quota or capacity refusal (#256).
 
-    Branches on ``gate`` first (memory-cloud v0.75.0+): ``"quota"`` is a
-    quota, ``"plan"`` / ``"allowlist"`` / ``"deployment"`` a feature gate —
+    Branches on ``gate`` first (memory-cloud v0.75.0+): ``"capacity"`` is
+    the Free capacity lock (v0.99.0+, #1941), ``"quota"`` a quota,
+    ``"plan"`` / ``"allowlist"`` / ``"deployment"`` a feature gate —
     whatever the error code. Without a ``gate`` (an older server, or a kind
-    this SDK does not know) the code decides: ``plan_required``,
+    this SDK does not know) the code decides: MCP ``capacity_locked`` and
+    REST ``CAPACITY-001`` are the capacity lock; ``plan_required``,
     ``feature_not_available`` and ``FEAT-001`` are feature gates;
     ``quota_exceeded`` and ``QUOTA-001`` are quotas only when they name a
     known ``quota_type`` or a retry window, because the same code also
-    covers limits no plan lifts, such as the 1 MB memory-size guard. MCP
-    ``rate_limit_exceeded`` (the daily MCP call cap) is the
-    ``api_mcp_daily`` quota, resetting at the next UTC midnight.
+    covers limits no plan lifts, such as the REST 1 MB memory-size guard
+    (MCP answers that one ``payload_too_large`` since v0.108.0, #2003, which
+    is no gate code). MCP ``rate_limit_exceeded`` (the daily MCP call cap) is
+    the ``api_mcp_daily`` quota, resetting at the next UTC midnight.
 
     Malformed detail fields are dropped rather than raised, so drift never
     hides the refusal itself.
@@ -415,12 +422,26 @@ def gate_error(
             (the resource events-per-hour ceiling) is read from ``fields``.
 
     Returns:
-        :class:`KaguraQuotaError` or :class:`KaguraFeatureNotAvailableError`,
-        each carrying every descriptor field as ``details``; a plain
-        :class:`KaguraError` for a quota code that is neither a tier quota
-        nor a retry window; ``None`` when ``code`` is not a plan or quota
-        refusal.
+        :class:`KaguraCapacityLockedError`, :class:`KaguraQuotaError` or
+        :class:`KaguraFeatureNotAvailableError`, each carrying every
+        descriptor field as ``details``; a plain :class:`KaguraError` for a
+        quota code that is neither a tier quota nor a retry window; ``None``
+        when ``code`` is not a plan, quota or capacity refusal. The error's
+        ``code`` is ``code``.
     """
+    typed = _gate_error(code, message, fields, retry_after=retry_after)
+    if typed is not None:
+        annotate_server_error(typed, code, fields)
+    return typed
+
+
+def _gate_error(
+    code: str,
+    message: str,
+    fields: Mapping[str, Any],
+    *,
+    retry_after: int | None,
+) -> KaguraError | None:
     details = {k: v for k, v in fields.items() if k not in _ENVELOPE_KEYS}
     if code == _MCP_DAILY_CAP_CODE:
         # Fill in the canonical names the envelope leaves implicit; whatever
@@ -436,6 +457,8 @@ def gate_error(
     if retry_after is None:
         retry_after = _opt_int(fields.get("retry_after_seconds"))
     gate = _opt_str(fields.get("gate"))
+    if gate == _CAPACITY_GATE or code in _CAPACITY_CODES:
+        return _capacity_error(message, fields, details)
     if gate == "quota":
         return _quota_error(message, fields, retry_after, details)
     if gate in _FEATURE_GATES or code in _FEATURE_CODES:
@@ -495,26 +518,40 @@ def _opt_datetime(value: object) -> datetime | None:
 def raise_for_kagura_status(e: httpx.HTTPStatusError) -> NoReturn:
     """Translate an httpx ``HTTPStatusError`` into the matching Kagura error.
 
-    Maps ``401`` → :class:`~kagura_memory.exceptions.KaguraAuthError`, ``429`` →
-    :class:`~kagura_memory.exceptions.KaguraRateLimitError` (honoring a numeric
-    ``Retry-After`` header), and every other status →
+    Maps ``401`` → :class:`~kagura_memory.exceptions.KaguraAuthError`, a ``403``
+    ``insufficient_scope`` (an OAuth token without the scope the call needs,
+    memory-cloud v0.79.0+, #1686) → :class:`KaguraAuthError` naming the scope,
+    ``429`` → :class:`~kagura_memory.exceptions.KaguraRateLimitError`
+    (honoring a numeric ``Retry-After`` header), ``503`` →
+    :class:`~kagura_memory.exceptions.KaguraServiceUnavailableError` (its
+    ``Retry-After`` and reason), and every other status →
     :class:`~kagura_memory.exceptions.KaguraConnectionError`. The server-supplied
     ``detail`` (a FastAPI string or validation-error list) is appended when
     present — surfacing e.g. which field failed a 422 — otherwise the
-    exception's own message is used so the status is never left bare. This
+    exception's own message is used so the status is never left bare. The
+    error code and fields the body carried (a JSON-RPC error's ``data``, the
+    REST ``details``) are kept on the error's ``code`` / ``details``. This
     function always raises.
     """
     response = e.response
     status = response.status_code
     if status == 401:
         raise KaguraAuthError("Authentication failed. Check your API key.") from e
+    if status == 403 and (scope_error := insufficient_scope_error(response)) is not None:
+        raise scope_error from e
     detail = extract_detail(response) or _exc_message(e)
     if status == 429:
-        raise KaguraRateLimitError(
+        err: KaguraError = KaguraRateLimitError(
             f"Rate limit exceeded (HTTP 429): {detail}",
             retry_after=_retry_after_seconds(response),
-        ) from e
-    raise KaguraConnectionError(f"HTTP {status}: {detail}") from e
+        )
+    elif status == 503:
+        err = service_unavailable_error(response, f"HTTP 503: {detail}")
+    else:
+        err = KaguraConnectionError(f"HTTP {status}: {detail}")
+    if (fields := server_error_fields(response)) is not None:
+        annotate_server_error(err, *fields)
+    raise err from e
 
 
 def parse_response(model: type[_M], data: Any, *, operation: str) -> _M:
@@ -778,3 +815,179 @@ def validate_https_url(url: str, *, label: str = "URL") -> None:
             f"{label} must use HTTPS for security (got: {candidate}). "
             "HTTP is only allowed for localhost development."
         )
+
+
+# ---------------------------------------------------------------------------
+# Server error fields, capacity lock, scope and 503 (memory-cloud v0.78.0+, #299)
+# ---------------------------------------------------------------------------
+
+# The Free capacity lock (memory-cloud v0.99.0+, #1941): REST ``403
+# CAPACITY-001`` with ``details.gate == "capacity"``, MCP ``capacity_locked``.
+_CAPACITY_GATE = "capacity"
+_CAPACITY_CODES = frozenset({"capacity_locked", "CAPACITY-001"})
+_INSUFFICIENT_SCOPE = "insufficient_scope"
+# One ``name=value`` parameter of a ``WWW-Authenticate`` challenge, the value
+# a quoted string (RFC 9110 §11.2) or a bare token.
+_CHALLENGE_PARAM_RE = re.compile(r'([A-Za-z_][\w-]*)\s*=\s*(?:"((?:[^"\\]|\\.)*)"|([^\s,"]+))')
+_QUOTED_PAIR_RE = re.compile(r"\\(.)")
+
+
+def _capacity_error(
+    message: str, fields: Mapping[str, Any], details: dict[str, Any]
+) -> KaguraCapacityLockedError:
+    counts = (
+        "memory_count",
+        "memory_limit",
+        "over_memories",
+        "used_bytes",
+        "storage_limit_bytes",
+        "over_bytes",
+    )
+    return KaguraCapacityLockedError(
+        message,
+        cleanup_url=_opt_str(fields.get("cleanup_url")),
+        **{key: _opt_int(fields.get(key)) for key in counts},
+        details=details,
+    )
+
+
+def annotate_server_error(err: KaguraError, code: str, fields: Mapping[str, Any]) -> KaguraError:
+    """Keep the server's error ``code`` and its other fields on ``err``.
+
+    Args:
+        err: The error the SDK built for the refusal or failure.
+        code: The server's error code (MCP ``error``, REST ``error``, OAuth
+            ``error``, or a JSON-RPC ``data.error``).
+        fields: What came with it — the MCP envelope, the REST ``details``
+            or the JSON-RPC ``data``. ``status`` / ``error`` / ``message``
+            frame the envelope and are left out.
+
+    Returns:
+        ``err``, whose ``code`` and ``details`` are set unless the error
+        already had its own (a typed error builds ``details`` itself).
+    """
+    if err.code is None:
+        err.code = code
+    if not err.details:
+        err.details = {k: v for k, v in fields.items() if k not in _ENVELOPE_KEYS}
+    return err
+
+
+def server_error_fields(response: httpx.Response) -> tuple[str, dict[str, Any]] | None:
+    """``(code, fields)`` of an error body that names an error code, else ``None``.
+
+    Reads the three shapes memory-cloud answers with: the REST envelope
+    ``{"error": <code>, "message": ..., "details": {...}}`` (``fields`` is
+    ``details``); a JSON-RPC error whose ``data`` carries ``error`` — the
+    ``/mcp`` transport's refusals and server failures, with ``cause``,
+    ``correlation_id``, ``help`` and ``retryable`` (memory-cloud v0.82.0+,
+    #1742; ``fields`` is ``data``); and the OAuth-style ``{"error": <code>,
+    "error_description": ...}`` (``fields`` is the body without ``error``).
+
+    Args:
+        response: A non-2xx response.
+    """
+    try:
+        body = response.json()
+    except (ValueError, UnicodeDecodeError):
+        return None
+    if not isinstance(body, dict):
+        return None
+    error = body.get("error")
+    if isinstance(error, dict):
+        data = error.get("data")
+        if isinstance(data, dict) and isinstance(data.get("error"), str):
+            return data["error"], data
+        return None
+    if not isinstance(error, str):
+        return None
+    details = body.get("details")
+    if isinstance(details, dict):
+        return error, details
+    return error, {k: v for k, v in body.items() if k != "error"}
+
+
+def _bearer_challenge(response: httpx.Response) -> dict[str, str]:
+    """The parameters of ``response``'s ``WWW-Authenticate: Bearer`` challenge (RFC 6750 §3).
+
+    Names are lower-cased; ``{}`` when there is no Bearer challenge.
+    """
+    header = response.headers.get("WWW-Authenticate")
+    if not isinstance(header, str):
+        return {}
+    scheme, _, params = header.strip().partition(" ")
+    if scheme.lower() != "bearer":
+        return {}
+    return {
+        match.group(1).lower(): (
+            _QUOTED_PAIR_RE.sub(r"\1", match.group(2))
+            if match.group(2) is not None
+            else match.group(3)
+        )
+        for match in _CHALLENGE_PARAM_RE.finditer(params)
+    }
+
+
+def insufficient_scope_error(response: httpx.Response) -> KaguraAuthError | None:
+    """The :class:`KaguraAuthError` for a 403 ``insufficient_scope``, else ``None``.
+
+    memory-cloud v0.79.0+ (#1686) refuses a ``tools/call`` whose OAuth token
+    lacks the tool's scope — ``memory:read`` for the read-only tools,
+    ``recall`` and ``get_agent_bootstrap``, ``memory:write`` for every other
+    tool — with HTTP 403, a ``WWW-Authenticate: Bearer
+    error="insufficient_scope"`` challenge and a JSON-RPC error whose
+    ``data`` names ``required_scope``. REST ``/api/v1/*`` sends the challenge
+    with ``scope="<required>"``. ``data.required_scope`` wins: the ``/mcp``
+    challenge's ``scope`` is the granted scopes plus the required one, the
+    value to re-authorize with.
+
+    Args:
+        response: A 403 response.
+
+    Returns:
+        The error, with ``code`` ``"insufficient_scope"`` and
+        ``details["required_scope"]`` when the scope is known; ``None`` for
+        any other 403.
+    """
+    fields = server_error_fields(response)
+    data = fields[1] if fields is not None and fields[0] == _INSUFFICIENT_SCOPE else None
+    challenge = _bearer_challenge(response)
+    if data is None and challenge.get("error") != _INSUFFICIENT_SCOPE:
+        return None
+    scope = _opt_str((data or {}).get("required_scope")) or challenge.get("scope") or None
+    needs = f"the {scope} scope" if scope else "a scope"
+    err = KaguraAuthError(
+        f"The OAuth sign-in lacks {needs} this call needs (HTTP 403 insufficient_scope). "
+        "Run `kagura auth login` to sign in again with it; a `--read-only` login grants "
+        "memory:read only."
+    )
+    annotate_server_error(err, _INSUFFICIENT_SCOPE, data or {})
+    if scope:
+        err.details["required_scope"] = scope
+    return err
+
+
+def service_unavailable_error(
+    response: httpx.Response, message: str
+) -> KaguraServiceUnavailableError:
+    """The :class:`KaguraServiceUnavailableError` for an HTTP 503 ``response``.
+
+    ``retry_after`` is the ``Retry-After`` header, else a JSON-RPC
+    ``data.retry_after_seconds``; ``reason`` is the REST ``details.reason``
+    (``DB-002``, memory-cloud v0.104.0+), else the MCP ``cause``, else the
+    error code (``/mcp``'s ``temporarily_unavailable``, v0.82.0+).
+
+    Args:
+        response: The 503 response.
+        message: Message for the exception.
+    """
+    fields = server_error_fields(response)
+    code, data = fields if fields is not None else (None, {})
+    retry_after = _retry_after_seconds(response)
+    if retry_after is None:
+        retry_after = _opt_int(data.get("retry_after_seconds"))
+    reason = _opt_str(data.get("reason")) or _opt_str(data.get("cause")) or code
+    err = KaguraServiceUnavailableError(message, retry_after=retry_after, reason=reason)
+    if code is not None:
+        annotate_server_error(err, code, data)
+    return err
