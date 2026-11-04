@@ -1,5 +1,6 @@
 """Pydantic models for Kagura Memory SDK."""
 
+import re
 from datetime import datetime
 from typing import Any, Literal, TypeVar
 
@@ -484,7 +485,7 @@ class MemoryListItem(BaseModel):
     @classmethod
     def _date_is_start_of_utc_day(cls, value: Any) -> Any:
         # A date would otherwise parse as a naive midnight next to aware datetimes.
-        if isinstance(value, str) and len(value) == 10:
+        if isinstance(value, str) and re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value):
             return f"{value}T00:00:00Z"
         return value
 

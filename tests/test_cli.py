@@ -1226,14 +1226,60 @@ def test_update_memory_merge_details_falls_back_when_ignored(mock_client_cls, mo
     }
 
 
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_update_memory_fallback_folds_observed_at_into_the_details(mock_client_cls, mock_config):
+    """The server folds observed_at into the patch; the fallback's merge must too.
+
+    Otherwise a stored observed_at would contradict the new one in the write.
+    """
+    current = {"observed_at": "2024-01-01", "status": "open"}
+    result, mock_client = _update_memory_cli(
+        mock_client_cls,
+        mock_config,
+        "-m",
+        "mem-1",
+        "--details-patch",
+        '{"status": "done"}',
+        "--observed-at",
+        "2026-11-04",
+        reference=_reference_reply(current),
+        update_side_effect=[_patch_refused("details_patch"), {"status": "success", "version": 3}],
+    )
+    assert result.exit_code == 0, result.output
+    second = mock_client.update_memory.await_args
+    assert second.kwargs["details"] == {"observed_at": "2026-11-04", "status": "done"}
+    assert second.kwargs["observed_at"] == "2026-11-04"
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_update_memory_details_patch_fallback_names_its_flag(mock_client_cls, mock_config):
+    result, mock_client = _update_memory_cli(
+        mock_client_cls,
+        mock_config,
+        "-m",
+        "mem-1",
+        "--details-patch",
+        '{"status": "done"}',
+        reference=_bounded_reference_reply(details_omitted=True, details_total_chars=30000),
+        update_side_effect=[_patch_refused("details_patch")],
+    )
+    assert result.exit_code == 1, result.output
+    assert "--details-patch: the memory's current details could not be read" in result.output
+    assert "without --details-patch" in result.output
+    mock_client.update_memory.assert_awaited_once()
+
+
 @pytest.mark.parametrize(
     ("code", "details"),
     [
         ("invalid_argument", {"unknown_arguments": ["add_tags"]}),
+        ("invalid_argument", {"unknown_arguments": ["details_patch", "add_tags"]}),
         ("invalid_argument", {}),
         ("validation_error", {}),
     ],
-    ids=["other-argument", "no-list", "other-code"],
+    ids=["other-argument", "another-argument-too", "no-list", "other-code"],
 )
 @patch("kagura_memory.cli.load_config")
 @patch("kagura_memory.cli.KaguraClient")

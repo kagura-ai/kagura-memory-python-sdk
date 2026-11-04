@@ -202,7 +202,7 @@ def _build_details(details: str | None, location: str | None) -> dict[str, Any] 
 
 
 async def _current_details_for_merge(
-    client: KaguraClient, context_id: str, memory_id: str
+    client: KaguraClient, context_id: str, memory_id: str, flag: str = "--merge-details"
 ) -> dict[str, Any]:
     """Read the memory's current ``details`` for ``update-memory``'s merge fallback.
 
@@ -217,7 +217,7 @@ async def _current_details_for_merge(
     instead). Any of those markers refuses the merge — a truthy
     ``details_omitted``, a ``details_json`` page, or a ``details_total_chars``
     size without the ``details`` key itself — since a marker without the object
-    can only mean a bounded read.
+    can only mean a bounded read. ``flag`` names the option the messages are about.
 
     Raises:
         click.ClickException: If the reply carries no memory object, its
@@ -226,7 +226,7 @@ async def _current_details_for_merge(
     result = await client.reference(context_id=context_id, memory_id=memory_id)
     memory = result.get("memory") if isinstance(result, dict) else None
     if not isinstance(memory, dict):
-        raise click.ClickException("--merge-details: the reference reply carried no memory object")
+        raise click.ClickException(f"{flag}: the reference reply carried no memory object")
     if (
         memory.get("details_omitted")
         or "details_json" in memory
@@ -239,9 +239,9 @@ async def _current_details_for_merge(
             else ""
         )
         raise click.ClickException(
-            f"--merge-details: the memory's current details could not be read in full{size}; "
+            f"{flag}: the memory's current details could not be read in full{size}; "
             "the server bounds a reference reply and this CLI cannot page it yet. Send the "
-            "complete object with --details and without --merge-details (the MCP reference "
+            f"complete object with --details and without {flag} (the MCP reference "
             "tool returns the whole object with max_chars up to 100000 or details_offset "
             "paging)."
         )
@@ -254,9 +254,7 @@ async def _current_details_for_merge(
     if current is None:
         return {}
     if not isinstance(current, dict):
-        raise click.ClickException(
-            "--merge-details: the memory's current details are not a JSON object"
-        )
+        raise click.ClickException(f"{flag}: the memory's current details are not a JSON object")
     return current
 
 
@@ -1011,11 +1009,15 @@ def reference(context_id, memory_id):
     )
 
 
-def _apply_details_patch(current: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
+def _apply_details_patch(
+    current: dict[str, Any], patch: dict[str, Any], observed_at: str | None
+) -> dict[str, Any]:
     """What ``details_patch`` makes of ``current``: a shallow merge, ``None`` deleting a key.
 
     The server's rule (``MemoryService._merge_details_patch``, memory-cloud
-    v0.140.0), for the read-then-write fallback on a server without it.
+    v0.140.0), for the read-then-write fallback on a server without it. A
+    top-level ``observed_at`` lands in the merged details, as the server folds
+    it into the patch, so a stored ``observed_at`` cannot contradict it.
     """
     merged = dict(current)
     for key, value in patch.items():
@@ -1023,21 +1025,24 @@ def _apply_details_patch(current: dict[str, Any], patch: dict[str, Any]) -> dict
             merged.pop(key, None)
         else:
             merged[key] = value
+    if observed_at is not None:
+        merged["observed_at"] = observed_at
     return merged
 
 
 def _details_patch_refused(err: KaguraError) -> bool:
-    """Whether ``err`` is a server refusing ``details_patch`` as an unknown argument.
+    """Whether ``err`` is a server refusing ``details_patch``, and nothing else, as unknown.
 
     memory-cloud 0.82.0-0.139.x answers ``invalid_argument`` and lists the
-    argument in ``unknown_arguments`` (#1742); read from the code and that
-    list, never the message. Without the list the refusal is not taken to be
-    about ``details_patch``, so a write is never retried on a guess.
+    arguments it does not declare in ``unknown_arguments`` (#1742); read from
+    the code and that list, never the message. Without the list, or with
+    another argument in it (which the fallback would send again), the error
+    stands, so a write is never retried on a guess.
     """
-    if err.code != "invalid_argument":
+    if getattr(err, "code", None) != "invalid_argument":
         return False
-    listed = err.details.get("unknown_arguments")
-    return isinstance(listed, list) and "details_patch" in listed
+    listed = getattr(err, "details", {}).get("unknown_arguments")
+    return isinstance(listed, list) and set(listed) == {"details_patch"}
 
 
 @main.command(name="update-memory")
@@ -1214,10 +1219,11 @@ def update_memory(
         raise click.ClickException(
             "--details-patch cannot be combined with --details/--location/--merge-details"
         )
+    flag = "--details-patch"
     if merge_details:
         if details_payload is None:
             raise click.ClickException("--merge-details needs --details or --location")
-        patch, details_payload = details_payload, None
+        patch, details_payload, flag = details_payload, None, "--merge-details"
 
     edit: dict[str, Any] = {
         "memory_id": memory_id,
@@ -1249,8 +1255,8 @@ def update_memory(
                 "merged onto a reference() read instead.",
                 err=True,
             )
-            current = await _current_details_for_merge(client, ctx, memory_id)
-            merged = _apply_details_patch(current, patch)
+            current = await _current_details_for_merge(client, ctx, memory_id, flag)
+            merged = _apply_details_patch(current, patch, edit["observed_at"])
             return await client.update_memory(context_id=ctx, details=merged, **edit)
         if "version" in result:
             return result
@@ -1262,10 +1268,9 @@ def update_memory(
             "merged onto a reference() read in a second call.",
             err=True,
         )
-        current = await _current_details_for_merge(client, ctx, memory_id)
-        return await client.update_memory(
-            context_id=ctx, memory_id=memory_id, details=_apply_details_patch(current, patch)
-        )
+        current = await _current_details_for_merge(client, ctx, memory_id, flag)
+        merged = _apply_details_patch(current, patch, edit["observed_at"])
+        return await client.update_memory(context_id=ctx, memory_id=memory_id, details=merged)
 
     _run_client_command(op, context_id)
 
