@@ -2560,8 +2560,9 @@ class KaguraClient:
                 DeprecationWarning,
                 stacklevel=2,
             )
-        # Pre-check quota
-        contexts = await self.list_contexts()
+        # Pre-check quota. count / limit / can_create do not depend on the
+        # page, so one row is enough (an older server ignores limit).
+        contexts = await self.list_contexts(limit=1)
         count = contexts.get("count")
         limit = contexts.get("limit")
         # ``limit: 0`` with ``can_create: false`` is how list_contexts reports

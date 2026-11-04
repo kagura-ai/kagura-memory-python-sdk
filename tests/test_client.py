@@ -1680,8 +1680,8 @@ async def test_list_contexts_passes_through_empty_account_hint():
 async def test_create_context_precheck_accepts_slim_list_contexts_response():
     """Issue #255: create_context's quota pre-check works on the v0.73.0 slim envelope.
 
-    The pre-check only reads can_create/count/limit, and calls list_contexts with
-    no options so it asks for the cheapest shape.
+    The pre-check only reads can_create/count/limit, which do not depend on the
+    page, so it asks for the cheapest shape: no options and one row (#315).
     """
     client = _make_initialized_client()
 
@@ -1693,7 +1693,7 @@ async def test_create_context_precheck_accepts_slim_list_contexts_response():
             ]
             result = await client.create_context(name="new-ctx")
             assert result["name"] == "new-ctx"
-            assert mock.call_args_list[0].args == ("list_contexts", {})
+            assert mock.call_args_list[0].args == ("list_contexts", {"limit": 1})
             assert mock.call_args_list[1].args[0] == "create_context"
     finally:
         await client.close()
