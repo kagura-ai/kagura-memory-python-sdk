@@ -1098,10 +1098,11 @@ def _fields_of(body: Any) -> tuple[str, dict[str, Any]] | None:
 class ErrorBody:
     """A non-2xx response's JSON body, decoded once and read each way the error mapping needs.
 
-    ``KaguraRestClient``, :func:`raise_for_kagura_status` and ``kagura-mcp``
-    read one per error response and pass it down, instead of decoding the
-    body again in every reader (#311). A body that is not JSON reads as
-    nothing in every field.
+    ``KaguraRestClient`` and :func:`raise_for_kagura_status` read one per
+    error response and pass it down, instead of decoding the body again in
+    every reader (#311); ``kagura-mcp`` reads one where it decides whether to
+    forward the reply and one where it words its own. A body that is not
+    JSON reads as nothing in every field.
     """
 
     #: What :func:`extract_detail` returns: the server's message, or ``""``.

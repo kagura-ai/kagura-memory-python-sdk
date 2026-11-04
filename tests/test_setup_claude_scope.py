@@ -847,6 +847,10 @@ def test_query_flags_of_an_http_entry_read_the_url_as_the_server_does(
     assert _query_flags({"type": "http", "url": f"{MCP_URL}{query}"}) == flags
 
 
+def test_query_flags_of_an_http_entry_without_a_url_are_empty() -> None:
+    assert _query_flags({"type": "http", "url": None}) == {}
+
+
 def test_add_tools_under_a_tools_allowlist_warns(connection, tmp_path: Path) -> None:
     args = ["setup", "claude", "--project-dir", str(tmp_path), "--context-id", CTX, "-y"]
     args += ["--api-key", API_KEY, "--mcp-url", f"{MCP_URL}?tools=recall"]

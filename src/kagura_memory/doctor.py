@@ -777,18 +777,18 @@ def _tool_view(mcp_url: str, version: str | None = None) -> dict[str, Any]:
     :data:`_NO_PROFILE`. A blank ``profile=`` is not the default: the server
     fails ``tools/list`` for it.
     """
-    query = mcp_url_tool_view(mcp_url)
-    if query.tools is not None:
-        return {"tools": ",".join(query.tools)}
-    if query.profile is not None:
-        profile = query.profile or "(empty)"
+    asked = mcp_url_tool_view(mcp_url)
+    if asked.tools is not None:
+        return {"tools": ",".join(asked.tools)}
+    if asked.profile is not None:
+        profile = asked.profile or "(empty)"
     elif meets_minimum(version, _CORE_DEFAULT_SINCE):
         profile = "core (default)"
     else:
         profile = _NO_PROFILE
     view: dict[str, Any] = {"profile": profile}
-    if query.add_tools:
-        view["add_tools"] = list(query.add_tools)
+    if asked.add_tools:
+        view["add_tools"] = list(asked.add_tools)
     return view
 
 

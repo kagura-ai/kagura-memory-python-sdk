@@ -2114,8 +2114,8 @@ def _digest_view_args(
     and so is a list naming no tool (``--add-tools`` would refuse it).
     """
     if entry.url is not None:
-        query = mcp_url_tool_view(entry.url)
-        view = [query.profile, ",".join(query.tools or ()), ",".join(query.add_tools)]
+        asked = mcp_url_tool_view(entry.url)
+        view = [asked.profile, ",".join(asked.tools or ()), ",".join(asked.add_tools)]
     else:
         view = [tool_profile, None, ",".join(add_tools) if add_tools else None]
     args: list[str] = []
