@@ -850,6 +850,40 @@ def test_logout_revokes_and_deletes_profile(
     assert cf.get_profile("default") is None
 
 
+@pytest.mark.parametrize(
+    ("refresh_token", "sent"),
+    [("rtok-1", "rtok-1"), ("", "atok-1")],
+    ids=["refresh-token", "no-refresh-token"],
+)
+@pytest.mark.parametrize("args", [["auth", "logout"], ["auth", "logout", "--all", "--yes"]])
+@patch("kagura_memory.auth.cli.revoke_token", new_callable=AsyncMock)
+@patch("kagura_memory.auth.cli.make_oauth_client")
+def test_logout_revokes_the_refresh_token(
+    mock_client_factory,
+    mock_revoke,
+    args: list[str],
+    refresh_token: str,
+    sent: str,
+    patched_default_path: Path,
+):
+    """memory-cloud v0.82.0+ (#1741) revokes a refresh token's access token with
+    it, but not the reverse: logout sends the refresh token, else the access token."""
+    mock_client_factory.return_value = _async_ctx()
+    mock_revoke.return_value = True
+    _seed_credentials(
+        patched_default_path.parent.parent,
+        _make_creds(access_token="atok-1", refresh_token=refresh_token),
+    )
+
+    result = CliRunner().invoke(main, args)
+
+    assert result.exit_code == 0, result.output
+    mock_revoke.assert_awaited_once()
+    assert mock_revoke.await_args.kwargs["token"] == sent
+    assert mock_revoke.await_args.kwargs["client_id"] == "kagura-cli"
+    assert "Warning" not in result.output
+
+
 def test_logout_all_without_yes_errors(patched_default_path: Path):
     creds = _make_creds()
     _seed_credentials(patched_default_path.parent.parent, creds)
