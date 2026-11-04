@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from .models import RollbackSummary
+    from .models import RollbackSummary, SessionRollbackSummary
 
 
 def _exc_message(e: BaseException) -> str:
@@ -448,6 +448,9 @@ class KaguraPartialRollbackError(KaguraError):
     category, with the failures in ``summary.errors`` — read it to decide
     whether to retry.
 
+    A session rollback's partial failure is
+    :class:`KaguraPartialSessionRollbackError` instead.
+
     Attributes:
         report_id: The Sleep report that was rolled back.
         summary: What was reversed, kept and failed. ``None`` when the
@@ -465,6 +468,48 @@ class KaguraPartialRollbackError(KaguraError):
         super().__init__(message)
         self.report_id = report_id
         self.summary = summary
+
+
+class KaguraPartialSessionRollbackError(KaguraError):
+    """``rollback_session`` failed some items of this call (memory-cloud v0.113.0+, #2044).
+
+    The server answers ``partial_rollback`` after a real run (``dry_run=False``)
+    in which some items failed. Every other item of the call was handled and
+    saved, so nothing is half-reverted; call ``rollback_session`` again with
+    the same arguments to retry the failed items (they are planned again from
+    the memory as it is then). A sibling of :class:`KaguraPartialRollbackError`,
+    which is the Sleep run rollback's.
+
+    The rest of the envelope stays in ``details`` (``rollback_status``,
+    ``events``, the ``session_id`` or ``since`` / ``until`` echo); quote
+    ``correlation_id`` when reporting a failure.
+
+    Attributes:
+        session_summary: What this call forgot, restored, skipped and failed,
+            with one line per failed item in ``session_summary.errors``.
+            ``None`` when the server's ``summary`` was missing or did not
+            parse.
+        totals: The counters of every call of this rollback so far
+            (``calls`` included), as the server sent them, or ``None``.
+        rollback_id: The rollback record's id, or ``None``.
+        remaining: Events still to handle (the failed items' included), or
+            ``None`` when the server did not say.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        session_summary: SessionRollbackSummary | None = None,
+        totals: dict[str, Any] | None = None,
+        rollback_id: int | None = None,
+        remaining: int | None = None,
+    ):
+        super().__init__(message)
+        self.session_summary = session_summary
+        self.totals = totals
+        self.rollback_id = rollback_id
+        self.remaining = remaining
 
 
 class KaguraIntegrityError(KaguraError):

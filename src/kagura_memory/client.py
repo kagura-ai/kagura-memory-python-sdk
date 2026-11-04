@@ -6,11 +6,12 @@ import json
 import logging
 import math
 import re
+import uuid
 import warnings
 from collections.abc import AsyncGenerator
 from contextlib import aclosing
 from datetime import UTC, date, datetime
-from typing import Any, Literal, Self, TypeVar, get_args
+from typing import Any, Literal, Self, TypeVar, get_args, overload
 from urllib.parse import quote
 
 import httpx
@@ -40,16 +41,24 @@ from .exceptions import (
     KaguraError,
     KaguraNotFoundError,
     KaguraPartialRollbackError,
+    KaguraPartialSessionRollbackError,
     KaguraResponseError,
     _exc_message,
 )
 from .models import (
+    _BOOTSTRAP_MIN_CHARS,
+    _MAX_CHARS_MAX,
+    _MAX_CHARS_MIN,
     _OBSERVED_DATE,
     _RECALL_FULL_MAX,
     Agent,
     AgentBinding,
     AgentBootstrapComponentName,
     AgentBootstrapResponse,
+    BootstrapComponentName,
+    BootstrapFormat,
+    BootstrapResponse,
+    ChangesSinceResponse,
     ContextInfo,
     ContextTagsResponse,
     DedupeMode,
@@ -57,7 +66,11 @@ from .models import (
     Edge,
     EmbeddingModelsResponse,
     EmbeddingStatus,
+    ForgetBatchResult,
     GuardrailSet,
+    GuideResponse,
+    ListMatchingResponse,
+    ListOrderBy,
     ListTagsResponse,
     MeasurementAggregate,
     MeasurementPeriod,
@@ -66,11 +79,16 @@ from .models import (
     MemoryListResponse,
     MemoryStatsResponse,
     RecallVerbosity,
+    RememberBatchResult,
+    RevisionsPage,
     RollbackResult,
     RollbackSummary,
     ServerInfo,
+    SessionRollbackResult,
+    SessionRollbackSummary,
     SleepReport,
     SleepReportDetail,
+    ToolDescriptions,
     ToolListResponse,
     ToolTrigger,
     UsageInfo,
@@ -80,6 +98,7 @@ from .models import (
     _details_with_tool_trigger,
     _validate_int_range,
     _validate_max_chars,
+    _validate_or_none,
 )
 
 _T = TypeVar("_T", bound=_BaseModel)
@@ -265,8 +284,8 @@ class KaguraClient:
 
     MCP tool methods additionally translate the server's structured domain
     errors (``{"status": "error", ...}``) into exceptions rather than
-    returning them as data (issue #180): a missing context/memory/report
-    raises :class:`KaguraNotFoundError`, a quota refusal (including the
+    returning them as data (issue #180): a missing context, memory, report or
+    rollback session raises :class:`KaguraNotFoundError`, a quota refusal (including the
     in-band daily MCP call cap, ``rate_limit_exceeded``)
     :class:`KaguraQuotaError`, a plan/feature gate
     :class:`KaguraFeatureNotAvailableError` and the Free capacity lock
@@ -2840,17 +2859,42 @@ class KaguraClient:
             arguments["verbose"] = True
         return await self._call_tool_checked("update_memory", arguments)
 
+    @overload
     async def forget(
         self,
         context_id: str,
         memory_id: str | None = None,
         query: str | None = None,
         k: int = 10,
-    ) -> dict[str, Any]:
+        *,
+        memory_ids: None = None,
+    ) -> dict[str, Any]: ...
+
+    @overload
+    async def forget(
+        self,
+        context_id: str,
+        memory_id: None = None,
+        query: None = None,
+        k: None = None,
+        *,
+        memory_ids: list[str],
+    ) -> ForgetBatchResult: ...
+
+    async def forget(
+        self,
+        context_id: str,
+        memory_id: str | None = None,
+        query: str | None = None,
+        k: int | None = None,
+        *,
+        memory_ids: list[str] | None = None,
+    ) -> dict[str, Any] | ForgetBatchResult:
         """
         Call forget MCP tool (soft delete memories).
 
-        Delete by specific memory_id or by search query. This is a soft
+        Delete by specific memory_id, by a list of ids (``memory_ids``) or by
+        search query. This is a soft
         delete: a deleted memory stays recoverable until the deployment's
         cleanup sweep purges it. The window is set per deployment
         (``CLEANUP_DELETED_MEMORIES_RETENTION_DAYS``, default 30 days, ``0``
@@ -2872,23 +2916,61 @@ class KaguraClient:
         other matches without counting the guardrail. Check
         ``deleted_count`` rather than assuming success.
 
+        ``memory_ids`` (memory-cloud v0.117.0+, #2127) forgets 1-50 distinct
+        ids in one call, each exactly as ``memory_id`` would and committed on
+        its own, and returns a :class:`~kagura_memory.models.ForgetBatchResult`
+        with one row per id (``deleted`` / ``skipped`` / ``error``). The ids
+        share one time budget (the server's ``forget`` timeout, v0.118.0+,
+        #2191): an id it did not reach is an ``error`` row with ``error ==
+        "not_attempted"`` — resend those. An older server refuses the
+        argument (``invalid_argument``, v0.82.0+).
+
         Args:
             context_id: Context ID
             memory_id: UUID of specific memory to delete
             query: Search query to find and delete matching memories
-            k: Number of memories to delete in query mode (default: 10)
+            k: Number of memories to delete in query mode (default: 10).
+                Query mode only: passed with ``memory_ids`` it raises
+                ``ValueError``.
+            memory_ids: 1-50 distinct memory UUIDs to delete in one call.
+                Keyword-only; not combined with ``memory_id``, ``query`` or
+                ``k``.
 
         Returns:
-            API response with deletion results (``deleted_count``,
-            ``memory_ids``) — may be fewer than targeted, see above.
+            For ``memory_id`` / ``query``: the API response dict
+            (``deleted_count``, ``memory_ids``) — may be fewer than
+            targeted, see above. Since memory-cloud v0.113.0 (#2044) it adds
+            ``session_id`` when the request has a session (for
+            :meth:`changes_since` / :meth:`rollback_session`). For
+            ``memory_ids``: a :class:`~kagura_memory.models.ForgetBatchResult`.
 
         Raises:
-            ValueError: If neither ``memory_id`` nor ``query`` is provided —
-                ``forget`` always targets a specific memory or a search; an
-                unqualified call would be an ambiguous no-op.
+            ValueError: If none of ``memory_id``, ``query`` and
+                ``memory_ids`` is provided — ``forget`` always targets a
+                specific memory or a search; an unqualified call would be an
+                ambiguous no-op — or ``memory_ids`` is combined with another
+                target or with ``k``, is empty, holds more than 50 ids, an id
+                that is not a UUID, or the same id twice (all checked before
+                any request).
+            TypeError: ``memory_ids`` is a bare ``str``, not a list, or holds a
+                non-``str``.
             KaguraError: Server-side rejection, e.g. a ``query`` delete while
-                recall is degraded.
+                recall is degraded. With ``memory_ids``, every id failing is
+                ``code == "batch_failed"`` with the rows in
+                ``details["results"]``.
+            KaguraResponseError: A ``memory_ids`` reply does not match
+                :class:`~kagura_memory.models.ForgetBatchResult`
+                (``operation="forget"``).
         """
+        if memory_ids is not None:
+            if memory_id or query:
+                raise ValueError("Provide exactly one of memory_id, memory_ids or query")
+            if k is not None:
+                raise ValueError("k applies to query mode only, not to memory_ids")
+            result = await self._call_tool_checked(
+                "forget", {"context_id": context_id, "memory_ids": _checked_memory_ids(memory_ids)}
+            )
+            return parse_response(ForgetBatchResult, result, operation="forget")
         if not memory_id and not query:
             raise ValueError("Provide either memory_id or query")
         arguments: dict[str, Any] = {"context_id": context_id}
@@ -2896,8 +2978,551 @@ class KaguraClient:
             arguments["memory_id"] = memory_id
         if query:
             arguments["query"] = query
-            arguments["k"] = k
+            arguments["k"] = _FORGET_DEFAULT_K if k is None else k
         return await self._call_tool_checked("forget", arguments)
+
+    async def bootstrap(
+        self,
+        context_id: str,
+        *,
+        since: str | datetime | None = None,
+        include: list[BootstrapComponentName] | None = None,
+        max_chars: int | None = None,
+        format: BootstrapFormat | None = None,
+    ) -> BootstrapResponse:
+        """Open an interactive session on one context in one call.
+
+        Calls the ``bootstrap`` MCP tool (memory-cloud v0.93.0+, #1851): the
+        context block, its tool ``guardrails``, the trusted pinned set
+        (cap 20), the upcoming Time Memories (k = 20) and the change log
+        since ``since`` (at most 50), each bounded and **fail-soft** — a
+        failing lane is ``status="error"`` while the rest return, with
+        ``degraded`` set. Deterministic: no recall runs; search by topic with
+        :meth:`recall` if the change list does not answer the question.
+        Not :meth:`get_agent_bootstrap`, which rehydrates a registered agent.
+
+        The memory-cloud session-start skill calls it as
+        ``bootstrap(ctx, since="7d", format="index", max_chars=5000)``.
+
+        Args:
+            context_id: Context UUID.
+            since: Start of the ``changes`` window: ISO 8601 (naive = UTC), a
+                ``datetime`` (naive = UTC), or ``"<N>d"`` for N days back
+                (``"0d"`` to ``"999d"``). Omit for the server's ``"7d"``.
+            include: The lanes to compose, a non-empty subset of
+                ``"pinned"``, ``"upcoming"``, ``"changes"``. Omit for all.
+            max_chars: Reply budget in characters, not tokens, 2,000-100,000
+                (server default 20,000). Over budget the full format first
+                leaves ``context_summary`` out of the pinned rows
+                (``context_summary_omitted``), then each lane keeps the prefix
+                that fits (``truncated``). Below 10,000 needs memory-cloud
+                v0.115.0+ (#2126); an older server refuses it
+                (``validation_error``).
+            format: ``"index"`` for pointer rows (pinned keeps its text;
+                guardrail, upcoming and change rows carry an 80-character
+                ``summary`` with ``summary_cut``; no ``instructions``) or
+                ``"full"``. Omitted, the server picks ``"index"`` below
+                ``max_chars`` 10,000 and ``"full"`` otherwise. Needs
+                memory-cloud v0.115.0+ (#2126): v0.93.0-v0.114.x refuse the
+                argument (``invalid_argument``).
+
+        Returns:
+            :class:`~kagura_memory.models.BootstrapResponse`. Since
+            memory-cloud v0.142.0 (#2615) ``plan_headroom`` lists every plan
+            dimension at 80 % or more of its limit on every call.
+
+        Raises:
+            ValueError: ``max_chars`` is not an ``int`` in [2,000, 100,000],
+                ``format`` is not ``"full"`` / ``"index"``, ``format="full"``
+                comes with ``max_chars`` below 10,000, or ``include`` is empty
+                or names an unknown lane (before any request).
+            TypeError: ``include`` is a bare ``str``, not a list, or holds a
+                non-``str`` (before any request).
+            KaguraNotFoundError: The context does not exist or is not
+                accessible.
+            KaguraError: Another server-side refusal, e.g. a malformed
+                ``since`` (``validation_error``).
+            KaguraResponseError: The reply does not match
+                :class:`~kagura_memory.models.BootstrapResponse`
+                (``operation="bootstrap"``).
+        """
+        arguments: dict[str, Any] = {"context_id": context_id}
+        if since is not None:
+            arguments["since"] = _iso_arg(since)
+        if include is not None:
+            lanes = _str_list("include", include)
+            known = get_args(BootstrapComponentName)
+            if not lanes or any(name not in known for name in lanes):
+                raise ValueError(f"include must be a non-empty subset of {', '.join(known)}")
+            arguments["include"] = lanes
+        if max_chars is not None:
+            _validate_int_range("max_chars", max_chars, _BOOTSTRAP_MIN_CHARS, _MAX_CHARS_MAX)
+            arguments["max_chars"] = max_chars
+        if format is not None:
+            if format not in get_args(BootstrapFormat):
+                raise ValueError(f"format must be 'full' or 'index', got {format!r}")
+            if format == "full" and max_chars is not None and max_chars < _MAX_CHARS_MIN:
+                raise ValueError(
+                    f'format="full" needs max_chars of at least {_MAX_CHARS_MIN}; '
+                    'pass format="index" (or omit format) under it'
+                )
+            arguments["format"] = format
+        result = await self._call_tool_checked("bootstrap", arguments)
+        return parse_response(BootstrapResponse, result, operation="bootstrap")
+
+    async def changes_since(
+        self,
+        context_id: str,
+        since: str | datetime,
+        *,
+        until: str | datetime | None = None,
+        kinds: list[str] | None = None,
+        cursor: str | None = None,
+        limit: int | None = None,
+        session_id: str | None = None,
+        by_me: bool | None = None,
+        max_chars: int | None = None,
+    ) -> ChangesSinceResponse:
+        """List what changed in a context since a time, oldest first.
+
+        Calls the ``changes_since`` MCP tool (memory-cloud v0.93.0+, #1852): a
+        deterministic memory-level change log — ``created``, ``updated``
+        (Sleep maintenance included), ``superseded`` (with
+        ``superseded_by``) and ``forgotten`` events — keyset-paged. A soft
+        delete logs ``forgotten`` only (v0.98.0+, #1924), and every event of
+        a memory that is forgotten now has no ``summary`` (v0.96.0+, #1876).
+        No ranking, no embedding, no Hebbian write. In a private context only
+        the caller's own memories (and a linked account's) are listed.
+
+        Args:
+            context_id: Context UUID.
+            since: Window start, inclusive: ISO 8601 or a ``datetime`` (naive
+                = UTC).
+            until: Window end, exclusive (later than ``since``). Omit for now.
+            kinds: Kinds to include, a non-empty subset of ``created``,
+                ``updated``, ``superseded``, ``forgotten`` — or, with
+                ``session_id`` / ``by_me``, of ``created``, ``updated``,
+                ``forgotten``, ``restored``. Omit for all.
+            cursor: ``next_cursor`` of the previous page.
+            limit: Changes per page (server default 50, clamped to 1-100).
+            session_id: Only that session's writes (a ``session_id`` a write
+                returned; memory-cloud v0.113.0+, #2044). Another principal's
+                session lists nothing, unless the caller owns the context.
+            by_me: ``True`` lists only the caller's own writes, in any session
+                (memory-cloud v0.114.0+, #2121) — what
+                ``rollback_session(since=...)`` would address.
+            max_chars: Reply budget in characters, 10,000-100,000 (server
+                default 20,000); a cut page sets ``truncated``.
+
+        Returns:
+            :class:`~kagura_memory.models.ChangesSinceResponse`; call again
+            with ``cursor=result.next_cursor`` while ``result.has_more``.
+
+        Raises:
+            ValueError: ``max_chars`` is out of range (before any request).
+            TypeError: ``kinds`` is a bare ``str``, not a list, or holds a
+                non-``str`` (before any request).
+            KaguraNotFoundError: The context does not exist or is not
+                accessible.
+            KaguraError: Another server-side refusal (``validation_error``:
+                a malformed time, ``until`` not after ``since``, a bad
+                ``kinds`` / ``session_id`` / ``cursor``). Each argument after
+                ``cursor``/``limit`` is refused as ``invalid_argument`` by a
+                server older than its floor.
+            KaguraResponseError: The reply does not match
+                :class:`~kagura_memory.models.ChangesSinceResponse`
+                (``operation="changes_since"``).
+        """
+        arguments: dict[str, Any] = {"context_id": context_id, "since": _iso_arg(since)}
+        if until is not None:
+            arguments["until"] = _iso_arg(until)
+        if kinds is not None:
+            arguments["kinds"] = _str_list("kinds", kinds)
+        if cursor is not None:
+            arguments["cursor"] = cursor
+        if limit is not None:
+            arguments["limit"] = limit
+        if session_id is not None:
+            arguments["session_id"] = session_id
+        if by_me is not None:
+            arguments["by_me"] = by_me
+        if max_chars is not None:
+            _validate_max_chars(max_chars)
+            arguments["max_chars"] = max_chars
+        result = await self._call_tool_checked("changes_since", arguments)
+        return parse_response(ChangesSinceResponse, result, operation="changes_since")
+
+    async def list_matching(
+        self,
+        context_id: str,
+        *,
+        filters: dict[str, Any] | None = None,
+        order_by: ListOrderBy | None = None,
+        direction: Literal["asc", "desc"] | None = None,
+        cursor: str | None = None,
+        limit: int | None = None,
+        include_details: bool = False,
+        max_chars: int | None = None,
+    ) -> ListMatchingResponse:
+        """List every live memory of a context that matches exact filters.
+
+        Calls the ``list`` MCP tool (memory-cloud v0.93.0+, #1852): no
+        ranking, a stable order and a ``total``, e.g. the open backlog
+        ``filters={"type": ["tech-debt"], "tags": ["status:open"]}`` or
+        ``{"type": "task", "details.status": "open"}``. Use :meth:`recall`
+        for meaning.
+
+        :meth:`list_memories` is a different call: REST
+        ``GET /api/v1/memory/list``, with a summary substring (``q``), a
+        trigger window, a bounding box and the cross-context "my memories"
+        view. This method is MCP and takes ``recall``'s exact filter
+        vocabulary plus ``details.<key>`` equality, orders by
+        ``updated_at`` / ``created_at`` / ``importance`` / ``observed_at``
+        and pages with a cursor. In a private context both list only the
+        caller's own memories.
+
+        Args:
+            context_id: Context UUID.
+            filters: Exact-match filters, ANDed: ``type``, ``scope``,
+                ``source_type``, ``delivery_mode``, ``tags`` (+ ``tags_match``
+                ``any`` | ``all``, ``tags_normalize``), ``importance``
+                ``{gte|lte|gt|lt}``, ``created_after`` / ``created_before`` /
+                ``updated_after`` / ``updated_before`` (ISO 8601),
+                ``observed_after`` / ``observed_before`` (v0.127.0+),
+                ``source_uri_prefix``, ``trust_tier="trusted"``, and
+                ``details.<key>`` — a scalar matched with its stored JSON type
+                (``2`` is not ``2.0`` or ``"2"``). The server refuses an
+                unknown filter (``validation_error``).
+            order_by: ``"updated_at"`` (server default; a never-edited memory
+                sorts by ``created_at``), ``"created_at"``, ``"importance"``
+                or ``"observed_at"`` (memory-cloud v0.127.0+, #2330; memories
+                without one go last). The id breaks ties.
+            direction: ``"asc"`` or ``"desc"`` (server default).
+            cursor: ``next_cursor`` of the previous page.
+            limit: Memories per page (server default 50, clamped to 1-100).
+            include_details: ``True`` adds each memory's ``details`` (dropped
+                first when the reply passes ``max_chars``:
+                ``details_omitted``). Sent only when ``True``.
+            max_chars: Reply budget in characters, 10,000-100,000 (server
+                default 20,000); a cut page sets ``truncated``.
+
+        Returns:
+            :class:`~kagura_memory.models.ListMatchingResponse`; call again
+            with ``cursor=result.next_cursor`` while ``result.has_more``.
+
+        Raises:
+            ValueError: ``max_chars`` is out of range (before any request).
+            KaguraNotFoundError: The context does not exist or is not
+                accessible.
+            KaguraError: Another server-side refusal (``validation_error``:
+                an unknown filter, ``order_by`` or ``direction``).
+            KaguraResponseError: The reply does not match
+                :class:`~kagura_memory.models.ListMatchingResponse`
+                (``operation="list"``).
+        """
+        arguments: dict[str, Any] = {"context_id": context_id}
+        if filters is not None:
+            arguments["filters"] = filters
+        if order_by is not None:
+            arguments["order_by"] = order_by
+        if direction is not None:
+            arguments["direction"] = direction
+        if cursor is not None:
+            arguments["cursor"] = cursor
+        if limit is not None:
+            arguments["limit"] = limit
+        if include_details:
+            arguments["include_details"] = True
+        if max_chars is not None:
+            _validate_max_chars(max_chars)
+            arguments["max_chars"] = max_chars
+        result = await self._call_tool_checked("list", arguments)
+        return parse_response(ListMatchingResponse, result, operation="list")
+
+    async def remember_batch(
+        self,
+        context_id: str,
+        items: list[dict[str, Any]],
+        *,
+        atomic: bool | None = None,
+        dedupe: DedupeMode | None = None,
+        tags_normalize: bool | None = None,
+        verbose: bool | None = None,
+    ) -> RememberBatchResult:
+        """Store up to 50 memories in one call.
+
+        Calls the ``remember_batch`` MCP tool (memory-cloud v0.93.0+, #1853).
+        Each item is validated and limited like a single :meth:`remember`.
+        Without ``atomic`` each item is written and reported on its own; with
+        ``atomic=True`` the batch is one transaction — a failing item, or a
+        ``dedupe="check"`` candidate, rolls everything back and the other
+        items come back ``skipped``.
+
+        Args:
+            context_id: Context UUID; it applies to every item.
+            items: 1-50 dicts of the server's ``remember`` arguments, by
+                their wire names: ``summary``, ``content`` and ``type`` are
+                required, plus any of ``importance``, ``tags``,
+                ``source_uri``, ``source_type``, ``context_summary``,
+                ``details`` (a tool guardrail is
+                ``details={"tool_trigger": {...}}``), ``observed_at``
+                (memory-cloud v0.127.0+), ``context``, ``delivery_mode``,
+                ``linked_memory_ids``, ``linked_source_uris``,
+                ``supersedes`` — no SDK defaults are added. An item may
+                repeat the batch's ``context_id`` but name no other. An
+                undeclared key fails that item (``invalid_argument``; a
+                whole atomic batch is refused).
+            atomic: ``True``: all or nothing. Server default ``False``.
+            dedupe: As ``remember``'s, applied per item: ``"suggest"``
+                (server default), ``"check"`` (a near-duplicate is returned as
+                a ``duplicate_candidate`` row instead of written) or
+                ``"off"``.
+            tags_normalize: ``True`` stores each item's tags under the
+                context's established spelling (reported in ``lint``).
+            verbose: ``True`` keeps ``persistence.detail`` on each row.
+
+        Returns:
+            :class:`~kagura_memory.models.RememberBatchResult` with one row
+            per item. Check ``failed`` / ``candidates`` / ``skipped`` and
+            each row's ``status``; on ``committed_after_timeout`` every item
+            is stored — do not resend.
+
+        Raises:
+            ValueError: ``items`` is empty or holds more than 50 items, an
+                item carries ``dedupe``, ``tags_normalize`` or ``verbose``
+                (batch-level here) or a ``context_id`` other than the
+                batch's, or an item's ``tags`` break the 50-tag /
+                100-character cap (all before any request).
+            TypeError: ``items`` is not a list, or an item is not a dict.
+            KaguraQuotaError: An atomic batch did not fit the daily quota
+                (``quota_exceeded``; nothing was written, a smaller batch may
+                fit).
+            KaguraCapacityLockedError: The workspace is over its Free
+                capacity.
+            KaguraError: Nothing was written. ``code == "batch_failed"``
+                (every item failed) or ``"batch_refused"`` (an atomic batch
+                with an invalid item) carries the per-item rows in
+                ``details["results"]``; a ``dedupe_unavailable`` item (the
+                duplicate check is down) is such a row — retry it or send
+                ``dedupe="off"``. ``"timeout"`` (an atomic batch rolled back
+                at its time limit) carries no rows: send fewer items, or drop
+                ``atomic``.
+            KaguraResponseError: The reply does not match
+                :class:`~kagura_memory.models.RememberBatchResult`
+                (``operation="remember_batch"``).
+        """
+        arguments: dict[str, Any] = {
+            "context_id": context_id,
+            "items": _checked_batch_items(items, context_id),
+        }
+        if atomic is not None:
+            arguments["atomic"] = atomic
+        if dedupe is not None:
+            arguments["dedupe"] = dedupe
+        if tags_normalize is not None:
+            arguments["tags_normalize"] = tags_normalize
+        if verbose is not None:
+            arguments["verbose"] = verbose
+        result = await self._call_tool_checked("remember_batch", arguments)
+        return parse_response(RememberBatchResult, result, operation="remember_batch")
+
+    async def describe_tools(
+        self,
+        *,
+        query: str | None = None,
+        names: list[str] | None = None,
+    ) -> ToolDescriptions:
+        """Find the tools this MCP URL's ``tools/list`` leaves out.
+
+        Calls the ``describe_tools`` MCP tool (memory-cloud v0.93.0+, #1849).
+        A profile only shapes ``tools/list``: this client can call every
+        tool, but a model behind a mainstream MCP client can call listed
+        tools only, so the reply says which URL query lists more.
+
+        Args:
+            query: Case-insensitive substring narrowing the hidden-tool list
+                by name, title or summary.
+            names: Up to 20 tool names whose complete definitions to return
+                instead of the list.
+
+        Returns:
+            :class:`~kagura_memory.models.ToolDescriptions`.
+
+        Raises:
+            ValueError: ``names`` holds more than 20 names (before any
+                request).
+            TypeError: ``names`` is a bare ``str`` or holds a non-``str``.
+            KaguraResponseError: The reply does not match
+                :class:`~kagura_memory.models.ToolDescriptions`
+                (``operation="describe_tools"``).
+        """
+        arguments: dict[str, Any] = {}
+        if query is not None:
+            arguments["query"] = query
+        if names is not None:
+            arguments["names"] = _checked_names("names", names, _DESCRIBE_MAX_NAMES)
+        result = await self._call_tool_checked("describe_tools", arguments)
+        return parse_response(ToolDescriptions, result, operation="describe_tools")
+
+    async def guide(self, topics: list[str] | None = None) -> GuideResponse:
+        """Read sections of the server's tool manual.
+
+        Calls the ``guide`` MCP tool (memory-cloud v0.93.0+, #1850): the
+        walkthroughs the short tool descriptions leave out — how to read a
+        reply, when to pick one tool over another, the write rules. A caller
+        error's ``help`` often names a topic (``'Manual: guide(["<tool>"])'``).
+        Static text, nothing caller-specific.
+
+        Args:
+            topics: Up to 20 tool names (``"recall"``) or ``"<tool>.<section>"``
+                topics. Omit for the server's ``["index"]``, which lists them
+                all.
+
+        Returns:
+            :class:`~kagura_memory.models.GuideResponse`; unknown names are in
+            ``unknown``, not raised.
+
+        Raises:
+            ValueError: ``topics`` holds more than 20 names (before any
+                request).
+            TypeError: ``topics`` is a bare ``str`` or holds a non-``str``.
+            KaguraResponseError: The reply does not match
+                :class:`~kagura_memory.models.GuideResponse`
+                (``operation="guide"``).
+        """
+        arguments: dict[str, Any] = {}
+        if topics is not None:
+            arguments["topics"] = _checked_names("topics", topics, _GUIDE_MAX_TOPICS)
+        result = await self._call_tool_checked("guide", arguments)
+        return parse_response(GuideResponse, result, operation="guide")
+
+    async def list_revisions(
+        self,
+        context_id: str,
+        memory_id: str,
+        *,
+        limit: int | None = None,
+        cursor: str | None = None,
+        max_chars: int | None = None,
+    ) -> RevisionsPage:
+        """Read one memory's revision log, newest first.
+
+        Calls the ``list_revisions`` MCP tool (memory-cloud v0.113.0+,
+        #2043): one row per ``created`` / ``updated`` (with the fields it
+        changed) / ``forgotten`` / ``restored`` event, each with the version
+        after it. Same permission as :meth:`reference`; a forgotten memory's
+        log is unreadable (``memory_not_found``).
+
+        Args:
+            context_id: Context UUID.
+            memory_id: Memory UUID.
+            limit: Events per page (server default 20, clamped to 1-100).
+            cursor: ``next_cursor`` of the previous page.
+            max_chars: Reply budget in characters, 10,000-100,000 (server
+                default 20,000); a cut page sets ``truncated``.
+
+        Returns:
+            :class:`~kagura_memory.models.RevisionsPage`.
+
+        Raises:
+            ValueError: ``max_chars`` is out of range (before any request).
+            KaguraNotFoundError: The memory or context does not exist, is not
+                accessible, or the memory is forgotten.
+            KaguraResponseError: The reply does not match
+                :class:`~kagura_memory.models.RevisionsPage`
+                (``operation="list_revisions"``).
+        """
+        arguments: dict[str, Any] = {"context_id": context_id, "memory_id": memory_id}
+        if limit is not None:
+            arguments["limit"] = limit
+        if cursor is not None:
+            arguments["cursor"] = cursor
+        if max_chars is not None:
+            _validate_max_chars(max_chars)
+            arguments["max_chars"] = max_chars
+        result = await self._call_tool_checked("list_revisions", arguments)
+        return parse_response(RevisionsPage, result, operation="list_revisions")
+
+    async def rollback_session(
+        self,
+        context_id: str,
+        *,
+        session_id: str | None = None,
+        since: str | datetime | None = None,
+        until: str | datetime | None = None,
+        dry_run: bool = True,
+    ) -> SessionRollbackResult:
+        """Plan or undo what one session — or the caller in a window — wrote.
+
+        Calls the ``rollback_session`` MCP tool (memory-cloud v0.113.0+,
+        #2044). **Destructive with** ``dry_run=False``: per memory, one the
+        session created is forgotten, one it edited gets the values from
+        before its first edit back (a new version), one it forgot is
+        restored and re-embedded. A memory someone else changed since, Sleep
+        merged, a resource row or one the caller may not write
+        (``not_permitted``, v0.134.0+, #2432) is skipped with a cause, never
+        half-reverted. Only the caller's own writes (same user or a linked
+        account, same agent credential); a context owner may name any
+        session. Needs the context editor role. A call handles at most 500
+        events (100 restores): ``status == "in_progress"`` with
+        ``remaining > 0`` means call again with the same arguments. Once
+        complete, further calls are refused (``already_rolled_back``) until
+        new writes land.
+
+        Args:
+            context_id: Context UUID.
+            session_id: The session whose writes to undo — the
+                ``session_id`` a ``remember`` / ``update_memory`` / ``forget``
+                / :meth:`remember_batch` reply returned.
+            since: Instead of ``session_id``: undo the caller's own writes
+                since then (ISO 8601 or ``datetime``, naive = UTC; memory-cloud
+                v0.114.0+, #2121). Preview them with
+                ``changes_since(since=..., by_me=True)``.
+            until: Window end, exclusive, at most 7 days after ``since``.
+                Omit for now, or for the end of the caller's unfinished
+                rollback of a window from the same ``since``.
+            dry_run: ``True`` (default) only plans and changes nothing;
+                ``False`` rolls back. Always sent, so the plan-only default
+                never depends on the server's.
+
+        Returns:
+            :class:`~kagura_memory.models.SessionRollbackResult`.
+
+        Raises:
+            ValueError: Neither or both of ``session_id`` and ``since`` are
+                given, or ``until`` comes without ``since`` (before any
+                request).
+            KaguraNotFoundError: ``session_not_found`` (no session with this
+                id the caller may roll back in this context), or the context
+                is not accessible.
+            KaguraPartialSessionRollbackError: Some items failed this call;
+                every other item was handled and saved. ``session_summary``
+                lists the failures in ``errors``; ``totals``, ``rollback_id``
+                and ``remaining`` come with it. Call again with the same
+                arguments to retry the failed items.
+            KaguraError: ``no_writes_in_window``, ``already_rolled_back``,
+                ``permission_denied`` (below editor) or ``validation_error``
+                (e.g. a window wider than 7 days), in ``code``.
+            KaguraResponseError: The reply does not match
+                :class:`~kagura_memory.models.SessionRollbackResult`
+                (``operation="rollback_session"``).
+        """
+        if (session_id is None) == (since is None):
+            raise ValueError("Provide exactly one of session_id or since")
+        if until is not None and since is None:
+            raise ValueError("until needs since")
+        arguments: dict[str, Any] = {"context_id": context_id, "dry_run": dry_run}
+        if session_id is not None:
+            arguments["session_id"] = session_id
+        if since is not None:
+            arguments["since"] = _iso_arg(since)
+        if until is not None:
+            arguments["until"] = _iso_arg(until)
+        result = await self._call_tool("rollback_session", arguments)
+        if result.get("status") == "error" and result.get("error") == "partial_rollback":
+            raise _partial_session_rollback_error(result)
+        self._raise_for_mcp_error(result, "rollback_session")
+        return parse_response(SessionRollbackResult, result, operation="rollback_session")
 
     async def create_context(
         self,
@@ -3947,6 +4572,7 @@ class KaguraClient:
             "memory_not_found",
             "agent_not_found",
             "binding_not_found",
+            "session_not_found",
         ):
             err = KaguraNotFoundError(f"{operation}: {message}")
         elif code == "partial_rollback":
@@ -4411,3 +5037,139 @@ def _unfinished_list_error(tool: str) -> KaguraResponseError:
     return KaguraResponseError(
         f"{tool}: the list did not end within {_MAX_AUTO_PAGES} pages", operation=tool
     )
+
+
+# ---------------------------------------------------------------------------
+# Session tools (#301): local checks mirroring the server's own bounds
+# ---------------------------------------------------------------------------
+
+# remember_batch items (server ``MAX_BATCH_ITEMS``) and the remember arguments
+# that are set once, on the batch, never per item (server ``_BATCH_LEVEL``).
+_BATCH_MAX_ITEMS = 50
+_BATCH_LEVEL_KEYS = ("dedupe", "tags_normalize", "verbose")
+# forget(memory_ids=) ids per call (server ``FORGET_MAX_IDS``).
+_FORGET_MAX_IDS = 50
+# forget(query=) matches deleted when ``k`` is unset (the server's default too).
+_FORGET_DEFAULT_K = 10
+# describe_tools names / guide topics per call (server ``MAX_NAMES`` / ``MAX_TOPICS``).
+_DESCRIBE_MAX_NAMES = 20
+_GUIDE_MAX_TOPICS = 20
+
+
+def _checked_batch_items(items: Any, context_id: str) -> list[dict[str, Any]]:
+    """Reject a ``remember_batch`` ``items`` list before any request.
+
+    Per-item rules the server reports per item (a missing ``summary``, an
+    unknown key) stay the server's. Refused here: the batch-level keys, an
+    item ``context_id`` other than the batch's (the server accepts one that
+    repeats it, compared as a string), and the tag cap that
+    :meth:`KaguraClient.remember` also checks.
+
+    Raises:
+        TypeError: ``items`` is not a list, or an item is not a dict.
+        ValueError: Not 1-50 items, an item carries a batch-level key or
+            another context's ``context_id``, or an item's ``tags`` list
+            breaks the 50-tag / 100-character cap.
+    """
+    if not isinstance(items, list):
+        raise TypeError(f"items must be a list of dicts, got {type(items).__name__}")
+    if not 1 <= len(items) <= _BATCH_MAX_ITEMS:
+        raise ValueError(f"items must hold 1 to {_BATCH_MAX_ITEMS} items, got {len(items)}")
+    for index, item in enumerate(items):
+        if not isinstance(item, dict):
+            raise TypeError(f"items[{index}] must be a dict, got {type(item).__name__}")
+        batch_level = [key for key in _BATCH_LEVEL_KEYS if key in item]
+        if batch_level:
+            raise ValueError(
+                f"items[{index}] carries {', '.join(batch_level)}: set dedupe / "
+                "tags_normalize / verbose on remember_batch itself, not on an item"
+            )
+        if "context_id" in item and item["context_id"] != context_id:
+            raise ValueError(
+                f"items[{index}] carries another context_id: the batch's context_id "
+                "applies to every item"
+            )
+        tags = item.get("tags")
+        if isinstance(tags, list):
+            try:
+                _validate_memory_tags(tags)
+            except ValueError as e:
+                raise ValueError(f"items[{index}]: {e}") from None
+    return items
+
+
+def _partial_session_rollback_error(result: dict[str, Any]) -> KaguraPartialSessionRollbackError:
+    """The error for ``rollback_session``'s ``partial_rollback`` envelope.
+
+    Not :meth:`KaguraClient._raise_for_mcp_error`'s ``partial_rollback``:
+    that one reads a Sleep run's ``rollback_summary``, which this envelope
+    lacks (``session_rollback.py`` sends ``summary`` and ``totals``). The
+    partial rollback is already committed, so a field the SDK cannot read is
+    ``None`` rather than a second error that would hide it.
+    """
+    totals = result.get("totals")
+    err = KaguraPartialSessionRollbackError(
+        f"rollback_session failed (partial_rollback): {result.get('message', 'Unknown error')}",
+        session_summary=_validate_or_none(SessionRollbackSummary, result.get("summary")),
+        totals=totals if isinstance(totals, dict) else None,
+        rollback_id=_opt_int(result.get("rollback_id")),
+        remaining=_opt_int(result.get("remaining")),
+    )
+    annotate_server_error(err, "partial_rollback", result)
+    return err
+
+
+def _str_list(name: str, values: Any) -> list[str]:
+    """A list-of-str argument, copied, or the ``TypeError`` naming it.
+
+    A bare ``str`` is refused rather than iterated: ``list("created")``
+    would send its characters as the list.
+
+    Raises:
+        TypeError: ``values`` is a ``str`` or not a list, or an entry is not
+            a ``str``.
+    """
+    if isinstance(values, str) or not isinstance(values, list):
+        raise TypeError(f"{name} must be a list of strings, not {type(values).__name__}")
+    for index, value in enumerate(values):
+        if not isinstance(value, str):
+            raise TypeError(f"{name}[{index}] must be a str, got {type(value).__name__}")
+    return list(values)
+
+
+def _checked_memory_ids(memory_ids: Any) -> list[str]:
+    """Reject a ``forget(memory_ids=)`` list the server would refuse.
+
+    Distinct the way the server compares them: as UUIDs, so two spellings
+    of one id (case) are the same id.
+
+    Raises:
+        TypeError: A bare ``str``, a non-list, or a non-``str`` id.
+        ValueError: Not 1-50 ids, an id that is not a UUID, or a repeat.
+    """
+    ids = _str_list("memory_ids", memory_ids)
+    if not 1 <= len(ids) <= _FORGET_MAX_IDS:
+        raise ValueError(f"memory_ids must hold 1 to {_FORGET_MAX_IDS} ids, got {len(ids)}")
+    seen: set[uuid.UUID] = set()
+    for index, value in enumerate(ids):
+        try:
+            parsed = uuid.UUID(value)
+        except ValueError:
+            raise ValueError(f"memory_ids[{index}] is not a memory UUID") from None
+        if parsed in seen:
+            raise ValueError(f"memory_ids lists {parsed} more than once")
+        seen.add(parsed)
+    return ids
+
+
+def _checked_names(name: str, values: Any, limit: int) -> list[str]:
+    """Reject a list-of-names argument the server would refuse.
+
+    Raises:
+        TypeError: A bare ``str``, a non-list, or a non-``str`` entry.
+        ValueError: More than ``limit`` entries.
+    """
+    names = _str_list(name, values)
+    if len(names) > limit:
+        raise ValueError(f"{name} holds at most {limit} names, got {len(names)}")
+    return names
