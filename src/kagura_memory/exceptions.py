@@ -410,6 +410,11 @@ class KaguraPartialRollbackError(KaguraError):
     category, with the failures in ``summary.errors`` — read it to decide
     whether to retry.
 
+    ``rollback_session`` (memory-cloud v0.113.0+, #2044) raises it too when
+    items of a session rollback failed: ``report_id`` and ``summary`` are
+    then ``None``, and the server's ``summary``, ``totals``, ``remaining``,
+    ``rollback_id`` and ``correlation_id`` are in ``details`` (#301).
+
     Attributes:
         report_id: The Sleep report that was rolled back.
         summary: What was reversed, kept and failed. ``None`` when the

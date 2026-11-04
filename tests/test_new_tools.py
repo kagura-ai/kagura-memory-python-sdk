@@ -30,6 +30,7 @@ from kagura_memory import (
     KaguraClient,
     KaguraError,
     KaguraNotFoundError,
+    KaguraPartialRollbackError,
     KaguraQuotaError,
     KaguraResponseError,
     PlanHeadroomNotice,
@@ -1025,3 +1026,350 @@ async def test_forget_single_mode_still_returns_the_dict():
     result, params = await _call(reply, "forget", CTX, memory_id=MEM_A)
     assert result == reply
     assert params["arguments"] == {"context_id": CTX, "memory_id": MEM_A}
+
+
+# ============================================================================
+# describe_tools / guide
+# ============================================================================
+
+_URL_HINT = {
+    "list_all": "?profile=full on the MCP URL lists every tool",
+    "allowlist": "?tools=<name>,<name> lists exactly those (wins over profile)",
+    "add": "?add_tools=<name>,<name> lists the profile plus those (ignored next to ?tools=)",
+    "note": "A profile only picks what tools/list shows; …",
+}
+
+
+@pytest.mark.asyncio
+async def test_describe_tools_lists_hidden_tools_with_no_arguments():
+    reply = {
+        "status": "success",
+        "tools": [{"name": "get_usage", "title": "Get usage", "summary": "Plan usage."}],
+        "count": 1,
+        "listed": ["bootstrap", "recall"],
+        "hint": 'describe_tools(names=["<tool>"]) returns a tool\'s full schema; …',
+        "url": _URL_HINT,
+    }
+    result, params = await _call(reply, "describe_tools")
+    assert params == {"name": "describe_tools", "arguments": {}}
+    assert result.tools[0]["name"] == "get_usage" and result.count == 1
+    assert result.listed == ["bootstrap", "recall"] and result.url == _URL_HINT
+    assert result.definitions == [] and result.url_error is None
+
+
+@pytest.mark.asyncio
+async def test_describe_tools_returns_definitions_for_names():
+    reply = {
+        "status": "success",
+        "definitions": [{"name": "get_usage", "inputSchema": {"type": "object"}}],
+        "url": _URL_HINT,
+        "url_error": "Unknown tool profile 'typo'.",
+        "unknown": ["nope"],
+        "hint": "describe_tools() with no arguments lists every tool you can ask for.",
+    }
+    result, params = await _call(
+        reply, "describe_tools", query="usage", names=["get_usage", "nope"]
+    )
+    assert params["arguments"] == {"query": "usage", "names": ["get_usage", "nope"]}
+    assert result.definitions[0]["inputSchema"] == {"type": "object"}
+    assert result.unknown == ["nope"] and result.url_error == "Unknown tool profile 'typo'."
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method", "kwargs", "error"),
+    [
+        ("describe_tools", {"names": "get_usage"}, TypeError),
+        ("describe_tools", {"names": ["a", 1]}, TypeError),
+        ("describe_tools", {"names": [f"t{i}" for i in range(21)]}, ValueError),
+        ("guide", {"topics": "recall"}, TypeError),
+        ("guide", {"topics": [None]}, TypeError),
+        ("guide", {"topics": [f"t{i}" for i in range(21)]}, ValueError),
+    ],
+)
+async def test_name_lists_are_checked_before_any_request(method, kwargs, error):
+    await _refused_locally(method, error=error, **kwargs)
+
+
+@pytest.mark.asyncio
+async def test_guide_sends_topics_only_when_set_and_reads_sections():
+    reply = {
+        "status": "success",
+        "topics": [{"topic": "index", "text": "Topics: …"}],
+        "unknown": ["recal"],
+        "hint": 'guide(["index"]) lists every topic.',
+    }
+    result, params = await _call(reply, "guide")
+    assert params == {"name": "guide", "arguments": {}}
+    assert result.topics[0].topic == "index" and result.unknown == ["recal"]
+
+    _, params = await _call(reply, "guide", ["recall", "recal"])
+    assert params["arguments"] == {"topics": ["recall", "recal"]}
+
+
+@pytest.mark.asyncio
+async def test_guide_drift_raises_response_error():
+    sent: list[dict[str, Any]] = []
+    client = _wire_client({"status": "success", "topics": "index"}, sent)
+    try:
+        with pytest.raises(KaguraResponseError) as info:
+            await client.guide()
+    finally:
+        await client.close()
+    assert info.value.operation == "guide"
+
+
+# ============================================================================
+# list_revisions
+# ============================================================================
+
+REVISIONS_REPLY: dict[str, Any] = {
+    "status": "success",
+    "memory_id": MEM_A,
+    "current_version": 3,
+    "revisions": [
+        {
+            "version": 3,
+            "kind": "updated",
+            "at": "2026-11-03T10:00:00Z",
+            "changed_fields": ["summary", "tags"],
+            "writer": "api",
+            "by_you": True,
+            "session_id": "mcp-0123456789abcdef",
+        },
+        {
+            "version": 2,
+            "kind": "updated",
+            "at": "2026-11-02T10:00:00Z",
+            "changed_fields": [],
+            "writer": "erasure",
+            "by_you": False,
+        },
+    ],
+    "count": 2,
+    "has_more": True,
+    "next_cursor": "41",
+    **_CONTEXT_FIELDS,
+}
+
+
+@pytest.mark.asyncio
+async def test_list_revisions_sends_set_arguments_and_reads_the_page():
+    result, params = await _call(REVISIONS_REPLY, "list_revisions", CTX, MEM_A)
+    assert params == {
+        "name": "list_revisions",
+        "arguments": {"context_id": CTX, "memory_id": MEM_A},
+    }
+    assert result.current_version == 3 and result.has_more is True
+    mine, erased = result.revisions
+    assert mine.changed_fields == ["summary", "tags"] and mine.by_you is True
+    assert mine.session_id == "mcp-0123456789abcdef"
+    assert erased.writer == "erasure" and erased.agent_id is None
+
+    _, params = await _call(
+        REVISIONS_REPLY, "list_revisions", CTX, MEM_A, limit=5, cursor="41", max_chars=10_000
+    )
+    assert params["arguments"] == {
+        "context_id": CTX,
+        "memory_id": MEM_A,
+        "limit": 5,
+        "cursor": "41",
+        "max_chars": 10_000,
+    }
+
+
+@pytest.mark.asyncio
+async def test_list_revisions_of_a_forgotten_memory_is_not_found():
+    reply = _error("memory_not_found", f"Memory not found or you don't have access: {MEM_A}")
+    sent: list[dict[str, Any]] = []
+    client = _wire_client(reply, sent)
+    try:
+        with pytest.raises(KaguraNotFoundError):
+            await client.list_revisions(CTX, MEM_A)
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_list_revisions_checks_max_chars_and_drift():
+    await _refused_locally("list_revisions", CTX, MEM_A, error=ValueError, max_chars=5)
+    reply = {k: v for k, v in REVISIONS_REPLY.items() if k != "current_version"}
+    sent: list[dict[str, Any]] = []
+    client = _wire_client(reply, sent)
+    try:
+        with pytest.raises(KaguraResponseError) as info:
+            await client.list_revisions(CTX, MEM_A)
+    finally:
+        await client.close()
+    assert info.value.operation == "list_revisions"
+
+
+# ============================================================================
+# rollback_session
+# ============================================================================
+
+DRY_RUN_REPLY: dict[str, Any] = {
+    "status": "dry_run",
+    "dry_run": True,
+    "plan": {"forget": 1, "restore": 1, "unforget": 0, "skip": 1},
+    "items": [
+        {"memory_id": MEM_A, "kind": "created", "action": "forget"},
+        {
+            "memory_id": MEM_B,
+            "kind": "updated",
+            "action": "restore",
+            "fields": ["summary"],
+        },
+        {"memory_id": MEM_C, "kind": "updated", "action": "skip", "cause": "not_permitted"},
+    ],
+    "session_id": "mcp-0123456789abcdef",
+    "events": 4,
+    "remaining": 0,
+    **_CONTEXT_FIELDS,
+}
+
+_SUMMARY = {
+    "forgotten": 1,
+    "restored": 1,
+    "updated_restored": 1,
+    "skipped": 1,
+    "failed": 0,
+    "chunks_requeued": 0,
+    "points_requeued": 0,
+    "skipped_items": [{"memory_id": MEM_C, "kind": "updated", "cause": "not_permitted"}],
+    "errors": [],
+}
+
+
+@pytest.mark.asyncio
+async def test_rollback_session_always_sends_dry_run():
+    result, params = await _call(
+        DRY_RUN_REPLY, "rollback_session", CTX, session_id="mcp-0123456789abcdef"
+    )
+    assert params == {
+        "name": "rollback_session",
+        "arguments": {"context_id": CTX, "dry_run": True, "session_id": "mcp-0123456789abcdef"},
+    }
+    assert result.status == "dry_run" and result.dry_run is True
+    assert result.plan == {"forget": 1, "restore": 1, "unforget": 0, "skip": 1}
+    forget_row, restore_row, skip_row = result.items
+    assert forget_row.action == "forget" and restore_row.fields == ["summary"]
+    assert skip_row.cause == "not_permitted"
+    assert result.summary is None and result.items_truncated is False
+
+
+@pytest.mark.asyncio
+async def test_rollback_session_window_mode_reads_a_run():
+    reply = {
+        "status": "in_progress",
+        "dry_run": False,
+        "rollback_status": "partial",
+        "summary": _SUMMARY,
+        "totals": {**{k: v for k, v in _SUMMARY.items() if isinstance(v, int)}, "calls": 1},
+        "since": "2026-11-03T00:00:00Z",
+        "until": "2026-11-04T00:00:00Z",
+        "until_from": "unfinished_rollback",
+        "events": 500,
+        "remaining": 12,
+        "rollback_id": 9,
+        "help": "Call again with the same since and until to continue.",
+        **_CONTEXT_FIELDS,
+    }
+    result, params = await _call(
+        reply,
+        "rollback_session",
+        CTX,
+        since=datetime(2026, 11, 3),
+        until="2026-11-04T00:00:00Z",
+        dry_run=False,
+    )
+    assert params["arguments"] == {
+        "context_id": CTX,
+        "dry_run": False,
+        "since": "2026-11-03T00:00:00",
+        "until": "2026-11-04T00:00:00Z",
+    }
+    assert result.status == "in_progress" and result.remaining == 12
+    assert result.since == datetime(2026, 11, 3, tzinfo=UTC)
+    assert result.until_from == "unfinished_rollback" and result.rollback_id == 9
+    assert result.summary is not None
+    assert result.summary.skipped_items[0]["cause"] == "not_permitted"
+    assert result.totals is not None and result.totals["calls"] == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({}, "exactly one"),
+        ({"session_id": "s", "since": "2026-11-03T00:00:00Z"}, "exactly one"),
+        ({"session_id": "s", "until": "2026-11-04T00:00:00Z"}, "until needs since"),
+    ],
+)
+async def test_rollback_session_needs_one_mode(kwargs, match):
+    message = await _refused_locally("rollback_session", CTX, error=ValueError, **kwargs)
+    assert match in message
+
+
+@pytest.mark.asyncio
+async def test_rollback_session_partial_raises_with_the_session_summary():
+    reply = _error(
+        "partial_rollback",
+        "Rollback finished this call with 1 failed item(s); summary shows what was reversed.",
+        help="Every item not listed in summary.errors was handled and saved. …",
+        retryable=True,
+        rollback_status="partial",
+        summary={**_SUMMARY, "failed": 1, "errors": [f"Memory {MEM_D} (forget) failed: x"]},
+        totals={"forgotten": 1, "failed": 1, "calls": 1},
+        correlation_id="c0ffee",
+        session_id="mcp-0123456789abcdef",
+        events=4,
+        remaining=1,
+        rollback_id=9,
+        **_CONTEXT_FIELDS,
+    )
+    sent: list[dict[str, Any]] = []
+    client = _wire_client(reply, sent)
+    try:
+        with pytest.raises(KaguraPartialRollbackError) as info:
+            await client.rollback_session(CTX, session_id="mcp-0123456789abcdef", dry_run=False)
+    finally:
+        await client.close()
+    err = info.value
+    assert err.code == "partial_rollback" and err.retryable is True
+    assert err.report_id is None and err.summary is None and err.__cause__ is None
+    assert err.details["summary"]["failed"] == 1 and err.details["remaining"] == 1
+    assert err.correlation_id == "c0ffee"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("code", "error"),
+    [
+        ("session_not_found", KaguraNotFoundError),
+        ("no_writes_in_window", KaguraError),
+        ("already_rolled_back", KaguraError),
+    ],
+)
+async def test_rollback_session_refusals(code, error):
+    sent: list[dict[str, Any]] = []
+    client = _wire_client(_error(code, "refused", retryable=False), sent)
+    try:
+        with pytest.raises(error) as info:
+            await client.rollback_session(CTX, since="2026-11-03T00:00:00Z")
+    finally:
+        await client.close()
+    assert info.value.code == code
+
+
+@pytest.mark.asyncio
+async def test_rollback_session_drift_raises_response_error():
+    reply = {k: v for k, v in DRY_RUN_REPLY.items() if k != "dry_run"}
+    sent: list[dict[str, Any]] = []
+    client = _wire_client(reply, sent)
+    try:
+        with pytest.raises(KaguraResponseError) as info:
+            await client.rollback_session(CTX, session_id="s")
+    finally:
+        await client.close()
+    assert info.value.operation == "rollback_session"

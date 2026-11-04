@@ -59,6 +59,7 @@ from .models import (
     EmbeddingStatus,
     ForgetBatchResult,
     GuardrailSet,
+    GuideResponse,
     ListMatchingResponse,
     ListOrderBy,
     ListTagsResponse,
@@ -70,11 +71,14 @@ from .models import (
     MemoryStatsResponse,
     RecallVerbosity,
     RememberBatchResult,
+    RevisionsPage,
     RollbackResult,
     RollbackSummary,
     ServerInfo,
+    SessionRollbackResult,
     SleepReport,
     SleepReportDetail,
+    ToolDescriptions,
     ToolTrigger,
     UsageInfo,
     _agent_update_payload,
@@ -2856,6 +2860,212 @@ class KaguraClient:
         result = await self._call_tool_checked("remember_batch", arguments)
         return parse_response(RememberBatchResult, result, operation="remember_batch")
 
+    async def describe_tools(
+        self,
+        *,
+        query: str | None = None,
+        names: list[str] | None = None,
+    ) -> ToolDescriptions:
+        """Find the tools this MCP URL's ``tools/list`` leaves out.
+
+        Calls the ``describe_tools`` MCP tool (memory-cloud v0.93.0+, #1849).
+        A profile only shapes ``tools/list``: this client can call every
+        tool, but a model behind a mainstream MCP client can call listed
+        tools only, so the reply says which URL query lists more.
+
+        Args:
+            query: Case-insensitive substring narrowing the hidden-tool list
+                by name, title or summary.
+            names: Up to 20 tool names whose complete definitions to return
+                instead of the list.
+
+        Returns:
+            :class:`~kagura_memory.models.ToolDescriptions`.
+
+        Raises:
+            ValueError: ``names`` holds more than 20 names (before any
+                request).
+            TypeError: ``names`` is a bare ``str`` or holds a non-``str``.
+            KaguraResponseError: The reply does not match
+                :class:`~kagura_memory.models.ToolDescriptions`
+                (``operation="describe_tools"``).
+        """
+        arguments: dict[str, Any] = {}
+        if query is not None:
+            arguments["query"] = query
+        if names is not None:
+            arguments["names"] = _checked_names("names", names, _DESCRIBE_MAX_NAMES)
+        result = await self._call_tool_checked("describe_tools", arguments)
+        return parse_response(ToolDescriptions, result, operation="describe_tools")
+
+    async def guide(self, topics: list[str] | None = None) -> GuideResponse:
+        """Read sections of the server's tool manual.
+
+        Calls the ``guide`` MCP tool (memory-cloud v0.93.0+, #1850): the
+        walkthroughs the short tool descriptions leave out — how to read a
+        reply, when to pick one tool over another, the write rules. A caller
+        error's ``help`` often names a topic (``'Manual: guide(["<tool>"])'``).
+        Static text, nothing caller-specific.
+
+        Args:
+            topics: Up to 20 tool names (``"recall"``) or ``"<tool>.<section>"``
+                topics. Omit for the server's ``["index"]``, which lists them
+                all.
+
+        Returns:
+            :class:`~kagura_memory.models.GuideResponse`; unknown names are in
+            ``unknown``, not raised.
+
+        Raises:
+            ValueError: ``topics`` holds more than 20 names (before any
+                request).
+            TypeError: ``topics`` is a bare ``str`` or holds a non-``str``.
+            KaguraResponseError: The reply does not match
+                :class:`~kagura_memory.models.GuideResponse`
+                (``operation="guide"``).
+        """
+        arguments: dict[str, Any] = {}
+        if topics is not None:
+            arguments["topics"] = _checked_names("topics", topics, _GUIDE_MAX_TOPICS)
+        result = await self._call_tool_checked("guide", arguments)
+        return parse_response(GuideResponse, result, operation="guide")
+
+    async def list_revisions(
+        self,
+        context_id: str,
+        memory_id: str,
+        *,
+        limit: int | None = None,
+        cursor: str | None = None,
+        max_chars: int | None = None,
+    ) -> RevisionsPage:
+        """Read one memory's revision log, newest first.
+
+        Calls the ``list_revisions`` MCP tool (memory-cloud v0.113.0+,
+        #2043): one row per ``created`` / ``updated`` (with the fields it
+        changed) / ``forgotten`` / ``restored`` event, each with the version
+        after it. Same permission as :meth:`reference`; a forgotten memory's
+        log is unreadable (``memory_not_found``).
+
+        Args:
+            context_id: Context UUID.
+            memory_id: Memory UUID.
+            limit: Events per page (server default 20, clamped to 1-100).
+            cursor: ``next_cursor`` of the previous page.
+            max_chars: Reply budget in characters, 10,000-100,000 (server
+                default 20,000); a cut page sets ``truncated``.
+
+        Returns:
+            :class:`~kagura_memory.models.RevisionsPage`.
+
+        Raises:
+            ValueError: ``max_chars`` is out of range (before any request).
+            KaguraNotFoundError: The memory or context does not exist, is not
+                accessible, or the memory is forgotten.
+            KaguraResponseError: The reply does not match
+                :class:`~kagura_memory.models.RevisionsPage`
+                (``operation="list_revisions"``).
+        """
+        arguments: dict[str, Any] = {"context_id": context_id, "memory_id": memory_id}
+        if limit is not None:
+            arguments["limit"] = limit
+        if cursor is not None:
+            arguments["cursor"] = cursor
+        if max_chars is not None:
+            _validate_max_chars(max_chars)
+            arguments["max_chars"] = max_chars
+        result = await self._call_tool_checked("list_revisions", arguments)
+        return parse_response(RevisionsPage, result, operation="list_revisions")
+
+    async def rollback_session(
+        self,
+        context_id: str,
+        *,
+        session_id: str | None = None,
+        since: str | datetime | None = None,
+        until: str | datetime | None = None,
+        dry_run: bool = True,
+    ) -> SessionRollbackResult:
+        """Plan or undo what one session — or the caller in a window — wrote.
+
+        Calls the ``rollback_session`` MCP tool (memory-cloud v0.113.0+,
+        #2044). **Destructive with** ``dry_run=False``: per memory, one the
+        session created is forgotten, one it edited gets the values from
+        before its first edit back (a new version), one it forgot is
+        restored and re-embedded. A memory someone else changed since, Sleep
+        merged, a resource row or one the caller may not write
+        (``not_permitted``, v0.134.0+, #2432) is skipped with a cause, never
+        half-reverted. Only the caller's own writes (same user or a linked
+        account, same agent credential); a context owner may name any
+        session. Needs the context editor role. A call handles at most 500
+        events (100 restores): ``status == "in_progress"`` with
+        ``remaining > 0`` means call again with the same arguments. Once
+        complete, further calls are refused (``already_rolled_back``) until
+        new writes land.
+
+        Args:
+            context_id: Context UUID.
+            session_id: The session whose writes to undo — the
+                ``session_id`` a ``remember`` / ``update_memory`` / ``forget``
+                / :meth:`remember_batch` reply returned.
+            since: Instead of ``session_id``: undo the caller's own writes
+                since then (ISO 8601 or ``datetime``, naive = UTC; memory-cloud
+                v0.114.0+, #2121). Preview them with
+                ``changes_since(since=..., by_me=True)``.
+            until: Window end, exclusive, at most 7 days after ``since``.
+                Omit for now, or for the end of the caller's unfinished
+                rollback of a window from the same ``since``.
+            dry_run: ``True`` (default) only plans and changes nothing;
+                ``False`` rolls back. Always sent, so the plan-only default
+                never depends on the server's.
+
+        Returns:
+            :class:`~kagura_memory.models.SessionRollbackResult`.
+
+        Raises:
+            ValueError: Neither or both of ``session_id`` and ``since`` are
+                given, or ``until`` comes without ``since`` (before any
+                request).
+            KaguraNotFoundError: ``session_not_found`` (no session with this
+                id the caller may roll back in this context), or the context
+                is not accessible.
+            KaguraPartialRollbackError: Some items failed this call; every
+                other item was handled and saved. ``report_id`` and
+                ``summary`` are ``None`` here: the server's ``summary``,
+                ``totals``, ``remaining``, ``rollback_id`` and
+                ``correlation_id`` are in ``details``. Call again to retry the
+                failed items.
+            KaguraError: ``no_writes_in_window``, ``already_rolled_back``,
+                ``permission_denied`` (below editor) or ``validation_error``
+                (e.g. a window wider than 7 days), in ``code``.
+            KaguraResponseError: The reply does not match
+                :class:`~kagura_memory.models.SessionRollbackResult`
+                (``operation="rollback_session"``).
+        """
+        if (session_id is None) == (since is None):
+            raise ValueError("Provide exactly one of session_id or since")
+        if until is not None and since is None:
+            raise ValueError("until needs since")
+        arguments: dict[str, Any] = {"context_id": context_id, "dry_run": dry_run}
+        if session_id is not None:
+            arguments["session_id"] = session_id
+        if since is not None:
+            arguments["since"] = _iso_arg(since)
+        if until is not None:
+            arguments["until"] = _iso_arg(until)
+        result = await self._call_tool("rollback_session", arguments)
+        if result.get("status") == "error" and result.get("error") == "partial_rollback":
+            # Not _raise_for_mcp_error's partial_rollback: that one reads a
+            # Sleep run's ``rollback_summary``, which this envelope lacks.
+            err = KaguraPartialRollbackError(
+                f"rollback_session failed (partial_rollback): "
+                f"{result.get('message', 'Unknown error')}"
+            )
+            annotate_server_error(err, "partial_rollback", result)
+            raise err
+        self._raise_for_mcp_error(result, "rollback_session")
+        return parse_response(SessionRollbackResult, result, operation="rollback_session")
+
     async def create_context(
         self,
         name: str,
@@ -3845,6 +4055,7 @@ class KaguraClient:
             "memory_not_found",
             "agent_not_found",
             "binding_not_found",
+            "session_not_found",
         ):
             err = KaguraNotFoundError(f"{operation}: {message}")
         elif code == "partial_rollback":
@@ -4224,6 +4435,9 @@ _BATCH_MAX_ITEMS = 50
 _BATCH_LEVEL_KEYS = ("context_id", "dedupe", "tags_normalize", "verbose")
 # forget(memory_ids=) ids per call (server ``FORGET_MAX_IDS``).
 _FORGET_MAX_IDS = 50
+# describe_tools names / guide topics per call (server ``MAX_NAMES`` / ``MAX_TOPICS``).
+_DESCRIBE_MAX_NAMES = 20
+_GUIDE_MAX_TOPICS = 20
 
 
 def _checked_batch_items(items: Any) -> list[dict[str, Any]]:
@@ -4286,3 +4500,19 @@ def _checked_memory_ids(memory_ids: Any) -> list[str]:
             raise ValueError(f"memory_ids lists {parsed} more than once")
         seen.add(parsed)
     return list(memory_ids)
+
+
+def _checked_names(name: str, values: Any, limit: int) -> list[str]:
+    """Reject a list-of-names argument the server would refuse.
+
+    Raises:
+        TypeError: A bare ``str``, a non-list, or a non-``str`` entry.
+        ValueError: More than ``limit`` entries.
+    """
+    if isinstance(values, str) or not isinstance(values, list):
+        raise TypeError(f"{name} must be a list of strings, not {type(values).__name__}")
+    if any(not isinstance(value, str) for value in values):
+        raise TypeError(f"{name} must hold strings only")
+    if len(values) > limit:
+        raise ValueError(f"{name} holds at most {limit} names, got {len(values)}")
+    return list(values)
