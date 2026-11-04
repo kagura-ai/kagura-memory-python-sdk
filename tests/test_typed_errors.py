@@ -774,6 +774,7 @@ def test_a_non_bearer_challenge_naming_the_scope_error_is_not_read():
     err = _raised(403, {"error": "HTTP-403", "message": "x"}, **{"WWW-Authenticate": challenge})
     assert type(err) is KaguraConnectionError
 
+
 @pytest.mark.asyncio
 async def test_list_tags_rest_422_keeps_the_rest_body_on_the_mcp_style_error():
     errors = [{"loc": ["query", "with_tags"], "msg": "Too many tags", "type": "value_error"}]
