@@ -382,3 +382,78 @@ class FakeMcpServer:
             json={"jsonrpc": "2.0", "id": body["id"], "result": result},
             headers={"mcp-session-id": session_id},
         )
+
+
+# ---------------------------------------------------------------------------
+# A paged list_contexts directory (#309)
+# ---------------------------------------------------------------------------
+
+
+class PagedContexts:
+    """A ``KaguraClient`` stand-in whose ``list_contexts`` pages ``names``.
+
+    Models memory-cloud 0.82.0+'s directory: ``name_contains`` is a
+    case-insensitive substring filter (on the name here), and each page holds
+    ``page_size`` rows with ``has_more`` and an offset ``next_cursor``. Row ids
+    are UUIDs derived from the position in ``names``. Every call is recorded as
+    its keyword arguments; ``pages`` overrides the replies in order. Install it
+    with ``monkeypatch.setattr("kagura_memory.setup_claude._make_client",
+    fake.make_client)``.
+    """
+
+    def __init__(
+        self,
+        names: list[str],
+        page_size: int = 2,
+        pages: list[dict[str, Any]] | None = None,
+    ) -> None:
+        self.rows = [{"id": self.id_of(i), "name": name} for i, name in enumerate(names)]
+        self.page_size = page_size
+        self.pages = list(pages) if pages is not None else None
+        self.calls: list[dict[str, Any]] = []
+        self.made_with: list[tuple[str | None, str | None, str | None]] = []
+
+    @staticmethod
+    def id_of(index: int) -> str:
+        return f"00000000-0000-0000-0000-{index:012d}"
+
+    def make_client(
+        self, api_key: str | None, mcp_url: str | None, profile: str | None
+    ) -> "PagedContexts":
+        """A ``setup_claude._make_client`` replacement; records its arguments."""
+        self.made_with.append((api_key, mcp_url, profile))
+        return self
+
+    async def __aenter__(self) -> "PagedContexts":
+        return self
+
+    async def __aexit__(self, *exc: object) -> bool:
+        return False
+
+    async def list_contexts(self, **kwargs: Any) -> dict[str, Any]:
+        self.calls.append(kwargs)
+        if self.pages is not None:
+            return self.pages.pop(0)
+        needle = (kwargs.get("name_contains") or "").casefold()
+        matched = [row for row in self.rows if needle in row["name"].casefold()]
+        start = int(kwargs.get("cursor") or 0)
+        end = start + self.page_size
+        has_more = end < len(matched)
+        return {
+            "status": "success",
+            "contexts": matched[start:end],
+            "has_more": has_more,
+            "next_cursor": str(end) if has_more else None,
+        }
+
+    def first_page(self) -> dict[str, Any]:
+        """The reply to a plain ``list_contexts()`` (what ``_test_connection`` returns)."""
+        end = self.page_size
+        has_more = end < len(self.rows)
+        return {
+            "status": "success",
+            "count": len(self.rows),
+            "contexts": self.rows[:end],
+            "has_more": has_more,
+            "next_cursor": str(end) if has_more else None,
+        }

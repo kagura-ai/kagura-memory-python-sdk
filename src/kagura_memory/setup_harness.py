@@ -98,7 +98,13 @@ from .config import load_config
 from .exceptions import KaguraAuthError, KaguraNotFoundError, _exc_message
 from .memory_client import MemoryClient
 from .models import GuardrailDigest
-from .setup_claude import _load_profile, _stdio_entry, _verify_profile, _warn_tools_allowlist
+from .setup_claude import (
+    _load_profile,
+    _lookup_context,
+    _stdio_entry,
+    _verify_profile,
+    _warn_tools_allowlist,
+)
 
 HarnessName = Literal["codex", "hermes", "openclaw"]
 
@@ -1636,18 +1642,25 @@ def _drop_guardrails_context(h: _Harness, *, flag: bool, mcp_url: str | None) ->
 
 
 def _resolve_context(
-    chosen: str | None, contexts: dict[str, Any] | None, *, interactive: bool
+    chosen: str | None,
+    contexts: dict[str, Any] | None,
+    *,
+    interactive: bool,
+    profile: str | None = None,
 ) -> str:
     """The context UUID for a guardrails lane or the export.
 
-    ``chosen`` (an id or a name) is looked up in ``contexts``, the profile's
-    list; without one, an interactive run picks from that list. It never
-    creates a context: a new one has no guardrails to deliver.
+    ``chosen`` (an id or an exact name) is looked up in ``contexts``, the
+    first page of ``profile``'s list, and a name outside that page on every
+    page (``setup_claude._lookup_context``); without one, an interactive run
+    picks from that first page. It never creates a context: a new one has
+    no guardrails to deliver.
 
     Raises:
         click.UsageError: No context was given, and setup cannot list or ask.
         click.ClickException: The context is not a UUID (an unknown name), or
             the profile can see none to pick.
+        KaguraResponseError: The name lookup's pages do not add up.
     """
     listed = [
         c for c in (contexts or {}).get("contexts", []) if isinstance(c, dict) and c.get("id")
@@ -1663,7 +1676,7 @@ def _resolve_context(
         choice = click.prompt("Context", type=click.IntRange(1, len(listed)))
         chosen = str(listed[choice - 1]["id"])
     else:
-        match = next((c for c in listed if chosen in (c["id"], c.get("name"))), None)
+        match = _lookup_context(chosen, contexts or {}, profile=profile)
         if match is not None:
             chosen = str(match["id"])
             click.echo(f"  Using context: {match.get('name', '?')} ({chosen[:8]}...)")
@@ -1922,7 +1935,9 @@ def run_setup_harness(
         if dry_run:
             export_context = _dry_run_context(export_context)
         else:
-            export_context = _resolve_context(export_context, contexts, interactive=interactive)
+            export_context = _resolve_context(
+                export_context, contexts, interactive=interactive, profile=profile
+            )
     if lane_from_context:
         guardrails = export_context
     export_auth = None

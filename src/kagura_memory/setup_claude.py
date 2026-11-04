@@ -16,7 +16,12 @@ import click
 
 from . import claude_code
 from ._auth import _resolve_profile_auth
-from ._http import mcp_url_guardrails_off, mcp_url_has_tools_allowlist, mcp_url_with_query
+from ._http import (
+    mcp_url_guardrails_off,
+    mcp_url_has_tools_allowlist,
+    mcp_url_with_query,
+    normalize_uuid,
+)
 from .auth.credentials import CredentialsFile, OAuthCredentials
 from .claude_code import (
     MCP_API_KEY_ENV,
@@ -35,10 +40,15 @@ from .claude_code import (
 
 # Re-exported: the detector lived here before #258, and callers import it from here.
 from .claude_code import detect_mcp_json_mode as detect_mcp_json_mode
-from .client import KaguraClient
+from .client import _MAX_AUTO_PAGES, KaguraClient, _next_page_cursor, _unfinished_list_error
 from .exceptions import KaguraAuthError, KaguraConnectionError, _exc_message
 
 DEFAULT_MCP_URL = "http://localhost:8080/mcp"
+
+# The longest ``name_contains`` list_contexts takes (memory-cloud
+# ``_LIST_CONTEXTS_NAME_FILTER_MAX_LENGTH``), which is also the longest
+# context name the server creates.
+_CONTEXT_NAME_MAX_CHARS = 100
 
 # Trailing space distinguishes "kagura recall/remember" from "kagura-memory" in MCP config
 KAGURA_HOOK_MARKER = "kagura "
@@ -182,9 +192,99 @@ async def _test_connection(
     *,
     profile: str | None = None,
 ) -> dict[str, Any]:
-    """Test connection and return contexts list."""
+    """Test the connection; return the first page of ``list_contexts``.
+
+    A connectivity check, so one page is enough: from memory-cloud 0.82.0
+    (#1743) it holds the 100 most recently used contexts, with ``has_more``
+    when more follow (an older server returns every context). The
+    suggested context and the pick lists offer this page only; a context
+    given by name is also looked up past it (:func:`_lookup_context`).
+    """
     async with _make_client(api_key, mcp_url, profile) as client:
         return await client.list_contexts()
+
+
+async def _find_context_by_name(
+    name: str,
+    api_key: str | None = None,
+    mcp_url: str | None = None,
+    *,
+    profile: str | None = None,
+) -> dict[str, Any] | None:
+    """The context named exactly ``name``, from ``list_contexts(name_contains=name)``.
+
+    ``name_contains`` is the server's case-insensitive substring match on the
+    name or the display name (memory-cloud 0.73.0+), so a page can hold
+    other contexts too: only a row whose ``name`` equals ``name`` as the
+    server stores it is taken, as on the first page; a display name never
+    counts (list rows do not carry it). Pages are followed with ``cursor``
+    while ``has_more`` says more match (0.82.0+), at most 50, the bound
+    :meth:`KaguraClient.list_agents` uses. The first match in the server's
+    most-recently-used order wins.
+
+    Returns:
+        The matching ``list_contexts`` row, or None when no page has one.
+
+    Raises:
+        KaguraResponseError: A page says ``has_more`` without a usable
+            ``next_cursor`` or repeats an earlier one, or the matches do
+            not end within 50 pages.
+    """
+    seen: set[str] = set()
+    cursor: str | None = None
+    async with _make_client(api_key, mcp_url, profile) as client:
+        for _ in range(_MAX_AUTO_PAGES):
+            page = await client.list_contexts(name_contains=name, cursor=cursor)
+            for ctx in page.get("contexts") or []:
+                if isinstance(ctx, dict) and ctx.get("id") and ctx.get("name") == name:
+                    return ctx
+            cursor = _next_page_cursor(page, "list_contexts", seen)
+            if cursor is None:
+                return None
+    raise _unfinished_list_error("list_contexts")
+
+
+def _lookup_context(
+    chosen: str,
+    contexts_response: dict[str, Any],
+    api_key: str | None = None,
+    mcp_url: str | None = None,
+    *,
+    profile: str | None = None,
+) -> dict[str, Any] | None:
+    """The context ``chosen`` (an id or an exact name) names, or None.
+
+    ``contexts_response`` is the first ``list_contexts`` page
+    (:func:`_test_connection`); a row there with that id or name wins. Only
+    when the page is not the whole list (``has_more``, memory-cloud
+    0.82.0+) is a name outside it looked up on every page with
+    :func:`_find_context_by_name`, on the credential ``api_key`` /
+    ``mcp_url`` / ``profile`` name (as for :func:`_make_client`). A UUID is
+    not looked up, and neither is a value the server's ``name_contains``
+    refuses (blank, or longer than a context name can be): the caller uses
+    those as given.
+
+    Raises:
+        KaguraResponseError: See :func:`_find_context_by_name`.
+    """
+    for ctx in contexts_response.get("contexts") or []:
+        if isinstance(ctx, dict) and ctx.get("id") and chosen in (ctx["id"], ctx.get("name")):
+            return ctx
+    if contexts_response.get("has_more") is not True or _is_uuid(chosen):
+        return None
+    stripped = chosen.strip()  # as the server reads name_contains
+    if not stripped or len(stripped) > _CONTEXT_NAME_MAX_CHARS:
+        return None
+    return asyncio.run(_find_context_by_name(chosen, api_key, mcp_url, profile=profile))
+
+
+def _is_uuid(value: str) -> bool:
+    """Whether ``value`` parses as a UUID (as :func:`normalize_uuid` reads it)."""
+    try:
+        normalize_uuid(value, label="context_id")
+    except ValueError:
+        return False
+    return True
 
 
 async def _create_context(
@@ -246,18 +346,22 @@ def _select_or_create_context(
 ) -> str:
     """Select existing context or create a new one. Returns context_id.
 
-    When ``profile`` is set, any context creation authenticates via the OAuth
-    profile instead of ``api_key`` / ``mcp_url``.
+    ``contexts_response`` is the first ``list_contexts`` page. A
+    ``preselected`` id or exact name is matched there, and a name outside
+    that page on every page (:func:`_lookup_context`); a value no page
+    matches is used as given. When ``profile`` is set, the lookup and any
+    context creation authenticate via the OAuth profile instead of
+    ``api_key`` / ``mcp_url``.
     """
     contexts = contexts_response.get("contexts", [])
 
     if preselected:
-        for ctx in contexts:
-            if ctx.get("id") == preselected or ctx.get("name") == preselected:
-                ctx_id = ctx.get("id", preselected)
-                click.echo(f"  Using context: {ctx.get('name', '?')} ({ctx_id[:8]}...)")
-                return ctx_id
-        # Treat as raw UUID if not found in context list
+        match = _lookup_context(preselected, contexts_response, api_key, mcp_url, profile=profile)
+        if match is not None:
+            ctx_id = str(match["id"])
+            click.echo(f"  Using context: {match.get('name', '?')} ({ctx_id[:8]}...)")
+            return ctx_id
+        # A UUID setup does not look up, or a value no page matches: used as given.
         click.echo(f"  Using context: {preselected}")
         return preselected
 
@@ -1271,11 +1375,12 @@ def _load_profile(profile: str) -> tuple[CredentialsFile, OAuthCredentials]:
 
 
 def _verify_profile(profile: str, creds: OAuthCredentials) -> dict[str, Any]:
-    """Check that ``profile`` works with a ``list_contexts`` call; return its result.
+    """Check that ``profile`` works with a ``list_contexts`` call; return its first page.
 
     Auth and the URL come from the profile alone, even when ``KAGURA_API_KEY``
     is set (see :func:`_make_client`), so the contexts listed are the ones the
-    written ``kagura-mcp --profile`` entry can reach.
+    written ``kagura-mcp --profile`` entry can reach. One page, as
+    :func:`_test_connection` reads it.
 
     Raises:
         click.ClickException: Authentication or the connection failed.

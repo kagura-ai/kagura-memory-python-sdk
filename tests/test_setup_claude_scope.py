@@ -30,6 +30,7 @@ from kagura_memory.setup_claude import (
     _remove_sdk_hook,
     _sdk_prefix,
 )
+from tests.conftest import PagedContexts
 
 CTX = "11111111-2222-3333-4444-555555555555"
 MCP_URL = "https://memory.example.com/mcp"
@@ -1259,3 +1260,39 @@ def test_remove_sdk_hook_keeps_other_hooks_in_a_shared_entry() -> None:
     ]
     assert not _remove_sdk_hook(settings, "SessionStart", SESSIONSTART_HOOK_COMMAND)
     assert not _remove_sdk_hook({"hooks": []}, "SessionStart", SESSIONSTART_HOOK_COMMAND)
+
+
+# =============================================================================
+# --context-id NAME past the first list_contexts page (#309)
+# =============================================================================
+
+
+@pytest.mark.parametrize("oauth", [True, False], ids=["oauth", "api-key"])
+@pytest.mark.parametrize("yes", [True, False], ids=["-y", "interactive"])
+def test_context_name_past_the_first_page_resolves(
+    connection, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, oauth: bool, yes: bool
+) -> None:
+    # Two contexts a page: "far" is on page 3 of the plain list, and on page 2 of
+    # name_contains="far", behind "far-a" and "far-b".
+    fake = PagedContexts(["recent-a", "recent-b", "far-a", "far-b", "far"])
+    connection.return_value = fake.first_page()
+    monkeypatch.setattr("kagura_memory.setup_claude._make_client", fake.make_client)
+    args = ["setup", "claude", "--project-dir", str(tmp_path), "--context-id", "far"]
+    args += ["--profile", "default"] if oauth else ["--api-key", API_KEY, "--mcp-url", MCP_URL]
+    if yes:
+        args.append("-y")
+
+    # Interactive, the API-key path asks for the key and the URL: Enter keeps both.
+    result = CliRunner().invoke(main, args, input=None if yes else "\n\n")
+
+    assert result.exit_code == 0, result.output
+    far = PagedContexts.id_of(4)
+    assert f"Using context: far ({far[:8]}...)" in result.output
+    assert read_json(tmp_path / ".kagura.json")["context_id"] == far
+    assert f"-c {far} " in hook_commands(tmp_path, "SessionStart")[0]
+    assert fake.calls == [
+        {"name_contains": "far", "cursor": None},
+        {"name_contains": "far", "cursor": "2"},
+    ]
+    # The lookup runs on the credential the connection check used.
+    assert fake.made_with == [(None, MCP_URL, "default") if oauth else (API_KEY, MCP_URL, None)]
