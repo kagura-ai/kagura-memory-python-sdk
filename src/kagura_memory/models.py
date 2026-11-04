@@ -1870,9 +1870,9 @@ class PlanHeadroomNotice(BaseModel):
     one decimal (94.97 % reads 94.9). ``remedies`` names what helps:
     ``cleanup`` (forget memories or delete contexts; the total cap only),
     ``wait`` (the daily reset), ``upgrade`` (a higher tier raises this cap)
-    or ``admin`` (a deployment without billing). ``help`` is one sentence
-    under 300 characters with no URL; ``resets_at`` is the next UTC midnight
-    on the daily dimensions.
+    or ``admin`` (a deployment without billing). ``help`` names those
+    remedies and what fails at 100 %, in at most 300 characters with no URL;
+    ``resets_at`` is the next UTC midnight on the daily dimensions.
 
     ``plan`` is absent when the server could not resolve the plan, and
     ``bootstrap`` keeps ``help`` on its most severe entry only when the
