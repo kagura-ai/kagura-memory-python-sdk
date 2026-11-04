@@ -30,6 +30,7 @@ from kagura_memory.auth.device_flow import (
 )
 from kagura_memory.claude_code import claude_json_label
 from kagura_memory.cli import main
+from kagura_memory.exceptions import KaguraAuthError
 
 # `auth refresh` / `auth token` refresh through credentials.refresh_profile_locked,
 # which resolves these two from device_flow at call time — patch them there.
@@ -993,8 +994,6 @@ def test_refresh_scope_widening_triggers_device_flow(
     on the user for minutes, runs after it is released (#313) so `kagura-mcp`
     refreshes of the same file are not stalled meanwhile.
     """
-    from kagura_memory.exceptions import KaguraAuthError
-
     lock_free: dict[str, bool] = {}
 
     def refuse_scope(*_args, **_kwargs):
@@ -1027,6 +1026,61 @@ def test_refresh_scope_widening_triggers_device_flow(
     assert stored is not None
     assert stored.access_token == "atok-write"
     assert "memory:write" in stored.scope
+
+
+def _scope_refusal(code: str | None, message: str) -> KaguraAuthError:
+    err = KaguraAuthError(message)
+    err.code = code
+    return err
+
+
+@pytest.mark.parametrize(
+    ("refusal", "device_flow"),
+    [
+        # The OAuth code decides, whatever the message says.
+        pytest.param(_scope_refusal("invalid_scope", "Refresh failed"), True, id="code"),
+        pytest.param(
+            _scope_refusal("invalid_request", "Refresh failed: invalid_scope in the body"),
+            False,
+            id="other-code",
+        ),
+        # No code (a body without an OAuth error field): the message decides.
+        pytest.param(_scope_refusal(None, "HTTP 400 ... insufficient_scope"), True, id="no-code"),
+        pytest.param(_scope_refusal(None, "HTTP 400 bad request"), False, id="no-code-other"),
+    ],
+)
+@patch("kagura_memory.auth.cli.poll_for_token", new_callable=AsyncMock)
+@patch("kagura_memory.auth.cli.authorize_device", new_callable=AsyncMock)
+@patch("kagura_memory.auth.cli._try_open_browser", return_value=True)
+@patch("kagura_memory.auth.cli.make_oauth_client")
+def test_refresh_scope_widening_branches_on_the_oauth_error_code(
+    mock_client_factory,
+    mock_browser,
+    mock_authorize,
+    mock_poll,
+    refusal: KaguraAuthError,
+    device_flow: bool,
+    patched_default_path: Path,
+):
+    """Only a refused scope runs the device flow: by ``code``, else by message."""
+    mock_client_factory.return_value = _async_ctx()
+    mock_authorize.return_value = _mock_device_response()
+    mock_poll.return_value = _mock_token_response(scope="memory:read memory:write")
+    _seed_credentials(patched_default_path.parent.parent, _make_creds())
+
+    with (
+        patch(f"{_DF}.refresh_access_token", new=AsyncMock(side_effect=refusal)),
+        patch(f"{_DF}.make_oauth_client", return_value=_async_ctx()),
+    ):
+        result = CliRunner().invoke(main, ["auth", "refresh", "--scope", "memory:write"])
+
+    if device_flow:
+        assert result.exit_code == 0, result.output
+        mock_authorize.assert_awaited_once()
+    else:
+        assert result.exit_code == 1
+        assert str(refusal) in result.output
+        mock_authorize.assert_not_awaited()
 
 
 @contextlib.contextmanager

@@ -893,11 +893,9 @@ async def _run_refresh(
             scope=scope,
         )
     except KaguraAuthError as e:
-        # Heuristic: when the user asked for a wider scope and the
-        # server rejected it as insufficient/invalid_scope, fall
-        # through to a fresh device flow to collect new consent.
-        message = str(e).lower()
-        if scope is None or not ("insufficient_scope" in message or "invalid_scope" in message):
+        # The server refused the wider scope: fall through to a fresh device
+        # flow to collect the new consent.
+        if scope is None or not _refused_scope(e):
             raise
 
     click.echo(
@@ -923,6 +921,21 @@ async def _run_refresh(
     new_creds = _build_credentials(token, server=creds.server)
     update_profile(profile, new_creds)
     return new_creds
+
+
+_SCOPE_REFUSALS = ("insufficient_scope", "invalid_scope")
+
+
+def _refused_scope(e: KaguraAuthError) -> bool:
+    """Whether a refresh failed because the grant does not cover the scope asked for.
+
+    Reads the OAuth ``error`` the refresh keeps as ``code``. An error without a
+    code (a body with no OAuth ``error`` field) falls back to its message.
+    """
+    if e.code is not None:
+        return e.code in _SCOPE_REFUSALS
+    message = str(e).lower()
+    return any(refusal in message for refusal in _SCOPE_REFUSALS)
 
 
 # ---------------------------------------------------------------------------
