@@ -2239,13 +2239,15 @@ class ForgetIdResult(BaseModel):
     correlation_id: str | None = None
 
 
-class ForgetBatchResult(BaseModel):
+class ForgetBatchResult(_ContextEcho):
     """Reply of ``forget(memory_ids=[...])`` (memory-cloud v0.117.0+, #2127).
 
     Each id is forgotten exactly as ``forget(memory_id=...)`` would forget
     it, committed on its own. ``status`` is ``success`` or ``partial`` (an
     id failed); ``memory_ids`` lists the deleted ids and ``deleted_count`` /
-    ``succeeded`` count them, ``failed`` counts the ``error`` rows.
+    ``succeeded`` count them, ``failed`` counts the ``error`` rows. Of the
+    ``context_*`` echo, ``forget`` sends ``context_id`` and ``context_name``
+    only.
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -2259,8 +2261,6 @@ class ForgetBatchResult(BaseModel):
     skipped: int
     failed: int
     session_id: str | None = None
-    context_id: str | None = None
-    context_name: str | None = None
 
 
 class ToolDescriptions(BaseModel):
