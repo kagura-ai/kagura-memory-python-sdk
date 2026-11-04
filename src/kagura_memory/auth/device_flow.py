@@ -370,7 +370,9 @@ async def refresh_access_token(
             reset, which revokes every access and refresh token and device
             code of the account (v0.83.0+, #1738): only ``kagura auth login``
             recovers then.
-        KaguraAuthError: any other OAuth error.
+        KaguraAuthError: any other OAuth error. Its ``code`` is the OAuth
+            ``error`` (``invalid_scope`` for a scope the grant does not
+            cover); ``details`` holds ``error_description`` when sent.
         KaguraConnectionError: network failure.
     """
     url = f"{server.rstrip('/')}{_PATH_TOKEN}"
@@ -392,19 +394,26 @@ async def refresh_access_token(
 
     body = _safe_json(response)
     error = body.get("error", "")
+    # The OAuth ``error`` becomes the exception's ``code`` (the CLI branches on
+    # ``invalid_scope``); ``error_description`` and the rest go to ``details``.
+    fields = {k: v for k, v in body.items() if k != "error"}
 
     if error == "invalid_grant":
-        raise KaguraAuthExpiredError(
+        expired = KaguraAuthExpiredError(
             "Your login expired (refresh token is no longer valid).\n"
             "  Run: kagura auth login\n"
             "  Your server and workspace selection are preserved."
         )
+        raise annotate_server_error(expired, error, fields)
 
     description = body.get("error_description", "")
     if error:
-        raise KaguraAuthError(
+        refused = KaguraAuthError(
             f"Refresh failed: {error}{f' — {description}' if description else ''}"
         )
+        if isinstance(error, str):
+            annotate_server_error(refused, error, fields)
+        raise refused
     # Non-OAuth failure (HTML 5xx, network proxy returning text/plain, etc.).
     detail = extract_detail(response) or response.text[:200]
     raise KaguraAuthError(
