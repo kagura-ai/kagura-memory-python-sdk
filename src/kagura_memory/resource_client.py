@@ -317,6 +317,10 @@ class ResourceClient(KaguraRestClient):
         endpoint is currently non-paginated; the server caps a workspace
         at well under 50 resources by design.
 
+        A resource whose contexts were all deleted while it still holds
+        active tokens is listed with ``context_id`` / ``context_name`` set
+        to ``None`` (server v0.94.0+) until its last token is revoked.
+
         Workspace owners only — non-owners receive 403.
 
         Returns:

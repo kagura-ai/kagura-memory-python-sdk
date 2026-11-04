@@ -621,11 +621,19 @@ class ResourceSchemaResponse(BaseModel):
 
 
 class ResourceListItem(BaseModel):
-    """Single resource entry in the workspace resource list."""
+    """Single resource entry in the workspace resource list.
+
+    ``context_id`` and ``context_name`` are ``None`` for a resource whose
+    contexts have all been deleted while it still holds active tokens
+    (server v0.94.0+, kagura-ai/memory-cloud#1863): the server lists such a
+    row only so those tokens stay reachable, and revoking the resource's
+    last token removes the row. ``context_display_name`` is ``None`` then
+    too, and whenever the context has no display name.
+    """
 
     resource_id: str
-    context_id: str
-    context_name: str
+    context_id: str | None = None
+    context_name: str | None = None
     context_display_name: str | None = None
     token_count: int
     memory_count: int
