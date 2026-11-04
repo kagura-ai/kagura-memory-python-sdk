@@ -453,9 +453,10 @@ class MemoryListItemLocation(BaseModel):
 
 
 # The two forms memory-cloud stores ``details.observed_at`` in and lists it as
-# (utils/observed_at.py ``DATE_RE`` / ``DATETIME_RE``, #2330).
+# (utils/observed_at.py ``DATE_RE`` / ``DATETIME_RE``, #2330). The date form is
+# also the date input form ``KaguraClient`` checks an argument against.
 _OBSERVED_DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
-_OBSERVED_DATETIME = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")
+_OBSERVED_STORED_DATETIME = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")
 
 
 class MemoryListItem(BaseModel):
@@ -468,14 +469,18 @@ class MemoryListItem(BaseModel):
     always ``None`` against servers older than v0.54.0 (which omit it).
 
     ``observed_at`` (memory-cloud v0.127.0+, #2330) is when the fact held —
-    ``details.observed_at`` — as an aware UTC ``datetime``, or ``None`` when
-    the memory has none (and always on older servers). The server keeps the
-    writer's precision: a date-only value (``2024-03-07``) reads as midnight
-    UTC of that day, the instant the server itself sorts and filters it by;
-    :meth:`KaguraClient.reference` returns the stored text. A value in that
-    shape that names no real day or time (``2024-02-30``) reads as ``None``:
-    the server sends one for a memory whose details carried it before
-    v0.127.0 checked them, and it must not fail the whole page.
+    ``details.observed_at`` — as the text the server stores, at the writer's
+    precision: a date ``YYYY-MM-DD`` or a UTC datetime
+    ``YYYY-MM-DDTHH:MM:SSZ``. ``None`` when the memory has none (and always
+    on older servers). The two forms are kept apart because they are not
+    the same value: the server sorts and filters a date as the start of that
+    UTC day (``2024-03-07`` as ``2024-03-07T00:00:00Z``, e.g. for
+    :meth:`KaguraClient.recall`'s ``observed_after`` / ``observed_before``),
+    while an exact match on ``2024-03-07`` finds the date form only. Pad a
+    date with ``T00:00:00Z`` before comparing it with a datetime. A value
+    written before v0.127.0 checked it is listed as stored when it has one of
+    the two shapes, so it may name no real day (``2024-02-30``); any other
+    text is response drift (``KaguraResponseError``).
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -488,28 +493,20 @@ class MemoryListItem(BaseModel):
     created_at: datetime
     updated_at: datetime
     location: MemoryListItemLocation | None = None
-    observed_at: datetime | None = None
+    observed_at: str | None = None
 
-    @field_validator("observed_at", mode="before")
+    @field_validator("observed_at")
     @classmethod
-    def _date_is_start_of_utc_day(cls, value: Any) -> Any:
-        if not isinstance(value, str):
+    def _stored_form(cls, value: str | None) -> str | None:
+        # The server lists only its two stored shapes (observed_at_from_details,
+        # a regex check, so a legacy "2024-02-30" passes as is); other text is drift.
+        if (
+            value is None
+            or _OBSERVED_DATE.fullmatch(value)
+            or _OBSERVED_STORED_DATETIME.fullmatch(value)
+        ):
             return value
-        # A date would otherwise parse as a naive midnight next to aware datetimes.
-        if _OBSERVED_DATE.fullmatch(value):
-            value = f"{value}T00:00:00Z"
-        if _OBSERVED_DATETIME.fullmatch(value):
-            try:
-                if value[11:13] == "24":
-                    # Not a time on every Python (3.14 alone reads the next midnight).
-                    raise ValueError(value)
-                return datetime.fromisoformat(value)
-            except ValueError:
-                # The server's stored shape (utils/observed_at.py) is checked by
-                # regex only, so a legacy "2024-02-30" reaches the list as is.
-                return None
-        # Any other text is not a value the server sends: drift, as for any field.
-        return value
+        raise ValueError("observed_at must be YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ")
 
 
 class MemoryListResponse(BaseModel):

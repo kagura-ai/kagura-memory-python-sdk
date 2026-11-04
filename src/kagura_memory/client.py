@@ -43,6 +43,7 @@ from .exceptions import (
     _exc_message,
 )
 from .models import (
+    _OBSERVED_DATE,
     _RECALL_FULL_MAX,
     Agent,
     AgentBinding,
@@ -161,8 +162,7 @@ def _iso_arg(value: str | datetime) -> str:
 # ``observed_at`` input forms memory-cloud accepts (utils/observed_at.py, #2330):
 # extended ISO 8601 only, at most 40 characters, checked before the calendar.
 _OBSERVED_AT_MAX_CHARS = 40
-_OBSERVED_DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
-_OBSERVED_DATETIME = re.compile(
+_OBSERVED_INPUT_DATETIME = re.compile(
     r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})?"
 )
 _OBSERVED_AT_HINT = (
@@ -210,7 +210,7 @@ def _observed_at_arg(value: object) -> str:
     try:
         if _OBSERVED_DATE.fullmatch(text):
             date.fromisoformat(text)
-        elif _OBSERVED_DATETIME.fullmatch(text):
+        elif _OBSERVED_INPUT_DATETIME.fullmatch(text):
             if text[11:13] == "24":
                 # Python 3.14 reads 24:00:00 as the next midnight; the
                 # server's parser (Python 3.11) refuses the hour.

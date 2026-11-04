@@ -810,8 +810,8 @@ async def _list_memories(rows: list[dict[str, Any]], **kwargs: Any):
 
 
 @pytest.mark.asyncio
-async def test_list_memories_reads_observed_at() -> None:
-    """A datetime keeps its instant; a date is the start of that UTC day; absent is None."""
+async def test_list_memories_reads_observed_at_as_stored() -> None:
+    """The server's text at the writer's precision: a date stays a date; absent is None."""
     rows = [
         {**_LIST_ROW, "observed_at": "2024-03-07T10:00:00Z"},
         {**_LIST_ROW, "observed_at": "2024-03-07"},
@@ -819,15 +819,12 @@ async def test_list_memories_reads_observed_at() -> None:
         _LIST_ROW,
     ]
     page, requests = await _list_memories(rows)
-    observed = [row.observed_at for row in page.memories]
-    assert observed == [
-        datetime(2024, 3, 7, 10, tzinfo=UTC),
-        datetime(2024, 3, 7, tzinfo=UTC),
+    assert [row.observed_at for row in page.memories] == [
+        "2024-03-07T10:00:00Z",
+        "2024-03-07",
         None,
         None,
     ]
-    # Every value is aware, so rows sort and compare without a TypeError.
-    assert all(value.tzinfo is not None for value in observed if value is not None)
     params = dict(requests[0].url.params)
     assert not any(key.startswith("observed") for key in params)
 
@@ -836,35 +833,41 @@ async def test_list_memories_reads_observed_at() -> None:
 async def test_list_memories_ignores_fields_newer_than_the_sdk() -> None:
     rows = [{**_LIST_ROW, "observed_at": "2024-03-07", "version": 4, "tags": ["deploy"]}]
     page, _ = await _list_memories(rows)
-    assert page.memories[0].observed_at == datetime(2024, 3, 7, tzinfo=UTC)
+    assert page.memories[0].observed_at == "2024-03-07"
     assert not hasattr(page.memories[0], "version")
 
 
 @pytest.mark.asyncio
-async def test_list_memories_legacy_observed_at_reads_as_none() -> None:
-    """The server lists any value in its stored shape, a pre-v0.127.0 one unchecked.
+async def test_list_memories_lists_a_legacy_observed_at_as_stored() -> None:
+    """The server checks the stored shape by regex only, so a pre-v0.127.0 value passes.
 
-    One such row must not fail the page: it reads as None, the others parse.
+    It must not fail the page: it comes through as the server sent it.
     """
     rows = [
         {**_LIST_ROW, "observed_at": "2024-02-30"},
         {**_LIST_ROW, "observed_at": "2024-03-07T24:00:00Z"},
-        {**_LIST_ROW, "observed_at": "2024-13-01T10:00:00Z"},
-        {**_LIST_ROW, "observed_at": "2024-03-07"},
     ]
     page, _ = await _list_memories(rows)
-    assert [row.observed_at for row in page.memories] == [
-        None,
-        None,
-        None,
-        datetime(2024, 3, 7, tzinfo=UTC),
-    ]
+    assert [row.observed_at for row in page.memories] == ["2024-02-30", "2024-03-07T24:00:00Z"]
 
 
 @pytest.mark.asyncio
-async def test_list_memories_unreadable_observed_at_is_response_drift() -> None:
+@pytest.mark.parametrize(
+    "value",
+    [
+        "last spring",
+        # Input forms the server normalizes on write, never lists.
+        "2024-03-07T10:00:00+09:00",
+        "2024-03-07T10:00:00.5Z",
+        "2024-03-07T10:00:00",
+        " 2024-03-07",
+        20240307,
+    ],
+    ids=["prose", "offset", "fraction", "naive", "padded", "int"],
+)
+async def test_list_memories_observed_at_outside_the_stored_shape_is_drift(value: object) -> None:
     with pytest.raises(KaguraResponseError, match="list_memories"):
-        await _list_memories([{**_LIST_ROW, "observed_at": "last spring"}])
+        await _list_memories([{**_LIST_ROW, "observed_at": value}])
 
 
 # ============================================================================
