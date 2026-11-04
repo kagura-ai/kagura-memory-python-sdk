@@ -796,6 +796,118 @@ async def test_amain_guardrails_uuid_is_canonicalized(monkeypatch: pytest.Monkey
     assert url == f"https://test.example.com/mcp?guardrails={_CTX_UUID}"
 
 
+@pytest.mark.asyncio
+async def test_amain_add_tools_and_context_extend_the_profile_url(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+):
+    """#300: repeated --add-tools add up into one ?add_tools=; --context is canonical."""
+    argv = [
+        "--add-tools",
+        "explore",
+        "--add-tools",
+        " a,b ,explore",
+        "--context",
+        _CTX_UUID.upper(),
+    ]
+    url = await _posted_url(monkeypatch, tmp_path, argv)
+    assert url == f"https://test.example.com/mcp?add_tools=explore,a,b&context={_CTX_UUID}"
+
+
+@pytest.mark.asyncio
+async def test_amain_warns_when_a_tools_allowlist_overrides_add_tools(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, capsys
+):
+    server = "https://test.example.com/mcp?tools=recall"
+    argv = ["--server", server, "--tool-profile", "full", "--add-tools", "explore"]
+    await _posted_url(monkeypatch, tmp_path, argv)
+    assert "instead of --tool-profile and --add-tools" in capsys.readouterr().err
+
+
+def test_amain_refuses_over_100_names_across_repeated_add_tools(monkeypatch, capsys):
+    monkeypatch.setattr(mcp_proxy, "get_shared_state", lambda profile=None: None)
+    argv = ["--add-tools", ",".join(f"a{i}" for i in range(60))]
+    argv += ["--add-tools", ",".join(f"b{i}" for i in range(60))]
+    with pytest.raises(SystemExit) as exc:
+        mcp_proxy.main(argv)
+    assert exc.value.code == 2
+    assert "--add-tools: add_tools accepts at most 100" in capsys.readouterr().err
+
+
+async def _posted_headers(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, argv: list[str]
+) -> list[httpx.Headers]:
+    """Run ``_amain`` for an ``initialize`` and a ``tools/list``; return each request's headers."""
+    seen: list[httpx.Headers] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers)
+        msg_id = json.loads(request.content).get("id")
+        return httpx.Response(
+            200,
+            json={"jsonrpc": "2.0", "id": msg_id, "result": {}},
+            headers={"mcp-session-id": "s1"},
+        )
+
+    stdin = [_INITIALIZE, {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}]
+    await _run_amain(monkeypatch, tmp_path, stdin, handler, argv)
+    assert len(seen) == 2
+    return seen
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("argv", "env", "expected"),
+    [
+        (["--session-id", " run-42.a_b "], None, "run-42.a_b"),
+        ([], "from-env", "from-env"),
+        (["--session-id", "flag"], "from-env", "flag"),  # the flag wins
+        ([], "  ", None),  # blank means unset
+        ([], None, None),
+    ],
+    ids=["flag", "env", "flag-wins", "blank-env", "none"],
+)
+async def test_amain_sends_the_session_id_header_on_every_request(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, argv, env, expected
+):
+    """#300: stdio has no request header, so the proxy names the session itself
+    (memory-cloud's ``Kagura-Session-Id``, #2122)."""
+    if env is None:
+        monkeypatch.delenv(mcp_proxy.SESSION_ENV, raising=False)
+    else:
+        monkeypatch.setenv(mcp_proxy.SESSION_ENV, env)
+    headers = await _posted_headers(monkeypatch, tmp_path, argv)
+    assert [h.get("kagura-session-id") for h in headers] == [expected, expected]
+
+
+def test_amain_refuses_an_invalid_session_id_from_the_environment(monkeypatch, capsys):
+    monkeypatch.setattr(mcp_proxy, "get_shared_state", lambda profile=None: None)
+    monkeypatch.setenv(mcp_proxy.SESSION_ENV, "has space")
+    with pytest.raises(SystemExit) as exc:
+        mcp_proxy.main([])
+    assert exc.value.code == 2
+    assert f"{mcp_proxy.SESSION_ENV}: use 1-128 letters" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("argv", "flag"),
+    [
+        (["--add-tools", " , "], "--add-tools"),
+        (["--add-tools", ",".join(f"t{i}" for i in range(101))], "--add-tools"),
+        (["--context", "my-context"], "--context"),
+        (["--session-id", "a/b"], "--session-id"),
+        (["--session-id", "x" * 129], "--session-id"),
+        (["--session-id", ""], "--session-id"),
+    ],
+    ids=["blank-add-tools", "over-100", "context-not-uuid", "slash", "too-long", "empty"],
+)
+def test_parser_rejects_bad_view_and_session_values(argv: list[str], flag: str, capsys):
+    """The server ignores or drops such values silently, so the proxy refuses to start."""
+    with pytest.raises(SystemExit) as exc:
+        mcp_proxy._build_parser().parse_args(argv)
+    assert exc.value.code == 2
+    assert flag in capsys.readouterr().err
+
+
 @pytest.mark.parametrize("bad", ["on", "my-context", ""])
 def test_parser_rejects_guardrails_that_is_neither_off_nor_uuid(bad: str, capsys):
     """The server silently ignores such a value, so the proxy refuses to start."""
