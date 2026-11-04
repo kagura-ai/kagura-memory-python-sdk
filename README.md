@@ -362,7 +362,8 @@ subclass; `.operation` names the MCP tool or `<Client>.<method>`, e.g.
 `KaguraClient.get_server_info`, which `check_server_version` reports too) instead of a raw
 pydantic `ValidationError` or `KeyError`. The message names the failing fields, not their
 values. Upgrading `kagura-memory` is the likely fix. A network failure, a non-JSON 2xx body and
-a non-2xx status other than 401/429 raise `KaguraConnectionError` instead.
+a non-2xx status other than 401, 429 and a 403 `insufficient_scope` raise `KaguraConnectionError`
+instead (a 503 its subclass `KaguraServiceUnavailableError`).
 
 Every error the server reported keeps what it sent: `code` is its error code (the MCP envelope's
 `error`, e.g. `payload_too_large` or `version_conflict`, or the REST `error`, e.g. `FEAT-001`) and
