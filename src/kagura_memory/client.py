@@ -42,6 +42,9 @@ from .exceptions import (
     _exc_message,
 )
 from .models import (
+    _BOOTSTRAP_MIN_CHARS,
+    _MAX_CHARS_MAX,
+    _MAX_CHARS_MIN,
     _RECALL_FULL_MAX,
     Agent,
     AgentBinding,
@@ -188,8 +191,8 @@ class KaguraClient:
 
     MCP tool methods additionally translate the server's structured domain
     errors (``{"status": "error", ...}``) into exceptions rather than
-    returning them as data (issue #180): a missing context/memory/report
-    raises :class:`KaguraNotFoundError`, a quota refusal (including the
+    returning them as data (issue #180): a missing context, memory, report or
+    rollback session raises :class:`KaguraNotFoundError`, a quota refusal (including the
     in-band daily MCP call cap, ``rate_limit_exceeded``)
     :class:`KaguraQuotaError`, a plan/feature gate
     :class:`KaguraFeatureNotAvailableError` and the Free capacity lock
@@ -2511,8 +2514,9 @@ class KaguraClient:
         if memory_ids is not None:
             if memory_id or query:
                 raise ValueError("Provide exactly one of memory_id, memory_ids or query")
-            arguments = {"context_id": context_id, "memory_ids": _checked_memory_ids(memory_ids)}
-            result = await self._call_tool_checked("forget", arguments)
+            result = await self._call_tool_checked(
+                "forget", {"context_id": context_id, "memory_ids": _checked_memory_ids(memory_ids)}
+            )
             return parse_response(ForgetBatchResult, result, operation="forget")
         if not memory_id and not query:
             raise ValueError("Provide either memory_id or query")
@@ -2596,14 +2600,14 @@ class KaguraClient:
                 raise ValueError(f"include must be a non-empty subset of {', '.join(known)}")
             arguments["include"] = list(include)
         if max_chars is not None:
-            _validate_int_range("max_chars", max_chars, _BOOTSTRAP_MIN_CHARS, _MAX_CHARS_LIMIT)
+            _validate_int_range("max_chars", max_chars, _BOOTSTRAP_MIN_CHARS, _MAX_CHARS_MAX)
             arguments["max_chars"] = max_chars
         if format is not None:
             if format not in get_args(BootstrapFormat):
                 raise ValueError(f"format must be 'full' or 'index', got {format!r}")
-            if format == "full" and max_chars is not None and max_chars < _FULL_FORMAT_MIN_CHARS:
+            if format == "full" and max_chars is not None and max_chars < _MAX_CHARS_MIN:
                 raise ValueError(
-                    f'format="full" needs max_chars of at least {_FULL_FORMAT_MIN_CHARS}; '
+                    f'format="full" needs max_chars of at least {_MAX_CHARS_MIN}; '
                     'pass format="index" (or omit format) under it'
                 )
             arguments["format"] = format
@@ -4424,11 +4428,6 @@ async def _collect_pages(client: KaguraClient, tool: str, model: type[_T], key: 
 # Session tools (#301): local checks mirroring the server's own bounds
 # ---------------------------------------------------------------------------
 
-# bootstrap's max_chars floor (server ``BOOTSTRAP_INDEX_MIN_CHARS``, v0.115.0+)
-# and the budget below which ``format="full"`` is refused (``MIN_MAX_CHARS``).
-_BOOTSTRAP_MIN_CHARS = 2_000
-_FULL_FORMAT_MIN_CHARS = 10_000
-_MAX_CHARS_LIMIT = 100_000
 # remember_batch items (server ``MAX_BATCH_ITEMS``) and the remember arguments
 # that are set on the batch, never per item (``_BATCH_LEVEL`` + context_id).
 _BATCH_MAX_ITEMS = 50

@@ -43,6 +43,7 @@ from .files_client import FilesClient
 from .logger import VerboseLogger
 from .memory_client import MemoryClient
 from .models import (
+    _BOOTSTRAP_MIN_CHARS,
     _MAX_CHARS_MAX,
     _MAX_CHARS_MIN,
     _RECALL_FULL_MAX,
@@ -1000,7 +1001,7 @@ def reference(context_id, memory_id):
 )
 @click.option(
     "--max-chars",
-    type=click.IntRange(2_000, _MAX_CHARS_MAX),
+    type=click.IntRange(_BOOTSTRAP_MIN_CHARS, _MAX_CHARS_MAX),
     help="Response budget in characters, 2000-100000 (below 10000 needs server v0.115.0+; "
     "default 20000)",
 )

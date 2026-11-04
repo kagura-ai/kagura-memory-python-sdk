@@ -786,6 +786,14 @@ async def test_remember_batch_accepts_fifty_items_and_tags_at_the_cap():
 
 
 @pytest.mark.asyncio
+async def test_remember_batch_leaves_tags_sent_as_a_json_string_to_the_server():
+    """The server coerces ``tags`` sent as a JSON string per item; only a list is measured."""
+    items = [{**_ITEM, "tags": '["a", "b"]'}]
+    _, params = await _call(BATCH_REPLY, "remember_batch", CTX, items)
+    assert params["arguments"]["items"] == items
+
+
+@pytest.mark.asyncio
 async def test_remember_batch_reads_a_partial_reply_with_plan_headroom():
     result, _ = await _call(BATCH_REPLY, "remember_batch", CTX, [_ITEM] * 4)
 

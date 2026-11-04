@@ -2027,6 +2027,10 @@ BootstrapComponentName = Literal["pinned", "upcoming", "changes"]
 BootstrapFormat = Literal["full", "index"]
 """Valid ``bootstrap`` ``format`` values (memory-cloud v0.115.0+, #2126; request side only)."""
 
+# bootstrap's own max_chars floor (server ``BOOTSTRAP_INDEX_MIN_CHARS``, v0.115.0+);
+# ``format="full"`` still needs the shared 10,000 floor (``_MAX_CHARS_MIN``).
+_BOOTSTRAP_MIN_CHARS = 2_000
+
 
 class BootstrapResponse(_ContextEcho):
     """Reply of the ``bootstrap`` MCP tool (memory-cloud v0.93.0+, #1851).
