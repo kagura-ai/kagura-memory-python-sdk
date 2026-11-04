@@ -232,6 +232,19 @@ def normalize_tool_profile(value: str) -> str:
 MAX_ADD_TOOLS = 100
 
 
+def _tool_names(value: str, *, cap: int | None) -> tuple[str, ...]:
+    """The tool names in a comma-separated ``value``, by memory-cloud's ``_read_names`` rule.
+
+    Each item is trimmed, blank names are dropped and duplicates removed,
+    keeping the order. With ``cap``, only the first ``cap`` items are read
+    (blank ones count), as the server reads :data:`MAX_ADD_TOOLS` of them;
+    ``None`` reads every item, for a caller that refuses a longer list
+    instead of cutting it (:func:`normalize_add_tools`).
+    """
+    parts = value.split(",") if cap is None else value.split(",", cap)[:cap]
+    return tuple(dict.fromkeys(name for part in parts if (name := part.strip())))
+
+
 def normalize_add_tools(names: Sequence[str]) -> str:
     """Validate ``?add_tools=`` tool names and join them as the server reads them.
 
@@ -257,12 +270,12 @@ def normalize_add_tools(names: Sequence[str]) -> str:
     """
     if isinstance(names, str):
         raise TypeError("add_tools must be a list of tool names, not a str")
-    found: list[str] = []
-    for item in names:
+    items = list(names)
+    for item in items:
         if not isinstance(item, str):
             raise TypeError(f"add_tools items must be str, got {type(item).__name__}")
-        found.extend(name for part in item.split(",") if (name := part.strip()))
-    unique = list(dict.fromkeys(found))
+    # Every name is read, not the first 100: a longer list is refused below.
+    unique = _tool_names(",".join(items), cap=None)
     if dashed := next((name for name in unique if name.startswith("-")), None):
         raise ValueError(f"add_tools names cannot start with '-': {dashed!r}")
     if len(unique) > MAX_ADD_TOOLS:
@@ -988,15 +1001,9 @@ def mcp_url_tool_view(mcp_url: str) -> McpToolView:
     tools = query.get("tools")
     return McpToolView(
         profile=profile.strip() if profile is not None else None,
-        tools=_tool_names(tools) if tools is not None else None,
-        add_tools=_tool_names(query.get("add_tools", "")),
+        tools=_tool_names(tools, cap=MAX_ADD_TOOLS) if tools is not None else None,
+        add_tools=_tool_names(query.get("add_tools", ""), cap=MAX_ADD_TOOLS),
     )
-
-
-def _tool_names(value: str) -> tuple[str, ...]:
-    """The tool names memory-cloud reads from one ``tools`` / ``add_tools`` value."""
-    parts = value.split(",", MAX_ADD_TOOLS)[:MAX_ADD_TOOLS]
-    return tuple(dict.fromkeys(name for part in parts if (name := part.strip())))
 
 
 # ---------------------------------------------------------------------------
