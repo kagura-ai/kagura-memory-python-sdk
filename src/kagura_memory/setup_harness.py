@@ -82,12 +82,13 @@ from ._auth import _SOURCE_LABEL, _OAuthAuth, _resolve_auth, _resolve_profile_au
 from ._guardrail_export import has_guardrail_block, write_guardrail_block
 from ._http import (
     base_url_from_mcp,
+    is_canonical_uuid,
     mcp_url_guardrails_off,
     mcp_url_query_values,
     mcp_url_with_query,
     mcp_url_without_query_param,
     normalize_url,
-    normalize_uuid,
+    uuid_or_none,
     validate_https_url,
 )
 from ._version import meets_minimum
@@ -98,7 +99,14 @@ from .config import load_config
 from .exceptions import KaguraAuthError, KaguraNotFoundError, _exc_message
 from .memory_client import MemoryClient
 from .models import GuardrailDigest
-from .setup_claude import _load_profile, _stdio_entry, _verify_profile, _warn_tools_allowlist
+from .setup_claude import (
+    _connection_hints,
+    _load_profile,
+    _lookup_context,
+    _stdio_entry,
+    _verify_profile,
+    _warn_tools_allowlist,
+)
 
 HarnessName = Literal["codex", "hermes", "openclaw"]
 
@@ -1485,14 +1493,10 @@ def _check_flags(
             "--agents-md needs --context-id with -y or without a terminal: setup cannot "
             "ask which context."
         )
-    if url_form and profile is None and context_id is not None:
-        try:
-            normalize_uuid(context_id, label="--context-id")
-        except ValueError:
-            raise click.UsageError(
-                "Without --profile, --context-id must be a context UUID: setup cannot "
-                "list contexts."
-            ) from None
+    if url_form and profile is None and context_id is not None and uuid_or_none(context_id) is None:
+        raise click.UsageError(
+            "Without --profile, --context-id must be a context UUID: setup cannot list contexts."
+        )
 
 
 def _check_same_server(profile: str, profile_url: str, mcp_url: str) -> None:
@@ -1636,18 +1640,30 @@ def _drop_guardrails_context(h: _Harness, *, flag: bool, mcp_url: str | None) ->
 
 
 def _resolve_context(
-    chosen: str | None, contexts: dict[str, Any] | None, *, interactive: bool
+    chosen: str | None,
+    contexts: dict[str, Any] | None,
+    *,
+    interactive: bool,
+    profile: str | None = None,
 ) -> str:
     """The context UUID for a guardrails lane or the export.
 
-    ``chosen`` (an id or a name) is looked up in ``contexts``, the profile's
-    list; without one, an interactive run picks from that list. It never
-    creates a context: a new one has no guardrails to deliver.
+    ``chosen`` (an id or an exact name, trimmed) is looked up in
+    ``contexts``, the first page of ``profile``'s list, and a name outside
+    that page on every page (``setup_claude._lookup_context``; a UUID in
+    the dashed form is taken as an id). Without one, an interactive run
+    picks from that first page. It never creates a context: a new one has
+    no guardrails to deliver.
 
     Raises:
         click.UsageError: No context was given, and setup cannot list or ask.
         click.ClickException: The context is not a UUID (an unknown name), or
             the profile can see none to pick.
+        KaguraAuthError: The name lookup was refused the profile's
+            credential (the caller adds the hint with
+            ``setup_claude._connection_hints``).
+        KaguraConnectionError: The name lookup could not reach the server.
+        KaguraResponseError: The name lookup's pages do not add up.
     """
     listed = [
         c for c in (contexts or {}).get("contexts", []) if isinstance(c, dict) and c.get("id")
@@ -1663,25 +1679,27 @@ def _resolve_context(
         choice = click.prompt("Context", type=click.IntRange(1, len(listed)))
         chosen = str(listed[choice - 1]["id"])
     else:
-        match = next((c for c in listed if chosen in (c["id"], c.get("name"))), None)
-        if match is not None:
-            chosen = str(match["id"])
-            click.echo(f"  Using context: {match.get('name', '?')} ({chosen[:8]}...)")
-    try:
-        return normalize_uuid(chosen, label="context_id")
-    except ValueError:
-        raise click.ClickException(f"No context {chosen!r} (by id or name).") from None
+        found = _lookup_context(chosen, contexts or {}, profile=profile)
+        chosen = found.value
+        if found.context is not None:
+            chosen = str(found.context["id"])
+            click.echo(f"  Using context: {found.context.get('name', '?')} ({chosen[:8]}...)")
+    context_id = uuid_or_none(chosen)
+    if context_id is None:
+        raise click.ClickException(f"No context {chosen!r} (by id or name).")
+    return context_id
 
 
 def _dry_run_context(chosen: str | None) -> str | None:
-    """``chosen`` as ``--dry-run`` shows it: a UUID, or a placeholder for a context
-    name, which only the real run looks up (a dry run makes no network call)."""
+    """``chosen`` as ``--dry-run`` shows it: a UUID in the dashed form, or a
+    placeholder for anything else, which the real run first looks up as a
+    context name (a dry run makes no network call)."""
     if chosen is None:
         return None
-    try:
-        return normalize_uuid(chosen, label="context_id")
-    except ValueError:
-        return f"<UUID of context {chosen}>"
+    value = chosen.strip()
+    if is_canonical_uuid(value):
+        return uuid_or_none(value)
+    return f"<UUID of context {value}>"
 
 
 def _print_reason(
@@ -1922,7 +1940,10 @@ def run_setup_harness(
         if dry_run:
             export_context = _dry_run_context(export_context)
         else:
-            export_context = _resolve_context(export_context, contexts, interactive=interactive)
+            with _connection_hints(creds.server if creds is not None else mcp_url, profile):
+                export_context = _resolve_context(
+                    export_context, contexts, interactive=interactive, profile=profile
+                )
     if lane_from_context:
         guardrails = export_context
     export_auth = None

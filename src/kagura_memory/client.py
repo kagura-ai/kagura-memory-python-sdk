@@ -6,6 +6,8 @@ import json
 import logging
 import math
 import warnings
+from collections.abc import AsyncGenerator
+from contextlib import aclosing
 from datetime import datetime
 from typing import Any, Literal, Self, TypeVar, get_args
 from urllib.parse import quote
@@ -3865,29 +3867,88 @@ async def _collect_pages(client: KaguraClient, tool: str, model: type[_T], key: 
     """
     rows: list[_T] = []
     returned_ids: set[Any] = set()
-    arguments: dict[str, Any] = {}
+    async with aclosing(_iter_pages(client, tool, {})) as pages:
+        async for result in pages:
+            page = parse_response_list(model, result.get(key, []), operation=tool)
+            rows.extend(row for row in page if getattr(row, "id", None) not in returned_ids)
+            returned_ids.update(getattr(row, "id", None) for row in page)
+            returned_ids.discard(None)
+    return rows
+
+
+async def _iter_pages(
+    client: KaguraClient, tool: str, arguments: dict[str, Any]
+) -> AsyncGenerator[dict[str, Any], None]:
+    """Each page of a cursor-paged MCP list tool, in order (memory-cloud v0.82.0+, #1743).
+
+    The first call sends ``arguments`` as given, so an older server, which
+    pages nothing and sends no ``has_more``, answers in one call. Each later
+    call sends ``arguments`` plus ``cursor``, the ``next_cursor`` of the page
+    before. The next page is fetched only when the caller asks for it, so a
+    caller that stops early sends no further request; wrap the iterator in
+    :func:`contextlib.aclosing` when it may stop early.
+
+    Args:
+        client: The client whose MCP session runs the calls.
+        tool: The MCP list tool; also the error's ``operation``.
+        arguments: The tool arguments every page is sent with.
+
+    Yields:
+        Each page's result envelope, unparsed.
+
+    Raises:
+        KaguraResponseError: ``has_more`` came without a usable
+            ``next_cursor``, or with one an earlier page already sent; or
+            the list is not complete after 50 pages.
+    """
     seen: set[str] = set()
+    page_arguments = dict(arguments)
     for _ in range(_MAX_AUTO_PAGES):
-        result = await client._call_tool_checked(tool, arguments)
-        page = parse_response_list(model, result.get(key, []), operation=tool)
-        rows.extend(row for row in page if getattr(row, "id", None) not in returned_ids)
-        returned_ids.update(getattr(row, "id", None) for row in page)
-        returned_ids.discard(None)
-        if result.get("has_more") is not True:
-            return rows
-        cursor = result.get("next_cursor")
-        if not isinstance(cursor, str) or not cursor:
-            raise KaguraResponseError(
-                f"{tool}: unexpected server response (has_more without a next_cursor)",
-                operation=tool,
-            )
-        if cursor in seen:
-            raise KaguraResponseError(
-                f"{tool}: unexpected server response (a page repeated an earlier next_cursor)",
-                operation=tool,
-            )
-        seen.add(cursor)
-        arguments = {"cursor": cursor}
-    raise KaguraResponseError(
+        result = await client._call_tool_checked(tool, page_arguments)
+        yield result
+        cursor = _next_page_cursor(result, tool, seen)
+        if cursor is None:
+            return
+        page_arguments = {**arguments, "cursor": cursor}
+    raise _unfinished_list_error(tool)
+
+
+def _next_page_cursor(result: dict[str, Any], tool: str, seen: set[str]) -> str | None:
+    """The ``cursor`` for the page after ``result``, or None when it is the last.
+
+    A page is the last unless it says ``has_more: true`` (an older server,
+    which pages nothing, never does). The cursor returned is added to
+    ``seen``, the cursors earlier pages of the same list sent.
+
+    Args:
+        result: One page of a cursor-paged MCP list tool (memory-cloud
+            v0.82.0+, #1743).
+        tool: The MCP list tool; also the error's ``operation``.
+        seen: The cursors earlier pages sent; updated in place.
+
+    Raises:
+        KaguraResponseError: ``has_more`` came without a usable
+            ``next_cursor``, or with one an earlier page already sent.
+    """
+    if result.get("has_more") is not True:
+        return None
+    cursor = result.get("next_cursor")
+    if not isinstance(cursor, str) or not cursor:
+        raise KaguraResponseError(
+            f"{tool}: unexpected server response (has_more without a next_cursor)",
+            operation=tool,
+        )
+    if cursor in seen:
+        raise KaguraResponseError(
+            f"{tool}: unexpected server response (a page repeated an earlier next_cursor)",
+            operation=tool,
+        )
+    seen.add(cursor)
+    return cursor
+
+
+def _unfinished_list_error(tool: str) -> KaguraResponseError:
+    """The error for a paged list still unfinished after ``_MAX_AUTO_PAGES`` pages."""
+    return KaguraResponseError(
         f"{tool}: the list did not end within {_MAX_AUTO_PAGES} pages", operation=tool
     )
