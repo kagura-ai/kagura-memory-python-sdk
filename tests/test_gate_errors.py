@@ -610,6 +610,9 @@ _FULL_SUMMARY = {
     "importance_kept": 1,
     "promotions_kept": 5,
     "archives_restored": 2,
+    # memory-cloud v0.112.0+ (#2061 / #2065).
+    "chunks_requeued": 1,
+    "points_requeued": 0,
     "errors": [_UNREVERSIBLE, "Action 42 (merge): db error"],
 }
 
