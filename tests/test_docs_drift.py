@@ -27,6 +27,7 @@ from kagura_memory import (
 from kagura_memory._http import mcp_session_expired, sanitize_server_detail
 from kagura_memory.auth.device_flow import refresh_access_token, revoke_token
 from kagura_memory.cli import context_search_config
+from kagura_memory.client import MIN_SERVER_VERSION
 from kagura_memory.models import MemoryStatItem, UsageInfo
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -83,6 +84,7 @@ def _doc_files() -> list[Path]:
     files = sorted((REPO_ROOT / "src" / "kagura_memory").rglob("*.py"))
     files += sorted((REPO_ROOT / "skills").rglob("SKILL.md"))
     files += sorted((REPO_ROOT / "examples").glob("*.py"))
+    files += sorted((REPO_ROOT / "docs").rglob("*.md"))
     files += [REPO_ROOT / name for name in ("README.md", "AGENTS.md", "CLAUDE.md")]
     return files
 
@@ -307,42 +309,131 @@ def test_merge_example_reports_pending_embedding() -> None:
     assert "pending_embedding" in example
 
 
-def _compat_rows() -> list[str]:
+COMPAT_PAGE = REPO_ROOT / "docs" / "compatibility.md"
+# README.md is the PyPI long description, where a relative link is dead (#323).
+COMPAT_URL = "https://github.com/kagura-ai/kagura-memory-python-sdk/blob/main/docs/compatibility.md"
+_MIN_LINE = "**Min memory-cloud:** "
+_CEILING = re.compile(r"checked against memory-cloud up to \*\*([\d.]+)\*\*")
+
+
+def _compat_sections() -> dict[str, str]:
+    """docs/compatibility.md's ``## <SDK version>`` sections, in page order (#323)."""
+    parts = re.split(r"^## (.+)$", COMPAT_PAGE.read_text(encoding="utf-8"), flags=re.M)
+    return dict(zip(parts[1::2], parts[2::2], strict=True))
+
+
+def _min_line(section: str) -> str:
+    """A section's first paragraph, its ``**Min memory-cloud:**`` floor."""
+    first = section.strip().split("\n\n", 1)[0]
+    assert first.startswith(_MIN_LINE), f"the section does not open with its floor: {first[:60]!r}"
+    return first
+
+
+def _ceiling(section: str) -> str:
+    """The ceiling the section's Min memory-cloud line names, never one from its notes."""
+    found = _CEILING.search(_min_line(section))
+    assert found, f"the Min memory-cloud line names no ceiling: {_min_line(section)[:80]!r}"
+    return found.group(1)
+
+
+def _readme_compat_section() -> str:
     readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
-    table = readme.split("## SDK ↔ memory-cloud Compatibility", 1)[1]
-    return [line for line in table.splitlines() if re.match(r"\| \d", line)]
+    return readme.split("## SDK ↔ memory-cloud Compatibility\n", 1)[1].split("\n## ", 1)[0]
+
+
+def _readme_compat_rows() -> list[str]:
+    return [line for line in _readme_compat_section().splitlines() if re.match(r"\| \[?\d", line)]
+
+
+def _cells(row: str) -> list[str]:
+    return [cell.strip() for cell in re.split(r"(?<!\\)\|", row.strip()[1:-1])]
 
 
 def _version(text: str) -> tuple[int, ...]:
     return tuple(int(part) for part in text.split("."))
 
 
-def test_compat_rows_have_three_cells() -> None:
+def _github_anchor(heading: str) -> str:
+    """The id GitHub gives a heading: lowercased, punctuation dropped, spaces to ``-``."""
+    return re.sub(r"[^\w\- ]", "", heading.lower()).replace(" ", "-")
+
+
+def test_compat_page_headings_are_versions_newest_first() -> None:
+    """Each ``## `` heading is one SDK release (or range), once, newest first."""
+    headings = re.findall(r"^## (.+)$", COMPAT_PAGE.read_text(encoding="utf-8"), flags=re.M)
+    assert len(headings) == len(set(headings)), f"a release has two sections: {headings}"
+    for heading in headings:
+        assert re.fullmatch(r"\d+\.\d+\.(\d+|x)( – \d+\.\d+\.(\d+|x))?", heading), heading
+    starts = [_version(heading.split()[0].replace("x", "0")) for heading in headings]
+    assert starts == sorted(starts, reverse=True), f"sections out of order: {headings}"
+
+
+def test_compat_sections_open_with_their_floor() -> None:
+    """Each section's first paragraph is its ``**Min memory-cloud:**`` floor."""
+    missing = [h for h, s in _compat_sections().items() if not s.strip().startswith(_MIN_LINE)]
+    assert not missing, f"sections that do not open with their floor: {missing}"
+
+
+@pytest.mark.parametrize("where", ["page", "README"])
+def test_compat_docs_name_min_server_version(where: str) -> None:
+    """The page intro and the README section give the client's ``MIN_SERVER_VERSION``."""
+    if where == "page":
+        text = COMPAT_PAGE.read_text(encoding="utf-8").split("\n## ", 1)[0]
+    else:
+        text = _readme_compat_section()
+    named = re.search(r"`MIN_SERVER_VERSION`[^\n]*?\*\*(\d+\.\d+\.\d+)\*\*", text)
+    assert named, f"the {where} does not give MIN_SERVER_VERSION"
+    assert named.group(1) == MIN_SERVER_VERSION
+
+
+def test_compat_0_44_section() -> None:
+    """#314: the 0.44.0 section names its ceiling (memory-cloud v0.142.0) and its issues."""
+    section = _compat_sections()["0.44.0"]
+    assert _ceiling(section) == "0.142.0"
+    issues = re.findall(r"kagura-memory-python-sdk/issues/(\d+)", section)
+    for issue in ("301", "302", "309", "311", "313", "314", "315"):
+        assert issue in issues, f"the 0.44.0 section does not link SDK #{issue}"
+    for issue in ("2508", "2614", "2615"):
+        assert f"memory-cloud/issues/{issue})" in section, f"the section lacks memory-cloud#{issue}"
+    assert f"`MIN_SERVER_VERSION` stays **{MIN_SERVER_VERSION}**" in section
+
+
+def test_readme_compat_rows_have_three_cells() -> None:
     """An unescaped ``|``, even inside a code span, splits a GFM table cell."""
-    split = [
-        row[:12] for row in _compat_rows() if len(re.split(r"(?<!\\)\|", row.strip()[1:-1])) != 3
-    ]
+    rows = _readme_compat_rows()
+    assert rows, "the README compatibility section has no summary table"
+    split = [row for row in rows if len(_cells(row)) != 3]
     assert not split, f"rows with an unescaped pipe: {split}"
 
 
-def test_compat_0_44_row() -> None:
-    """#314: the 0.44.0+ row names its ceiling (memory-cloud v0.142.0) and its issues."""
-    row = next(row for row in _compat_rows() if row.startswith("| 0.44.0+ |"))
-    assert "checked against memory-cloud up to **0.142.0**" in row
-    issues = re.findall(r"kagura-memory-python-sdk/issues/(\d+)", row)
-    for issue in ("301", "302", "309", "311", "313", "314", "315"):
-        assert issue in issues, f"the 0.44.0+ row does not link SDK #{issue}"
-    for issue in ("2508", "2614", "2615"):
-        assert f"memory-cloud/issues/{issue})" in row, f"the row lacks memory-cloud#{issue}"
-    assert "`MIN_SERVER_VERSION` stays **0.17.1**" in row
+def test_readme_compat_summary_matches_the_page() -> None:
+    """#323: the README summarises the page's five newest sections, ceiling for ceiling."""
+    sections = list(_compat_sections().items())
+    rows = _readme_compat_rows()
+    assert len(rows) == 5, f"the README summary lists the last five releases: {rows}"
+    for row, (heading, section) in zip(rows, sections[:5], strict=True):
+        sdk, ceiling, _ = _cells(row)
+        assert sdk == f"[{heading}]({COMPAT_URL}#{_github_anchor(heading)})", row
+        assert ceiling == _ceiling(section), (
+            f"the page's {heading} section says {_ceiling(section)}: {row}"
+        )
+    newest, section = sections[0]
+    sentence = f"SDK {newest} is checked against memory-cloud up to **{_ceiling(section)}**"
+    assert sentence in _readme_compat_section()
+
+
+def test_readme_links_the_docs_page_absolutely() -> None:
+    """README.md is the PyPI long description: a relative ``docs/`` link is dead there."""
+    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    assert "](docs/" not in readme
+    assert f"]({COMPAT_URL})" in _readme_compat_section()
 
 
 @pytest.mark.parametrize("name", ["CLAUDE.md", "AGENTS.md"])
-def test_agent_guides_name_the_readme_ceiling(name: str) -> None:
-    """CLAUDE.md / AGENTS.md name the ceiling of the README's newest row (#314: 0.142.0+)."""
-    newest = re.search(r"checked against memory-cloud up to \*\*([\d.]+)\*\*", _compat_rows()[0])
-    assert newest, "the newest compatibility row names no memory-cloud ceiling"
-    ceiling = newest.group(1)
+def test_agent_guides_name_the_compat_ceiling(name: str) -> None:
+    """CLAUDE.md / AGENTS.md name the ceiling of the page's newest section (#314: 0.142.0+)."""
+    ceiling = _ceiling(next(iter(_compat_sections().values())))
     assert _version(ceiling) >= (0, 142, 0)
     text = (REPO_ROOT / name).read_text(encoding="utf-8")
     assert f"Checked against memory-cloud up to **v{ceiling}**" in text
+    assert "docs/compatibility.md" in text

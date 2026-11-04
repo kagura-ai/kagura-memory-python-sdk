@@ -50,6 +50,16 @@ The in-repo Claude Code plugin (`kagura-cli`) ships from this repo and is releas
 
 `tests/test_plugin.py::test_plugin_and_marketplace_versions_synced` enforces this — if you skip it, `/quality` (and CI) will fail.
 
+### 4d. Update the compatibility docs
+
+Each release names the memory-cloud release it was checked against. Usually the release's last docs PR already did this; if not, do it here:
+
+- `docs/compatibility.md`: add a `## X.Y.Z` section at the top: a `**Min memory-cloud:**` paragraph (`MIN_SERVER_VERSION`, "checked against memory-cloud up to **A.B.C**", the per-surface floors), then the release notes.
+- README "SDK ↔ memory-cloud Compatibility" summary table: add the `X.Y.Z` row, linking `https://github.com/kagura-ai/kagura-memory-python-sdk/blob/main/docs/compatibility.md#<anchor>` (absolute: the README is the PyPI description), and drop the sixth row so it keeps the last five.
+- The README sentence "SDK X.Y.Z is checked against memory-cloud up to **A.B.C**", and the "Checked against memory-cloud up to" line in `CLAUDE.md` and `AGENTS.md`.
+
+`tests/test_docs_drift.py` checks that the README row and sentence and the `CLAUDE.md` / `AGENTS.md` line agree with the page's newest section.
+
 ### 5. Update lock file
 
 ```bash
@@ -65,7 +75,8 @@ uv build
 ### 7. Commit and tag
 
 ```bash
-git add src/kagura_memory/__init__.py uv.lock .claude-plugin/plugin.json .claude-plugin/marketplace.json
+git add src/kagura_memory/__init__.py uv.lock .claude-plugin/plugin.json .claude-plugin/marketplace.json \
+  docs/compatibility.md README.md CLAUDE.md AGENTS.md
 git commit -m "chore(release): vX.Y.Z"
 git tag vX.Y.Z
 ```
