@@ -18,7 +18,13 @@ from ._auth import (
     _StaticAuth,
 )
 from ._guardrail_export import write_guardrail_block
-from ._http import normalize_guardrails, normalize_uuid, path_segment, validate_lat_lon
+from ._http import (
+    normalize_add_tools,
+    normalize_guardrails,
+    normalize_uuid,
+    path_segment,
+    validate_lat_lon,
+)
 from .auth.cli import auth as _auth_group
 from .claude_code import MCP_SERVER_NAME
 from .client import KaguraClient
@@ -1467,6 +1473,22 @@ def _nonblank_path_option(ctx, param, value: Path | None) -> Path | None:
     return value
 
 
+def _add_tools_option(ctx, param, value: tuple[str, ...]) -> tuple[str, ...] | None:
+    """``--add-tools NAME[,NAME...]`` (repeatable) as one normalized tuple; None when absent.
+
+    A value that names no tool is a typo, so it is refused rather than
+    dropped; so are more than 100 names (#300).
+    """
+    if not value:
+        return None
+    try:
+        if any(not normalize_add_tools([item]) for item in value):
+            raise click.BadParameter("must name at least one tool")
+        return tuple(normalize_add_tools(value).split(","))
+    except ValueError as e:
+        raise click.BadParameter(str(e)) from None
+
+
 @main.group()
 def guardrails():
     """Inspect a context's tool guardrails (server v0.74.0+)."""
@@ -1525,7 +1547,17 @@ def guardrails_load(context_id, cap):
     "--tools",
     help="With --target instructions: the MCP URL's ?tools= allowlist",
 )
-def guardrails_digest(context_id, target, out_path, profile, tools):
+@click.option(
+    "--add-tools",
+    multiple=True,
+    metavar="NAME[,NAME...]",
+    callback=_add_tools_option,
+    help=(
+        "With --target instructions: the MCP URL's ?add_tools= names (server v0.129.0+); "
+        "comma-separated, may repeat"
+    ),
+)
+def guardrails_digest(context_id, target, out_path, profile, tools, add_tools):
     """
     Render the tool guardrails for clients without tool hooks.
 
@@ -1540,9 +1572,10 @@ def guardrails_digest(context_id, target, out_path, profile, tools):
     update-index --skip-worktree AGENTS.md) — in a public repository a
     committed block publishes the guardrail summaries.
 
-    --target instructions previews a bare MCP URL (the full tool view). For
-    a URL with ?profile= or ?tools=, repeat them with --profile / --tools:
-    they decide which tool the truncation note names.
+    --target instructions previews a bare MCP URL (on memory-cloud 0.93.0+
+    the core tool view). For a URL with ?profile=, ?tools= or ?add_tools=,
+    repeat them with --profile / --tools / --add-tools: they decide which
+    tool the truncation note names.
 
     \b
     Examples:
@@ -1552,9 +1585,10 @@ def guardrails_digest(context_id, target, out_path, profile, tools):
     """
     if out_path is not None and target != "export":
         raise click.UsageError("--out writes the export block; drop --target instructions")
-    if (profile is not None or tools is not None) and target != "instructions":
+    if (profile is not None or tools is not None or add_tools) and target != "instructions":
         raise click.UsageError(
-            "--profile / --tools shape the instructions preview; add --target instructions"
+            "--profile / --tools / --add-tools shape the instructions preview; "
+            "add --target instructions"
         )
     try:
         config = load_config()
@@ -1563,8 +1597,10 @@ def guardrails_digest(context_id, target, out_path, profile, tools):
 
         async def _run() -> GuardrailDigest:
             async with client:
+                # Passed only when given, as the client sends it only when set.
+                extra = {"add_tools": add_tools} if add_tools else {}
                 return await client.get_guardrail_digest(
-                    ctx_id, target=target, profile=profile, tools=tools
+                    ctx_id, target=target, profile=profile, tools=tools, **extra
                 )
 
         digest = asyncio.run(_run())
