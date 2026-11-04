@@ -512,6 +512,10 @@ class _SharedCredentialsState:
     profile_name: str
     path: Path
     lock: asyncio.Lock
+    # The refresh token the file still holds after a refresh of this process
+    # could not be saved: the server used it up, and ``credentials`` holds the
+    # one that works. ``None`` once a refresh is saved or adopted.
+    used_refresh_token: str | None = None
 
 
 _state_cache: dict[tuple[Path, str], _SharedCredentialsState] = {}
@@ -664,14 +668,18 @@ class KaguraOAuth(httpx.Auth):
                 self._state.profile_name,
                 expected_stale_token=expected_stale_token,
                 fallback=self._state.credentials,
+                used_refresh_token=self._state.used_refresh_token,
                 path=self._state.path,
             )
         except _RefreshNotSavedError as e:
             # The server rotated, so the token this process held is revoked and
             # the refreshed one exists only here: keep it, so this process stays
-            # usable until it expires, and still let the caller see the failure.
+            # usable, and remember which refresh token on file is used up so the
+            # next refresh sends this one. The caller still sees the failure.
             self._state.credentials = e.credentials
+            self._state.used_refresh_token = e.used_refresh_token
             raise
+        self._state.used_refresh_token = None
 
 
 # ---------------------------------------------------------------------------
@@ -683,12 +691,16 @@ class _RefreshNotSavedError(KaguraAuthError):
     """The server rotated the token, but credentials.json could not be written.
 
     ``credentials`` is the refreshed profile and its only copy: the rotation
-    revoked the access token on file and used up its refresh token.
+    revoked the access token on file and used up its refresh token, which is
+    ``used_refresh_token`` (``None`` when the profile was not in the file).
     """
 
-    def __init__(self, message: str, credentials: OAuthCredentials) -> None:
+    def __init__(
+        self, message: str, credentials: OAuthCredentials, used_refresh_token: str | None
+    ) -> None:
         super().__init__(message)
         self.credentials = credentials
+        self.used_refresh_token = used_refresh_token
 
 
 async def refresh_profile_locked(
@@ -696,6 +708,7 @@ async def refresh_profile_locked(
     *,
     expected_stale_token: str | None,
     fallback: OAuthCredentials,
+    used_refresh_token: str | None = None,
     scope: str | None = None,
     path: Path | None = None,
 ) -> OAuthCredentials:
@@ -726,7 +739,13 @@ async def refresh_profile_locked(
             on-disk token differs from it; the same token means nobody has
             rotated yet.
         fallback: The caller's copy of the profile, refreshed when the profile
-            is no longer in the file.
+            is no longer in the file or the file is behind it (below).
+        used_refresh_token: A refresh token the caller knows is used up: an
+            earlier refresh of its own consumed it but could not be saved
+            (:class:`_RefreshNotSavedError`), so ``fallback`` holds the one
+            that works. While the file still holds it, ``fallback`` is
+            refreshed instead; once the file holds anything else (another
+            process saved since), the file wins as usual.
         scope: Scope to request. When set, the refresh always runs: a token
             another process rotated carries the grant it had, not this one.
         path: The credentials file (default :data:`DEFAULT_CREDENTIALS_PATH`).
@@ -755,7 +774,10 @@ async def refresh_profile_locked(
         # change before the save below, and a second load could only differ by
         # failing — an unreadable file must not be rewritten with one profile.
         cf = _load_for_update(path)
-        disk = cf.get_profile(profile_name)
+        on_file = cf.get_profile(profile_name)
+        disk = on_file
+        if disk is not None and used_refresh_token and disk.refresh_token == used_refresh_token:
+            disk = None  # the file is behind the caller: refresh from its copy
         if disk is not None and scope is None and _already_rotated(disk, expected_stale_token):
             return disk
         refreshed = await _network_refresh(disk if disk is not None else fallback, scope=scope)
@@ -774,6 +796,7 @@ async def refresh_profile_locked(
                 "cannot be refreshed again.\n"
                 "  Fix the cause, then run: kagura auth login",
                 refreshed,
+                on_file.refresh_token if on_file is not None else None,
             ) from e
         return refreshed
 

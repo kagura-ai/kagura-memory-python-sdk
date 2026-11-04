@@ -1148,6 +1148,123 @@ async def test_refresh_not_saved_is_typed_and_keeps_the_new_token_in_memory(
     assert on_disk.access_token == "old"
 
 
+def _single_use_endpoint_issuing(sent: list[str], issued: dict[str, tuple[str, str, int]]):
+    """A single-use token endpoint: refresh token → (access, refresh, ttl seconds)."""
+
+    async def single_use(_client, server, *, client_id, refresh_token, scope=None):
+        if refresh_token in sent:
+            raise KaguraAuthExpiredError("Your login expired (refresh token is no longer valid).")
+        sent.append(refresh_token)
+        access, refresh, ttl = issued[refresh_token]
+        return TokenResponse(
+            access_token=access,
+            refresh_token=refresh,
+            token_type="Bearer",
+            expires_at=datetime.now(UTC) + timedelta(seconds=ttl),
+            scope="memory:read",
+        )
+
+    return single_use
+
+
+def _save_fails_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    import kagura_memory.auth.credentials as creds_mod
+
+    real_save = creds_mod.save_credentials_file
+    failures = [OSError(28, "No space left on device")]
+
+    def save(cf, path=None):
+        if failures:
+            raise failures.pop()
+        real_save(cf, path)
+
+    monkeypatch.setattr(creds_mod, "save_credentials_file", save)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path_kind", ["skew", "401"])
+async def test_refresh_after_a_failed_save_sends_the_refresh_token_held_in_memory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, path_kind: str
+):
+    """After a save failed, the next refresh sends the refresh token held in memory.
+
+    The file still holds the profile the first refresh rotated away: its access
+    token is revoked and its refresh token used up. Refreshing from it, or (401
+    path) adopting it because it differs from the rejected token, would end in
+    "login expired".
+    """
+    reset_state_cache()
+    path = tmp_path / "creds.json"
+    soon = datetime.now(UTC) + timedelta(seconds=5)  # within REFRESH_SKEW_SEC
+    stale = _sample_creds(access_token="t1", refresh_token="r1", expires_at=soon)
+    cf = CredentialsFile()
+    cf.set_profile("default", stale)
+    save_credentials_file(cf, path)
+    auth = KaguraOAuth(_independent_state(path, stale))
+    sent: list[str] = []
+    # t2 is issued inside the skew window too, so the skew path refreshes again.
+    issued = {"r1": ("t2", "r2", 10), "r2": ("t3", "r3", 3600)}
+
+    _save_fails_once(monkeypatch)
+    with (
+        patch(
+            "kagura_memory.auth.device_flow.refresh_access_token",
+            new=_single_use_endpoint_issuing(sent, issued),
+        ),
+        patch("kagura_memory.auth.device_flow.make_oauth_client", return_value=_AsyncContextStub()),
+    ):
+        with pytest.raises(KaguraAuthError, match="could not save it"):
+            await auth._maybe_refresh()
+        assert auth._state.credentials.access_token == "t2"
+        if path_kind == "skew":
+            await auth._maybe_refresh()
+        else:
+            await auth.force_refresh()  # t2 rejected upstream
+
+    assert sent == ["r1", "r2"]
+    assert auth._state.credentials.access_token == "t3"
+    assert auth._state.used_refresh_token is None
+    on_disk = load_credentials_file(path).get_profile()
+    assert on_disk is not None
+    assert (on_disk.access_token, on_disk.refresh_token) == ("t3", "r3")
+
+
+@pytest.mark.asyncio
+async def test_after_a_failed_save_a_profile_saved_since_wins(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Once another process saved the profile (here a new login), the file wins
+    again: its fresh token is adopted and the in-memory refresh token is not sent."""
+    reset_state_cache()
+    path = tmp_path / "creds.json"
+    soon = datetime.now(UTC) + timedelta(seconds=5)
+    stale = _sample_creds(access_token="t1", refresh_token="r1", expires_at=soon)
+    cf = CredentialsFile()
+    cf.set_profile("default", stale)
+    save_credentials_file(cf, path)
+    auth = KaguraOAuth(_independent_state(path, stale))
+    sent: list[str] = []
+
+    _save_fails_once(monkeypatch)
+    with (
+        patch(
+            "kagura_memory.auth.device_flow.refresh_access_token",
+            new=_single_use_endpoint_issuing(sent, {"r1": ("t2", "r2", 10)}),
+        ),
+        patch("kagura_memory.auth.device_flow.make_oauth_client", return_value=_AsyncContextStub()),
+    ):
+        with pytest.raises(KaguraAuthError, match="could not save it"):
+            await auth._maybe_refresh()
+        update_profile(
+            "default", _sample_creds(access_token="t-login", refresh_token="r-login"), path
+        )
+        await auth._maybe_refresh()
+
+    assert sent == ["r1"]
+    assert auth._state.credentials.access_token == "t-login"
+    assert auth._state.used_refresh_token is None
+
+
 @pytest.mark.asyncio
 async def test_force_refresh_coalesces_with_an_in_flight_skew_refresh(tmp_path: Path):
     """A 401 force_refresh queued behind a skew refresh of one state → one token call.
