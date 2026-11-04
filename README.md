@@ -676,7 +676,7 @@ The same client also provisions **member API keys** (memory-cloud [#1165](https:
 
 ## SDK ↔ memory-cloud Compatibility
 
-`MIN_SERVER_VERSION` in `src/kagura_memory/client.py` is **0.17.1**, and it is **advisory**: the SDK does not pre-check the server version and block a call, `check_server_version()` only logs a warning, and `kagura doctor` is the one place a too-old server fails outright. SDK 0.44.0 is checked against memory-cloud up to **0.142.0**. A newer surface carries its own server floor, named in the section of the release that added it.
+`MIN_SERVER_VERSION` in `src/kagura_memory/client.py` is **0.17.1**, and it is **advisory**: the SDK does not pre-check the server version and block a call, `check_server_version()` only logs a warning, and `kagura doctor` is the one place a too-old server fails outright. SDK 0.44.0 is checked against memory-cloud up to **0.142.0**. A newer surface carries its own server floor, given in the [docs/compatibility.md](docs/compatibility.md) section of the release that added it.
 
 | SDK | memory-cloud checked up to | What changed |
 |---|---|---|
