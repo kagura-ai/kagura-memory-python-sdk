@@ -64,6 +64,8 @@ _STALE_PHRASES = [
     "realignment with 0.141.0 is [#299]",
     # Since memory-cloud v0.93.0 a bare URL lists core; ?profile=full adds tools.
     "narrow `tools/list` only",
+    # #302: content_chunks_enabled / llm_selector_enabled need the context owner.
+    "Requires owner or editor permission",
 ]
 
 
@@ -133,13 +135,48 @@ def test_no_doc_says_a_non_uuid_is_a_500_without_the_422() -> None:
                 "``verified``",
                 "``acceptance``",
                 "#1683",
+                # #302: the event-time filter keys (memory-cloud v0.127.0).
+                "``observed_after``",
+                "``observed_before``",
             ],
+        ),
+        (KaguraClient.list_memories, ["``observed_at``", "#2330"]),
+        # #302: owner-only toggles, not "owner or editor"; the LanceDB refusal.
+        (
+            KaguraClient.update_search_config,
+            ["workspace owner/admin", "invalid_search_config", "#2015", "#2144"],
         ),
         (KaguraClient.recall_nearby, ["``location``", "include_details", "details_omitted"]),
         (KaguraClient.recall_upcoming, ["details_omitted", "details_total_chars"]),
         (KaguraClient.forget, ["CLEANUP_DELETED_MEMORIES_RETENTION_DAYS", "degraded"]),
-        (KaguraClient.remember, ["persistence", "lint", "``verbose=true``", "missing_fields"]),
-        (KaguraClient.update_memory, ["persistence", "lint", '``""``', "``{}``", "#1803"]),
+        (
+            KaguraClient.remember,
+            [
+                "persistence",
+                "lint",
+                "``verbose=true``",
+                "missing_fields",
+                # #302: memory-cloud v0.93.0-v0.127.0 write options.
+                "duplicate_candidate",
+                "tag_normalized",
+                "#2330",
+            ],
+        ),
+        (
+            KaguraClient.update_memory,
+            [
+                "persistence",
+                "lint",
+                '``""``',
+                "``{}``",
+                "#1803",
+                # #302: partial edits, optimistic concurrency and the accept.
+                "#2585",
+                "KaguraVersionConflictError",
+                "superseded_memory_id",
+                "edge_exists",
+            ],
+        ),
         (KaguraClient.create_context, ["invalid_embedding_model", "get_context_info"]),
         (KaguraClient.update_context, ["plan_required", "public_contexts"]),
         (KaguraClient.setup_resource, ["plan_required", "``resources``"]),
@@ -150,7 +187,16 @@ def test_no_doc_says_a_non_uuid_is_a_500_without_the_422() -> None:
         (KaguraClient.update_edge, ["permission_denied", "#2313"]),
         (
             KaguraClient.reference,
-            ["``acceptance``", "``verified``", "``not_writable``", "``edge_exists``"],
+            [
+                "``acceptance``",
+                "``verified``",
+                "``not_writable``",
+                "``edge_exists``",
+                # #302: versions, continuation reads, and the REST-only flag.
+                "#2043",
+                "``content_next_offset``",
+                "``record_access: false``",
+            ],
         ),
         (KaguraClient.get_usage, ["#1946"]),
         (UsageInfo, ["#1946"]),

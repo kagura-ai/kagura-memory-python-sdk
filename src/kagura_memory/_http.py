@@ -25,6 +25,7 @@ from .exceptions import (
     KaguraRateLimitError,
     KaguraResponseError,
     KaguraServiceUnavailableError,
+    KaguraVersionConflictError,
     _exc_message,
 )
 
@@ -509,6 +510,32 @@ def _envelope_of(body: Any) -> tuple[str, str, dict[str, Any]] | None:
         message if isinstance(message, str) else "",
         details if isinstance(details, dict) else {},
     )
+
+
+def version_conflict_error(
+    code: str, message: str, fields: Mapping[str, Any]
+) -> KaguraVersionConflictError | None:
+    """Type a refused ``expected_version`` (memory-cloud v0.113.0+, #2043; SDK #302).
+
+    MCP answers ``version_conflict``; REST answers ``RES-002`` — a code the
+    files API's sha256 dedup ``409`` shares — told apart by its
+    ``details.reason == "version_conflict"``. The caller keeps the server's
+    ``code`` and fields on the error (:func:`annotate_server_error`).
+
+    Args:
+        code: The error code — MCP ``error`` or REST ``error``.
+        message: Message for the exception.
+        fields: The MCP envelope, or the REST ``details``.
+
+    Returns:
+        :class:`KaguraVersionConflictError`, or ``None`` when the error is
+        something else.
+    """
+    if code == "version_conflict" or (
+        code == "RES-002" and fields.get("reason") == "version_conflict"
+    ):
+        return KaguraVersionConflictError(message)
+    return None
 
 
 def gate_error(

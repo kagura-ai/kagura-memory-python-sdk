@@ -9,8 +9,14 @@ import pytest
 from click.testing import CliRunner
 
 from kagura_memory.auth.credentials import reset_state_cache
-from kagura_memory.cli import _parse_tags, main
-from kagura_memory.exceptions import KaguraConnectionError, KaguraError, KaguraNotFoundError
+from kagura_memory.cli import _cli_error_message, _parse_tags, _unknown_arguments, main
+from kagura_memory.exceptions import (
+    KaguraConnectionError,
+    KaguraError,
+    KaguraNotFoundError,
+    KaguraVersionConflictError,
+)
+from kagura_memory.models import ServerInfo
 from kagura_memory.setup_claude import SESSIONSTART_HOOK_COMMAND
 from tests.conftest import (
     indexer_status_dict,
@@ -795,14 +801,26 @@ def test_update_memory_dismiss_rejects_external_id(mock_client_cls):
 # ---------------------------------------------------------------------------
 
 
-def _update_memory_cli(mock_client_cls, mock_config, *args, reference=None, reference_exc=None):
+def _update_memory_cli(
+    mock_client_cls,
+    mock_config,
+    *args,
+    reference=None,
+    reference_exc=None,
+    update_side_effect=None,
+    server_info=None,
+):
     """Invoke `kagura update-memory` with a wired mock client and return (result, client).
 
     ``args`` is the full argument list after ``update-memory`` (the id flag
     included, so a test can choose --memory-id or --external-id). ``reference``
-    is the reply the mock's ``reference`` returns for --merge-details; by
+    is the reply the mock's ``reference`` returns for the merge fallback; by
     default a memory whose details are ``null``. ``reference_exc`` makes that
-    read raise instead (a failed reference() call).
+    read raise instead (a failed reference() call). ``update_memory`` answers
+    as memory-cloud 0.113.0+ does (with a ``version``) unless
+    ``update_side_effect`` says otherwise. ``get_server_info`` (the probe
+    before the ignored-``details_patch`` fallback) reports 0.81.0 unless
+    ``server_info`` gives another reply or an exception to raise.
     """
     mock_config.return_value = {
         "api_key": "key",
@@ -810,7 +828,13 @@ def _update_memory_cli(mock_client_cls, mock_config, *args, reference=None, refe
         "context_id": "ctx",
     }
     mock_client = AsyncMock()
-    mock_client.update_memory.return_value = {"status": "success", "memory_id": "mem-1"}
+    mock_client.update_memory.return_value = {
+        "status": "success",
+        "memory_id": "mem-1",
+        "version": 2,
+    }
+    if update_side_effect is not None:
+        mock_client.update_memory.side_effect = update_side_effect
     mock_client.reference.return_value = (
         {"status": "success", "memory": {"memory_id": "mem-1", "details": None}}
         if reference is None
@@ -818,6 +842,12 @@ def _update_memory_cli(mock_client_cls, mock_config, *args, reference=None, refe
     )
     if reference_exc is not None:
         mock_client.reference.side_effect = reference_exc
+    if isinstance(server_info, BaseException):
+        mock_client.get_server_info.side_effect = server_info
+    else:
+        mock_client.get_server_info.return_value = server_info or ServerInfo(
+            name="Kagura Memory Cloud", version="0.81.0"
+        )
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=None)
     mock_client_cls.return_value = mock_client
@@ -1046,13 +1076,12 @@ def _bounded_reference_reply(**markers):
 @patch("kagura_memory.cli.load_config")
 @patch("kagura_memory.cli.KaguraClient")
 def test_update_memory_merge_details(mock_client_cls, mock_config):
-    """--merge-details reads the memory with reference() and merges top-level keys.
+    """--merge-details sends --details/--location as details_patch in one call (#302).
 
-    Keys the payload does not mention are kept, a key present in both takes the
-    new value, and the merged dict is what goes under ``details=``. The other
-    flags compose with it: --dismiss-supersede-candidate still rides along.
+    No reference() read first: the server merges the top-level keys over the
+    current details. The other flags compose with it: --dismiss-supersede-candidate
+    still rides along.
     """
-    current = {"location": {"lat": 1.0, "lon": 2.0, "label": "old"}, "client": "acme", "n": 1}
     result, mock_client = _update_memory_cli(
         mock_client_cls,
         mock_config,
@@ -1061,23 +1090,502 @@ def test_update_memory_merge_details(mock_client_cls, mock_config):
         "--location",
         "35.68,139.76,Tokyo HQ",
         "--details",
-        '{"n": 2}',
+        '{"n": 2, "stale": null}',
         "--merge-details",
         "--dismiss-supersede-candidate",
-        reference=_reference_reply(current),
     )
     assert result.exit_code == 0, result.output
-    mock_client.reference.assert_awaited_once_with(context_id="ctx", memory_id="mem-1")
+    mock_client.reference.assert_not_called()
+    mock_client.update_memory.assert_awaited_once()
     kwargs = mock_client.update_memory.await_args.kwargs
     assert kwargs["memory_id"] == "mem-1"
-    assert kwargs["details"] == {
+    assert kwargs["details_patch"] == {
+        "n": 2,
+        "stale": None,
         "location": {"lat": 35.68, "lon": 139.76, "label": "Tokyo HQ"},
-        "client": "acme",
+    }
+    assert "details" not in kwargs
+    assert kwargs["dismiss_supersede_candidate"] is True
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_update_memory_details_patch(mock_client_cls, mock_config):
+    """--details-patch is forwarded as written, nulls included."""
+    result, mock_client = _update_memory_cli(
+        mock_client_cls,
+        mock_config,
+        "-m",
+        "mem-1",
+        "--details-patch",
+        '{"status": "done", "assignee": null}',
+        "--expected-version",
+        "3",
+    )
+    assert result.exit_code == 0, result.output
+    kwargs = mock_client.update_memory.await_args.kwargs
+    assert kwargs["details_patch"] == {"status": "done", "assignee": None}
+    assert kwargs["expected_version"] == 3
+    mock_client.reference.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ("--details", '{"a": 1}'),
+        ("--location", "35.68,139.76"),
+        ("--merge-details", "--details", '{"a": 1}'),
+    ],
+    ids=["details", "location", "merge-details"],
+)
+@patch("kagura_memory.cli.KaguraClient")
+def test_update_memory_details_patch_is_exclusive(mock_client_cls, args):
+    result = CliRunner().invoke(
+        main, ["update-memory", "-m", "mem-1", "--details-patch", '{"b": 2}', *args]
+    )
+    assert result.exit_code == 1, result.output
+    assert "--details-patch cannot be combined" in result.output
+    mock_client_cls.assert_not_called()
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_update_memory_rejects_non_object_details_patch(mock_client_cls, mock_config):
+    result, mock_client = _update_memory_cli(
+        mock_client_cls, mock_config, "-m", "mem-1", "--details-patch", "[1]"
+    )
+    assert result.exit_code != 0
+    assert "--details-patch must be a JSON object" in result.output
+    mock_client.update_memory.assert_not_called()
+
+
+class _OddDetailsError(Exception):
+    """An error whose ``details`` is not an object (a subclass outside the SDK)."""
+
+    details = ["unknown_arguments"]
+
+
+@pytest.mark.parametrize(
+    ("details", "expected"),
+    [
+        ({"unknown_arguments": ["details_patch", "add_tags"]}, ["details_patch", "add_tags"]),
+        ({"unknown_arguments": ["details_patch", 7, None]}, ["details_patch"]),
+        ({"unknown_arguments": "details_patch"}, None),
+        ({}, None),
+    ],
+    ids=["listed", "non-str-dropped", "not-a-list", "absent"],
+)
+def test_unknown_arguments_reads_the_envelope_list(details, expected):
+    err = KaguraError("refused")
+    err.code, err.details = "invalid_argument", details
+    assert _unknown_arguments(err) == expected
+
+
+def test_unknown_arguments_tolerates_details_that_are_not_an_object():
+    assert _unknown_arguments(_OddDetailsError()) is None
+    assert _unknown_arguments(ValueError("no details at all")) is None
+
+
+def _patch_refused(*names: str) -> KaguraError:
+    """memory-cloud 0.82.0-0.139.x refusing undeclared arguments (#1742)."""
+    err = KaguraError("update_memory failed (invalid_argument): Unknown argument(s)")
+    err.code = "invalid_argument"
+    err.details = {"unknown_arguments": list(names)}
+    return err
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_update_memory_merge_details_falls_back_when_refused(mock_client_cls, mock_config):
+    """Before 0.140.0 the refused call wrote nothing: read, merge, write the whole object.
+
+    The merge follows details_patch's rule (a null deletes the key), and the
+    other flags — --expected-version included — go with the write.
+    """
+    current = {"location": {"lat": 1.0, "lon": 2.0, "label": "old"}, "client": "acme", "n": 1}
+    result, mock_client = _update_memory_cli(
+        mock_client_cls,
+        mock_config,
+        "-m",
+        "mem-1",
+        "-s",
+        "updated summary",
+        "--location",
+        "35.68,139.76,Tokyo HQ",
+        "--details",
+        '{"n": 2, "client": null}',
+        "--merge-details",
+        "--expected-version",
+        "4",
+        reference=_reference_reply(current),
+        update_side_effect=[_patch_refused("details_patch"), {"status": "success", "version": 5}],
+    )
+    assert result.exit_code == 0, result.output
+    assert "this server refused it, merging via reference() instead" in result.stderr
+    mock_client.reference.assert_awaited_once_with(context_id="ctx", memory_id="mem-1")
+    first, second = mock_client.update_memory.await_args_list
+    assert "details_patch" in first.kwargs
+    assert "details_patch" not in second.kwargs
+    assert second.kwargs["details"] == {
+        "location": {"lat": 35.68, "lon": 139.76, "label": "Tokyo HQ"},
         "n": 2,
     }
-    assert kwargs["dismiss_supersede_candidate"] is True
+    assert second.kwargs["summary"] == "updated summary"
+    assert second.kwargs["expected_version"] == 4
     # The read is not mutated in place: the merge builds a new dict.
     assert current["n"] == 1
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_update_memory_merge_details_falls_back_when_ignored(mock_client_cls, mock_config):
+    """A server before 0.82.0 drops details_patch and answers without a version.
+
+    Its other edits were applied, so the second call writes the merged details only.
+    """
+    current = {"location": {"lat": 1.0, "lon": 2.0}, "client": "acme"}
+    result, mock_client = _update_memory_cli(
+        mock_client_cls,
+        mock_config,
+        "-m",
+        "mem-1",
+        "-s",
+        "updated summary",
+        "--location",
+        "35.68,139.76",
+        "--merge-details",
+        reference=_reference_reply(current),
+        update_side_effect=[{"status": "success"}, {"status": "success", "memory_id": "mem-1"}],
+    )
+    assert result.exit_code == 0, result.output
+    assert "this server ignored it (before 0.82.0)" in result.stderr
+    first, second = mock_client.update_memory.await_args_list
+    assert first.kwargs["summary"] == "updated summary"
+    assert second.kwargs == {
+        "context_id": "ctx",
+        "memory_id": "mem-1",
+        "details": {"location": {"lat": 35.68, "lon": 139.76}, "client": "acme"},
+    }
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_update_memory_ignored_patch_names_the_other_ignored_flags(mock_client_cls, mock_config):
+    """The server that ignored details_patch ignored the other new flags too: say so, exit 1.
+
+    The details merge still runs (the first write already happened), and its
+    reply is printed before the error.
+    """
+    result, mock_client = _update_memory_cli(
+        mock_client_cls,
+        mock_config,
+        "-m",
+        "mem-1",
+        "--details-patch",
+        '{"status": "done"}',
+        "--add-tag",
+        "status:done",
+        "--remove-tag",
+        "status:open",
+        "--expected-version",
+        "3",
+        "--observed-at",
+        "2026-11-04",
+        reference=_reference_reply({"status": "open"}),
+        update_side_effect=[{"status": "success"}, {"status": "success", "memory_id": "mem-1"}],
+    )
+    assert result.exit_code == 1, result.output
+    assert '"memory_id": "mem-1"' in result.stdout
+    assert (
+        "ignored --add-tag, --remove-tag, --expected-version, --observed-at "
+        "(--observed-at went into details.observed_at only" in result.stderr
+    )
+    assert "Both writes happened" in result.stderr
+    first, second = mock_client.update_memory.await_args_list
+    assert first.kwargs["add_tags"] == ["status:done"]
+    assert second.kwargs == {
+        "context_id": "ctx",
+        "memory_id": "mem-1",
+        "details": {"status": "done", "observed_at": "2026-11-04"},
+    }
+
+
+@pytest.mark.parametrize(
+    ("server_info", "probe"),
+    [
+        (ServerInfo(name="Kagura Memory Cloud", version="0.82.0"), "reports version 0.82.0"),
+        (ServerInfo(name="Kagura Memory Cloud", version="0.130.2"), "reports version 0.130.2"),
+        (ServerInfo(name="Kagura Memory Cloud", version="dev"), "reports version dev"),
+        (KaguraConnectionError("HTTP 502"), "its version could not be read (HTTP 502)"),
+    ],
+    ids=["0.82.0", "newer", "unparseable", "probe-failed"],
+)
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_update_memory_reply_without_version_from_a_newer_server_is_not_merged(
+    mock_client_cls, mock_config, server_info, probe
+):
+    """Only a server before 0.82.0 ignores details_patch; any other reply without
+    a version is not understood, so nothing is read or written again.
+    """
+    result, mock_client = _update_memory_cli(
+        mock_client_cls,
+        mock_config,
+        "-m",
+        "mem-1",
+        "--location",
+        "35.68,139.76",
+        "--merge-details",
+        update_side_effect=[{"status": "success"}],
+        server_info=server_info,
+    )
+    assert result.exit_code == 1, result.output
+    assert f"without 'version' and {probe}" in result.output
+    assert "whether it applied --merge-details cannot be confirmed" in result.output
+    mock_client.get_server_info.assert_awaited_once()
+    mock_client.reference.assert_not_called()
+    mock_client.update_memory.assert_awaited_once()
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_update_memory_fallback_folds_observed_at_into_the_details(mock_client_cls, mock_config):
+    """The server folds observed_at into the patch; the fallback's merge must too.
+
+    Otherwise a stored observed_at would contradict the new one in the write.
+    """
+    current = {"observed_at": "2024-01-01", "status": "open"}
+    result, mock_client = _update_memory_cli(
+        mock_client_cls,
+        mock_config,
+        "-m",
+        "mem-1",
+        "--details-patch",
+        '{"status": "done"}',
+        "--observed-at",
+        "2026-11-04",
+        reference=_reference_reply(current),
+        update_side_effect=[_patch_refused("details_patch"), {"status": "success", "version": 3}],
+    )
+    assert result.exit_code == 0, result.output
+    second = mock_client.update_memory.await_args
+    assert second.kwargs["details"] == {"observed_at": "2026-11-04", "status": "done"}
+    assert second.kwargs["observed_at"] == "2026-11-04"
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_update_memory_details_patch_fallback_names_its_flag(mock_client_cls, mock_config):
+    result, mock_client = _update_memory_cli(
+        mock_client_cls,
+        mock_config,
+        "-m",
+        "mem-1",
+        "--details-patch",
+        '{"status": "done"}',
+        reference=_bounded_reference_reply(details_omitted=True, details_total_chars=30000),
+        update_side_effect=[_patch_refused("details_patch")],
+    )
+    assert result.exit_code == 1, result.output
+    assert "--details-patch: the memory's current details could not be read" in result.output
+    assert "without --details-patch" in result.output
+    mock_client.update_memory.assert_awaited_once()
+
+
+_WIRE_CTX = "11111111-2222-3333-4444-555555555555"
+_WIRE_MEM = "aaaaaaaa-0000-0000-0000-000000000001"
+# memory-cloud 0.82.0-0.139.x: update_memory's closed schema refuses details_patch
+# (mcp_server/tools/__init__.py + _arg_coercion.find_unknown_arguments, #1742).
+_UNKNOWN_DETAILS_PATCH = {
+    "status": "error",
+    "error": "invalid_argument",
+    "message": "update_memory does not accept the argument 'details_patch' (did you mean "
+    "'details'?). Arguments its inputSchema declares: context_id, details, ...",
+    "unknown_arguments": ["details_patch"],
+    "allowed_arguments": ["context_id", "details", "expected_version", "memory_id"],
+    "suggestions": {"details_patch": "details"},
+    "help": "Remove the unknown arguments or rename them as suggested, then call the tool again.",
+}
+_WIRE_UPDATED = {
+    "status": "success",
+    "memory_id": _WIRE_MEM,
+    "operation": "updated",
+    "re_embedded": False,
+    "scope": "working",
+}
+
+
+_SYSTEM_INFO = ("GET", "/api/v1/system/info")
+
+
+@pytest.mark.parametrize(
+    ("first_reply", "server_version", "expected_calls", "exit_code"),
+    [
+        (
+            {**_WIRE_UPDATED, "version": 5},
+            None,
+            [("update_memory", "patch")],
+            0,
+        ),
+        (
+            _UNKNOWN_DETAILS_PATCH,
+            None,
+            [("update_memory", "patch"), ("reference", None), ("update_memory", "merged+edits")],
+            0,
+        ),
+        (
+            # Merged, then exit 1: --expected-version was ignored as well.
+            _WIRE_UPDATED,
+            "0.81.0",
+            [
+                ("update_memory", "patch"),
+                _SYSTEM_INFO,
+                ("reference", None),
+                ("update_memory", "merged"),
+            ],
+            1,
+        ),
+        (
+            # A reply without version from a server that would have refused an
+            # unknown argument: not understood, so nothing is read or written again.
+            _WIRE_UPDATED,
+            "0.130.0",
+            [("update_memory", "patch"), _SYSTEM_INFO],
+            1,
+        ),
+    ],
+    ids=[
+        "0.140.0+-one-call",
+        "0.82.0-0.139.x-refused",
+        "before-0.82.0-ignored",
+        "no-version-from-0.82.0+",
+    ],
+)
+def test_update_memory_merge_details_on_the_wire(
+    monkeypatch, first_reply, server_version, expected_calls, exit_code
+):
+    """--merge-details through the real client and transport, per server generation.
+
+    The refusal is read from the MCP envelope as the client keeps it
+    (``KaguraError.details["unknown_arguments"]``), the server version from
+    ``GET /api/v1/system/info``, and every request carries exactly the
+    arguments named here.
+    """
+    import httpx
+
+    from kagura_memory import KaguraClient
+
+    stored = {"location": {"lat": 1.0, "lon": 2.0}, "client": "acme", "n": 1}
+    sent: list[tuple[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            sent.append((request.method, request.url.path))
+            return httpx.Response(200, json={"name": "kagura", "version": server_version})
+        params = json.loads(request.content)["params"]
+        sent.append((params["name"], params["arguments"]))
+        if params["name"] == "reference":
+            reply = {"status": "success", "memory": {"memory_id": _WIRE_MEM, "details": stored}}
+        elif len(sent) == 1:
+            reply = first_reply
+        else:
+            reply = {**_WIRE_UPDATED, "version": 5}
+        text = json.dumps(reply)
+        return httpx.Response(
+            200,
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {"content": [{"type": "text", "text": text}]},
+            },
+        )
+
+    def wired_client(**_kwargs):
+        client = KaguraClient(api_key="test", mcp_url="https://test.com/mcp")
+        client._session_id = "pre-set-session"
+        client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        return client
+
+    monkeypatch.setattr("kagura_memory.cli.KaguraClient", wired_client)
+    monkeypatch.setattr(
+        "kagura_memory.cli.load_config",
+        lambda: {"api_key": "test", "mcp_url": "https://test.com/mcp"},
+    )
+    result = CliRunner().invoke(
+        main,
+        [
+            "update-memory",
+            "-c",
+            _WIRE_CTX,
+            "-m",
+            _WIRE_MEM,
+            "--location",
+            "35.68,139.76",
+            "--details",
+            '{"n": 2, "client": null}',
+            "--merge-details",
+            "--expected-version",
+            "4",
+        ],
+    )
+    assert result.exit_code == exit_code, result.output
+    ids = {"context_id": _WIRE_CTX, "memory_id": _WIRE_MEM}
+    new_location = {"lat": 35.68, "lon": 139.76}
+    bodies = {
+        None: ids,
+        "patch": {
+            **ids,
+            "details_patch": {"n": 2, "client": None, "location": new_location},
+            "expected_version": 4,
+        },
+        # The refused call wrote nothing: the merged object goes with every flag.
+        "merged+edits": {
+            **ids,
+            "details": {"location": new_location, "n": 2},
+            "expected_version": 4,
+        },
+        # The ignored call applied the other flags: only the details are left.
+        "merged": {**ids, "details": {"location": new_location, "n": 2}},
+    }
+    assert sent == [
+        call if call == _SYSTEM_INFO else (call[0], bodies[call[1]]) for call in expected_calls
+    ]
+    if server_version == "0.81.0":
+        assert "ignored --expected-version." in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("code", "details"),
+    [
+        ("invalid_argument", {"unknown_arguments": ["add_tags"]}),
+        ("invalid_argument", {"unknown_arguments": ["details_patch", "add_tags"]}),
+        ("invalid_argument", {}),
+        ("validation_error", {}),
+    ],
+    ids=["other-argument", "another-argument-too", "no-list", "other-code"],
+)
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_update_memory_merge_details_no_fallback_on_other_errors(
+    mock_client_cls, mock_config, code, details
+):
+    """Only a refusal that names details_patch retries; nothing is read or rewritten on a guess."""
+    err = KaguraError(f"update_memory failed ({code}): refused")
+    err.code, err.details = code, details
+    result, mock_client = _update_memory_cli(
+        mock_client_cls,
+        mock_config,
+        "-m",
+        "mem-1",
+        "--location",
+        "35.68,139.76",
+        "--merge-details",
+        update_side_effect=err,
+    )
+    assert result.exit_code == 1, result.output
+    assert f"({code})" in result.output
+    mock_client.reference.assert_not_called()
+    mock_client.update_memory.assert_awaited_once()
 
 
 @pytest.mark.parametrize(
@@ -1088,7 +1596,7 @@ def test_update_memory_merge_details(mock_client_cls, mock_config):
 @patch("kagura_memory.cli.load_config")
 @patch("kagura_memory.cli.KaguraClient")
 def test_update_memory_merge_details_onto_none(mock_client_cls, mock_config, reference):
-    """A memory with null (or no) details merges onto ``{}``: the payload is sent as-is."""
+    """In the fallback, null (or no) details merge onto ``{}``: the patch is sent as-is."""
     result, mock_client = _update_memory_cli(
         mock_client_cls,
         mock_config,
@@ -1098,6 +1606,7 @@ def test_update_memory_merge_details_onto_none(mock_client_cls, mock_config, ref
         "35.68,139.76",
         "--merge-details",
         reference=reference,
+        update_side_effect=[_patch_refused("details_patch"), {"status": "success"}],
     )
     assert result.exit_code == 0, result.output
     assert mock_client.update_memory.await_args.kwargs["details"] == {
@@ -1108,11 +1617,17 @@ def test_update_memory_merge_details_onto_none(mock_client_cls, mock_config, ref
 @patch("kagura_memory.cli.load_config")
 @patch("kagura_memory.cli.KaguraClient")
 def test_update_memory_merge_details_empty_object_resends_current(mock_client_cls, mock_config):
-    """--details '{}' under --merge-details is a no-op merge: the current details go back.
+    """--details '{}' under --merge-details is an empty patch, never a clear.
 
     Without --merge-details the same '{}' clears details, as the client documents.
     """
     current = {"location": {"lat": 1.0, "lon": 2.0}, "client": "acme"}
+    result, mock_client = _update_memory_cli(
+        mock_client_cls, mock_config, "-m", "mem-1", "--details", "{}", "--merge-details"
+    )
+    assert result.exit_code == 0, result.output
+    assert mock_client.update_memory.await_args.kwargs["details_patch"] == {}
+
     result, mock_client = _update_memory_cli(
         mock_client_cls,
         mock_config,
@@ -1122,6 +1637,7 @@ def test_update_memory_merge_details_empty_object_resends_current(mock_client_cl
         "{}",
         "--merge-details",
         reference=_reference_reply(current),
+        update_side_effect=[_patch_refused("details_patch"), {"status": "success"}],
     )
     assert result.exit_code == 0, result.output
     assert mock_client.update_memory.await_args.kwargs["details"] == current
@@ -1173,10 +1689,10 @@ def test_update_memory_merge_details_empty_object_resends_current(mock_client_cl
 def test_update_memory_merge_details_refuses_partial_read(
     mock_client_cls, mock_config, reference, expected
 ):
-    """A bounded reference reply (memory-cloud 0.78.0+) that left details out is refused.
+    """In the fallback, a bounded reference reply (0.78.0+) that left details out is refused.
 
     Merging onto a partial read would silently drop the keys that were not
-    returned, so the CLI stops before sending anything and points at the
+    returned, so the CLI stops before writing anything and points at the
     full-object path (--details without --merge-details). The first cases use
     the server's real shape — markers in place of the ``details`` key — so a
     guard that treats an absent key as "no details" before checking the
@@ -1191,17 +1707,20 @@ def test_update_memory_merge_details_refuses_partial_read(
         "35.68,139.76",
         "--merge-details",
         reference=reference,
+        update_side_effect=[_patch_refused("details_patch")],
     )
     assert result.exit_code == 1, result.output
     assert expected in result.output
     assert "without --merge-details" in result.output
-    mock_client.update_memory.assert_not_called()
+    # Only the refused one-call attempt went out; no details were written.
+    mock_client.update_memory.assert_awaited_once()
+    assert "details" not in mock_client.update_memory.await_args.kwargs
 
 
 @patch("kagura_memory.cli.load_config")
 @patch("kagura_memory.cli.KaguraClient")
 def test_update_memory_merge_details_rejects_non_object_current(mock_client_cls, mock_config):
-    """Current details that are not a JSON object cannot be merged onto — nothing is sent."""
+    """Current details that are not a JSON object cannot be merged onto — nothing is written."""
     result, mock_client = _update_memory_cli(
         mock_client_cls,
         mock_config,
@@ -1211,10 +1730,11 @@ def test_update_memory_merge_details_rejects_non_object_current(mock_client_cls,
         "35.68,139.76",
         "--merge-details",
         reference=_reference_reply(["not", "an", "object"]),
+        update_side_effect=[_patch_refused("details_patch")],
     )
     assert result.exit_code == 1, result.output
     assert "current details are not a JSON object" in result.output
-    mock_client.update_memory.assert_not_called()
+    mock_client.update_memory.assert_awaited_once()
 
 
 @pytest.mark.parametrize(
@@ -1237,10 +1757,11 @@ def test_update_memory_merge_details_requires_memory_object(
         "35.68,139.76",
         "--merge-details",
         reference=reference,
+        update_side_effect=[_patch_refused("details_patch")],
     )
     assert result.exit_code == 1, result.output
     assert "carried no memory object" in result.output
-    mock_client.update_memory.assert_not_called()
+    mock_client.update_memory.assert_awaited_once()
 
 
 @pytest.mark.parametrize(
@@ -1254,7 +1775,7 @@ def test_update_memory_merge_details_requires_memory_object(
 @patch("kagura_memory.cli.load_config")
 @patch("kagura_memory.cli.KaguraClient")
 def test_update_memory_merge_details_failed_read_never_writes(mock_client_cls, mock_config, exc):
-    """A reference() that RAISES under --merge-details fails the command; nothing is sent.
+    """A fallback reference() that RAISES fails the command; no details are written.
 
     ``_call_tool_checked`` turns a memory_not_found / permission_denied
     envelope into ``KaguraNotFoundError`` / ``KaguraError`` and a transport
@@ -1273,11 +1794,13 @@ def test_update_memory_merge_details_failed_read_never_writes(mock_client_cls, m
         "35.68,139.76",
         "--merge-details",
         reference_exc=exc,
+        update_side_effect=[_patch_refused("details_patch")],
     )
     assert result.exit_code == 1, result.output
     assert str(exc) in result.output
     mock_client.reference.assert_awaited_once_with(context_id="ctx", memory_id="mem-1")
-    mock_client.update_memory.assert_not_called()
+    mock_client.update_memory.assert_awaited_once()
+    assert "details" not in mock_client.update_memory.await_args.kwargs
 
 
 @patch("kagura_memory.cli.KaguraClient")
@@ -1318,6 +1841,257 @@ def test_update_memory_merge_details_needs_payload(mock_client_cls, args):
     assert result.exit_code == 1, result.output
     assert "--merge-details needs --details or --location" in result.output
     mock_client_cls.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# update-memory --add-tag / --remove-tag / --expected-version / --observed-at /
+# --accept-supersede-candidate, remember --observed-at / --dedupe /
+# --tags-normalize, context search-config --content-chunks / --llm-selector (#302)
+# ---------------------------------------------------------------------------
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_update_memory_tag_edits_and_guards(mock_client_cls, mock_config):
+    """Repeatable --add-tag / --remove-tag (blanks dropped) and the other new flags."""
+    result, mock_client = _update_memory_cli(
+        mock_client_cls,
+        mock_config,
+        "-m",
+        "mem-1",
+        "--add-tag",
+        "status:done",
+        "--add-tag",
+        " ",
+        "--add-tag",
+        " release ",
+        "--remove-tag",
+        "status:open",
+        "--expected-version",
+        "7",
+        "--observed-at",
+        "2026-11-04",
+    )
+    assert result.exit_code == 0, result.output
+    kwargs = mock_client.update_memory.await_args.kwargs
+    assert kwargs["add_tags"] == ["status:done", "release"]
+    assert kwargs["remove_tags"] == ["status:open"]
+    assert kwargs["expected_version"] == 7
+    assert kwargs["observed_at"] == "2026-11-04"
+    assert kwargs["tags"] is None
+    assert kwargs["accept_supersede_candidate"] is False
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_update_memory_new_flags_default_off(mock_client_cls, mock_config):
+    """Unset (or blank), each new flag reaches the client as its unset value."""
+    result, mock_client = _update_memory_cli(
+        mock_client_cls, mock_config, "-m", "mem-1", "-s", "updated summary", "--observed-at", " "
+    )
+    assert result.exit_code == 0, result.output
+    kwargs = mock_client.update_memory.await_args.kwargs
+    assert kwargs["add_tags"] is None
+    assert kwargs["remove_tags"] is None
+    assert kwargs["expected_version"] is None
+    assert kwargs["observed_at"] is None
+    assert kwargs["accept_supersede_candidate"] is False
+    assert kwargs["details"] is None
+    assert "details_patch" not in kwargs
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_update_memory_accept_supersede_candidate(mock_client_cls, mock_config):
+    result, mock_client = _update_memory_cli(
+        mock_client_cls, mock_config, "-m", "mem-1", "--accept-supersede-candidate"
+    )
+    assert result.exit_code == 0, result.output
+    assert mock_client.update_memory.await_args.kwargs["accept_supersede_candidate"] is True
+
+
+@pytest.mark.parametrize(
+    ("args", "message"),
+    [
+        (("--add-tag", "a"), "--add-tag requires --memory-id"),
+        (("--remove-tag", "a"), "--remove-tag requires --memory-id"),
+        (("--details-patch", '{"a": 1}'), "--details-patch requires --memory-id"),
+        (("--expected-version", "2"), "--expected-version requires --memory-id"),
+        (("--accept-supersede-candidate",), "--accept-supersede-candidate requires --memory-id"),
+        (
+            ("--add-tag", "a", "--expected-version", "2"),
+            "--add-tag, --expected-version require --memory-id",
+        ),
+    ],
+    ids=["add-tag", "remove-tag", "details-patch", "expected-version", "accept", "two-flags"],
+)
+@patch("kagura_memory.cli.KaguraClient")
+def test_update_memory_in_place_flags_reject_external_id(mock_client_cls, args, message):
+    result = CliRunner().invoke(
+        main, ["update-memory", "--external-id", "ext-1", "-s", "summary text", *args]
+    )
+    assert result.exit_code == 1, result.output
+    assert message in result.output
+    mock_client_cls.assert_not_called()
+
+
+@pytest.mark.parametrize("flag", ["--add-tag", "--remove-tag"])
+@patch("kagura_memory.cli.KaguraClient")
+def test_update_memory_tags_and_tag_edits_are_exclusive(mock_client_cls, flag):
+    result = CliRunner().invoke(main, ["update-memory", "-m", "mem-1", "--tags", "a,b", flag, "c"])
+    assert result.exit_code == 1, result.output
+    assert "--tags replaces the whole list" in result.output
+    mock_client_cls.assert_not_called()
+
+
+@patch("kagura_memory.cli.KaguraClient")
+def test_update_memory_expected_version_must_be_positive(mock_client_cls):
+    result = CliRunner().invoke(main, ["update-memory", "-m", "mem-1", "--expected-version", "0"])
+    assert result.exit_code == 2, result.output
+    assert "--expected-version" in result.output
+    mock_client_cls.assert_not_called()
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_update_memory_version_conflict_prints_the_current_version(mock_client_cls, mock_config):
+    err = KaguraVersionConflictError(
+        "update_memory failed (version_conflict): Memory mem-1 is at version 5, not the "
+        "expected version 3."
+    )
+    err.code = "version_conflict"
+    err.details = {
+        "current_version": 5,
+        "expected_version": 3,
+        "help": "reference() the memory and resend with its current version.",
+    }
+    result, _ = _update_memory_cli(
+        mock_client_cls,
+        mock_config,
+        "-m",
+        "mem-1",
+        "-s",
+        "updated summary",
+        "--expected-version",
+        "3",
+        update_side_effect=err,
+    )
+    assert result.exit_code == 1, result.output
+    assert "is at version 5" in result.output
+    assert "Current version: 5" in result.output
+    assert "Help: reference() the memory" in result.output
+
+
+def test_version_conflict_without_a_current_version_prints_no_line():
+    assert "Current version" not in _cli_error_message(KaguraVersionConflictError("conflict"))
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_remember_new_flags(mock_client_cls, mock_config):
+    mock_config.return_value = {
+        "api_key": "key",
+        "mcp_url": "https://test.com/mcp",
+        "context_id": "ctx",
+    }
+    mock_client = AsyncMock()
+    mock_client.remember.return_value = {
+        "status": "duplicate_candidate",
+        "candidate": {"memory_id": "mem-old", "summary": "Deploy key rotated", "similarity": 0.9},
+    }
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    mock_client_cls.return_value = mock_client
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "remember",
+            "-s",
+            "Deploy key rotated",
+            "--content",
+            "...",
+            "--observed-at",
+            "2026-11-01",
+            "--dedupe",
+            "check",
+            "--tags-normalize",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "duplicate_candidate" in result.output
+    kwargs = mock_client.remember.await_args.kwargs
+    assert kwargs["observed_at"] == "2026-11-01"
+    assert kwargs["dedupe"] == "check"
+    assert kwargs["tags_normalize"] is True
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_remember_new_flags_default_off(mock_client_cls, mock_config):
+    mock_config.return_value = {
+        "api_key": "key",
+        "mcp_url": "https://test.com/mcp",
+        "context_id": "ctx",
+    }
+    mock_client = AsyncMock()
+    mock_client.remember.return_value = {"status": "success"}
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    mock_client_cls.return_value = mock_client
+
+    result = CliRunner().invoke(main, ["remember", "-s", "summary text", "--content", "..."])
+    assert result.exit_code == 0, result.output
+    kwargs = mock_client.remember.await_args.kwargs
+    assert kwargs["observed_at"] is None
+    assert kwargs["dedupe"] is None
+    assert kwargs["tags_normalize"] is False
+
+
+def test_remember_dedupe_help_says_a_candidate_exits_0():
+    result = CliRunner().invoke(main, ["remember", "--help"])
+    assert result.exit_code == 0
+    assert "exit 0: a result, not an error" in " ".join(result.output.split())
+
+
+def test_remember_rejects_an_unknown_dedupe_mode():
+    result = CliRunner().invoke(
+        main, ["remember", "-s", "summary text", "--content", "...", "--dedupe", "skip"]
+    )
+    assert result.exit_code == 2
+    assert "--dedupe" in result.output
+
+
+@pytest.mark.parametrize(
+    ("args", "expected"),
+    [
+        (["--content-chunks"], {"content_chunks_enabled": True, "llm_selector_enabled": None}),
+        (["--no-content-chunks"], {"content_chunks_enabled": False, "llm_selector_enabled": None}),
+        (["--llm-selector"], {"content_chunks_enabled": None, "llm_selector_enabled": True}),
+        (["--no-llm-selector"], {"content_chunks_enabled": None, "llm_selector_enabled": False}),
+        (
+            ["--semantic", "0.5", "--bm25", "0.5"],
+            {"content_chunks_enabled": None, "llm_selector_enabled": None},
+        ),
+    ],
+    ids=["chunks-on", "chunks-off", "selector-on", "selector-off", "neither"],
+)
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_context_search_config_toggles(mock_client_cls, mock_config, args, expected):
+    """A toggle alone is enough; ``--no-...`` sends False, which turns the setting off."""
+    mock_config.return_value = {"api_key": "key", "mcp_url": "https://test.com/mcp"}
+    mock_client = AsyncMock()
+    mock_client.update_search_config.return_value = {"status": "success"}
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    mock_client_cls.return_value = mock_client
+
+    result = CliRunner().invoke(main, ["context", "search-config", "uuid-1", *args])
+    assert result.exit_code == 0, result.output
+    kwargs = mock_client.update_search_config.await_args.kwargs
+    for key, value in expected.items():
+        assert kwargs[key] is value
 
 
 @patch("kagura_memory.cli.load_config")

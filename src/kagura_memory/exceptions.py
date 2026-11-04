@@ -163,6 +163,44 @@ class KaguraNotFoundError(KaguraError):
     """Requested resource not found (HTTP 404)."""
 
 
+class KaguraVersionConflictError(KaguraError):
+    """An edit's ``expected_version`` no longer matched the memory (memory-cloud v0.113.0+).
+
+    ``update_memory(expected_version=N)`` found the memory at another
+    version because another edit landed first, and wrote nothing (#2043):
+    MCP ``version_conflict``, or REST ``PATCH /api/v1/memory/{id}``'s
+    ``409 RES-002`` with ``details.reason == "version_conflict"``. It is not
+    retryable as is: read the memory again (``KaguraClient.reference``
+    returns its ``version``), then resend with that version, or without
+    ``expected_version`` to overwrite.
+
+    ``code`` and ``details`` keep what the server sent — ``code`` is
+    ``"version_conflict"`` from MCP and ``"RES-002"`` from REST — and the
+    properties below read ``details``.
+    """
+
+    @property
+    def current_version(self) -> int | None:
+        """The memory's version now, when the server sent it."""
+        return _int_detail(self, "current_version")
+
+    @property
+    def expected_version(self) -> int | None:
+        """The ``expected_version`` the refused edit carried."""
+        return _int_detail(self, "expected_version")
+
+    @property
+    def memory_id(self) -> str | None:
+        """The memory's id (the MCP envelope sends it; REST names it in the URL)."""
+        return _str_detail(self, "memory_id")
+
+
+def _int_detail(err: KaguraError, key: str) -> int | None:
+    value = getattr(err, "details", {}).get(key)
+    # bool is a subclass of int, but True is never a version.
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
 class KaguraResponseError(KaguraError):
     """A successful server response did not match the SDK's model of it (#250).
 

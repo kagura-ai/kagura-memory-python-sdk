@@ -21,6 +21,7 @@ from .exceptions import (
     KaguraRateLimitError,
     KaguraResponseError,
     KaguraServiceUnavailableError,
+    KaguraVersionConflictError,
 )
 from .files_client import FilesClient
 from .ingest import FileIngestor
@@ -42,6 +43,7 @@ from .models import (
     ContextInfo,
     ContextStats,
     CostBreakdown,
+    DedupeMode,
     DuplicateMemoryInfo,
     DuplicatePair,
     DuplicatesResponse,
@@ -158,6 +160,8 @@ __all__ = [
     "SeriesBucket",
     # Recall result shape (#298, server v0.108.0+)
     "RecallVerbosity",
+    # remember(dedupe=...) (#302, server v0.93.0+)
+    "DedupeMode",
     # Memory stats & duplicates (v0.6.1)
     "MemoryStatItem",
     "MemoryStatsResponse",
@@ -242,6 +246,7 @@ __all__ = [
     "KaguraConnectionError",
     "KaguraRateLimitError",
     "KaguraNotFoundError",
+    "KaguraVersionConflictError",
     "KaguraResponseError",
     "KaguraQuotaError",
     "KaguraFeatureNotAvailableError",

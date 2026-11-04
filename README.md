@@ -235,13 +235,17 @@ async with KaguraClient(api_key="kagura_...", mcp_url="https://...") as client:
     # WHERE axis — deterministic "what's near here" query, nearest first
     # (SDK v0.38.0, server v0.53.0+). radius_m/k/include_details are keyword-only.
     # lat/lon must be JSON numbers; the server 422s string-typed coordinates.
-    await client.remember(context_id="dev", summary="Coffee with Sato", content="...",
-                          details={"location": {"lat": 35.68, "lon": 139.76, "label": "Tokyo HQ"}})
+    saved = await client.remember(context_id="dev", summary="Coffee with Sato", content="...",
+                                  details={"location": {"lat": 35.68, "lon": 139.76, "label": "Tokyo HQ"}},
+                                  observed_at="2026-11-04")  # when it held (server v0.127.0+)
     nearby = await client.recall_nearby(context_id="dev", lat=35.68, lon=139.76, radius_m=500)
     # Items carry `location` (server v0.82.0+); include_details=True returns `details`.
-    # update_memory(details=...) REPLACES details wholesale — no deep-merge. Read the
-    # current value with reference() and re-send location, or this drops off the map
-    # (the CLI's `kagura update-memory --merge-details` does that round-trip).
+    # update_memory(details=...) REPLACES details wholesale — no deep-merge. Re-send
+    # location, or change only some keys with details_patch (server v0.140.0+; a None
+    # value deletes a key), or this drops off the map.
+    await client.update_memory(context_id="dev", memory_id=saved["memory_id"],
+                               details_patch={"status": "done"}, add_tags=["status:done"],
+                               expected_version=saved["version"])  # else KaguraVersionConflictError
     # Map viewport over the REST list (SDK v0.40.0, server v0.54.0+): keyword-only,
     # one-sided bounds OK, any bound keeps only located memories (item.location).
     page = await client.list_memories(context_id="dev", lat_min=35.5, lat_max=35.9,
@@ -322,9 +326,9 @@ async with MemoryClient.from_mcp_url() as memory:  # REST twin for API-key hooks
 ```
 
 - `update_memory(details=...)` replaces `details` wholesale: re-send `tool_trigger` with
-  any other details you change, or the memory stops being a guardrail (the CLI's
-  `kagura update-memory --merge-details` does that reference() round-trip). Passing both
-  `tool_trigger=` and `details["tool_trigger"]` raises `ValueError`.
+  any other details you change, or the memory stops being a guardrail — or change only
+  some keys with `details_patch` (server v0.140.0+; `tool_trigger=` merges into it). Passing
+  both `tool_trigger=` and a `"tool_trigger"` key raises `ValueError`.
 - `forget` silently skips a guardrail the caller may not delete (below context editor,
   or an agent-bound key), so `deleted_count` can be `0` with no error.
 - A hook that caches the set treats a `GuardrailSet.format` greater than
@@ -768,6 +772,8 @@ not fail CI.
 # Direct memory operations
 kagura remember -s "FastAPI DI" --content "Use Depends()..." -c dev
 kagura remember -s "Coffee with Sato" --content "..." --location "35.68,139.76,Tokyo HQ"
+kagura remember -s "Release 2.0 shipped" --content "..." --observed-at 2026-11-01   # when it held (v0.127.0+)
+kagura remember -s "Deploy key rotated" --content "..." --dedupe check --tags-normalize  # v0.93.0+
 kagura recall "dependency injection" -k 10
 kagura recall "dependency injection" --no-rerank   # skip reranking; no flag follows the context config (v0.69.0+)
 kagura recall "project context" --trusted-only     # exclude connector-ingested memories (filters.trust_tier, v0.24.0+)
@@ -778,9 +784,14 @@ kagura recall "deploy runbook" --full 1 --max-chars 40000   # content on the top
 kagura explore -m "memory-uuid" --depth 3
 kagura forget -m "memory-uuid"
 kagura update-memory -m "memory-uuid" --dismiss-supersede-candidate   # server v0.65.0+
-# --details replaces details wholesale; --merge-details does a reference() round-trip and keeps the other keys
+kagura update-memory -m "memory-uuid" --accept-supersede-candidate    # server v0.126.0+
+# --details replaces details wholesale; --merge-details sends a details_patch and keeps the other keys
+# (server v0.140.0+; older servers get a reference() round-trip instead)
 kagura update-memory -m "memory-uuid" --details '{"location": {"lat": 35.68, "lon": 139.76}, "client": "acme"}'
 kagura update-memory -m "memory-uuid" --location "35.68,139.76,Tokyo HQ" --merge-details
+kagura update-memory -m "memory-uuid" --add-tag status:done --remove-tag status:open \
+  --details-patch '{"status": "done", "assignee": null}' --expected-version 3   # v0.140.0+ / v0.113.0+
+kagura context search-config <context-id> --content-chunks --no-llm-selector   # owner/admin only (v0.110.0+ / v0.115.0+)
 kagura contexts
 kagura context list --name-contains auth --summary   # server v0.73.0+; --details, --stats
 kagura context list --limit 50 --cursor 50          # server v0.82.0+; a cut page names next_cursor on stderr

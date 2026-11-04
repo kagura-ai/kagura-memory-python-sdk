@@ -5,10 +5,11 @@ import itertools
 import json
 import logging
 import math
+import re
 import warnings
 from collections.abc import AsyncGenerator
 from contextlib import aclosing
-from datetime import datetime
+from datetime import UTC, date, datetime
 from typing import Any, Literal, Self, TypeVar, get_args
 from urllib.parse import quote
 
@@ -31,6 +32,7 @@ from ._http import (
     validate_coordinate,
     validate_https_url,
     validate_lat_lon,
+    version_conflict_error,
 )
 from ._version import meets_minimum, parse_version
 from .exceptions import (
@@ -42,6 +44,7 @@ from .exceptions import (
     _exc_message,
 )
 from .models import (
+    _OBSERVED_DATE,
     _RECALL_FULL_MAX,
     Agent,
     AgentBinding,
@@ -49,6 +52,7 @@ from .models import (
     AgentBootstrapResponse,
     ContextInfo,
     ContextTagsResponse,
+    DedupeMode,
     DuplicatesResponse,
     Edge,
     EmbeddingModelsResponse,
@@ -157,6 +161,90 @@ def _iso_arg(value: str | datetime) -> str:
     return value.isoformat() if isinstance(value, datetime) else value
 
 
+# ``observed_at`` input forms memory-cloud accepts (utils/observed_at.py, #2330):
+# extended ISO 8601 only, at most 40 characters, checked before the calendar.
+_OBSERVED_AT_MAX_CHARS = 40
+_OBSERVED_INPUT_DATETIME = re.compile(
+    r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})?"
+)
+_OBSERVED_AT_HINT = (
+    "observed_at must be an ISO 8601 date (2024-03-07) or datetime (2024-03-07T10:00:00Z)"
+)
+
+
+def _observed_at_arg(value: object) -> str:
+    """Render an ``observed_at`` argument and refuse a form the server refuses.
+
+    A ``datetime`` becomes the server's stored form, ``YYYY-MM-DDTHH:MM:SSZ``:
+    naive (no UTC offset) means UTC (as for
+    :meth:`KaguraClient.record_measurement`), an aware one is converted, and
+    fractional seconds are dropped as the server drops them. A ``date``
+    becomes ``YYYY-MM-DD``. A string is sent as given once it passes the
+    server's own checks: at most 40 characters as sent (the request model's
+    cap), then, stripped, a date ``YYYY-MM-DD`` or ``YYYY-MM-DDTHH:MM:SS``
+    with optional fractional seconds and an optional ``Z`` / ``±HH:MM``
+    offset, a real calendar day and time, and an instant in UTC years
+    1-9999 (memory-cloud v0.127.0, #2330; basic forms such as ``20240307``,
+    a space separator or a time without seconds are refused there with
+    ``validation_error``).
+
+    Raises:
+        ValueError: ``value`` is not such a string, ``date`` or ``datetime``.
+    """
+    if isinstance(value, datetime):
+        try:
+            moment = value if value.utcoffset() is None else value.astimezone(UTC)
+        except OverflowError as e:
+            # The offset moves the instant out of years 1-9999, as the server finds.
+            raise ValueError(f"{_OBSERVED_AT_HINT}, got {value!r}") from e
+        return (
+            f"{moment.year:04d}-{moment.month:02d}-{moment.day:02d}"
+            f"T{moment.hour:02d}:{moment.minute:02d}:{moment.second:02d}Z"
+        )
+    if isinstance(value, date):
+        return value.isoformat()
+    if not isinstance(value, str):
+        raise ValueError(f"{_OBSERVED_AT_HINT}, got {type(value).__name__}")
+    text = value.strip()
+    # The cap is on the argument as sent (``max_length=40``), before the strip.
+    if not text or len(value) > _OBSERVED_AT_MAX_CHARS:
+        raise ValueError(f"{_OBSERVED_AT_HINT}, got {value!r}")
+    try:
+        if _OBSERVED_DATE.fullmatch(text):
+            date.fromisoformat(text)
+        elif _OBSERVED_INPUT_DATETIME.fullmatch(text):
+            if text[11:13] == "24":
+                # Python 3.14 reads 24:00:00 as the next midnight; the
+                # server's parser (Python 3.11) refuses the hour.
+                raise ValueError(text)
+            parsed = datetime.fromisoformat(text)
+            if parsed.tzinfo is not None:
+                # OverflowError for an offset that leaves years 1-9999.
+                parsed.astimezone(UTC)
+        else:
+            raise ValueError(text)
+    except (ValueError, OverflowError) as e:
+        raise ValueError(f"{_OBSERVED_AT_HINT}, got {value!r}") from e
+    return value
+
+
+def _check_observed_at_agrees(observed_at: str, details: dict[str, Any] | None, name: str) -> None:
+    """Refuse an ``observed_at`` that ``details`` contradicts, as the server does.
+
+    The server folds the argument into ``details.observed_at`` and compares
+    the two values as sent (``MemoryService._fold_observed_at``), so a
+    ``details_patch`` ``"observed_at": None`` — a key delete — disagrees too.
+
+    Raises:
+        ValueError: ``details`` holds an ``observed_at`` other than ``observed_at``.
+    """
+    if details is not None and "observed_at" in details and details["observed_at"] != observed_at:
+        raise ValueError(
+            f"{name}['observed_at'] and observed_at disagree; give one of them "
+            "(the server answers validation_error)"
+        )
+
+
 class KaguraClient:
     """
     Low-level REST API client for Kagura Memory Cloud MCP tools.
@@ -184,7 +272,9 @@ class KaguraClient:
     :class:`KaguraFeatureNotAvailableError` and the Free capacity lock
     (``capacity_locked``, memory-cloud v0.99.0+)
     :class:`KaguraCapacityLockedError`, each carrying the server's detail
-    fields (#256), and any other domain error raises :class:`KaguraError`.
+    fields (#256), a stale ``expected_version`` (``version_conflict``)
+    :class:`KaguraVersionConflictError` (#302), and any other domain error
+    raises :class:`KaguraError`.
     Every one keeps the envelope's ``error`` as ``code`` and its other
     fields (``help``, and on a server failure ``cause``, ``correlation_id``,
     ``retryable``, ``outcome``) in ``details`` — branch on ``code``, never
@@ -597,8 +687,18 @@ class KaguraClient:
         supersedes: str | None = None,
         *,
         tool_trigger: ToolTrigger | dict[str, Any] | None = None,
+        observed_at: str | date | datetime | None = None,
+        tags_normalize: bool = False,
+        dedupe: DedupeMode | None = None,
+        verbose: bool = False,
     ) -> dict[str, Any]:
         """Call remember MCP tool.
+
+        ``observed_at``, ``tags_normalize``, ``dedupe`` and ``verbose`` are
+        keyword-only and sent only when set, so a server that predates one
+        never sees it. From memory-cloud v0.82.0 (#1742) a server refuses an
+        argument it does not declare (``KaguraError``, code
+        ``invalid_argument``); one before v0.82.0 ignores it.
 
         Args:
             context_id: Context ID.
@@ -677,29 +777,70 @@ class KaguraClient:
                 validates the patterns and returns
                 ``invalid details.tool_trigger: <code>: ...`` on a bad one.
                 Keyword-only.
+            observed_at: When the fact held or the event happened — never the
+                write time (memory-cloud v0.127.0+, #2330). A ``YYYY-MM-DD``
+                date or an extended ISO 8601 datetime string, or a ``date`` /
+                ``datetime`` (a naive ``datetime`` means UTC). The server
+                stores it as ``details.observed_at``: a date as written, a
+                datetime in UTC as ``YYYY-MM-DDTHH:MM:SSZ``. :meth:`recall`
+                filters on it (``observed_after`` / ``observed_before``) and
+                its rows, :meth:`reference` and :meth:`list_memories` carry
+                it. Checked locally like the server checks it. Keyword-only.
+            tags_normalize: ``True`` stores each tag under the context's
+                established spelling when the two differ only by case,
+                separators, a simple plural or (v0.110.0+, #2028) hiragana /
+                katakana or one word-final ``ー``, and reports each mapping in
+                ``lint`` as ``{code: "tag_normalized", subject, replacement}``
+                (memory-cloud v0.93.0+, #1853; tags whose numbers differ are
+                never mapped, v0.95.0+, #1871). Sent only when ``True``.
+                Keyword-only.
+            dedupe: ``"suggest"`` (the server default), ``"check"`` or
+                ``"off"`` (memory-cloud v0.93.0+, #1853; see
+                :data:`~kagura_memory.models.DedupeMode`). With ``"check"`` a
+                near-duplicate (similarity ≥ 0.85 to a live memory of the
+                context) writes nothing and the reply is ``{status:
+                "duplicate_candidate", candidate: {memory_id, summary,
+                similarity, supersedable?}}`` — returned, not raised: store
+                with ``supersedes=<id>``, update the existing memory, or
+                repeat with ``"off"`` (``supersedable: False`` marks another
+                member's memory, which ``supersedes`` cannot take). ``"off"``
+                writes and opts this memory out of supersede suggestions for
+                good (#2024). Keyword-only.
+            verbose: ``True`` asks for ``persistence.detail``, the lifecycle
+                prose the server sends only with ``verbose=true`` since
+                memory-cloud v0.93.0 (#1851). Sent only when ``True``.
+                Keyword-only.
 
         Returns:
-            API response with ``memory_id``, ``scope`` and the context fields.
-            Since memory-cloud v0.65.0 two optional keys may follow, each
-            absent (never ``null``) when it does not apply:
-            ``persistence`` — ``{scope, committed, promotes_via,
+            API response with ``memory_id``, ``scope``, ``version`` (the
+            memory's version, :meth:`update_memory`'s ``expected_version``;
+            memory-cloud v0.113.0+, #2043) and the context fields. Since
+            memory-cloud v0.65.0 two optional keys may follow, each absent
+            (never ``null``) when it does not apply: ``persistence`` —
+            ``{scope, committed, promotes_via,
             consolidation_archive_min_age_days}``, how the scope the memory
             landed in is consolidated; since memory-cloud v0.93.0 (#1851) the
-            ``detail`` prose comes only with the server's ``verbose=true``,
-            which this method does not send — and ``lint`` —
-            ``[{code, hint, subject?}]``, advisory hints about a write that
-            will recall poorly (``summary_short``, ``summary_long``,
-            ``summary_narrative``, ``no_tags``, ``tag_near_duplicate``). The
-            memory is stored either way; act on a hint with
-            :meth:`update_memory`. Since v0.108.0 a cut summary adds
-            ``summary_truncated: true`` and ``summary_original_length`` (the
-            ``summary_long`` hint is then left out).
+            ``detail`` prose comes only with the server's ``verbose=true``
+            (``verbose=True`` here) — and ``lint`` — ``[{code, hint,
+            subject?}]``, advisory hints about a write that will recall
+            poorly (``summary_short``, ``summary_long``,
+            ``summary_narrative``, ``no_tags``, ``tag_near_duplicate``; and
+            ``tag_normalized`` with ``tags_normalize``). The memory is stored
+            either way; act on a hint with :meth:`update_memory`. Since
+            v0.108.0 a cut summary adds ``summary_truncated: true`` and
+            ``summary_original_length`` (the ``summary_long`` hint is then
+            left out). With ``dedupe="check"`` the reply may instead be the
+            ``duplicate_candidate`` one described there, with nothing
+            written: check ``result["status"]``.
 
         Raises:
             ValueError: ``tool_trigger`` is given and ``details`` already has
                 a ``"tool_trigger"`` key — pass the guardrail one way only;
-                or ``tags`` holds more than 50 tags or a tag longer than
-                100 characters.
+                ``tags`` holds more than 50 tags or a tag longer than 100
+                characters; ``observed_at`` is not a form the server accepts,
+                or disagrees with ``details["observed_at"]`` (the server's
+                ``validation_error``); or ``dedupe`` is not ``"suggest"`` /
+                ``"check"`` / ``"off"``. Checked before any request.
             KaguraCapacityLockedError: The workspace is over its Free
                 capacity (memory-cloud v0.99.0+); ``cleanup_url`` says where
                 to clean up.
@@ -711,10 +852,18 @@ class KaguraClient:
                 "payload_too_large"`` for a memory over 1 MB across summary,
                 context_summary, content and details (v0.108.0+, with
                 ``limit`` / ``actual`` in ``details``; older servers send an
-                untyped ``quota_exceeded``). Match ``code``, not the message.
+                untyped ``quota_exceeded``), or ``code ==
+                "dedupe_unavailable"`` when ``dedupe="check"`` could not embed
+                the summary (nothing written). Match ``code``, not the
+                message.
         """
         _validate_memory_tags(tags)
         details = _details_with_tool_trigger(details, tool_trigger)
+        observed = None if observed_at is None else _observed_at_arg(observed_at)
+        if observed is not None:
+            _check_observed_at_agrees(observed, details, "details")
+        if dedupe is not None and dedupe not in get_args(DedupeMode):
+            raise ValueError(f"dedupe must be 'suggest', 'check' or 'off', got {dedupe!r}")
         arguments: dict[str, Any] = {
             "context_id": context_id,
             "summary": summary,
@@ -744,6 +893,14 @@ class KaguraClient:
             arguments["linked_source_uris"] = linked_source_uris
         if supersedes is not None:
             arguments["supersedes"] = supersedes
+        if observed is not None:
+            arguments["observed_at"] = observed
+        if tags_normalize:
+            arguments["tags_normalize"] = True
+        if dedupe is not None:
+            arguments["dedupe"] = dedupe
+        if verbose:
+            arguments["verbose"] = True
 
         return await self._call_tool_checked("remember", arguments)
 
@@ -805,6 +962,12 @@ class KaguraClient:
                   come back as ``tag_suggestions`` instead.
                 - ``created_after`` / ``created_before``: ISO 8601 datetime
                 - ``updated_after`` / ``updated_before``: ISO 8601 datetime
+                - ``observed_after`` (inclusive) / ``observed_before``
+                  (exclusive): when the fact held (``details.observed_at``,
+                  set with :meth:`remember`'s ``observed_at``), an ISO 8601
+                  date or datetime; a date means the start of that UTC day,
+                  and a memory without ``observed_at`` never matches
+                  (memory-cloud v0.127.0+, #2330)
                 - ``trust_tier``: ``"trusted"`` EXCLUDES external/connector-ingested
                   memories from the results (opt-in; default recall returns them).
                   Pass it for behaviour-influencing reads where untrusted content
@@ -2285,13 +2448,44 @@ class KaguraClient:
         self,
         context_id: str,
         memory_id: str,
+        *,
+        version: int | None = None,
+        content_offset: int | None = None,
     ) -> dict[str, Any]:
         """
         Call reference MCP tool (get full memory details).
 
+        ``version`` and ``content_offset`` are keyword-only and sent only when
+        set. From memory-cloud v0.82.0 (#1742) a server refuses an argument it
+        does not declare (``KaguraError``, code ``invalid_argument``); one
+        before v0.82.0 ignores it.
+
+        Since memory-cloud v0.78.0 (#1685) the reply is bounded (20,000
+        characters by default): ``content`` that does not fit comes back
+        sliced with ``content_truncated`` / ``content_next_offset``, and a
+        ``details`` / ``context`` / links field that does not fit is left out
+        with ``<field>_omitted`` and ``<field>_total_chars`` — never cut
+        silently.
+
         Args:
             context_id: Context ID
             memory_id: Memory ID to retrieve full details for
+            version: Read an earlier version of the memory, an ``int`` ≥ 1
+                from its revision log (memory-cloud v0.113.0+, #2043). The
+                reply then carries ``historical: True``, ``current_version``
+                and, when the log could not rebuild some fields,
+                ``unavailable_fields``; the links and ``supersede_candidate``,
+                which describe the memory now, are left out. A version the
+                memory never had is ``KaguraError`` with ``code ==
+                "validation_error"`` and ``details["current_version"]``.
+                Keyword-only.
+            content_offset: Continue ``content`` from this character, an
+                ``int`` ≥ 0 — the ``content_next_offset`` of a cut
+                :meth:`recall` row or of the previous reference reply
+                (memory-cloud v0.78.0+, #1685). With an offset the server
+                returns that one field only (no ``details``, ``context`` or
+                links). An offset past the end is ``KaguraError`` with ``code
+                == "invalid_argument"``. Keyword-only.
 
         Returns:
             API response dict. Memory data is in ``result["memory"]``::
@@ -2300,19 +2494,41 @@ class KaguraClient:
                 memory = result["memory"]
                 print(memory["summary"], memory["content"])
 
-            A live ``supersede_candidate`` has :meth:`recall`'s keys
-            (``verified`` included) plus ``acceptance`` — ``{allowed,
-            reason}``, whether the caller may accept the suggestion
-            (memory-cloud v0.137.0+, #2427). ``reason`` is set only when
-            ``allowed`` is false: ``not_writable``, ``not_owner`` (both
-            memories must be the caller's own, see :meth:`create_edge`),
-            ``newer_candidate``, or ``edge_exists`` (another declared edge
-            already links the pair; v0.138.0+, #2518).
+            ``memory["version"]`` (memory-cloud v0.113.0+) is the version to
+            pass to :meth:`update_memory` as ``expected_version``, and
+            ``memory["observed_at"]`` (v0.127.0+, #2330) when the fact held,
+            when it is set. A live ``supersede_candidate`` has
+            :meth:`recall`'s keys (``verified`` included) plus
+            ``acceptance`` — ``{allowed, reason}``, whether the caller may
+            accept the suggestion (memory-cloud v0.137.0+, #2427). ``reason``
+            is set only when ``allowed`` is false: ``not_writable``,
+            ``not_owner`` (both memories must be the caller's own, see
+            :meth:`create_edge`), ``newer_candidate``, or ``edge_exists``
+            (another declared edge already links the pair; v0.138.0+, #2518).
+            Accept it with ``update_memory(accept_supersede_candidate=True)``.
+
+        A call without an offset counts as a read in the memory's access
+        stats; a continuation counts only when it is the session's first read
+        of the memory (v0.122.0+, #2139). REST ``POST /api/v1/memory/reference``
+        also takes ``record_access: false`` to read without counting
+        (v0.138.0+, #2518); the MCP tool has no such argument and this client
+        does not wrap the REST route.
+
+        Raises:
+            ValueError: ``version`` is not an ``int`` ≥ 1, or ``content_offset``
+                not an ``int`` ≥ 0 (``bool`` is neither, as on the server).
+                Checked before any request.
         """
-        arguments = {
+        arguments: dict[str, Any] = {
             "context_id": context_id,
             "memory_id": memory_id,
         }
+        if version is not None:
+            _validate_int_range("version", version, 1)
+            arguments["version"] = version
+        if content_offset is not None:
+            _validate_int_range("content_offset", content_offset, 0)
+            arguments["content_offset"] = content_offset
         return await self._call_tool_checked("reference", arguments)
 
     async def update_memory(
@@ -2331,6 +2547,13 @@ class KaguraClient:
         *,
         dismiss_supersede_candidate: bool = False,
         tool_trigger: ToolTrigger | dict[str, Any] | None = None,
+        observed_at: str | date | datetime | None = None,
+        add_tags: list[str] | None = None,
+        remove_tags: list[str] | None = None,
+        details_patch: dict[str, Any] | None = None,
+        expected_version: int | None = None,
+        accept_supersede_candidate: bool = False,
+        verbose: bool = False,
     ) -> dict[str, Any]:
         """Update an existing memory in-place or upsert by external ID.
 
@@ -2344,6 +2567,13 @@ class KaguraClient:
            upsert from either of two linked accounts replaces the same memory
            (memory-cloud v0.90.0+, #1803); shared contexts are unchanged.
 
+        The keyword-only arguments from ``observed_at`` on are sent only when
+        set, so a server that predates one never sees it. From memory-cloud
+        v0.82.0 (#1742) a server refuses an argument it does not declare
+        (``KaguraError``, code ``invalid_argument``); one before v0.82.0
+        ignores it — an ``add_tags`` / ``details_patch`` edit then changes
+        nothing, and ``expected_version`` guards nothing.
+
         Args:
             context_id: Context UUID.
             memory_id: UUID of memory to update in-place.
@@ -2353,7 +2583,8 @@ class KaguraClient:
             type: Updated memory type.
             importance: Updated importance (0.0-1.0).
             tags: Updated tags (replaces the list; ``[]`` clears it). At most
-                50, each at most 100 characters, as for :meth:`remember`.
+                50, each at most 100 characters, as for :meth:`remember`. To
+                change only some tags, use ``add_tags`` / ``remove_tags``.
             context_summary: Updated context summary (max 2000 chars).
                 ``""`` clears it; ``None`` leaves it unchanged.
             delivery_mode: Pin or unpin the memory. ``"always"`` pins it
@@ -2362,13 +2593,12 @@ class KaguraClient:
                 (back to probabilistic :meth:`recall`; the memory stays
                 persistent). Omit to leave the current delivery mode unchanged.
             details: Updated structured details JSON. **Replaces ``details``
-                wholesale** — the server does not deep-merge, so read the
-                current value with :meth:`reference` and re-send every key you
-                want to keep (notably ``location``, which otherwise drops off
-                :meth:`recall_nearby`, and ``tool_trigger``, which otherwise
-                unmarks a guardrail). ``{}`` clears it; omit to leave details
-                unchanged. The CLI's ``kagura update-memory --merge-details``
-                does that round-trip for top-level keys.
+                wholesale** — read the current value with :meth:`reference`
+                and re-send every key you want to keep (notably ``location``,
+                which otherwise drops off :meth:`recall_nearby`, and
+                ``tool_trigger``, which otherwise unmarks a guardrail), or
+                change only some keys with ``details_patch``. ``{}`` clears
+                it; omit to leave details unchanged.
             dismiss_supersede_candidate: Reject this memory's current
                 ``supersede_candidate`` (the older near-duplicate that
                 :meth:`recall` / :meth:`reference` suggest it replaces), for two
@@ -2378,58 +2608,198 @@ class KaguraClient:
                 v0.65.0+ (#1504). An older server silently drops the flag: a
                 dismissal-only call then succeeds as an empty in-place update
                 that dismisses nothing and refreshes ``updated_at``. To accept
-                the suggestion instead, create a ``supersedes`` edge.
+                the suggestion instead, pass ``accept_supersede_candidate``.
             tool_trigger: Mark (or re-mark) the memory as a tool guardrail —
-                sent as ``details["tool_trigger"]``, merged with ``details``;
                 same contract and permissions as :meth:`remember`'s
-                ``tool_trigger`` (memory-cloud v0.74.0+). Because ``details``
-                is replaced wholesale, passing only ``tool_trigger`` sends
-                ``details={"tool_trigger": ...}`` and drops every other key —
-                pass the keys to keep in ``details`` alongside it. To unmark,
-                send ``details`` without the key (or with
-                ``"tool_trigger": None``). Any edit of a memory that already
-                carries a trigger needs context editor or above. Keyword-only.
+                ``tool_trigger`` (memory-cloud v0.74.0+). It is merged into
+                ``details_patch`` when that is given, which keeps the other
+                stored keys; otherwise into ``details``, and because
+                ``details`` is replaced wholesale, passing only
+                ``tool_trigger`` sends ``details={"tool_trigger": ...}`` and
+                drops every other key — pass the keys to keep in ``details``,
+                or use ``details_patch``. To unmark, send ``details`` without
+                the key (or with ``"tool_trigger": None``), or
+                ``details_patch={"tool_trigger": None}``. Any edit of a memory
+                that already carries a trigger needs context editor or above.
+                Keyword-only.
+            observed_at: When the fact held (memory-cloud v0.127.0+, #2330),
+                in :meth:`remember`'s forms. Without ``details`` it changes
+                only ``details.observed_at`` of the stored details (a details
+                edit, so the version moves); with ``details`` or
+                ``details_patch`` their own ``observed_at``, if they carry
+                one, must equal it. Clear it by resending ``details`` without
+                the key or with ``details_patch={"observed_at": None}``.
+                Keyword-only.
+            add_tags: Tags to append to the stored list, each once, in order,
+                after ``remove_tags`` is applied (memory-cloud v0.140.0+,
+                #2585). The 50 × 100-character caps of ``tags`` apply here,
+                and the server applies the count cap again to the resulting
+                list. In-place mode only, never with ``tags``. Keyword-only.
+            remove_tags: Tags to remove from the stored list; one that is not
+                there is ignored (v0.140.0+, #2585). Not capped: a stored tag
+                longer than today's limit can still be removed. In-place mode
+                only, never with ``tags``. Keyword-only.
+            details_patch: A shallow merge into the stored details
+                (v0.140.0+, #2585): each key replaces the stored key, and a
+                ``None`` value **deletes** the key. Stored keys the patch does
+                not name are kept, so ``location`` and ``tool_trigger``
+                survive a status flip. The reserved keys keep their
+                validation; a patch that leaves null details empty changes
+                nothing. In-place mode only, never with ``details``.
+                Keyword-only.
+            expected_version: Apply the edit only while the memory is still
+                at this version (an ``int`` ≥ 1, the ``version`` that
+                :meth:`reference`, :meth:`remember` and this method return;
+                memory-cloud v0.113.0+, #2043). Otherwise nothing is written
+                and :class:`KaguraVersionConflictError` is raised. Omit for
+                last writer wins. In-place mode only. Keyword-only.
+            accept_supersede_candidate: Accept this memory's current
+                ``supersede_candidate``: write the declared ``supersedes``
+                edge from this memory to the candidate, which then leaves
+                default :meth:`recall`, and clear the suggestion (memory-cloud
+                v0.126.0+, #2308). A graph action only: needs ``memory_id``,
+                takes no field edits in the same call and leaves ``version``
+                and ``updated_at`` alone; ``expected_version`` may guard it.
+                Both memories must be the caller's own (in a private context a
+                linked account's count, #1803). Check
+                ``supersede_candidate.acceptance`` on :meth:`reference` first:
+                it says whether the accept would be refused. Sent only when
+                ``True``. Keyword-only.
+            verbose: ``True`` asks for ``persistence.detail`` (memory-cloud
+                v0.93.0+, #1851). Sent only when ``True``. Keyword-only.
 
         Returns:
             API response with updated memory info (``memory_id``,
-            ``operation``, ``re_embedded``, ``scope``). Since memory-cloud
-            v0.65.0 it may also carry ``persistence`` and ``lint`` as in
-            :meth:`remember` — ``lint`` describes the memory after the update.
-            When a dismissal applied,
-            ``supersede_candidate_dismissed`` holds the rejected candidate's
-            memory_id. It is the only confirmation that a dismissal happened:
-            the key is absent both when there was no live suggestion and when
-            the server predates v0.65.0.
+            ``operation``, ``re_embedded``, ``scope``, and ``version`` — the
+            version after this call, unchanged when it changed no versioned
+            field; memory-cloud v0.113.0+). Since memory-cloud v0.65.0 it may
+            also carry ``persistence`` and ``lint`` as in :meth:`remember` —
+            ``lint`` describes the memory after the update. When a dismissal
+            applied, ``supersede_candidate_dismissed`` holds the rejected
+            candidate's memory_id. It is the only confirmation that a
+            dismissal happened: the key is absent both when there was no
+            live suggestion and when the server predates v0.65.0. An accept
+            returns ``superseded_memory_id``, the memory now shadowed.
 
         Raises:
-            ValueError: If neither or both of ``memory_id`` and ``external_id``
-                are given; if ``dismiss_supersede_candidate`` is combined
-                with ``external_id`` (the server rejects that pair: an upsert
-                replaces the memory and its suggestion); or if
-                ``tool_trigger`` is given together with a
-                ``details["tool_trigger"]`` key; or if ``tags`` holds more
-                than 50 tags or a tag longer than 100 characters.
+            ValueError: Checked before any request, mirroring the server's
+                ``validation_error``: neither or both of ``memory_id`` and
+                ``external_id``; ``external_id`` with
+                ``dismiss_supersede_candidate``, ``accept_supersede_candidate``,
+                ``expected_version``, ``add_tags``, ``remove_tags`` or
+                ``details_patch`` (an upsert replaces the memory under a new
+                id); ``tags`` with ``add_tags`` / ``remove_tags``, or
+                ``details`` with ``details_patch`` (a call replaces a field or
+                edits it, not both); both supersede flags; the accept with any
+                field edit (``tool_trigger`` and ``observed_at`` included);
+                ``expected_version`` that is not an ``int`` ≥ 1;
+                ``observed_at`` in a form the server refuses, or disagreeing
+                with ``details`` / ``details_patch``; ``tool_trigger`` with a
+                ``"tool_trigger"`` key where it would be merged; or ``tags`` /
+                ``add_tags`` over 50 tags or with a tag over 100 characters.
+            KaguraVersionConflictError: ``expected_version`` is not the
+                memory's version; nothing was written. Its
+                ``current_version`` is the version to resend with, after
+                reading the memory again.
             KaguraFeatureNotAvailableError: ``feature == "contexts"``: the
                 context has no writable slot because the plan dropped below
                 the workspace's contexts (memory-cloud v0.100.0+).
             KaguraError: Server-side rejection, e.g. ``permission_denied`` for
-                a guardrail edit below context editor. Since memory-cloud
-                v0.113.0 (#2043) a server-side ``expected_version`` mismatch is
-                ``code == "version_conflict"`` (REST ``PATCH``: ``409
-                RES-002`` with ``details.reason == "version_conflict"``);
-                #302 adds the argument and a typed error.
+                a guardrail edit below context editor; ``validation_error`` for
+                an accept with no live suggestion, a candidate written after
+                this memory or a pair that is not both the caller's own; or
+                ``code == "edge_exists"`` when another declared edge already
+                links the pair (``details["existing_edge"]``; nothing written).
         """
         if not memory_id and not external_id:
             raise ValueError("Provide exactly one of memory_id or external_id")
         if memory_id and external_id:
             raise ValueError("Provide exactly one of memory_id or external_id")
-        if dismiss_supersede_candidate and external_id:
-            raise ValueError(
-                "dismiss_supersede_candidate requires memory_id (in-place mode); "
-                "an external_id upsert replaces the memory and its suggestion."
+        partial = [
+            name
+            for name, value in (
+                ("add_tags", add_tags),
+                ("remove_tags", remove_tags),
+                ("details_patch", details_patch),
             )
+            if value is not None
+        ]
+        if external_id:
+            # The upsert replaces the memory under a new id: there is no
+            # suggestion, version, stored list or stored details to act on.
+            if dismiss_supersede_candidate or accept_supersede_candidate:
+                flag = (
+                    "dismiss_supersede_candidate"
+                    if dismiss_supersede_candidate
+                    else "accept_supersede_candidate"
+                )
+                raise ValueError(
+                    f"{flag} requires memory_id (in-place mode); "
+                    "an external_id upsert replaces the memory and its suggestion."
+                )
+            if expected_version is not None:
+                raise ValueError(
+                    "expected_version requires memory_id (in-place mode); an external_id "
+                    "upsert replaces the memory under a new id."
+                )
+            if partial:
+                raise ValueError(
+                    f"{', '.join(partial)} require memory_id (in-place mode); "
+                    "use tags / details with external_id."
+                )
+        if accept_supersede_candidate and dismiss_supersede_candidate:
+            raise ValueError(
+                "accept_supersede_candidate and dismiss_supersede_candidate cannot "
+                "both be true: accept the suggestion or reject it."
+            )
+        if tags is not None and (add_tags is not None or remove_tags is not None):
+            raise ValueError(
+                "tags replaces the stored list and add_tags / remove_tags edit it; "
+                "give one or the other."
+            )
+        if details is not None and details_patch is not None:
+            raise ValueError(
+                "details replaces the stored details and details_patch merges into them; "
+                "give one or the other."
+            )
+        if expected_version is not None:
+            _validate_int_range("expected_version", expected_version, 1)
         _validate_memory_tags(tags)
-        details = _details_with_tool_trigger(details, tool_trigger)
+        _validate_memory_tags(add_tags, "add_tags")
+        if details_patch is not None:
+            details_patch = _details_with_tool_trigger(details_patch, tool_trigger)
+        else:
+            details = _details_with_tool_trigger(details, tool_trigger)
+        observed = None if observed_at is None else _observed_at_arg(observed_at)
+        if observed is not None:
+            _check_observed_at_agrees(observed, details, "details")
+            _check_observed_at_agrees(observed, details_patch, "details_patch")
+        if accept_supersede_candidate:
+            # A graph action: an edit in the same call would re-embed and
+            # version the memory it marks as superseding (#2308).
+            edits = [
+                name
+                for name, value in (
+                    ("summary", summary),
+                    ("content", content),
+                    ("type", type),
+                    ("importance", importance),
+                    ("tags", tags),
+                    ("context_summary", context_summary),
+                    ("delivery_mode", delivery_mode),
+                    ("details", details),
+                    ("details_patch", details_patch),
+                    ("add_tags", add_tags),
+                    ("remove_tags", remove_tags),
+                    ("observed_at", observed),
+                )
+                if value is not None
+            ]
+            if edits:
+                raise ValueError(
+                    "accept_supersede_candidate cannot be combined with field edits "
+                    f"({', '.join(edits)}); send the edit in a separate update_memory call."
+                )
 
         arguments: dict[str, Any] = {"context_id": context_id}
         if memory_id is not None:
@@ -2454,6 +2824,20 @@ class KaguraClient:
             arguments["details"] = details
         if dismiss_supersede_candidate:
             arguments["dismiss_supersede_candidate"] = True
+        if add_tags is not None:
+            arguments["add_tags"] = add_tags
+        if remove_tags is not None:
+            arguments["remove_tags"] = remove_tags
+        if details_patch is not None:
+            arguments["details_patch"] = details_patch
+        if observed is not None:
+            arguments["observed_at"] = observed
+        if expected_version is not None:
+            arguments["expected_version"] = expected_version
+        if accept_supersede_candidate:
+            arguments["accept_supersede_candidate"] = True
+        if verbose:
+            arguments["verbose"] = True
         return await self._call_tool_checked("update_memory", arguments)
 
     async def forget(
@@ -3125,10 +3509,17 @@ class KaguraClient:
         use_rerank: bool | None = None,
         reranker_provider: str | None = None,
         reranker_model: str | None = None,
+        *,
+        content_chunks_enabled: bool | None = None,
+        llm_selector_enabled: bool | None = None,
     ) -> dict[str, Any]:
         """Update hybrid search configuration for a context.
 
-        Weights must sum to 1.0 (±0.01). Requires owner or editor permission.
+        Weights must sum to 1.0 (±0.01). The weights, ``fetch_factor`` and
+        the reranker settings need context editor or above;
+        ``content_chunks_enabled`` and ``llm_selector_enabled`` need the
+        context owner or a workspace owner/admin (an editor gets
+        ``permission_denied`` with ``details["required_role"] == "owner"``).
         New contexts start from the deployment's defaults, which
         :meth:`get_server_info` reports as ``search_defaults`` (memory-cloud
         v0.69.0+).
@@ -3147,9 +3538,50 @@ class KaguraClient:
                 Ollama or vLLM.
             reranker_model: Reranker model name. May be omitted for
                 ``"self_hosted"`` (memory-cloud v0.69.0+).
+            content_chunks_enabled: Embed long ``content`` (1,500+
+                characters) as chunk vectors, so dense retrieval sees the
+                body, not only the summary (memory-cloud v0.110.0+, #2015).
+                **On, memory content — not only summaries — is sent to the
+                embedding and rerank providers.** Turning it on queues the
+                context's existing long memories for chunking (each costs
+                embeddings; v0.112.0+), turning it off deletes the chunks, and
+                sending the stored value is a no-op. Turning it on is refused
+                on a LanceDB deployment (``invalid_search_config``, v0.112.0+,
+                #2072) and, where the deployment gates it by plan
+                (``CONTENT_CHUNKS_REQUIRE_PLAN``, v0.113.0+, #2103), without
+                the plan's ``content_chunks`` feature or past its
+                ``max_content_chunk_contexts``. Sent when not ``None`` —
+                ``False`` turns it off. Keyword-only.
+            llm_selector_enabled: Let an MCP :meth:`recall` send the
+                context's summaries and attached content to the deployment's
+                judge model, which keeps the results that answer the query and
+                cuts their content to verbatim passages (``selector`` /
+                ``spans`` in the reply; memory-cloud v0.115.0+, #2144). Same
+                owner rule; where the deployment gates it by plan
+                (``LLM_SELECTOR_REQUIRE_PLAN``), turning it on needs the
+                ``llm_selector`` feature and a free slot under
+                ``max_llm_selector_contexts``. Sent when not ``None``.
+                Keyword-only.
 
         Returns:
-            Current search config after update.
+            Current search config after update, under ``config``. Besides the
+            arguments it carries ``reinforce_*`` and ``routing_mode``, and the
+            stored ``content_chunks_enabled`` (v0.110.0+) and
+            ``llm_selector_enabled`` (v0.115.0+) each with its ``*_effective``
+            — whether the stored flag is acted on (store, plan and cap). Read
+            the stored flag, never the effective one, before writing it back:
+            echoing an effective ``False`` would turn the setting off.
+
+        Raises:
+            KaguraFeatureNotAvailableError: The plan lacks ``content_chunks`` /
+                ``llm_selector`` (where the deployment gates it by plan).
+            KaguraQuotaError: The workspace is at its cap — ``quota_type``
+                ``content_chunk_contexts`` or ``llm_selector_contexts``.
+            KaguraError: ``code == "permission_denied"`` (an editor changing an
+                owner-only flag, or a viewer), ``"invalid_search_config"`` (the
+                weights do not sum to 1.0, a provider / model mismatch, or
+                content chunks on LanceDB; the REST twin answers ``422
+                VAL-001``), or ``"context_not_found"``.
         """
         arguments: dict[str, Any] = {"context_id": context_id}
         if semantic_weight is not None:
@@ -3164,6 +3596,10 @@ class KaguraClient:
             arguments["reranker_provider"] = reranker_provider
         if reranker_model is not None:
             arguments["reranker_model"] = reranker_model
+        if content_chunks_enabled is not None:
+            arguments["content_chunks_enabled"] = content_chunks_enabled
+        if llm_selector_enabled is not None:
+            arguments["llm_selector_enabled"] = llm_selector_enabled
         return await self._call_tool_checked("update_search_config", arguments)
 
     async def get_server_info(self) -> ServerInfo:
@@ -3414,8 +3850,13 @@ class KaguraClient:
         Returns:
             :class:`MemoryListResponse` with ``memories`` (ordered per
             ``order_by``; newest-first by default; each carrying ``location``
-            when it has one), ``total`` (matching rows across all pages), and
-            ``has_more``.
+            when it has one, and ``observed_at`` — when the fact held — on
+            memory-cloud v0.127.0+, #2330), ``total`` (matching rows across
+            all pages), and ``has_more``. This REST route has no
+            ``observed_at`` filter or sort (memory-cloud v0.142.0 accepts
+            ``order_by`` ``created_at`` / ``trigger_from`` only): filter with
+            :meth:`recall`'s ``observed_after`` / ``observed_before``, or the
+            MCP ``list`` tool, which this client does not wrap.
 
         Raises:
             ValueError: If a bbox bound is non-numeric or out of range — checked
@@ -3481,10 +3922,11 @@ class KaguraClient:
         fields, the Free capacity lock (``capacity_locked``, memory-cloud
         v0.99.0+) :class:`KaguraCapacityLockedError`, and
         ``partial_rollback`` raises :class:`KaguraPartialRollbackError`
-        (#256). Every other code raises :class:`KaguraError` — e.g.
-        ``payload_too_large`` (a memory over 1 MB, v0.108.0+, with ``limit``
-        / ``actual``) and ``version_conflict`` (``update_memory`` with a stale
-        ``expected_version``, v0.113.0+; typed by #302).
+        (#256). ``version_conflict`` (``update_memory`` with a stale
+        ``expected_version``, v0.113.0+) raises
+        :class:`KaguraVersionConflictError` (#302). Every other code raises
+        :class:`KaguraError` — e.g. ``payload_too_large`` (a memory over
+        1 MB, v0.108.0+, with ``limit`` / ``actual``).
 
         Every error keeps the envelope: ``code`` is its ``error`` and
         ``details`` everything but ``status`` / ``error`` / ``message`` —
@@ -3523,7 +3965,11 @@ class KaguraClient:
                     f"{text} (rollback_summary could not be read)", report_id=report_id
                 )
         else:
-            err = gate_error(str(code), text, result) or KaguraError(text)
+            err = (
+                version_conflict_error(str(code), text, result)
+                or gate_error(str(code), text, result)
+                or KaguraError(text)
+            )
         annotate_server_error(err, str(code), result)
         if drift is not None:
             raise err from drift
@@ -3781,11 +4227,16 @@ _SLEEP_REPORT_ENVELOPE_KEYS = (
 )
 
 
-def _validate_memory_tags(tags: list[str] | None) -> None:
+def _validate_memory_tags(tags: list[str] | None, name: str = "tags") -> None:
     """Reject a ``tags`` list the server would refuse on a write.
 
     Measured as the server measures it: the list as given (no trimming or
-    deduplication) and each tag's length in characters.
+    deduplication) and each tag's length in characters. ``update_memory``'s
+    ``add_tags`` takes the same caps (memory-cloud v0.140.0, #2585).
+
+    Args:
+        tags: The list, or ``None`` (nothing to check).
+        name: The argument's name, for the message.
 
     Raises:
         ValueError: More than 50 tags, or a tag longer than 100 characters.
@@ -3793,7 +4244,7 @@ def _validate_memory_tags(tags: list[str] | None) -> None:
     if tags is None:
         return
     if len(tags) > _MEMORY_TAGS_MAX_COUNT:
-        raise ValueError(f"tags accepts at most {_MEMORY_TAGS_MAX_COUNT} tags, got {len(tags)}")
+        raise ValueError(f"{name} accepts at most {_MEMORY_TAGS_MAX_COUNT} tags, got {len(tags)}")
     longest = max((len(tag) for tag in tags if isinstance(tag, str)), default=0)
     if longest > _MEMORY_TAG_MAX_CHARS:
         raise ValueError(
