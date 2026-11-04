@@ -1978,8 +1978,8 @@ class KaguraClient:
 
         Args:
             name_contains: Only contexts whose name or display name contains
-                this text (case-insensitive, max 100 characters). Omitted when
-                empty or unset.
+                this text (case-insensitive, max 100 characters). Sent trimmed,
+                as the server reads it, and omitted when blank or unset.
             include_summary: Add ``summary`` truncated to 300 characters; items
                 that were cut also carry ``summary_truncated: true``.
             include_details: Add the full ``summary`` and ``embedding_model``
@@ -2030,8 +2030,16 @@ class KaguraClient:
                 with ``include_details`` and no ``name_contains`` (the server
                 refuses that page with ``validation_error``).
         """
+        name_contains = _normalize_name_contains(name_contains)
+        if limit is not None:
+            _validate_int_range("limit", limit, 1, _LIST_CONTEXTS_MAX_LIMIT)
+            if _details_page_over_cap(include_details, name_contains, limit):
+                raise ValueError(
+                    "include_details returns full summaries: pass name_contains or a limit "
+                    f"of at most {_LIST_CONTEXTS_DETAILS_MAX_LIMIT}, got {limit}"
+                )
         arguments: dict[str, Any] = {}
-        if name_contains:
+        if name_contains is not None:
             arguments["name_contains"] = name_contains
         if include_summary:
             arguments["include_summary"] = True
@@ -2042,14 +2050,6 @@ class KaguraClient:
         if cursor is not None:
             arguments["cursor"] = cursor
         if limit is not None:
-            _validate_int_range("limit", limit, 1, _LIST_CONTEXTS_MAX_LIMIT)
-            # As the server reads it: a blank or non-string name_contains is no filter.
-            filtered = isinstance(name_contains, str) and bool(name_contains.strip())
-            if include_details and not filtered and limit > _LIST_CONTEXTS_DETAILS_MAX_LIMIT:
-                raise ValueError(
-                    "include_details returns full summaries: pass name_contains or a limit "
-                    f"of at most {_LIST_CONTEXTS_DETAILS_MAX_LIMIT}, got {limit}"
-                )
             arguments["limit"] = limit
         return await self._call_tool_checked("list_contexts", arguments)
 
@@ -3807,6 +3807,33 @@ def _validate_state_value(value: Any) -> None:
             f"value must be at most {_STATE_VALUE_MAX_CHARS} characters as compact JSON, "
             f"got {size}; store large data as a memory and keep its id in the state"
         )
+
+
+def _normalize_name_contains(name_contains: Any) -> Any:
+    """``list_contexts``' ``name_contains`` as the server reads it.
+
+    A string is trimmed and a blank one is no filter (``None``). Any other
+    value is returned as is, for the server to refuse.
+    """
+    if isinstance(name_contains, str):
+        return name_contains.strip() or None
+    return name_contains
+
+
+def _details_page_over_cap(include_details: bool, name_contains: Any, limit: int | None) -> bool:
+    """Whether memory-cloud refuses this ``list_contexts`` page (0.82.0+, #1743).
+
+    With ``include_details`` and no filter (a non-blank string
+    ``name_contains``) a page holds at most 20 contexts, and a larger
+    ``limit`` is refused with ``validation_error``, not clamped.
+    """
+    filtered = isinstance(_normalize_name_contains(name_contains), str)
+    return (
+        bool(include_details)
+        and not filtered
+        and limit is not None
+        and limit > _LIST_CONTEXTS_DETAILS_MAX_LIMIT
+    )
 
 
 async def _collect_pages(client: KaguraClient, tool: str, model: type[_T], key: str) -> list[_T]:

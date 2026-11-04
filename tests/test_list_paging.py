@@ -175,6 +175,29 @@ async def test_list_contexts_include_details_pages(kwargs: dict, sent: dict):
 
 
 @pytest.mark.parametrize(
+    ("name_contains", "sent"),
+    [
+        ("  auth ", {"name_contains": "auth"}),  # trimmed, as the server reads it
+        ("   ", {}),  # blank: no filter, so not sent
+        ("", {}),
+        (123, {"name_contains": 123}),  # not a string: left for the server to refuse
+    ],
+    ids=["padded", "blank", "empty", "non-str"],
+)
+@pytest.mark.asyncio
+async def test_list_contexts_sends_name_contains_as_the_server_reads_it(
+    name_contains: Any, sent: dict
+):
+    server = _Server(_directory([_context(1)]))
+    client = server.client()
+    try:
+        await client.list_contexts(name_contains=name_contains, include_details=True)
+    finally:
+        await client.close()
+    assert server.arguments == [{**sent, "include_details": True}]
+
+
+@pytest.mark.parametrize(
     ("kwargs", "match"),
     [
         ({"limit": 0}, "between 1 and 200"),
