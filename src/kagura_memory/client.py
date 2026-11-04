@@ -2459,10 +2459,11 @@ class KaguraClient:
         Since memory-cloud v0.82.0 (#1743) each direction is cut at ``limit``
         edges (50 unless set, at most 200). The tool takes no cursor: when a
         direction held more, its ``outgoing_has_more`` / ``incoming_has_more``
-        flag is set, which this list cannot carry, so the client logs a
-        warning on the ``kagura_memory`` logger. Raise ``limit`` to get more
-        of them, or raise ``min_weight`` / narrow ``edge_types`` so the ones
-        that matter fit.
+        flag is set, which this list cannot carry. When the cut came from the
+        server's default (``limit=None``) or its 200 clamp, not from the
+        ``limit`` passed, the client logs a warning on the ``kagura_memory``
+        logger. Raise ``limit`` to get more of them, or raise ``min_weight`` /
+        narrow ``edge_types`` so the ones that matter fit.
 
         Args:
             context_id: Context UUID containing the memory.
@@ -2500,7 +2501,9 @@ class KaguraClient:
         result = await self._call_tool_checked("list_edges", arguments)
         edges = parse_response_list(Edge, result.get("edges", []), operation="list_edges")
         cut = [d for d in ("outgoing", "incoming") if result.get(f"{d}_has_more") is True]
-        if cut:
+        # A cut at the caller's own limit is what they asked for: warn only when
+        # the server's default or its clamp made it.
+        if cut and (limit is None or limit > _LIST_EDGES_MAX_LIMIT):
             logging.getLogger("kagura_memory").warning(
                 "list_edges returned %d edges of memory %s, but more %s edges exist past "
                 "the per-direction limit: raise limit (max 200), or narrow with "
@@ -3355,6 +3358,8 @@ _MEMORY_TAG_MAX_CHARS = 100
 _STATE_VALUE_MAX_CHARS = 16_384
 # Pages a plain-list method follows before giving up on an unfinished list.
 _MAX_AUTO_PAGES = 50
+# list_edges per-direction clamp (server ``LIST_EDGES_MAX_LIMIT``).
+_LIST_EDGES_MAX_LIMIT = 200
 # get_sleep_report envelope keys merged into the flattened report.
 _SLEEP_REPORT_ENVELOPE_KEYS = (
     "actions",

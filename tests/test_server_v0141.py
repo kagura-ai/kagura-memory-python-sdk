@@ -580,6 +580,41 @@ async def test_list_edges_warns_when_a_direction_was_cut(
         assert f"more {warned} edges exist" in caplog.text
 
 
+@pytest.mark.parametrize(
+    ("limit", "warns"),
+    [(10, False), (200, False), (500, True)],
+    ids=["own-limit", "own-limit-at-clamp", "over-the-clamp"],
+)
+@pytest.mark.asyncio
+async def test_list_edges_warns_only_when_the_server_made_the_cut(
+    limit: int, warns: bool, caplog: pytest.LogCaptureFixture
+):
+    """A cut at the caller's own ``limit`` is what they asked for: no warning.
+
+    Over 200 the server clamps (v0.82.0+), so the cut is not the caller's.
+    """
+    client = _client()
+    payload = {
+        "status": "success",
+        "memory_id": "m-1",
+        "edges": [],
+        "count": 0,
+        "outgoing_has_more": True,
+        "incoming_has_more": False,
+    }
+    try:
+        with (
+            patch.object(client, "_call_tool", new=AsyncMock(return_value=payload)) as mock,
+            caplog.at_level(logging.WARNING, logger="kagura_memory"),
+        ):
+            await client.list_edges(CTX, "m-1", limit=limit)
+    finally:
+        await client.close()
+
+    assert mock.call_args.args[1]["limit"] == limit
+    assert ("more outgoing edges exist" in caplog.text) is warns
+
+
 @pytest.mark.parametrize(("sent", "expected"), [({"has_more": True}, True), ({}, False)])
 @pytest.mark.asyncio
 async def test_list_tags_reads_has_more(sent: dict, expected: bool):
