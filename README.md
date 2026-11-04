@@ -203,12 +203,13 @@ async with KaguraClient(api_key="kagura_...", mcp_url="https://...") as client:
 
     # Find a context by name. On memory-cloud v0.73.0+ rows are slim
     # (id/name/is_private/is_locked/last_used_at); summaries are opt-in.
-    found = await client.list_contexts(name_contains="auth", include_summary=True)
+    found = await client.list_contexts(name_contains="auth", include_summary=True, limit=50)
     # From v0.82.0 the directory is paged (100 a page; limit=1-200 picks the size, at
-    # most 20 with include_details and no name_contains): pass next_cursor back.
+    # most 20 with include_details and no name_contains): pass next_cursor back with
+    # the same other arguments, limit included.
     if found.get("has_more"):
         more = await client.list_contexts(name_contains="auth", include_summary=True,
-                                          cursor=found["next_cursor"], limit=50)
+                                          limit=50, cursor=found["next_cursor"])
 
     # Trust-tier filter (provenance) — exclude untrusted / connector-ingested
     # memories from behaviour-influencing reads (OWASP LLM01/LLM03)
