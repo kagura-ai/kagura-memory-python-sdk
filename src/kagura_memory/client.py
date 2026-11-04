@@ -72,6 +72,8 @@ from .models import (
 
 _T = TypeVar("_T", bound=_BaseModel)
 
+_logger = logging.getLogger("kagura_memory")
+
 
 MIN_SERVER_VERSION = "0.17.1"
 """Minimum memory-cloud server version this SDK was tested against.
@@ -2509,7 +2511,7 @@ class KaguraClient:
         # A cut at the caller's own limit is what they asked for: warn only when
         # the server's default or its clamp made it.
         if cut and (limit is None or limit > _LIST_EDGES_MAX_LIMIT):
-            logging.getLogger("kagura_memory").warning(
+            _logger.warning(
                 "list_edges returned %d edges of memory %s, but more %s edges exist past "
                 "the per-direction limit: raise limit (max 200), or narrow with "
                 "min_weight / edge_types",
@@ -2726,7 +2728,7 @@ class KaguraClient:
             # and anything unexpected — log a warning, and cache None so we
             # degrade to steering=None without re-fetching. (python.md
             # permits a broad catch that logs.)
-            logging.getLogger("kagura_memory").warning(
+            _logger.warning(
                 "get_context_info failed for context %s; ingest steering disabled: %s",
                 context_id,
                 e,
@@ -2844,7 +2846,7 @@ class KaguraClient:
         """
         info = await self.get_server_info()
         if meets_minimum(info.version, _MIN_SERVER_VERSION_TUPLE) is False:
-            logging.getLogger("kagura_memory").warning(
+            _logger.warning(
                 "Server version %s is below the SDK's tested minimum %s. "
                 "Some features may not work; older servers may silently "
                 "ignore unknown parameters.",
