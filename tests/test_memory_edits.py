@@ -841,6 +841,27 @@ async def test_list_memories_ignores_fields_newer_than_the_sdk() -> None:
 
 
 @pytest.mark.asyncio
+async def test_list_memories_legacy_observed_at_reads_as_none() -> None:
+    """The server lists any value in its stored shape, a pre-v0.127.0 one unchecked.
+
+    One such row must not fail the page: it reads as None, the others parse.
+    """
+    rows = [
+        {**_LIST_ROW, "observed_at": "2024-02-30"},
+        {**_LIST_ROW, "observed_at": "2024-03-07T24:00:00Z"},
+        {**_LIST_ROW, "observed_at": "2024-13-01T10:00:00Z"},
+        {**_LIST_ROW, "observed_at": "2024-03-07"},
+    ]
+    page, _ = await _list_memories(rows)
+    assert [row.observed_at for row in page.memories] == [
+        None,
+        None,
+        None,
+        datetime(2024, 3, 7, tzinfo=UTC),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_list_memories_unreadable_observed_at_is_response_drift() -> None:
     with pytest.raises(KaguraResponseError, match="list_memories"):
         await _list_memories([{**_LIST_ROW, "observed_at": "last spring"}])
