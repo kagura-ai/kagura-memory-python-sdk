@@ -32,6 +32,7 @@ from .models import (
     AgentBootstrapComponentName,
     AgentBootstrapCorrelation,
     AgentBootstrapResponse,
+    AgentStatus,
     ContextDetail,
     ContextGuardrailItem,
     ContextGuardrails,
@@ -97,6 +98,7 @@ from .models import (
     SleepAction,
     SleepReport,
     SleepReportDetail,
+    SleepReportSource,
     SleepRunStatus,
     TagInfo,
     ToolTrigger,
@@ -196,6 +198,7 @@ __all__ = [
     # Agent registry + bindings (#235, server v0.49.0+)
     "Agent",
     "AgentBinding",
+    "AgentStatus",
     # Agent bootstrap (#231, server v0.49.0+)
     "AgentBootstrapAgent",
     "AgentBootstrapBinding",
@@ -218,6 +221,7 @@ __all__ = [
     "CostBreakdown",
     # Sleep Maintenance (server v0.8+)
     "SleepRunStatus",
+    "SleepReportSource",
     "SleepReport",
     "SleepReportDetail",
     "SleepAction",

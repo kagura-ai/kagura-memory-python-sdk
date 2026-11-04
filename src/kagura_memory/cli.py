@@ -1374,11 +1374,20 @@ def sleep():
     type=click.IntRange(1, 50),
     help="Max runs to return (1-50, default: 10).",
 )
-def sleep_history(context_id, limit):
+@click.option(
+    "--source",
+    type=click.Choice(["sleep", "analysis", "all"]),
+    default=None,
+    help=(
+        "Sleep runs (the server's default), Memory Analysis spend rows, or all "
+        "(memory-cloud 0.138.0+)."
+    ),
+)
+def sleep_history(context_id, limit, source):
     """List recent Sleep Maintenance runs for a context."""
 
     async def _op(client: KaguraClient, _ctx: str) -> dict[str, Any]:
-        reports = await client.get_sleep_history(context_id=context_id, limit=limit)
+        reports = await client.get_sleep_history(context_id=context_id, limit=limit, source=source)
         return {"reports": [r.model_dump(mode="json") for r in reports]}
 
     _run_client_command(_op, context_id=None, needs_context=False)
@@ -1387,16 +1396,34 @@ def sleep_history(context_id, limit):
 @sleep.command(name="report")
 @click.argument("context_id")
 @click.argument("report_id")
-def sleep_report(context_id, report_id):
+@click.option(
+    "--actions-cursor",
+    default=None,
+    help="actions_next_cursor of the previous page (memory-cloud 0.82.0+).",
+)
+@click.option(
+    "--actions-limit",
+    type=click.IntRange(1, 200),
+    default=None,
+    help="Actions per page (1-200; the server's default is 50; memory-cloud 0.82.0+).",
+)
+def sleep_report(context_id, report_id, actions_cursor, actions_limit):
     """Get a detailed Sleep Maintenance report including audit log.
 
     CONTEXT_ID is kept for backwards compatibility and not sent: the server
     finds the run by REPORT_ID (memory-cloud 0.126.0+ checks read access on
-    the run's own context).
+    the run's own context). From memory-cloud 0.82.0 the audit log comes a
+    page at a time: while actions_has_more is true, pass actions_next_cursor
+    as --actions-cursor.
     """
 
     async def _op(client: KaguraClient, _ctx: str) -> dict[str, Any]:
-        detail = await client.get_sleep_report(context_id=context_id, report_id=report_id)
+        detail = await client.get_sleep_report(
+            context_id=context_id,
+            report_id=report_id,
+            actions_cursor=actions_cursor,
+            actions_limit=actions_limit,
+        )
         return detail.model_dump(mode="json")
 
     _run_client_command(_op, context_id=None, needs_context=False)

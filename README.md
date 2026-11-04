@@ -185,6 +185,9 @@ async with KaguraClient(api_key="kagura_...", mcp_url="https://...") as client:
     # Find a context by name. On memory-cloud v0.73.0+ rows are slim
     # (id/name/is_private/is_locked/last_used_at); summaries are opt-in.
     found = await client.list_contexts(name_contains="auth", include_summary=True)
+    # From v0.82.0 the directory is paged (100 a page): pass next_cursor back.
+    if found.get("has_more"):
+        more = await client.list_contexts(name_contains="auth", cursor=found["next_cursor"])
 
     # Trust-tier filter (provenance) — exclude untrusted / connector-ingested
     # memories from behaviour-influencing reads (OWASP LLM01/LLM03)
@@ -256,6 +259,8 @@ async with KaguraClient(api_key="kagura_...", mcp_url="https://...") as client:
     # Agent session-state lane — TTL-bounded, structurally excluded from recall()
     await client.set_state(context_id="dev", key="step", value={"n": 3}, ttl_seconds=3600)
     state = await client.get_state(context_id="dev", key="step")  # omit key → all live entries
+    # Values are capped at 16,384 characters of compact JSON (ValueError before any
+    # request); from v0.82.0 the list mode is paged: get_state("dev", cursor=page["next_cursor"])
 ```
 
 #### Tool guardrails (v0.39.0, server v0.74.0+)
@@ -695,8 +700,8 @@ kagura resource stats -r products
 kagura resource schema -r products
 
 # Sleep Maintenance — observability + rollback
-kagura sleep history <context-id> --limit 5
-kagura sleep report <context-id> <report-id>          # <context-id> is kept for compatibility and ignored:
+kagura sleep history <context-id> --limit 5 --source all  # sleep (default) | analysis | all (server 0.138.0+)
+kagura sleep report <context-id> <report-id> [--actions-limit 100] [--actions-cursor C]  # <context-id> is kept for compatibility and ignored:
 kagura sleep rollback <context-id> <report-id> -y    # the server finds the run by <report-id> (destructive: prompts unless --yes / -y)
 
 # Tool guardrails (server v0.74.0+); context-id defaults to .kagura.json
