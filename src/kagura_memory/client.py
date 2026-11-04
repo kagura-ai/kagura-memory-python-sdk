@@ -202,12 +202,21 @@ class KaguraClient:
             mcp_url: Explicit MCP URL. When omitted, derived from the
                 resolved credential source (OAuth profile, env, or
                 ``.kagura.json``). It may carry memory-cloud's endpoint
-                query, which every MCP request sends: ``?profile=<name>`` /
-                ``?tools=a,b`` (v0.73.0+) only narrow what ``tools/list``
-                returns — ``tools/call`` never reads them, so every method
-                here keeps working — and ``?guardrails=off`` (v0.74.0+)
-                drops the ``guardrails`` block from :meth:`get_context_info`.
-                REST calls derive their base URL without the query (#258).
+                query, which every MCP request sends. ``?profile=<name>`` /
+                ``?tools=a,b`` (v0.73.0+) and ``?add_tools=a,b`` (v0.129.0+)
+                choose what ``tools/list`` (:meth:`get_tool_definitions`)
+                returns: a bare URL lists the ``core`` profile on
+                memory-cloud 0.93.0+ (21 tools on 0.141.0, memory-cloud#1849)
+                and ``?profile=full`` every tool (72). A profile is a view,
+                not an authorization boundary — ``tools/call`` never reads
+                it, so every method here keeps working on any URL — except
+                that :meth:`recall`'s ``explore_hints`` need ``explore``
+                listed (``?add_tools=explore`` or ``?profile=full``; v0.135.0,
+                memory-cloud#2470). ``?context=<uuid>`` (v0.114.0+) names a
+                default context for tools called without ``context_id``, and
+                ``?guardrails=off`` (v0.74.0+) drops the ``guardrails`` block
+                from :meth:`get_context_info`. REST calls derive their base
+                URL without the query (#258).
             timeout: Request timeout in seconds.
             profile: Named OAuth profile to load (overrides
                 ``KAGURA_PROFILE`` and the credentials file's
@@ -1855,6 +1864,17 @@ class KaguraClient:
 
         This retrieves the current tool specifications from the MCP server,
         including tool names, descriptions, and parameter schemas.
+
+        The list is the view the MCP URL's query selects, not every tool: on
+        memory-cloud 0.93.0+ a bare URL lists the ``core`` profile (21 tools
+        on 0.141.0, memory-cloud#1849), ``?profile=full`` lists all of them
+        (72), ``?add_tools=a,b`` adds names to the profile (v0.129.0+,
+        memory-cloud#2354) and ``?tools=a,b`` is an allowlist. A profile is
+        a view, not an authorization boundary: a tool left out of the list
+        stays callable, so every method of this client works whatever it
+        returns. Only :meth:`recall`'s ``explore_hints`` depend on it, and
+        need ``explore`` listed (``?add_tools=explore`` or ``?profile=full``,
+        v0.135.0+).
 
         Returns:
             List of tool definition dicts with name, description, and inputSchema

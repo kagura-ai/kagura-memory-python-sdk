@@ -659,7 +659,8 @@ kagura doctor --json           # machine-readable output for CI/scripts
 The report covers effective auth source, OAuth/static API-key health,
 the Claude Code `kagura-memory` MCP entry in effect (from local, project
 `.mcp.json` or user scope, plus any entry it shadows), `kagura-mcp` PATH wiring, MCP URL HTTPS,
-server reachability/version, optional ingestion extras, LiteLLM supply-chain
+server reachability/version, the `tools/list` view of the CLI's MCP URL (tool count, and the
+profile and `add_tools` it lists: `core (default)` without `?profile=`), optional ingestion extras, LiteLLM supply-chain
 status, and local LLM provider key/model diagnostics. Provider diagnostics are
 local-only: `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, and
 `OLLAMA_API_KEY` are reported with redacted previews, and model/key mismatches
@@ -703,6 +704,7 @@ kagura guardrails digest <context-id>                 # print the AGENTS.md expo
 kagura guardrails digest <context-id> --out AGENTS.md # splice it in; unchanged set → no write, empty set → block removed
                                                       # (keep it out of commits: untracked file or --skip-worktree)
 kagura guardrails digest <context-id> --target instructions --profile core  # preview the MCP instructions for ?profile=core
+kagura guardrails digest <context-id> --target instructions --add-tools explore  # …for ?add_tools=explore (server v0.129.0+)
 
 # Measurement lane — numeric series kept apart from memories (server v0.54.0+)
 kagura measure record <context-id> weight_kg 71.5 --unit kg --at 2026-09-01T07:30:00Z   # --at defaults to now
@@ -843,19 +845,41 @@ in that directory or any parent), so setup checks every scope first: it warns (a
 with `-y` exits 1 without writing) when a stronger entry would hide the new one,
 and notes any weaker entry the new one hides. `kagura doctor` reports the same.
 
-**Upstream URL query** — `--guardrails off|<context-uuid>` (server v0.74.0+) and
-`--tool-profile <name>` (server v0.73.0+) put memory-cloud's `?guardrails=` /
-`?profile=` on the upstream MCP URL: as `kagura-mcp --guardrails … --tool-profile …`
-arguments for `--profile` (the proxy adds them to the profile's URL at run time,
-replacing any earlier value), or in the url's query for an API key. Nothing is
-copied into `--server` or `~/.kagura/credentials.json`, and changing them never
-forces a re-login. The entry is rebuilt from the flags on every run, so pass them
-again when you re-run setup (it notes any it dropped). `--guardrails off` also
-removes the `guardrails` block from `get_context_info`: use it only when hooks
-deliver guardrails (see below). `--tool-profile core` limits `tools/list` to the
-memory loop; the server knows `full` and `core` (case-sensitive), fails
-`tools/list` for any other name, and ignores the profile when the URL already has
-a `?tools=` allowlist. Older servers ignore both parameters.
+**Upstream URL query** — `--guardrails off|<context-uuid>` (server v0.74.0+),
+`--tool-profile <name>` (server v0.73.0+), `--add-tools <name>[,<name>…]` (server
+v0.129.0+) and `--context <context-uuid>` (server v0.114.0+) put memory-cloud's
+`?guardrails=` / `?profile=` / `?add_tools=` / `?context=` on the upstream MCP URL:
+as `kagura-mcp --guardrails … --tool-profile … --add-tools … --context …` arguments
+for `--profile` (the proxy adds them to the profile's URL at run time, replacing
+any earlier value), or in the url's query for an API key. Nothing is copied into
+`--server` or `~/.kagura/credentials.json`, and changing them never forces a
+re-login. The entry is rebuilt from the flags on every run, so pass them again
+when you re-run setup (it notes any it dropped). `--guardrails off` also removes
+the `guardrails` block from `get_context_info`: use it only when hooks deliver
+guardrails (see below).
+
+What `tools/list` shows: since memory-cloud 0.93.0 a bare `/mcp` URL lists the
+`core` profile, the memory loop (21 tools on 0.141.0), and `--tool-profile full`
+lists every tool (72). The server knows only `full` and `core` (case-sensitive) and
+fails `tools/list` for any other name, which leaves Claude Code with no Kagura
+tools. `--add-tools` lists more tools on top of the profile, e.g. `--add-tools
+explore`: `recall`'s `explore_hints` need `explore` listed (memory-cloud 0.135.0
+moved it out of `core`), so add it or use `full`. Unknown names are ignored, and a
+`?tools=` allowlist already on the URL wins over both flags (setup warns). A profile
+is a view, not an authorization boundary: `tools/call` reaches an unlisted tool too,
+and `describe_tools` names what the view leaves out. `--context` makes that context
+the default for tools called without `context_id`, so a session can skip
+`list_contexts`; an explicit `context_id` wins, and the default is checked like one.
+It is a UUID, unlike `--context-id`, which picks the project's hooks and commands.
+Older servers ignore the parameters they do not know.
+
+`kagura-mcp --session-id NAME` (or `KAGURA_MCP_SESSION_ID`; server v0.114.0+) sends
+`Kagura-Session-Id: NAME` on every upstream request, so the server records the
+writes under that session (`changes_since(session_id=…)`). Claude Code speaks stdio
+to the proxy, so there is no request header to pass on; a tool call's
+`params._meta["ai.kagura/sessionId"]` still passes through and wins for that call.
+`kagura doctor` reports how many tools `tools/list` returns on the CLI's MCP URL
+and which profile it lists.
 
 **Hooks and commands** — the SessionStart hook recalls project context with
 `kagura recall --trusted-only` (server v0.24.0+), so connector-ingested memories
@@ -961,6 +985,15 @@ see guardrails in the `guardrails` block of `get_context_info`, which
 and a context id is never written into their entry: a `?guardrails=<uuid>`
 already in `--mcp-url` is dropped with a warning (a `?guardrails=off` the server
 would read is kept, alone and with a warning).
+
+**Tool view.** `--tool-profile <name>` and `--add-tools <name>[,<name>…]` work as
+for `setup claude` ([above](#claude-code-integration)): on the stdio entry they
+become `kagura-mcp --tool-profile/--add-tools`, and with `--url-form` they go on the
+URL as `?profile=` / `?add_tools=`, where a value already in `--mcp-url` is kept
+when the flag is absent. Without either, memory-cloud 0.93.0+ lists the `core`
+tools; `full` lists every tool. For Codex, the `--guardrails` preview carries the entry's view, so its
+truncation note names a tool the entry lists. With `--url-form --oauth`, Codex keys
+its token on the URL, so changing them later means signing in again.
 
 **`AGENTS.md` export** (opt-in; server v0.74.0+). `--agents-md [PATH]` writes a
 snapshot of the context's tool guardrails — the same block as
