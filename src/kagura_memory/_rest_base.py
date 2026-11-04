@@ -42,6 +42,7 @@ from ._http import (
     server_error_fields,
     service_unavailable_error,
     validate_https_url,
+    version_conflict_error,
 )
 from .auth.credentials import KaguraOAuth
 from .exceptions import (
@@ -84,10 +85,11 @@ class KaguraRestClient:
     - 503 (``DB-002``, the database unavailable) →
       :class:`KaguraServiceUnavailableError` with ``retry_after`` from
       ``Retry-After`` and ``reason`` from ``details.reason``
-    - other statuses → :class:`KaguraConnectionError`, e.g. a 409: memory
-      ``PATCH`` with a stale ``expected_version`` answers ``409 RES-002``
-      with ``details.reason == "version_conflict"`` (v0.113.0+, #2043; typed
-      by #302)
+    - a refused ``expected_version`` (memory ``PATCH``'s ``409 RES-002``
+      with ``details.reason == "version_conflict"``, v0.113.0+, #2043) →
+      :class:`KaguraVersionConflictError` (#302), after the gate rule
+    - other statuses → :class:`KaguraConnectionError`, e.g. the files API's
+      sha256 dedup ``409 RES-002`` (no ``reason``)
     - transport errors → :class:`KaguraConnectionError`
     - whatever the class, an error built from a response keeps the body's
       error code as ``code`` and its ``details`` (the REST envelope's
@@ -300,7 +302,7 @@ class KaguraRestClient:
         (CodeQL py/mixed-returns vs py/illegal-raise both flagged the
         raising-hook shape).
         """
-        typed = self._gate_error(e)
+        typed = self._gate_error(e) or self._version_conflict_error(e)
         if typed is not None:
             return typed
         status = e.response.status_code
@@ -332,12 +334,31 @@ class KaguraRestClient:
         ``CAPACITY-001`` capacity lock a :class:`KaguraCapacityLockedError`,
         not an access problem.
         """
+        envelope = self._envelope(e)
+        if envelope is None:
+            return None
+        code, message, details = envelope
+        return gate_error(code, message, details, retry_after=_retry_after_seconds(e.response))
+
+    def _version_conflict_error(self, e: httpx.HTTPStatusError) -> KaguraError | None:
+        """Type a refused ``expected_version`` from the canonical envelope (#302).
+
+        Memory ``PATCH`` answers ``409 RES-002`` with ``details.reason ==
+        "version_conflict"`` (memory-cloud v0.113.0+, #2043); the files API's
+        dedup ``409 RES-002`` has no such reason and stays the generic error
+        ``FilesClient.upload`` reads its ``existing_file`` from.
+        """
+        envelope = self._envelope(e)
+        return None if envelope is None else version_conflict_error(*envelope)
+
+    @staticmethod
+    def _envelope(e: httpx.HTTPStatusError) -> tuple[str, str, dict[str, Any]] | None:
+        """``(code, message, details)`` of the canonical error body, message sanitized."""
         envelope = error_envelope(e.response)
         if envelope is None:
             return None
         code, message, details = envelope
-        safe_message = sanitize_server_detail(message) or f"HTTP {e.response.status_code}"
-        return gate_error(code, safe_message, details, retry_after=_retry_after_seconds(e.response))
+        return code, sanitize_server_detail(message) or f"HTTP {e.response.status_code}", details
 
     # ---- per-status hooks (override where the wire contract differs) ----
 

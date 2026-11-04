@@ -31,6 +31,7 @@ from ._http import (
     validate_coordinate,
     validate_https_url,
     validate_lat_lon,
+    version_conflict_error,
 )
 from ._version import meets_minimum, parse_version
 from .exceptions import (
@@ -2411,6 +2412,13 @@ class KaguraClient:
         *,
         dismiss_supersede_candidate: bool = False,
         tool_trigger: ToolTrigger | dict[str, Any] | None = None,
+        observed_at: str | date | datetime | None = None,
+        add_tags: list[str] | None = None,
+        remove_tags: list[str] | None = None,
+        details_patch: dict[str, Any] | None = None,
+        expected_version: int | None = None,
+        accept_supersede_candidate: bool = False,
+        verbose: bool = False,
     ) -> dict[str, Any]:
         """Update an existing memory in-place or upsert by external ID.
 
@@ -2424,6 +2432,13 @@ class KaguraClient:
            upsert from either of two linked accounts replaces the same memory
            (memory-cloud v0.90.0+, #1803); shared contexts are unchanged.
 
+        The keyword-only arguments from ``observed_at`` on are sent only when
+        set, so a server that predates one never sees it. From memory-cloud
+        v0.82.0 (#1742) a server refuses an argument it does not declare
+        (``KaguraError``, code ``invalid_argument``); one before v0.82.0
+        ignores it — an ``add_tags`` / ``details_patch`` edit then changes
+        nothing, and ``expected_version`` guards nothing.
+
         Args:
             context_id: Context UUID.
             memory_id: UUID of memory to update in-place.
@@ -2433,7 +2448,8 @@ class KaguraClient:
             type: Updated memory type.
             importance: Updated importance (0.0-1.0).
             tags: Updated tags (replaces the list; ``[]`` clears it). At most
-                50, each at most 100 characters, as for :meth:`remember`.
+                50, each at most 100 characters, as for :meth:`remember`. To
+                change only some tags, use ``add_tags`` / ``remove_tags``.
             context_summary: Updated context summary (max 2000 chars).
                 ``""`` clears it; ``None`` leaves it unchanged.
             delivery_mode: Pin or unpin the memory. ``"always"`` pins it
@@ -2442,13 +2458,12 @@ class KaguraClient:
                 (back to probabilistic :meth:`recall`; the memory stays
                 persistent). Omit to leave the current delivery mode unchanged.
             details: Updated structured details JSON. **Replaces ``details``
-                wholesale** — the server does not deep-merge, so read the
-                current value with :meth:`reference` and re-send every key you
-                want to keep (notably ``location``, which otherwise drops off
-                :meth:`recall_nearby`, and ``tool_trigger``, which otherwise
-                unmarks a guardrail). ``{}`` clears it; omit to leave details
-                unchanged. The CLI's ``kagura update-memory --merge-details``
-                does that round-trip for top-level keys.
+                wholesale** — read the current value with :meth:`reference`
+                and re-send every key you want to keep (notably ``location``,
+                which otherwise drops off :meth:`recall_nearby`, and
+                ``tool_trigger``, which otherwise unmarks a guardrail), or
+                change only some keys with ``details_patch``. ``{}`` clears
+                it; omit to leave details unchanged.
             dismiss_supersede_candidate: Reject this memory's current
                 ``supersede_candidate`` (the older near-duplicate that
                 :meth:`recall` / :meth:`reference` suggest it replaces), for two
@@ -2458,58 +2473,198 @@ class KaguraClient:
                 v0.65.0+ (#1504). An older server silently drops the flag: a
                 dismissal-only call then succeeds as an empty in-place update
                 that dismisses nothing and refreshes ``updated_at``. To accept
-                the suggestion instead, create a ``supersedes`` edge.
+                the suggestion instead, pass ``accept_supersede_candidate``.
             tool_trigger: Mark (or re-mark) the memory as a tool guardrail —
-                sent as ``details["tool_trigger"]``, merged with ``details``;
                 same contract and permissions as :meth:`remember`'s
-                ``tool_trigger`` (memory-cloud v0.74.0+). Because ``details``
-                is replaced wholesale, passing only ``tool_trigger`` sends
-                ``details={"tool_trigger": ...}`` and drops every other key —
-                pass the keys to keep in ``details`` alongside it. To unmark,
-                send ``details`` without the key (or with
-                ``"tool_trigger": None``). Any edit of a memory that already
-                carries a trigger needs context editor or above. Keyword-only.
+                ``tool_trigger`` (memory-cloud v0.74.0+). It is merged into
+                ``details_patch`` when that is given, which keeps the other
+                stored keys; otherwise into ``details``, and because
+                ``details`` is replaced wholesale, passing only
+                ``tool_trigger`` sends ``details={"tool_trigger": ...}`` and
+                drops every other key — pass the keys to keep in ``details``,
+                or use ``details_patch``. To unmark, send ``details`` without
+                the key (or with ``"tool_trigger": None``), or
+                ``details_patch={"tool_trigger": None}``. Any edit of a memory
+                that already carries a trigger needs context editor or above.
+                Keyword-only.
+            observed_at: When the fact held (memory-cloud v0.127.0+, #2330),
+                in :meth:`remember`'s forms. Without ``details`` it changes
+                only ``details.observed_at`` of the stored details (a details
+                edit, so the version moves); with ``details`` or
+                ``details_patch`` their own ``observed_at``, if they carry
+                one, must equal it. Clear it by resending ``details`` without
+                the key or with ``details_patch={"observed_at": None}``.
+                Keyword-only.
+            add_tags: Tags to append to the stored list, each once, in order,
+                after ``remove_tags`` is applied (memory-cloud v0.140.0+,
+                #2585). The 50 × 100-character caps of ``tags`` apply here,
+                and the server applies the count cap again to the resulting
+                list. In-place mode only, never with ``tags``. Keyword-only.
+            remove_tags: Tags to remove from the stored list; one that is not
+                there is ignored (v0.140.0+, #2585). Not capped: a stored tag
+                longer than today's limit can still be removed. In-place mode
+                only, never with ``tags``. Keyword-only.
+            details_patch: A shallow merge into the stored details
+                (v0.140.0+, #2585): each key replaces the stored key, and a
+                ``None`` value **deletes** the key. Stored keys the patch does
+                not name are kept, so ``location`` and ``tool_trigger``
+                survive a status flip. The reserved keys keep their
+                validation; a patch that leaves null details empty changes
+                nothing. In-place mode only, never with ``details``.
+                Keyword-only.
+            expected_version: Apply the edit only while the memory is still
+                at this version (an ``int`` ≥ 1, the ``version`` that
+                :meth:`reference`, :meth:`remember` and this method return;
+                memory-cloud v0.113.0+, #2043). Otherwise nothing is written
+                and :class:`KaguraVersionConflictError` is raised. Omit for
+                last writer wins. In-place mode only. Keyword-only.
+            accept_supersede_candidate: Accept this memory's current
+                ``supersede_candidate``: write the declared ``supersedes``
+                edge from this memory to the candidate, which then leaves
+                default :meth:`recall`, and clear the suggestion (memory-cloud
+                v0.126.0+, #2308). A graph action only: needs ``memory_id``,
+                takes no field edits in the same call and leaves ``version``
+                and ``updated_at`` alone; ``expected_version`` may guard it.
+                Both memories must be the caller's own (in a private context a
+                linked account's count, #1803). Check
+                ``supersede_candidate.acceptance`` on :meth:`reference` first:
+                it says whether the accept would be refused. Sent only when
+                ``True``. Keyword-only.
+            verbose: ``True`` asks for ``persistence.detail`` (memory-cloud
+                v0.93.0+, #1851). Sent only when ``True``. Keyword-only.
 
         Returns:
             API response with updated memory info (``memory_id``,
-            ``operation``, ``re_embedded``, ``scope``). Since memory-cloud
-            v0.65.0 it may also carry ``persistence`` and ``lint`` as in
-            :meth:`remember` — ``lint`` describes the memory after the update.
-            When a dismissal applied,
-            ``supersede_candidate_dismissed`` holds the rejected candidate's
-            memory_id. It is the only confirmation that a dismissal happened:
-            the key is absent both when there was no live suggestion and when
-            the server predates v0.65.0.
+            ``operation``, ``re_embedded``, ``scope``, and ``version`` — the
+            version after this call, unchanged when it changed no versioned
+            field; memory-cloud v0.113.0+). Since memory-cloud v0.65.0 it may
+            also carry ``persistence`` and ``lint`` as in :meth:`remember` —
+            ``lint`` describes the memory after the update. When a dismissal
+            applied, ``supersede_candidate_dismissed`` holds the rejected
+            candidate's memory_id. It is the only confirmation that a
+            dismissal happened: the key is absent both when there was no
+            live suggestion and when the server predates v0.65.0. An accept
+            returns ``superseded_memory_id``, the memory now shadowed.
 
         Raises:
-            ValueError: If neither or both of ``memory_id`` and ``external_id``
-                are given; if ``dismiss_supersede_candidate`` is combined
-                with ``external_id`` (the server rejects that pair: an upsert
-                replaces the memory and its suggestion); or if
-                ``tool_trigger`` is given together with a
-                ``details["tool_trigger"]`` key; or if ``tags`` holds more
-                than 50 tags or a tag longer than 100 characters.
+            ValueError: Checked before any request, mirroring the server's
+                ``validation_error``: neither or both of ``memory_id`` and
+                ``external_id``; ``external_id`` with
+                ``dismiss_supersede_candidate``, ``accept_supersede_candidate``,
+                ``expected_version``, ``add_tags``, ``remove_tags`` or
+                ``details_patch`` (an upsert replaces the memory under a new
+                id); ``tags`` with ``add_tags`` / ``remove_tags``, or
+                ``details`` with ``details_patch`` (a call replaces a field or
+                edits it, not both); both supersede flags; the accept with any
+                field edit (``tool_trigger`` and ``observed_at`` included);
+                ``expected_version`` that is not an ``int`` ≥ 1;
+                ``observed_at`` in a form the server refuses, or disagreeing
+                with ``details`` / ``details_patch``; ``tool_trigger`` with a
+                ``"tool_trigger"`` key where it would be merged; or ``tags`` /
+                ``add_tags`` over 50 tags or with a tag over 100 characters.
+            KaguraVersionConflictError: ``expected_version`` is not the
+                memory's version; nothing was written. Its
+                ``current_version`` is the version to resend with, after
+                reading the memory again.
             KaguraFeatureNotAvailableError: ``feature == "contexts"``: the
                 context has no writable slot because the plan dropped below
                 the workspace's contexts (memory-cloud v0.100.0+).
             KaguraError: Server-side rejection, e.g. ``permission_denied`` for
-                a guardrail edit below context editor. Since memory-cloud
-                v0.113.0 (#2043) a server-side ``expected_version`` mismatch is
-                ``code == "version_conflict"`` (REST ``PATCH``: ``409
-                RES-002`` with ``details.reason == "version_conflict"``);
-                #302 adds the argument and a typed error.
+                a guardrail edit below context editor; ``validation_error`` for
+                an accept with no live suggestion, a candidate written after
+                this memory or a pair that is not both the caller's own; or
+                ``code == "edge_exists"`` when another declared edge already
+                links the pair (``details["existing_edge"]``; nothing written).
         """
         if not memory_id and not external_id:
             raise ValueError("Provide exactly one of memory_id or external_id")
         if memory_id and external_id:
             raise ValueError("Provide exactly one of memory_id or external_id")
-        if dismiss_supersede_candidate and external_id:
-            raise ValueError(
-                "dismiss_supersede_candidate requires memory_id (in-place mode); "
-                "an external_id upsert replaces the memory and its suggestion."
+        partial = [
+            name
+            for name, value in (
+                ("add_tags", add_tags),
+                ("remove_tags", remove_tags),
+                ("details_patch", details_patch),
             )
+            if value is not None
+        ]
+        if external_id:
+            # The upsert replaces the memory under a new id: there is no
+            # suggestion, version, stored list or stored details to act on.
+            if dismiss_supersede_candidate or accept_supersede_candidate:
+                flag = (
+                    "dismiss_supersede_candidate"
+                    if dismiss_supersede_candidate
+                    else "accept_supersede_candidate"
+                )
+                raise ValueError(
+                    f"{flag} requires memory_id (in-place mode); "
+                    "an external_id upsert replaces the memory and its suggestion."
+                )
+            if expected_version is not None:
+                raise ValueError(
+                    "expected_version requires memory_id (in-place mode); an external_id "
+                    "upsert replaces the memory under a new id."
+                )
+            if partial:
+                raise ValueError(
+                    f"{', '.join(partial)} require memory_id (in-place mode); "
+                    "use tags / details with external_id."
+                )
+        if accept_supersede_candidate and dismiss_supersede_candidate:
+            raise ValueError(
+                "accept_supersede_candidate and dismiss_supersede_candidate cannot "
+                "both be true: accept the suggestion or reject it."
+            )
+        if tags is not None and (add_tags is not None or remove_tags is not None):
+            raise ValueError(
+                "tags replaces the stored list and add_tags / remove_tags edit it; "
+                "give one or the other."
+            )
+        if details is not None and details_patch is not None:
+            raise ValueError(
+                "details replaces the stored details and details_patch merges into them; "
+                "give one or the other."
+            )
+        if expected_version is not None:
+            _validate_min_int("expected_version", expected_version, 1)
         _validate_memory_tags(tags)
-        details = _details_with_tool_trigger(details, tool_trigger)
+        _validate_memory_tags(add_tags, "add_tags")
+        if details_patch is not None:
+            details_patch = _details_with_tool_trigger(details_patch, tool_trigger)
+        else:
+            details = _details_with_tool_trigger(details, tool_trigger)
+        observed = None if observed_at is None else _observed_at_arg(observed_at)
+        if observed is not None:
+            _check_observed_at_agrees(observed, details, "details")
+            _check_observed_at_agrees(observed, details_patch, "details_patch")
+        if accept_supersede_candidate:
+            # A graph action: an edit in the same call would re-embed and
+            # version the memory it marks as superseding (#2308).
+            edits = [
+                name
+                for name, value in (
+                    ("summary", summary),
+                    ("content", content),
+                    ("type", type),
+                    ("importance", importance),
+                    ("tags", tags),
+                    ("context_summary", context_summary),
+                    ("delivery_mode", delivery_mode),
+                    ("details", details),
+                    ("details_patch", details_patch),
+                    ("add_tags", add_tags),
+                    ("remove_tags", remove_tags),
+                    ("observed_at", observed),
+                )
+                if value is not None
+            ]
+            if edits:
+                raise ValueError(
+                    "accept_supersede_candidate cannot be combined with field edits "
+                    f"({', '.join(edits)}); send the edit in a separate update_memory call."
+                )
 
         arguments: dict[str, Any] = {"context_id": context_id}
         if memory_id is not None:
@@ -2534,6 +2689,20 @@ class KaguraClient:
             arguments["details"] = details
         if dismiss_supersede_candidate:
             arguments["dismiss_supersede_candidate"] = True
+        if add_tags is not None:
+            arguments["add_tags"] = add_tags
+        if remove_tags is not None:
+            arguments["remove_tags"] = remove_tags
+        if details_patch is not None:
+            arguments["details_patch"] = details_patch
+        if observed is not None:
+            arguments["observed_at"] = observed
+        if expected_version is not None:
+            arguments["expected_version"] = expected_version
+        if accept_supersede_candidate:
+            arguments["accept_supersede_candidate"] = True
+        if verbose:
+            arguments["verbose"] = True
         return await self._call_tool_checked("update_memory", arguments)
 
     async def forget(
@@ -3560,10 +3729,11 @@ class KaguraClient:
         fields, the Free capacity lock (``capacity_locked``, memory-cloud
         v0.99.0+) :class:`KaguraCapacityLockedError`, and
         ``partial_rollback`` raises :class:`KaguraPartialRollbackError`
-        (#256). Every other code raises :class:`KaguraError` — e.g.
-        ``payload_too_large`` (a memory over 1 MB, v0.108.0+, with ``limit``
-        / ``actual``) and ``version_conflict`` (``update_memory`` with a stale
-        ``expected_version``, v0.113.0+; typed by #302).
+        (#256). ``version_conflict`` (``update_memory`` with a stale
+        ``expected_version``, v0.113.0+) raises
+        :class:`KaguraVersionConflictError` (#302). Every other code raises
+        :class:`KaguraError` — e.g. ``payload_too_large`` (a memory over
+        1 MB, v0.108.0+, with ``limit`` / ``actual``).
 
         Every error keeps the envelope: ``code`` is its ``error`` and
         ``details`` everything but ``status`` / ``error`` / ``message`` —
@@ -3602,7 +3772,11 @@ class KaguraClient:
                     f"{text} (rollback_summary could not be read)", report_id=report_id
                 )
         else:
-            err = gate_error(str(code), text, result) or KaguraError(text)
+            err = (
+                version_conflict_error(str(code), text, result)
+                or gate_error(str(code), text, result)
+                or KaguraError(text)
+            )
         annotate_server_error(err, str(code), result)
         if drift is not None:
             raise err from drift
@@ -3853,11 +4027,16 @@ _SLEEP_REPORT_ENVELOPE_KEYS = (
 )
 
 
-def _validate_memory_tags(tags: list[str] | None) -> None:
+def _validate_memory_tags(tags: list[str] | None, name: str = "tags") -> None:
     """Reject a ``tags`` list the server would refuse on a write.
 
     Measured as the server measures it: the list as given (no trimming or
-    deduplication) and each tag's length in characters.
+    deduplication) and each tag's length in characters. ``update_memory``'s
+    ``add_tags`` takes the same caps (memory-cloud v0.140.0, #2585).
+
+    Args:
+        tags: The list, or ``None`` (nothing to check).
+        name: The argument's name, for the message.
 
     Raises:
         ValueError: More than 50 tags, or a tag longer than 100 characters.
@@ -3865,12 +4044,24 @@ def _validate_memory_tags(tags: list[str] | None) -> None:
     if tags is None:
         return
     if len(tags) > _MEMORY_TAGS_MAX_COUNT:
-        raise ValueError(f"tags accepts at most {_MEMORY_TAGS_MAX_COUNT} tags, got {len(tags)}")
+        raise ValueError(f"{name} accepts at most {_MEMORY_TAGS_MAX_COUNT} tags, got {len(tags)}")
     longest = max((len(tag) for tag in tags if isinstance(tag, str)), default=0)
     if longest > _MEMORY_TAG_MAX_CHARS:
         raise ValueError(
             f"each tag must be at most {_MEMORY_TAG_MAX_CHARS} characters, got {longest}"
         )
+
+
+def _validate_min_int(name: str, value: object, minimum: int) -> None:
+    """Reject a request integer below ``minimum``, as the server does.
+
+    ``bool`` is not an integer here, as on the server (``type(x) is int``).
+
+    Raises:
+        ValueError: ``value`` is not an ``int`` of at least ``minimum``.
+    """
+    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+        raise ValueError(f"{name} must be an integer of at least {minimum}, got {value!r}")
 
 
 def _validate_state_value(value: Any) -> None:

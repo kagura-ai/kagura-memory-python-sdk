@@ -13,12 +13,19 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, date, datetime, timedelta, timezone
-from typing import Any
+from typing import Any, get_args
 
 import httpx
 import pytest
 
-from kagura_memory import DedupeMode, KaguraClient
+from kagura_memory import (
+    DedupeMode,
+    KaguraClient,
+    KaguraConnectionError,
+    KaguraError,
+    KaguraVersionConflictError,
+    MemoryClient,
+)
 from kagura_memory.client import _observed_at_arg
 
 CTX = "11111111-2222-3333-4444-555555555555"
@@ -258,6 +265,349 @@ async def test_remember_refuses_locally(kwargs: dict[str, Any], match: str) -> N
 
 
 def test_dedupe_mode_lists_the_server_values() -> None:
-    from typing import get_args
-
     assert set(get_args(DedupeMode)) == {"suggest", "check", "off"}
+
+
+# ============================================================================
+# update_memory: partial edits, expected_version, the supersede accept
+# ============================================================================
+
+_UPDATED = {
+    "status": "success",
+    "memory_id": MEM,
+    "operation": "updated",
+    "re_embedded": False,
+    "scope": "working",
+    "version": 4,
+    **_CONTEXT_FIELDS,
+}
+
+
+async def _update(reply: dict[str, Any], **kwargs: Any) -> tuple[dict[str, Any], dict[str, Any]]:
+    sent: list[dict[str, Any]] = []
+    client = _wire_client(reply, sent)
+    try:
+        result = await client.update_memory(CTX, **kwargs)
+    finally:
+        await client.close()
+    return result, _arguments(sent)
+
+
+_NEW_UPDATE_ARGS = (
+    "observed_at",
+    "add_tags",
+    "remove_tags",
+    "details_patch",
+    "expected_version",
+    "accept_supersede_candidate",
+    "verbose",
+)
+
+
+@pytest.mark.asyncio
+async def test_update_memory_omits_the_new_arguments_by_default() -> None:
+    _, arguments = await _update(_UPDATED, memory_id=MEM, summary="Deploy target moved")
+    for key in _NEW_UPDATE_ARGS:
+        assert key not in arguments
+    assert arguments == {"context_id": CTX, "memory_id": MEM, "summary": "Deploy target moved"}
+
+
+@pytest.mark.asyncio
+async def test_update_memory_sends_partial_edits() -> None:
+    """One call flips a status: nothing else of the stored tags or details is resent."""
+    result, arguments = await _update(
+        _UPDATED,
+        memory_id=MEM,
+        add_tags=["status:done"],
+        remove_tags=["status:open"],
+        details_patch={"status": "done", "assignee": None},
+        observed_at="2026-11-04",
+        expected_version=3,
+        verbose=True,
+    )
+    assert arguments["add_tags"] == ["status:done"]
+    assert arguments["remove_tags"] == ["status:open"]
+    assert arguments["details_patch"] == {"status": "done", "assignee": None}
+    assert arguments["observed_at"] == "2026-11-04"
+    assert arguments["expected_version"] == 3
+    assert arguments["verbose"] is True
+    for key in ("tags", "details", "accept_supersede_candidate"):
+        assert key not in arguments
+    assert result["version"] == 4
+
+
+@pytest.mark.asyncio
+async def test_update_memory_tool_trigger_goes_into_the_patch() -> None:
+    """With ``details_patch`` the guardrail is merged into it, so other stored keys survive."""
+    _, arguments = await _update(
+        _UPDATED,
+        memory_id=MEM,
+        details_patch={"status": "done"},
+        tool_trigger={"tool": "Bash", "pattern": "rm -rf"},
+    )
+    assert arguments["details_patch"] == {
+        "status": "done",
+        "tool_trigger": {"tool": "Bash", "pattern": "rm -rf"},
+    }
+    assert "details" not in arguments
+
+
+@pytest.mark.asyncio
+async def test_update_memory_observed_at_alone_edits_only_that_key() -> None:
+    _, arguments = await _update(
+        _UPDATED, memory_id=MEM, observed_at=datetime(2026, 11, 4, 9, 30, tzinfo=UTC)
+    )
+    assert arguments == {"context_id": CTX, "memory_id": MEM, "observed_at": "2026-11-04T09:30:00Z"}
+
+
+@pytest.mark.asyncio
+async def test_update_memory_accept_supersede_candidate() -> None:
+    """A graph action: only the flag and a version guard go out; the reply names the old memory."""
+    reply = {**_UPDATED, "version": 3, "superseded_memory_id": OLD}
+    result, arguments = await _update(
+        reply, memory_id=MEM, accept_supersede_candidate=True, expected_version=3
+    )
+    assert arguments == {
+        "context_id": CTX,
+        "memory_id": MEM,
+        "accept_supersede_candidate": True,
+        "expected_version": 3,
+    }
+    assert result["superseded_memory_id"] == OLD
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"external_id": "e", "add_tags": ["a"]}, "add_tags require memory_id"),
+        ({"external_id": "e", "remove_tags": ["a"]}, "remove_tags require memory_id"),
+        ({"external_id": "e", "details_patch": {"a": 1}}, "details_patch require memory_id"),
+        ({"external_id": "e", "expected_version": 2}, "expected_version requires memory_id"),
+        (
+            {"external_id": "e", "accept_supersede_candidate": True},
+            "accept_supersede_candidate requires memory_id",
+        ),
+        (
+            {"external_id": "e", "dismiss_supersede_candidate": True},
+            "dismiss_supersede_candidate requires memory_id",
+        ),
+        ({"memory_id": MEM, "tags": ["a"], "add_tags": ["b"]}, "give one or the other"),
+        ({"memory_id": MEM, "tags": [], "remove_tags": ["b"]}, "give one or the other"),
+        ({"memory_id": MEM, "details": {}, "details_patch": {"a": 1}}, "give one or the other"),
+        (
+            {
+                "memory_id": MEM,
+                "accept_supersede_candidate": True,
+                "dismiss_supersede_candidate": True,
+            },
+            "cannot both be true",
+        ),
+        (
+            {"memory_id": MEM, "accept_supersede_candidate": True, "summary": "x" * 20},
+            r"field edits \(summary\)",
+        ),
+        (
+            {"memory_id": MEM, "accept_supersede_candidate": True, "add_tags": ["a"]},
+            r"field edits \(add_tags\)",
+        ),
+        (
+            {"memory_id": MEM, "accept_supersede_candidate": True, "observed_at": "2024-03-07"},
+            r"field edits \(observed_at\)",
+        ),
+        (
+            {
+                "memory_id": MEM,
+                "accept_supersede_candidate": True,
+                "tool_trigger": {"tool": "Bash", "pattern": "x"},
+            },
+            r"field edits \(details\)",
+        ),
+        ({"memory_id": MEM, "expected_version": 0}, "expected_version must be an integer"),
+        ({"memory_id": MEM, "expected_version": True}, "expected_version must be an integer"),
+        ({"memory_id": MEM, "expected_version": "3"}, "expected_version must be an integer"),
+        (
+            {
+                "memory_id": MEM,
+                "details_patch": {"observed_at": None},
+                "observed_at": "2024-03-07",
+            },
+            r"details_patch\['observed_at'\] and observed_at disagree",
+        ),
+        (
+            {
+                "memory_id": MEM,
+                "details": {"observed_at": "2024-03-08"},
+                "observed_at": "2024-03-07",
+            },
+            r"details\['observed_at'\] and observed_at disagree",
+        ),
+        ({"memory_id": MEM, "observed_at": "March 7"}, "ISO 8601"),
+        (
+            {"memory_id": MEM, "add_tags": [f"t{i}" for i in range(51)]},
+            "add_tags accepts at most 50 tags, got 51",
+        ),
+        ({"memory_id": MEM, "add_tags": ["x" * 101]}, "at most 100 characters"),
+        (
+            {
+                "memory_id": MEM,
+                "details_patch": {"tool_trigger": None},
+                "tool_trigger": {"tool": "Bash", "pattern": "x"},
+            },
+            "not both",
+        ),
+    ],
+    ids=[
+        "upsert-add-tags",
+        "upsert-remove-tags",
+        "upsert-details-patch",
+        "upsert-expected-version",
+        "upsert-accept",
+        "upsert-dismiss",
+        "tags-and-add-tags",
+        "tags-and-remove-tags",
+        "details-and-details-patch",
+        "accept-and-dismiss",
+        "accept-with-summary",
+        "accept-with-add-tags",
+        "accept-with-observed-at",
+        "accept-with-tool-trigger",
+        "version-zero",
+        "version-bool",
+        "version-str",
+        "patch-deletes-observed-at",
+        "details-disagree",
+        "observed-at-shape",
+        "add-tags-count",
+        "add-tags-length",
+        "tool-trigger-twice-in-patch",
+    ],
+)
+async def test_update_memory_refuses_locally(kwargs: dict[str, Any], match: str) -> None:
+    """Each mirrors a server validation_error; nothing goes on the wire."""
+    sent: list[dict[str, Any]] = []
+    client = _wire_client(_UPDATED, sent)
+    try:
+        with pytest.raises(ValueError, match=match):
+            await client.update_memory(CTX, **kwargs)
+    finally:
+        await client.close()
+    assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_update_memory_remove_tags_is_not_capped() -> None:
+    """The server caps the tags a call adds, never the ones it removes (#2585)."""
+    long_tag = "x" * 150
+    _, arguments = await _update(_UPDATED, memory_id=MEM, remove_tags=[long_tag])
+    assert arguments["remove_tags"] == [long_tag]
+
+
+@pytest.mark.asyncio
+async def test_update_memory_accept_conflicting_edge_is_a_kagura_error() -> None:
+    """``edge_exists`` keeps the existing edge in ``details``."""
+    edge = {"source_id": MEM, "target_id": OLD, "edge_type": "declared_link"}
+    sent: list[dict[str, Any]] = []
+    client = _wire_client(
+        {"status": "error", "error": "edge_exists", "message": "...", "existing_edge": edge}, sent
+    )
+    try:
+        with pytest.raises(KaguraError) as excinfo:
+            await client.update_memory(CTX, memory_id=MEM, accept_supersede_candidate=True)
+    finally:
+        await client.close()
+    assert excinfo.value.code == "edge_exists"
+    assert excinfo.value.details["existing_edge"] == edge
+
+
+# ============================================================================
+# KaguraVersionConflictError: MCP version_conflict and REST 409 RES-002
+# ============================================================================
+
+_MCP_CONFLICT = {
+    "status": "error",
+    "error": "version_conflict",
+    "message": f"Memory {MEM} is at version 5, not the expected version 3. Read it again "
+    "and resend with its current version.",
+    "memory_id": MEM,
+    "expected_version": 3,
+    "current_version": 5,
+    "retryable": False,
+    "help": "reference() the memory and resend with its current version, "
+    "or omit expected_version to overwrite.",
+}
+
+
+@pytest.mark.asyncio
+async def test_mcp_version_conflict_is_typed() -> None:
+    sent: list[dict[str, Any]] = []
+    client = _wire_client(_MCP_CONFLICT, sent)
+    try:
+        with pytest.raises(KaguraVersionConflictError) as excinfo:
+            await client.update_memory(CTX, memory_id=MEM, summary="x" * 20, expected_version=3)
+    finally:
+        await client.close()
+    err = excinfo.value
+    assert isinstance(err, KaguraError)
+    assert err.code == "version_conflict"
+    assert err.current_version == 5
+    assert err.expected_version == 3
+    assert err.memory_id == MEM
+    assert err.retryable is False
+    assert err.help is not None and "reference()" in err.help
+    assert "version 5" in str(err)
+
+
+def _rest_memory_client(status: int, body: Any):
+    client = MemoryClient(api_key="kagura_test", base_url="https://test.com")
+    client._client = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _req: httpx.Response(status, json=body))
+    )
+    return client
+
+
+@pytest.mark.asyncio
+async def test_rest_409_version_conflict_is_typed() -> None:
+    """``PATCH /api/v1/memory/{id}``'s refusal, through the shared REST spine."""
+    body = {
+        "error": "RES-002",
+        "message": f"Memory {MEM} is at version 5, not the expected version 3.",
+        "details": {"reason": "version_conflict", "expected_version": 3, "current_version": 5},
+    }
+    async with _rest_memory_client(409, body) as client:
+        with pytest.raises(KaguraVersionConflictError) as excinfo:
+            await client._request("PATCH", f"/api/v1/memory/{MEM}", json={"expected_version": 3})
+    err = excinfo.value
+    assert err.code == "RES-002"
+    assert err.details["reason"] == "version_conflict"
+    assert err.current_version == 5
+    assert err.expected_version == 3
+    assert err.memory_id is None
+    assert "version 5" in str(err)
+    assert isinstance(err.__cause__, httpx.HTTPStatusError)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"error": "RES-002", "message": "A file with this sha256 exists.", "details": {}},
+        {"error": "RES-002", "message": "edge", "details": {"reason": "edge_exists"}},
+        {"detail": "conflict"},
+    ],
+    ids=["files-dedup", "edge-exists", "fastapi-detail"],
+)
+async def test_rest_other_409s_are_not_version_conflicts(body: dict[str, Any]) -> None:
+    """The files dedup 409 shares ``RES-002``: it must stay what ``FilesClient.upload`` reads."""
+    async with _rest_memory_client(409, body) as client:
+        with pytest.raises(KaguraConnectionError) as excinfo:
+            await client._request("POST", "/api/v1/files/reserve", json={})
+    assert not isinstance(excinfo.value, KaguraVersionConflictError)
+
+
+def test_version_conflict_properties_ignore_malformed_details() -> None:
+    err = KaguraVersionConflictError("conflict")
+    err.details = {"current_version": True, "expected_version": "3", "memory_id": 7}
+    assert err.current_version is None
+    assert err.expected_version is None
+    assert err.memory_id is None

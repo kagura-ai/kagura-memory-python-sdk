@@ -33,6 +33,7 @@ import kagura_memory
 from kagura_memory import (
     KaguraCapacityLockedError,
     KaguraServiceUnavailableError,
+    KaguraVersionConflictError,
     UsageInfo,
 )
 from kagura_memory._http import gate_error, raise_for_kagura_status
@@ -221,18 +222,20 @@ def test_mcp_payload_too_large_stays_a_plain_error_with_its_numbers():
     assert err.help == "One memory holds up to 1,000,000 characters ..."
 
 
-def test_mcp_version_conflict_keeps_its_code():
-    """v0.113.0 (#2043): typed later by #302; until then the code identifies it."""
+def test_mcp_version_conflict_is_typed_and_keeps_its_code():
+    """v0.113.0 (#2043), typed by #302; the code still identifies it."""
     err = _mcp_error(
         {
             "error": "version_conflict",
             "message": "Memory version is 4, not 3.",
+            "current_version": 4,
             "help": "Read the target's current state before deciding whether to call again.",
         },
         "update_memory",
     )
-    assert type(err) is KaguraError
+    assert type(err) is KaguraVersionConflictError
     assert err.code == "version_conflict"
+    assert err.current_version == 4
 
 
 def test_mcp_server_failure_keeps_the_whole_envelope():
@@ -755,8 +758,9 @@ async def test_rest_409_and_404_keep_code_details_and_correlation_id():
         "message": "Memory version is 4, not 3.",
         "details": {"reason": "version_conflict", "correlation_id": "c0ffee"},
     }
+    # Typed by #302 (memory PATCH's refused expected_version) on every REST client.
     async with _rest(ResourceClient, _respond(409, conflict)) as c:
-        with pytest.raises(KaguraConnectionError, match="HTTP 409") as exc:
+        with pytest.raises(KaguraVersionConflictError, match="Memory version is 4") as exc:
             await c.list_tokens()
     assert exc.value.code == "RES-002"
     assert exc.value.details == {"reason": "version_conflict", "correlation_id": "c0ffee"}

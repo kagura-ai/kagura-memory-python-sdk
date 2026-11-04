@@ -138,8 +138,34 @@ def test_no_doc_says_a_non_uuid_is_a_500_without_the_422() -> None:
         (KaguraClient.recall_nearby, ["``location``", "include_details", "details_omitted"]),
         (KaguraClient.recall_upcoming, ["details_omitted", "details_total_chars"]),
         (KaguraClient.forget, ["CLEANUP_DELETED_MEMORIES_RETENTION_DAYS", "degraded"]),
-        (KaguraClient.remember, ["persistence", "lint", "``verbose=true``", "missing_fields"]),
-        (KaguraClient.update_memory, ["persistence", "lint", '``""``', "``{}``", "#1803"]),
+        (
+            KaguraClient.remember,
+            [
+                "persistence",
+                "lint",
+                "``verbose=true``",
+                "missing_fields",
+                # #302: memory-cloud v0.93.0-v0.127.0 write options.
+                "duplicate_candidate",
+                "tag_normalized",
+                "#2330",
+            ],
+        ),
+        (
+            KaguraClient.update_memory,
+            [
+                "persistence",
+                "lint",
+                '``""``',
+                "``{}``",
+                "#1803",
+                # #302: partial edits, optimistic concurrency and the accept.
+                "#2585",
+                "KaguraVersionConflictError",
+                "superseded_memory_id",
+                "edge_exists",
+            ],
+        ),
         (KaguraClient.create_context, ["invalid_embedding_model", "get_context_info"]),
         (KaguraClient.update_context, ["plan_required", "public_contexts"]),
         (KaguraClient.setup_resource, ["plan_required", "``resources``"]),
