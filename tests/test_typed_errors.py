@@ -750,3 +750,25 @@ async def test_rest_409_and_404_keep_code_details_and_correlation_id():
         with pytest.raises(KaguraNotFoundError, match="Agent not found") as exc404:
             await c.bootstrap(WS, context_id=CTX)
     assert (exc404.value.code, exc404.value.details) == ("NOT-001", {"agent_id": "a1"})
+
+
+@pytest.mark.parametrize(
+    "challenge",
+    [
+        'Basic realm="proxy", Bearer error="insufficient_scope", scope="memory:write"',
+        'Bearer error="insufficient_scope", scope="memory:write", Basic realm="proxy"',
+        "Bearer error=insufficient_scope, scope=memory:write",
+    ],
+    ids=["after-another", "before-another", "bare-tokens"],
+)
+def test_scope_challenge_is_read_wherever_the_bearer_challenge_sits(challenge):
+    """httpx joins repeated WWW-Authenticate headers with ", "."""
+    err = _raised(403, {"error": "HTTP-403", "message": "x"}, **{"WWW-Authenticate": challenge})
+    assert isinstance(err, KaguraAuthError)
+    assert err.details == {"required_scope": "memory:write"}
+
+
+def test_a_non_bearer_challenge_naming_the_scope_error_is_not_read():
+    challenge = 'Basic realm="error=insufficient_scope", charset="UTF-8"'
+    err = _raised(403, {"error": "HTTP-403", "message": "x"}, **{"WWW-Authenticate": challenge})
+    assert type(err) is KaguraConnectionError

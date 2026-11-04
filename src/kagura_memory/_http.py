@@ -826,9 +826,13 @@ def validate_https_url(url: str, *, label: str = "URL") -> None:
 _CAPACITY_GATE = "capacity"
 _CAPACITY_CODES = frozenset({"capacity_locked", "CAPACITY-001"})
 _INSUFFICIENT_SCOPE = "insufficient_scope"
-# One ``name=value`` parameter of a ``WWW-Authenticate`` challenge, the value
-# a quoted string (RFC 9110 §11.2) or a bare token.
-_CHALLENGE_PARAM_RE = re.compile(r'([A-Za-z_][\w-]*)\s*=\s*(?:"((?:[^"\\]|\\.)*)"|([^\s,"]+))')
+# One item of a ``WWW-Authenticate`` value: a ``name=value`` parameter (the
+# value a quoted string, RFC 9110 §11.2, or a bare token), else a bare token —
+# an auth-scheme, or the token68 some schemes carry. One value can hold several
+# challenges: httpx joins repeated headers with ", " (RFC 9110 §11.6.1).
+_CHALLENGE_ITEM_RE = re.compile(
+    r'([A-Za-z_][\w-]*)\s*=\s*(?:"((?:[^"\\]|\\.)*)"|([^\s,"]+))|([^\s,="]+=*)'
+)
 _QUOTED_PAIR_RE = re.compile(r"\\(.)")
 
 
@@ -910,22 +914,27 @@ def server_error_fields(response: httpx.Response) -> tuple[str, dict[str, Any]] 
 def _bearer_challenge(response: httpx.Response) -> dict[str, str]:
     """The parameters of ``response``'s ``WWW-Authenticate: Bearer`` challenge (RFC 6750 §3).
 
+    The Bearer challenge may come after another one (``Basic realm="x",
+    Bearer error=...``, e.g. a proxy's challenge joined with the server's).
     Names are lower-cased; ``{}`` when there is no Bearer challenge.
     """
     header = response.headers.get("WWW-Authenticate")
     if not isinstance(header, str):
         return {}
-    scheme, _, params = header.strip().partition(" ")
-    if scheme.lower() != "bearer":
-        return {}
-    return {
-        match.group(1).lower(): (
-            _QUOTED_PAIR_RE.sub(r"\1", match.group(2))
-            if match.group(2) is not None
-            else match.group(3)
-        )
-        for match in _CHALLENGE_PARAM_RE.finditer(params)
-    }
+    params: dict[str, str] | None = None
+    for match in _CHALLENGE_ITEM_RE.finditer(header):
+        scheme = match.group(4)
+        if scheme is not None:
+            if params is not None:
+                break  # the next challenge starts: the Bearer one is complete
+            if scheme.lower() == "bearer":
+                params = {}
+        elif params is not None:
+            quoted = match.group(2)
+            params[match.group(1).lower()] = (
+                _QUOTED_PAIR_RE.sub(r"\1", quoted) if quoted is not None else match.group(3)
+            )
+    return params or {}
 
 
 def insufficient_scope_error(response: httpx.Response) -> KaguraAuthError | None:
