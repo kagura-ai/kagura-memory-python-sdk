@@ -764,6 +764,30 @@ def normalize_uuid(value: object, *, label: str) -> str:
         raise ValueError(f"{label} must be a UUID, got {value!r}") from exc
 
 
+def uuid_or_none(value: str) -> str | None:
+    """``value`` as :func:`normalize_uuid` returns it, or None when it is not a UUID."""
+    try:
+        return normalize_uuid(value, label="value")
+    except ValueError:
+        return None
+
+
+# The dashed 8-4-4-4-12 form, either case: what setup takes as a context id
+# without looking it up by name (a dashless 32-hex string can be a name too).
+_CANONICAL_UUID_RE = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.IGNORECASE | re.ASCII
+)
+
+
+def is_canonical_uuid(value: str) -> bool:
+    """Whether ``value`` is a UUID in the dashed 8-4-4-4-12 form (either case).
+
+    The other spellings :func:`normalize_uuid` accepts (dashless, ``{braces}``,
+    ``urn:uuid:``) are not.
+    """
+    return _CANONICAL_UUID_RE.fullmatch(value) is not None
+
+
 def path_segment(value: str, *, label: str) -> str:
     """``value`` percent-encoded as ONE segment of a REST path.
 

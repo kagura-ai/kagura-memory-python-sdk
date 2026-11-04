@@ -392,7 +392,7 @@ class FakeMcpServer:
 class PagedContexts:
     """A ``KaguraClient`` stand-in whose ``list_contexts`` pages ``names``.
 
-    Models memory-cloud 0.82.0+'s directory: ``name_contains`` is a
+    Models memory-cloud 0.82.0+'s directory: ``name_contains`` is a trimmed,
     case-insensitive substring filter (on the name here), and each page holds
     ``page_size`` rows with ``has_more`` and an offset ``next_cursor``. Row ids
     are UUIDs derived from the position in ``names``. Every call is recorded as
@@ -439,7 +439,7 @@ class PagedContexts:
         self.calls.append(kwargs)
         if self.pages is not None:
             return self.pages.pop(0)
-        needle = (kwargs.get("name_contains") or "").casefold()
+        needle = (kwargs.get("name_contains") or "").strip().casefold()
         matched = [row for row in self.rows if needle in row["name"].casefold()]
         start = int(kwargs.get("cursor") or 0)
         end = start + self.page_size

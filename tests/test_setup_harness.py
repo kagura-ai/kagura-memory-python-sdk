@@ -2772,6 +2772,59 @@ def test_a_context_lookup_that_does_not_add_up_stops_before_writing(
     assert recorder.mutating() == []
 
 
+def test_a_padded_context_name_resolves(on_path, recorder, paged):
+    on_path("codex")
+    result = run("codex", "--profile", "default", "--context-id", " far ", "-y")
+    assert result.exit_code == 0, result.output
+    [argv] = recorder.mutating()
+    assert argv[-2:] == ["--guardrails", FAR]
+    assert [c["name_contains"] for c in paged.calls] == ["far", "far"]
+
+
+def test_a_padded_context_uuid_past_the_first_page_is_trimmed(on_path, recorder, paged):
+    on_path("codex")
+    result = run("codex", "--profile", "default", "--context-id", f" {OTHER_CTX}\t", "-y")
+    assert result.exit_code == 0, result.output
+    [argv] = recorder.mutating()
+    assert argv[-2:] == ["--guardrails", OTHER_CTX]
+    assert paged.calls == []
+
+
+def test_a_hex_context_name_is_looked_up_before_it_is_read_as_an_id(
+    on_path, recorder, connection, monkeypatch
+):
+    # A dashless 32-hex string is a valid context name and another UUID spelling:
+    # the name wins, so it is not rewritten into a dashed UUID of no context.
+    hex_name = "0123456789abcdef0123456789abcdef"
+    fake = PagedContexts(["recent-a", "recent-b", hex_name])
+    connection.return_value = fake.first_page()
+    monkeypatch.setattr("kagura_memory.setup_claude._make_client", fake.make_client)
+    on_path("codex")
+    result = run("codex", "--profile", "default", "--context-id", hex_name, "-y")
+    assert result.exit_code == 0, result.output
+    [argv] = recorder.mutating()
+    assert argv[-2:] == ["--guardrails", PagedContexts.id_of(2)]
+
+
+def test_a_hex_id_no_context_is_named_is_still_an_id(on_path, recorder, paged):
+    on_path("codex")
+    result = run("codex", "--profile", "default", "--context-id", OTHER_CTX.replace("-", ""), "-y")
+    assert result.exit_code == 0, result.output
+    [argv] = recorder.mutating()
+    assert argv[-2:] == ["--guardrails", OTHER_CTX]
+    assert len(paged.calls) == 1  # looked up by name first
+
+
+def test_dry_run_shows_a_dashless_uuid_as_a_placeholder(on_path, connection):
+    # The real run looks it up as a context name first.
+    on_path("codex")
+    hex_id = CTX.replace("-", "")
+    result = run("codex", "--profile", "default", "--context-id", hex_id, "--dry-run")
+    assert result.exit_code == 0, result.output
+    assert f"<UUID of context {hex_id}>" in result.output
+    connection.assert_not_called()
+
+
 def test_context_prompt_with_no_visible_context(on_path, connection, tty):
     on_path("openclaw")
     connection.return_value = {"count": 0, "contexts": []}

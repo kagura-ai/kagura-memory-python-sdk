@@ -18,10 +18,11 @@ import click
 from . import claude_code
 from ._auth import _resolve_profile_auth
 from ._http import (
+    is_canonical_uuid,
     mcp_url_guardrails_off,
     mcp_url_has_tools_allowlist,
     mcp_url_with_query,
-    normalize_uuid,
+    uuid_or_none,
 )
 from .auth.credentials import CredentialsFile, OAuthCredentials
 from .claude_code import (
@@ -242,55 +243,66 @@ async def _find_context_by_name(
     return None
 
 
+@dataclass(frozen=True)
+class _ContextLookup:
+    """What :func:`_lookup_context` found for a context id or name: one of three.
+
+    - Matched: ``context`` is the row whose id or exact name ``value`` is.
+    - Unknown (``unknown``): ``value`` names no context the credential can
+      see. It is not a UUID, and either every page was searched for the
+      name or it is longer than any context name.
+    - Neither: ``value`` is used as given. It is a UUID (the dashed form is
+      not looked up by name; another spelling matched no name), or blank.
+
+    ``value`` is the value looked up, trimmed: what is compared, sent and
+    used.
+    """
+
+    value: str
+    context: dict[str, Any] | None = None
+    unknown: bool = False
+
+
 def _lookup_context(
     chosen: str,
-    contexts_response: dict[str, Any],
+    first_page: dict[str, Any],
     api_key: str | None = None,
     mcp_url: str | None = None,
     *,
     profile: str | None = None,
-) -> dict[str, Any] | None:
-    """The context ``chosen`` (an id or an exact name) names, or None.
+) -> _ContextLookup:
+    """Resolve ``chosen``, a context id or an exact name, to a context.
 
-    ``contexts_response`` is the first ``list_contexts`` page
-    (:func:`_test_connection`); a row there with that id or name wins. Only
-    when the page is not the whole list (``has_more``, memory-cloud
-    0.82.0+) is a name outside it looked up on every page with
+    ``chosen`` is trimmed first, as the server reads ``name_contains``.
+    ``first_page`` is the first ``list_contexts`` page
+    (:func:`_test_connection`); a row there with that id or name wins. A
+    UUID in the dashed form is an id and is not looked up further. Any
+    other value is looked up as a name: when ``first_page`` is not the
+    whole list (``has_more``, memory-cloud 0.82.0+), on every page with
     :func:`_find_context_by_name`, on the credential ``api_key`` /
-    ``mcp_url`` / ``profile`` name (as for :func:`_make_client`). A UUID is
-    not looked up, and neither is a value ``name_contains`` cannot narrow
-    by: blank (the server reads it as no filter) or longer than a context
-    name can be (the server refuses it). The caller uses those as given.
+    ``mcp_url`` / ``profile`` name (as for :func:`_make_client`). A blank
+    value, or one longer than any context name, is not sent
+    (``name_contains`` reads blank as no filter and refuses a longer one).
 
     Raises:
         KaguraResponseError: See :func:`_find_context_by_name`.
+        KaguraAuthError: The lookup's credential was refused.
+        KaguraConnectionError: The lookup could not reach the server.
     """
-    for ctx in contexts_response.get("contexts") or []:
-        if isinstance(ctx, dict) and ctx.get("id") and chosen in (ctx["id"], ctx.get("name")):
-            return ctx
-    if contexts_response.get("has_more") is not True or not _is_lookup_name(chosen):
-        return None
-    return asyncio.run(_find_context_by_name(chosen, api_key, mcp_url, profile=profile))
-
-
-def _is_lookup_name(value: str) -> bool:
-    """Whether :func:`_lookup_context` looks ``value`` up past the first page.
-
-    Not a UUID, and 1-100 characters once trimmed, as the server reads
-    ``name_contains``: blank is no filter, and a longer value is refused
-    (and longer than any context name).
-    """
-    stripped = value.strip()
-    return bool(stripped) and len(stripped) <= _CONTEXT_NAME_MAX_CHARS and not _is_uuid(value)
-
-
-def _is_uuid(value: str) -> bool:
-    """Whether ``value`` parses as a UUID (as :func:`normalize_uuid` reads it)."""
-    try:
-        normalize_uuid(value, label="context_id")
-    except ValueError:
-        return False
-    return True
+    value = chosen.strip()
+    for ctx in first_page.get("contexts") or []:
+        if isinstance(ctx, dict) and ctx.get("id") and value in (ctx["id"], ctx.get("name")):
+            return _ContextLookup(value, context=ctx)
+    if not value or is_canonical_uuid(value):
+        return _ContextLookup(value)
+    if len(value) > _CONTEXT_NAME_MAX_CHARS:  # longer than any context name, or UUID
+        return _ContextLookup(value, unknown=True)
+    if first_page.get("has_more") is True:
+        ctx = asyncio.run(_find_context_by_name(value, api_key, mcp_url, profile=profile))
+        if ctx is not None:
+            return _ContextLookup(value, context=ctx)
+    # Every page was searched for the name; another spelling of a UUID is still an id.
+    return _ContextLookup(value, unknown=uuid_or_none(value) is None)
 
 
 async def _create_context(
@@ -355,31 +367,35 @@ def _select_or_create_context(
     ``contexts_response`` is the first ``list_contexts`` page. A
     ``preselected`` id or exact name is matched there, and a name outside
     that page on every page (:func:`_lookup_context`); a value no page
-    matches is used as given. When the whole list was searched (the first
-    page is all of it, or the lookup paged to the end), a value that is
-    not a UUID gets a warning on stderr first: it names no context this
-    credential can see. When ``profile`` is set, the lookup and any
-    context creation authenticate via the OAuth profile instead of
+    matches is used as given, trimmed. A value that names no context this
+    credential can see (:class:`_ContextLookup`'s ``unknown``: not a UUID,
+    and every page was searched, or it is longer than any context name)
+    gets a warning on stderr first. When ``profile`` is set, the lookup and
+    any context creation authenticate via the OAuth profile instead of
     ``api_key`` / ``mcp_url``.
+
+    Raises:
+        KaguraAuthError: The name lookup or creating the context was
+            refused the credential.
+        KaguraConnectionError: The same, unable to reach the server.
+        KaguraResponseError: The name lookup's pages do not add up.
     """
     contexts = contexts_response.get("contexts", [])
 
     if preselected:
-        match = _lookup_context(preselected, contexts_response, api_key, mcp_url, profile=profile)
-        if match is not None:
-            ctx_id = str(match["id"])
-            click.echo(f"  Using context: {match.get('name', '?')} ({ctx_id[:8]}...)")
+        found = _lookup_context(preselected, contexts_response, api_key, mcp_url, profile=profile)
+        if found.context is not None:
+            ctx_id = str(found.context["id"])
+            click.echo(f"  Using context: {found.context.get('name', '?')} ({ctx_id[:8]}...)")
             return ctx_id
-        # A UUID setup does not look up, or a value no page matches: used as given.
-        searched = contexts_response.get("has_more") is not True or _is_lookup_name(preselected)
-        if searched and not _is_uuid(preselected):
+        if found.unknown:
             click.echo(
-                f"  Warning: no context named {preselected!r} is visible to this "
+                f"  Warning: no context named {found.value!r} is visible to this "
                 "credential; using it as a raw context id.",
                 err=True,
             )
-        click.echo(f"  Using context: {preselected}")
-        return preselected
+        click.echo(f"  Using context: {found.value}")
+        return found.value
 
     default_name = project_dir.name.lower().replace(" ", "-")
 

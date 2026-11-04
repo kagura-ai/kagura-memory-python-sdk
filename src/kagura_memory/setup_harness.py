@@ -82,12 +82,13 @@ from ._auth import _SOURCE_LABEL, _OAuthAuth, _resolve_auth, _resolve_profile_au
 from ._guardrail_export import has_guardrail_block, write_guardrail_block
 from ._http import (
     base_url_from_mcp,
+    is_canonical_uuid,
     mcp_url_guardrails_off,
     mcp_url_query_values,
     mcp_url_with_query,
     mcp_url_without_query_param,
     normalize_url,
-    normalize_uuid,
+    uuid_or_none,
     validate_https_url,
 )
 from ._version import meets_minimum
@@ -1491,14 +1492,10 @@ def _check_flags(
             "--agents-md needs --context-id with -y or without a terminal: setup cannot "
             "ask which context."
         )
-    if url_form and profile is None and context_id is not None:
-        try:
-            normalize_uuid(context_id, label="--context-id")
-        except ValueError:
-            raise click.UsageError(
-                "Without --profile, --context-id must be a context UUID: setup cannot "
-                "list contexts."
-            ) from None
+    if url_form and profile is None and context_id is not None and uuid_or_none(context_id) is None:
+        raise click.UsageError(
+            "Without --profile, --context-id must be a context UUID: setup cannot list contexts."
+        )
 
 
 def _check_same_server(profile: str, profile_url: str, mcp_url: str) -> None:
@@ -1650,9 +1647,10 @@ def _resolve_context(
 ) -> str:
     """The context UUID for a guardrails lane or the export.
 
-    ``chosen`` (an id or an exact name) is looked up in ``contexts``, the
-    first page of ``profile``'s list, and a name outside that page on every
-    page (``setup_claude._lookup_context``); without one, an interactive run
+    ``chosen`` (an id or an exact name, trimmed) is looked up in
+    ``contexts``, the first page of ``profile``'s list, and a name outside
+    that page on every page (``setup_claude._lookup_context``; a UUID in
+    the dashed form is taken as an id). Without one, an interactive run
     picks from that first page. It never creates a context: a new one has
     no guardrails to deliver.
 
@@ -1660,6 +1658,9 @@ def _resolve_context(
         click.UsageError: No context was given, and setup cannot list or ask.
         click.ClickException: The context is not a UUID (an unknown name), or
             the profile can see none to pick.
+        KaguraAuthError: The name lookup was refused the profile's
+            credential.
+        KaguraConnectionError: The name lookup could not reach the server.
         KaguraResponseError: The name lookup's pages do not add up.
     """
     listed = [
@@ -1676,25 +1677,27 @@ def _resolve_context(
         choice = click.prompt("Context", type=click.IntRange(1, len(listed)))
         chosen = str(listed[choice - 1]["id"])
     else:
-        match = _lookup_context(chosen, contexts or {}, profile=profile)
-        if match is not None:
-            chosen = str(match["id"])
-            click.echo(f"  Using context: {match.get('name', '?')} ({chosen[:8]}...)")
-    try:
-        return normalize_uuid(chosen, label="context_id")
-    except ValueError:
-        raise click.ClickException(f"No context {chosen!r} (by id or name).") from None
+        found = _lookup_context(chosen, contexts or {}, profile=profile)
+        chosen = found.value
+        if found.context is not None:
+            chosen = str(found.context["id"])
+            click.echo(f"  Using context: {found.context.get('name', '?')} ({chosen[:8]}...)")
+    context_id = uuid_or_none(chosen)
+    if context_id is None:
+        raise click.ClickException(f"No context {chosen!r} (by id or name).")
+    return context_id
 
 
 def _dry_run_context(chosen: str | None) -> str | None:
-    """``chosen`` as ``--dry-run`` shows it: a UUID, or a placeholder for a context
-    name, which only the real run looks up (a dry run makes no network call)."""
+    """``chosen`` as ``--dry-run`` shows it: a UUID in the dashed form, or a
+    placeholder for anything else, which the real run first looks up as a
+    context name (a dry run makes no network call)."""
     if chosen is None:
         return None
-    try:
-        return normalize_uuid(chosen, label="context_id")
-    except ValueError:
-        return f"<UUID of context {chosen}>"
+    value = chosen.strip()
+    if is_canonical_uuid(value):
+        return uuid_or_none(value)
+    return f"<UUID of context {value}>"
 
 
 def _print_reason(

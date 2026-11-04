@@ -666,6 +666,9 @@ def test_setup_claude_reuses_existing_context_id(
 # and name_contains="far" also matches "far-a" and "far-b", which fill its page 1.
 NAMES = ["recent-a", "recent-b", "far-a", "far-b", "far"]
 FAR_ID = PagedContexts.id_of(4)
+UUID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+# A dashless 32-hex string: a valid context name, and another spelling of a UUID.
+HEX_NAME = "0123456789abcdef0123456789abcdef"
 
 
 @pytest.fixture()
@@ -676,15 +679,16 @@ def paged(monkeypatch: pytest.MonkeyPatch) -> PagedContexts:
     return fake
 
 
+def _cursors(fake: PagedContexts) -> list[str | None]:
+    return [call.get("cursor") for call in fake.calls]
+
+
 class TestFindContextByName:
     @pytest.mark.asyncio
     async def test_pages_with_name_contains_to_the_exact_name(self, paged: PagedContexts) -> None:
         found = await _find_context_by_name("far", "key", "url")
         assert found == {"id": FAR_ID, "name": "far"}
-        assert paged.calls == [
-            {"name_contains": "far"},
-            {"name_contains": "far", "cursor": "2"},
-        ]
+        assert paged.calls == [{"name_contains": "far"}, {"name_contains": "far", "cursor": "2"}]
         assert paged.made_with == [("key", "url", None)]
 
     @pytest.mark.asyncio
@@ -701,7 +705,7 @@ class TestFindContextByName:
         fake = PagedContexts(["FAR", "far-x", "x-far"], page_size=1)
         monkeypatch.setattr("kagura_memory.setup_claude._make_client", fake.make_client)
         assert await _find_context_by_name("far") is None
-        assert [c.get("cursor") for c in fake.calls] == [None, "1", "2"]
+        assert _cursors(fake) == [None, "1", "2"]
 
     @pytest.mark.asyncio
     async def test_rows_without_an_id_are_skipped(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -743,36 +747,69 @@ class TestFindContextByName:
 class TestLookupContext:
     def test_a_first_page_row_needs_no_request(self, paged: PagedContexts) -> None:
         first = paged.first_page()
-        assert _lookup_context("recent-b", first)["id"] == PagedContexts.id_of(1)
-        assert _lookup_context(PagedContexts.id_of(0), first)["name"] == "recent-a"
+        found = _lookup_context("recent-b", first)
+        assert found.context is not None and found.context["id"] == PagedContexts.id_of(1)
+        found = _lookup_context(PagedContexts.id_of(0), first)
+        assert found.context is not None and found.context["name"] == "recent-a"
         assert paged.calls == []
 
     def test_a_name_past_the_first_page_is_looked_up(self, paged: PagedContexts) -> None:
-        assert _lookup_context("far", paged.first_page(), "key", "url")["id"] == FAR_ID
+        found = _lookup_context("far", paged.first_page(), "key", "url")
+        assert found.context is not None and found.context["id"] == FAR_ID
         assert paged.calls[0] == {"name_contains": "far"}
+
+    def test_the_value_is_trimmed_once_for_every_use(self, paged: PagedContexts) -> None:
+        found = _lookup_context("  far \t", paged.first_page())
+        assert found.value == "far"
+        assert found.context is not None and found.context["id"] == FAR_ID
+        assert [call["name_contains"] for call in paged.calls] == ["far", "far"]
+        found = _lookup_context(" recent-a ", paged.first_page())
+        assert found.context is not None and found.context["name"] == "recent-a"
+        assert _lookup_context(f" {UUID}\n", paged.first_page()).value == UUID
 
     def test_a_complete_first_page_is_the_whole_list(self, paged: PagedContexts) -> None:
         # No has_more: a server before 0.82.0, or every context fit on the page.
-        assert _lookup_context("far", {"contexts": paged.rows[:2]}) is None
-        assert _lookup_context("far", {"contexts": [], "has_more": False}) is None
+        for first in ({"contexts": paged.rows[:2]}, {"contexts": [], "has_more": False}):
+            found = _lookup_context("far", first)
+            assert (found.value, found.context, found.unknown) == ("far", None, True)
         assert paged.calls == []
 
-    @pytest.mark.parametrize(
-        "chosen",
-        [
-            "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
-            "AAAAAAAABBBBCCCCDDDDEEEEEEEEEEEE",
-            "  ",
-            "x" * 101,
-        ],
-        ids=["uuid", "dashless-uuid", "blank", "too-long"],
-    )
-    def test_values_the_lookup_skips(self, paged: PagedContexts, chosen: str) -> None:
-        assert _lookup_context(chosen, paged.first_page()) is None
+    @pytest.mark.parametrize("chosen", [UUID, UUID.upper()], ids=["lower", "upper"])
+    def test_a_dashed_uuid_is_an_id(self, paged: PagedContexts, chosen: str) -> None:
+        found = _lookup_context(chosen, paged.first_page())
+        assert (found.value, found.context, found.unknown) == (chosen, None, False)
+        assert paged.calls == []
+
+    def test_another_uuid_spelling_is_looked_up_as_a_name_first(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # HEX_NAME is the third context, past a first page of two.
+        fake = PagedContexts(["recent-a", "recent-b", HEX_NAME])
+        monkeypatch.setattr("kagura_memory.setup_claude._make_client", fake.make_client)
+        found = _lookup_context(HEX_NAME, fake.first_page())
+        assert found.context is not None and found.context["id"] == PagedContexts.id_of(2)
+        # No context of that name: still an id, so not unknown.
+        found = _lookup_context(HEX_NAME.upper(), fake.first_page())
+        assert (found.context, found.unknown) == (None, False)
+        assert [call["name_contains"] for call in fake.calls] == [HEX_NAME, HEX_NAME.upper()]
+
+    def test_a_blank_value_is_not_sent(self, paged: PagedContexts) -> None:
+        found = _lookup_context("  ", paged.first_page())
+        assert (found.value, found.context, found.unknown) == ("", None, False)
+        assert paged.calls == []
+
+    @pytest.mark.parametrize("has_more", [True, False])
+    def test_a_value_longer_than_any_name_is_unknown(
+        self, paged: PagedContexts, has_more: bool
+    ) -> None:
+        first = {"contexts": paged.rows[:2], "has_more": has_more, "next_cursor": "2"}
+        found = _lookup_context("x" * 101, first)
+        assert (found.context, found.unknown) == (None, True)
         assert paged.calls == []
 
     def test_a_100_character_name_is_looked_up(self, paged: PagedContexts) -> None:
-        assert _lookup_context("x" * 100, paged.first_page()) is None
+        found = _lookup_context("x" * 100, paged.first_page())
+        assert (found.context, found.unknown) == (None, True)
         assert paged.calls == [{"name_contains": "x" * 100}]
 
 
@@ -791,26 +828,32 @@ class TestSelectPreselectedPastTheFirstPage:
         assert result == FAR_ID
         assert paged.made_with == [("key", "url", "work")]
 
+    def test_a_padded_name_resolves(self, paged: PagedContexts) -> None:
+        result = _select_or_create_context(
+            paged.first_page(), "key", "url", " far ", Path("/tmp/test"), non_interactive=True
+        )
+        assert result == FAR_ID
+
     def test_an_unknown_name_is_still_used_as_given(self, paged: PagedContexts) -> None:
         result = _select_or_create_context(
-            paged.first_page(), "key", "url", "fa", Path("/tmp/test"), non_interactive=True
+            paged.first_page(), "key", "url", " fa ", Path("/tmp/test"), non_interactive=True
         )
+        # Trimmed, as it was looked up.
         assert result == "fa"
         # name_contains="fa" matched three contexts over two pages, none named "fa".
-        assert [c.get("cursor") for c in paged.calls] == [None, "2"]
+        assert _cursors(paged) == [None, "2"]
 
 
 @patch("kagura_memory.setup_claude._test_connection")
 def test_setup_claude_does_not_look_up_a_uuid(
     mock_conn: AsyncMock, paged: PagedContexts, runner: CliRunner, tmp_path: Path
 ) -> None:
-    ctx = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
     mock_conn.return_value = paged.first_page()
 
-    result = runner.invoke(main, _setup_args(tmp_path, context_id=ctx))
+    result = runner.invoke(main, _setup_args(tmp_path, context_id=UUID))
 
     assert result.exit_code == 0, result.output
-    assert json.loads((tmp_path / ".kagura.json").read_text())["context_id"] == ctx
+    assert json.loads((tmp_path / ".kagura.json").read_text())["context_id"] == UUID
     assert paged.calls == []
 
 
@@ -833,7 +876,7 @@ def test_setup_claude_warns_on_a_name_no_page_matches(
     assert json.loads((tmp_path / ".kagura.json").read_text())["context_id"] == "fa"
     # The lookup paged to the end ("fa" matched the three far* contexts, none named
     # "fa"), so the list was searched: one stderr line, before "Using context".
-    assert [c.get("cursor") for c in paged.calls] == [None, "2"]
+    assert _cursors(paged) == [None, "2"]
     assert result.stderr == UNKNOWN_WARNING
     assert result.output.index(UNKNOWN_WARNING) < result.output.index("Using context: fa\n")
 
@@ -854,25 +897,42 @@ def test_setup_claude_warns_on_a_name_a_complete_page_lacks(
     assert result.output.index(UNKNOWN_WARNING) < result.output.index("Using context: fa\n")
 
 
-@pytest.mark.parametrize(
-    ("chosen", "has_more"),
-    [
-        ("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", False),
-        ("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", True),
-        ("x" * 101, True),
-    ],
-    ids=["uuid-complete-page", "uuid-paged", "too-long-paged"],
-)
-def test_no_warning_unless_the_list_was_searched_for_a_name(
-    paged: PagedContexts, capsys: pytest.CaptureFixture[str], chosen: str, has_more: bool
+def test_a_value_longer_than_any_name_warns_on_a_paged_list(
+    paged: PagedContexts, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    # A UUID is never a name; a value the lookup skips leaves the list unsearched.
+    chosen = "x" * 101
+    result = _select_or_create_context(
+        paged.first_page(), "key", "url", chosen, Path("/tmp/test"), non_interactive=True
+    )
+    assert result == chosen
+    assert paged.calls == []
+    assert f"Warning: no context named '{chosen}' is visible" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("chosen", "has_more", "looked_up"),
+    [
+        (UUID, False, False),
+        (UUID, True, False),
+        (HEX_NAME, True, True),
+    ],
+    ids=["uuid-complete-page", "uuid-paged", "dashless-uuid-paged"],
+)
+def test_no_warning_for_a_uuid(
+    paged: PagedContexts,
+    capsys: pytest.CaptureFixture[str],
+    chosen: str,
+    has_more: bool,
+    looked_up: bool,
+) -> None:
+    # A UUID is an id: the dashed form is not looked up by name, and another
+    # spelling that names no context is still used as an id.
     first = {"contexts": paged.rows[:2], "has_more": has_more, "next_cursor": "2"}
     result = _select_or_create_context(
         first, "key", "url", chosen, Path("/tmp/test"), non_interactive=True
     )
     assert result == chosen
-    assert paged.calls == []
+    assert bool(paged.calls) is looked_up
     captured = capsys.readouterr()
     assert captured.err == ""
     assert f"Using context: {chosen}" in captured.out
