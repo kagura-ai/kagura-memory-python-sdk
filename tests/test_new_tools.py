@@ -31,6 +31,7 @@ from kagura_memory import (
     KaguraError,
     KaguraNotFoundError,
     KaguraPartialRollbackError,
+    KaguraPartialSessionRollbackError,
     KaguraQuotaError,
     KaguraResponseError,
     PlanHeadroomNotice,
@@ -1458,15 +1459,43 @@ async def test_rollback_session_partial_raises_with_the_session_summary():
     sent: list[dict[str, Any]] = []
     client = _wire_client(reply, sent)
     try:
-        with pytest.raises(KaguraPartialRollbackError) as info:
+        with pytest.raises(KaguraPartialSessionRollbackError) as info:
             await client.rollback_session(CTX, session_id="mcp-0123456789abcdef", dry_run=False)
     finally:
         await client.close()
     err = info.value
+    assert not isinstance(err, KaguraPartialRollbackError)  # the Sleep run's sibling
     assert err.code == "partial_rollback" and err.retryable is True
-    assert err.report_id is None and err.summary is None and err.__cause__ is None
-    assert err.details["summary"]["failed"] == 1 and err.details["remaining"] == 1
-    assert err.correlation_id == "c0ffee"
+    assert err.session_summary is not None
+    assert err.session_summary.failed == 1 and err.session_summary.forgotten == 1
+    assert err.session_summary.errors == [f"Memory {MEM_D} (forget) failed: x"]
+    assert err.totals == {"forgotten": 1, "failed": 1, "calls": 1}
+    assert (err.rollback_id, err.remaining) == (9, 1)
+    assert err.correlation_id == "c0ffee" and err.__cause__ is None
+    assert err.details["rollback_status"] == "partial"
+
+
+@pytest.mark.asyncio
+async def test_rollback_session_partial_with_unreadable_fields_still_raises_typed():
+    """The rollback is committed: a field the SDK cannot read is None, not a second error."""
+    reply = _error(
+        "partial_rollback",
+        "Rollback finished this call with 1 failed item(s); summary shows what was reversed.",
+        summary={"failed": "one"},
+        totals="x",
+        rollback_id=True,
+        **_CONTEXT_FIELDS,
+    )
+    sent: list[dict[str, Any]] = []
+    client = _wire_client(reply, sent)
+    try:
+        with pytest.raises(KaguraPartialSessionRollbackError) as info:
+            await client.rollback_session(CTX, session_id="s", dry_run=False)
+    finally:
+        await client.close()
+    err = info.value
+    assert err.session_summary is None and err.totals is None
+    assert err.rollback_id is None and err.remaining is None
 
 
 @pytest.mark.asyncio

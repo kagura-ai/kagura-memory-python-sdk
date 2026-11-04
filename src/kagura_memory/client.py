@@ -38,6 +38,7 @@ from .exceptions import (
     KaguraError,
     KaguraNotFoundError,
     KaguraPartialRollbackError,
+    KaguraPartialSessionRollbackError,
     KaguraResponseError,
     _exc_message,
 )
@@ -79,6 +80,7 @@ from .models import (
     RollbackSummary,
     ServerInfo,
     SessionRollbackResult,
+    SessionRollbackSummary,
     SleepReport,
     SleepReportDetail,
     ToolDescriptions,
@@ -90,6 +92,7 @@ from .models import (
     _details_with_tool_trigger,
     _validate_int_range,
     _validate_max_chars,
+    _validate_or_none,
 )
 
 _T = TypeVar("_T", bound=_BaseModel)
@@ -3049,12 +3052,11 @@ class KaguraClient:
             KaguraNotFoundError: ``session_not_found`` (no session with this
                 id the caller may roll back in this context), or the context
                 is not accessible.
-            KaguraPartialRollbackError: Some items failed this call; every
-                other item was handled and saved. ``report_id`` and
-                ``summary`` are ``None`` here: the server's ``summary``,
-                ``totals``, ``remaining``, ``rollback_id`` and
-                ``correlation_id`` are in ``details``. Call again to retry the
-                failed items.
+            KaguraPartialSessionRollbackError: Some items failed this call;
+                every other item was handled and saved. ``session_summary``
+                lists the failures in ``errors``; ``totals``, ``rollback_id``
+                and ``remaining`` come with it. Call again with the same
+                arguments to retry the failed items.
             KaguraError: ``no_writes_in_window``, ``already_rolled_back``,
                 ``permission_denied`` (below editor) or ``validation_error``
                 (e.g. a window wider than 7 days), in ``code``.
@@ -3075,14 +3077,7 @@ class KaguraClient:
             arguments["until"] = _iso_arg(until)
         result = await self._call_tool("rollback_session", arguments)
         if result.get("status") == "error" and result.get("error") == "partial_rollback":
-            # Not _raise_for_mcp_error's partial_rollback: that one reads a
-            # Sleep run's ``rollback_summary``, which this envelope lacks.
-            err = KaguraPartialRollbackError(
-                f"rollback_session failed (partial_rollback): "
-                f"{result.get('message', 'Unknown error')}"
-            )
-            annotate_server_error(err, "partial_rollback", result)
-            raise err
+            raise _partial_session_rollback_error(result)
         self._raise_for_mcp_error(result, "rollback_session")
         return parse_response(SessionRollbackResult, result, operation="rollback_session")
 
@@ -4497,6 +4492,32 @@ def _checked_batch_items(items: Any, context_id: str) -> list[dict[str, Any]]:
             except ValueError as e:
                 raise ValueError(f"items[{index}]: {e}") from None
     return items
+
+
+def _int_or_none(value: Any) -> int | None:
+    """``value`` when it is an ``int`` (not a ``bool``), else ``None``."""
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _partial_session_rollback_error(result: dict[str, Any]) -> KaguraPartialSessionRollbackError:
+    """The error for ``rollback_session``'s ``partial_rollback`` envelope.
+
+    Not :meth:`KaguraClient._raise_for_mcp_error`'s ``partial_rollback``:
+    that one reads a Sleep run's ``rollback_summary``, which this envelope
+    lacks (``session_rollback.py`` sends ``summary`` and ``totals``). The
+    partial rollback is already committed, so a field the SDK cannot read is
+    ``None`` rather than a second error that would hide it.
+    """
+    totals = result.get("totals")
+    err = KaguraPartialSessionRollbackError(
+        f"rollback_session failed (partial_rollback): {result.get('message', 'Unknown error')}",
+        session_summary=_validate_or_none(SessionRollbackSummary, result.get("summary")),
+        totals=totals if isinstance(totals, dict) else None,
+        rollback_id=_int_or_none(result.get("rollback_id")),
+        remaining=_int_or_none(result.get("remaining")),
+    )
+    annotate_server_error(err, "partial_rollback", result)
+    return err
 
 
 def _str_list(name: str, values: Any) -> list[str]:
