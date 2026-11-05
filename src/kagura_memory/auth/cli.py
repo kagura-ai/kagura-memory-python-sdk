@@ -34,7 +34,6 @@ import click
 
 from ..exceptions import (
     KaguraAuthDeniedError,
-    KaguraAuthError,
     KaguraAuthExpiredError,
     KaguraConnectionError,
     _exc_message,
@@ -42,9 +41,11 @@ from ..exceptions import (
 from .credentials import (
     DEFAULT_CREDENTIALS_PATH,
     REFRESH_SKEW_SEC,
+    ConsentRequiredError,
     CredentialsFile,
     OAuthCredentials,
     RefreshResult,
+    check_login_credentials,
     delete_credentials_file,
     delete_profile,
     load_credentials_file,
@@ -230,6 +231,7 @@ async def _run_login(
     open_browser: bool,
     invite: InviteRef | None = None,
 ) -> None:
+    check_login_credentials()
     async with make_oauth_client() as client:
         device = await authorize_device(
             client,
@@ -897,12 +899,10 @@ async def _run_refresh(
             fallback=creds,
             scope=scope,
         )
-    except KaguraAuthError as e:
-        # The server refused the wider scope: fall through to a fresh device
-        # flow to collect the new consent.
-        if scope is None or not _refused_scope(e):
-            raise
-
+    except ConsentRequiredError as e:
+        snapshot = e.snapshot
+    assert scope is not None
+    creds = snapshot.selected
     click.echo(
         f"  Requested scope '{scope}' is wider than the current grant — "
         "re-running the device flow for consent..."
@@ -923,24 +923,9 @@ async def _run_refresh(
             interval=device.interval,
             expires_at=device.expires_at,
         )
-    new_creds = _build_credentials(token, server=creds.server)
-    update_profile(profile, new_creds)
+    new_creds = _build_credentials(token, server=creds.server, client_id=creds.client_id)
+    update_profile(profile, new_creds, consent=snapshot)
     return RefreshResult(new_creds, refreshed=True)
-
-
-_SCOPE_REFUSALS = ("insufficient_scope", "invalid_scope")
-
-
-def _refused_scope(e: KaguraAuthError) -> bool:
-    """Whether a refresh failed because the grant does not cover the scope asked for.
-
-    Reads the OAuth ``error`` the refresh keeps as ``code``. An error without a
-    code (a body with no OAuth ``error`` field) falls back to its message.
-    """
-    if e.code is not None:
-        return e.code in _SCOPE_REFUSALS
-    message = str(e).lower()
-    return any(refusal in message for refusal in _SCOPE_REFUSALS)
 
 
 # ---------------------------------------------------------------------------
@@ -1023,7 +1008,9 @@ def _resolve_server(explicit: str | None) -> str:
     return url
 
 
-def _build_credentials(token: TokenResponse, *, server: str) -> OAuthCredentials:
+def _build_credentials(
+    token: TokenResponse, *, server: str, client_id: str = DEFAULT_CLIENT_ID
+) -> OAuthCredentials:
     """Turn a device-flow token response into a new :class:`OAuthCredentials`.
 
     Used after ``login`` and after the scope-widening device flow of
@@ -1034,7 +1021,7 @@ def _build_credentials(token: TokenResponse, *, server: str) -> OAuthCredentials
     return OAuthCredentials(
         server=server,
         mcp_url=f"{server.rstrip('/')}/mcp",
-        client_id=DEFAULT_CLIENT_ID,
+        client_id=client_id,
         access_token=token.access_token,
         refresh_token=token.refresh_token,
         token_type=token.token_type,

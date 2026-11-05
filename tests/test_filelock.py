@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-import builtins
+import json
 import os
 import sys
 import time
@@ -12,31 +12,26 @@ from pathlib import Path
 import pytest
 
 from kagura_memory._filelock import _lock_path, async_file_lock, file_lock
+from kagura_memory.exceptions import KaguraAuthError
 
 # Module path for monkeypatching module-level lock constants (string-target form
 # so we don't also `import ... as fl`, keeping a single import style).
 _FL = "kagura_memory._filelock"
 
-_POSIX_ONLY = pytest.mark.skipif(
-    sys.platform == "win32", reason="POSIX fcntl lock; Windows is a no-op"
-)
-
 
 def test_lock_path_is_sibling_not_target():
     """The lock is taken on <name>.lock, never the credentials file itself."""
     target = Path("/home/u/.kagura/credentials.json")
-    assert _lock_path(target) == Path("/home/u/.kagura/credentials.json.lock")
+    assert _lock_path(target) == Path("/home/u/.kagura/credentials.json.lock-v1")
 
 
-@_POSIX_ONLY
 def test_file_lock_creates_lock_file_and_yields(tmp_path: Path):
     target = tmp_path / "credentials.json"
     with file_lock(target, exclusive=True):
         # The sibling lock file exists while the lock is held.
-        assert (tmp_path / "credentials.json.lock").exists()
+        assert (tmp_path / "credentials.json.lock-v1").exists()
 
 
-@_POSIX_ONLY
 def test_file_lock_sequential_acquire_release(tmp_path: Path):
     """Re-acquiring after release must not deadlock (lock is released on exit)."""
     target = tmp_path / "credentials.json"
@@ -47,7 +42,6 @@ def test_file_lock_sequential_acquire_release(tmp_path: Path):
         pass
 
 
-@_POSIX_ONLY
 def test_file_lock_released_on_exception(tmp_path: Path):
     """An exception inside the block still releases the lock (finally)."""
     target = tmp_path / "credentials.json"
@@ -59,144 +53,43 @@ def test_file_lock_released_on_exception(tmp_path: Path):
         pass
 
 
-@_POSIX_ONLY
 def test_file_lock_creates_parent_dir(tmp_path: Path):
     target = tmp_path / "nested" / "credentials.json"
     with file_lock(target, exclusive=True):
         assert target.parent.is_dir()
 
 
-def test_file_lock_noop_when_no_backend(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """With neither fcntl nor msvcrt the CM degrades to a no-op (no lock file).
-
-    Both backends are stubbed out (not just ``fcntl``) so this exercises the
-    no-op path on every platform — on Windows ``fcntl`` is already absent but
-    the real ``msvcrt`` backend would otherwise take over and create a lock
-    file, masking the no-op branch.
-    """
-    import builtins
-
-    real_import = builtins.__import__
-
-    def fake_import(name: str, *args: object, **kwargs: object):
-        if name in ("fcntl", "msvcrt"):
-            raise ImportError(f"simulated missing {name}")
-        return real_import(name, *args, **kwargs)  # type: ignore[arg-type]
-
-    monkeypatch.setattr(builtins, "__import__", fake_import)
+def test_legacy_marker_requires_manual_migration(tmp_path):
     target = tmp_path / "credentials.json"
-    with file_lock(target, exclusive=True):
-        pass
-    # No-op path must not have created a lock file.
-    assert not (tmp_path / "credentials.json.lock").exists()
+    legacy = tmp_path / "credentials.json.lock"
+    legacy.write_text("legacy")
+    with pytest.raises(KaguraAuthError, match="Stop every old and new client"):
+        with file_lock(target):
+            pytest.fail("entered despite legacy marker")
+    assert legacy.read_text() == "legacy"
 
 
-# ---------------------------------------------------------------------------
-# Windows msvcrt backend (#158)
-#
-# msvcrt is unavailable on the Linux CI runner, so the backend logic is
-# exercised by forcing `import fcntl` to fail and injecting a fake `msvcrt`
-# module. This unit-tests the byte-range / no-shared-mode / retry-loop logic
-# without a real Windows host.
-# ---------------------------------------------------------------------------
-
-
-class _FakeMsvcrt:
-    """Minimal stand-in for the ``msvcrt`` module's locking API."""
-
-    LK_LOCK = 1
-    LK_NBLCK = 2
-    LK_UNLCK = 0
-
-    def __init__(self, fail_nblck_times: int = 0) -> None:
-        self.calls: list[tuple[int, int]] = []
-        self.offsets: list[int] = []
-        self._fail = fail_nblck_times
-
-    def locking(self, fd: int, mode: int, nbytes: int) -> None:
-        # Record the fd position so the test can assert the caller seeked to 0
-        # (real msvcrt locks a byte range relative to the current position —
-        # dropping the lseek would lock/unlock the wrong region on Windows).
-        self.offsets.append(os.lseek(fd, 0, os.SEEK_CUR))
-        self.calls.append((mode, nbytes))
-        if mode == self.LK_NBLCK and self._fail > 0:
-            self._fail -= 1
-            raise OSError("Resource temporarily unavailable (simulated contention)")
-
-
-def _force_msvcrt(monkeypatch: pytest.MonkeyPatch, fake: _FakeMsvcrt) -> None:
-    """Make ``_detect_backend`` resolve to ``fake`` (no fcntl, then msvcrt)."""
-    real_import = builtins.__import__
-
-    def fake_import(name: str, *args: object, **kwargs: object):
-        if name == "fcntl":
-            raise ImportError("simulated no fcntl (Windows)")
-        if name == "msvcrt":
-            return fake
-        return real_import(name, *args, **kwargs)  # type: ignore[arg-type]
-
-    monkeypatch.setattr(builtins, "__import__", fake_import)
-
-
-def test_msvcrt_backend_locks_and_unlocks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """The msvcrt path creates the lock file and brackets the body lock→unlock."""
-    fake = _FakeMsvcrt()
-    _force_msvcrt(monkeypatch, fake)
-
+def test_abandoned_marker_is_not_broken(tmp_path, monkeypatch):
     target = tmp_path / "credentials.json"
-    with file_lock(target, exclusive=True):
-        assert (tmp_path / "credentials.json.lock").exists()
+    marker = _lock_path(target)
+    marker.write_text("crashed")
+    os.utime(marker, (0, 0))
+    monkeypatch.setattr(f"{_FL}._LOCK_ACQUIRE_TIMEOUT_SEC", 0)
+    with pytest.raises(TimeoutError, match="stop every participating client"):
+        with file_lock(target):
+            pytest.fail("broke an old lock")
+    assert marker.read_text() == "crashed"
 
-    modes = [mode for mode, _ in fake.calls]
-    assert modes == [fake.LK_NBLCK, fake.LK_UNLCK]
-    assert all(nbytes == 1 for _, nbytes in fake.calls)
-    # Both lock and unlock must operate at offset 0 (byte 0 of the lock file).
-    assert fake.offsets == [0, 0]
 
-
-def test_msvcrt_backend_treats_shared_as_exclusive(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """Windows has no shared mode: exclusive=False still takes an exclusive lock."""
-    fake = _FakeMsvcrt()
-    _force_msvcrt(monkeypatch, fake)
-
+def test_replacement_owner_survives_release(tmp_path):
     target = tmp_path / "credentials.json"
-    with file_lock(target, exclusive=False):
-        pass
-
-    # Same NBLCK acquire as the exclusive case — no shared variant exists.
-    assert fake.calls[0][0] == fake.LK_NBLCK
-
-
-def test_msvcrt_backend_retries_on_contention(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """A busy lock (LK_NBLCK raising OSError) is retried until it succeeds."""
-    fake = _FakeMsvcrt(fail_nblck_times=2)
-    _force_msvcrt(monkeypatch, fake)
-    monkeypatch.setattr(f"{_FL}._LOCK_RETRY_SEC", 0)  # don't actually sleep
-
-    target = tmp_path / "credentials.json"
-    with file_lock(target, exclusive=True):
-        pass
-
-    # 2 failed NBLCK attempts + 1 success + 1 UNLCK release.
-    nblck = [m for m, _ in fake.calls if m == fake.LK_NBLCK]
-    assert len(nblck) == 3
-    assert fake.calls[-1][0] == fake.LK_UNLCK
+    with file_lock(target):
+        marker = _lock_path(target)
+        assert json.loads(marker.read_bytes())["protocol"] == "kagura-credentials-lock-v1"
+        marker.write_text("replacement")
+    assert marker.read_text() == "replacement"
 
 
-def test_msvcrt_backend_times_out_on_stuck_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """A permanently-busy msvcrt lock raises TimeoutError instead of spinning forever."""
-    fake = _FakeMsvcrt(fail_nblck_times=10_000)  # never succeeds
-    _force_msvcrt(monkeypatch, fake)
-    monkeypatch.setattr(f"{_FL}._LOCK_RETRY_SEC", 0)
-    monkeypatch.setattr(f"{_FL}._LOCK_ACQUIRE_TIMEOUT_SEC", 0.0)  # trip the deadline at once
-
-    target = tmp_path / "credentials.json"
-    with pytest.raises(TimeoutError):
-        with file_lock(target, exclusive=True):
-            pass
-
-
-# ---------------------------------------------------------------------------
 # Cross-process lock contention (subprocess-based, #158)
 # ---------------------------------------------------------------------------
 
@@ -266,19 +159,17 @@ def test_file_lock_serializes_across_processes(tmp_path: Path):
 # ---------------------------------------------------------------------------
 
 
-@_POSIX_ONLY
 @pytest.mark.asyncio
 async def test_async_file_lock_acquires_and_releases(tmp_path: Path):
     """The async lock creates the lock file and releases so it can be re-taken."""
     target = tmp_path / "credentials.json"
     async with async_file_lock(target, exclusive=True):
-        assert (tmp_path / "credentials.json.lock").exists()
+        assert (tmp_path / "credentials.json.lock-v1").exists()
     # A second acquire after release must not hang.
     async with async_file_lock(target, exclusive=True):
         pass
 
 
-@_POSIX_ONLY
 @pytest.mark.asyncio
 async def test_async_file_lock_waits_and_is_cancellation_safe(tmp_path: Path):
     """A waiter blocked on a held lock can be cancelled WITHOUT leaking the lock.
@@ -321,7 +212,6 @@ async def test_async_file_lock_waits_and_is_cancellation_safe(tmp_path: Path):
         pass
 
 
-@_POSIX_ONLY
 @pytest.mark.asyncio
 async def test_async_file_lock_times_out_on_held_lock(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

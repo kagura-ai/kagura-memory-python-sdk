@@ -64,6 +64,20 @@ kagura files download-url <file_id> -c <context-id>   # short-lived GET on the o
 
 Ingestion extracts **text** — from PDFs, Office/HTML/EPUB documents, audio/video transcripts, and YouTube captions. Images embedded in a document are detected and counted (`IngestResult.skipped_images`) but not yet OCR'd: a vision provider (Gemini 2.5 Flash by default) is configured and validated, but the orchestrator does not currently invoke `Provider.describe_image()` — image-to-text memories are a planned follow-up. Pass `--no-vision` to skip provider configuration entirely, or `--dry-run` to see token / cost estimates without calling an LLM.
 
+### Sharing OAuth credentials with the TypeScript SDK
+
+Concurrent writers require Python SDK 0.45.0+ and TypeScript SDK 0.16.0+.
+Before migrating, stop **every** old and new CLI, proxy, and SDK process
+using the file. Only then manually retire the legacy `credentials.json.lock`
+if present. Do not restart mixed versions against the same credentials file.
+
+Writers now create `credentials.json.lock-v1` exclusively. After a crash,
+confirm that every participating client has stopped before manually removing
+an abandoned marker. Its age alone cannot establish abandonment. Keep the
+token-free `credentials.json.revocations-v1` alongside the file after logout:
+it prevents queued refreshes from restoring a removed profile. Explicit login
+can recreate the profile and retains the revocation history.
+
 ## Installation
 
 ```bash

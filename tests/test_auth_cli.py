@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import contextlib
 import json
-import os
-import sys
 import threading
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
@@ -39,7 +37,6 @@ _DF = "kagura_memory.auth.device_flow"
 # The lock-contention tests rely on fcntl serializing two open descriptions of
 # the same lock file within one process (the msvcrt backend is unit-tested in
 # test_filelock.py).
-_POSIX_ONLY = pytest.mark.skipif(sys.platform == "win32", reason="POSIX fcntl lock semantics")
 
 
 def _make_creds(
@@ -961,18 +958,9 @@ def _lock_is_free(credentials_path: Path) -> bool:
     """Whether nobody holds the cross-process lock on ``credentials_path`` right now."""
     import kagura_memory._filelock as fl
 
-    backend, mod = fl._detect_backend()
-    fd = os.open(str(fl._lock_path(credentials_path)), os.O_RDWR | os.O_CREAT, 0o600)
-    try:
-        if not fl._try_lock_fd(backend, mod, fd, exclusive=True):
-            return False
-        fl._unlock_fd(backend, mod, fd)
-        return True
-    finally:
-        os.close(fd)
+    return not fl._lock_path(credentials_path).exists()
 
 
-@_POSIX_ONLY
 @patch("kagura_memory.auth.cli.poll_for_token", new_callable=AsyncMock)
 @patch("kagura_memory.auth.cli.authorize_device", new_callable=AsyncMock)
 @patch(f"{_DF}.refresh_access_token", new_callable=AsyncMock)
@@ -1098,16 +1086,16 @@ def _peer_rotates_while_cli_waits(
 
     cli_waiting = threading.Event()
     waited: list[bool] = []
-    real_try_lock_fd = fl._try_lock_fd
+    real_try_acquire = fl._try_acquire
 
-    def spy_try_lock_fd(backend, mod, fd, *, exclusive):
-        acquired = real_try_lock_fd(backend, mod, fd, exclusive=exclusive)
+    def spy_try_acquire(target, deadline):
+        acquired = real_try_acquire(target, deadline)
         if not acquired:
             waited.append(True)
             cli_waiting.set()
         return acquired
 
-    monkeypatch.setattr(fl, "_try_lock_fd", spy_try_lock_fd)
+    monkeypatch.setattr(fl, "_try_acquire", spy_try_acquire)
     peer_holds = threading.Event()
 
     def peer() -> None:
@@ -1131,7 +1119,6 @@ def _peer_rotates_while_cli_waits(
     assert waited, "the CLI never waited on the lock the peer held"
 
 
-@_POSIX_ONLY
 def test_refresh_adopts_the_token_another_process_rotated_while_it_waited(
     patched_default_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -1167,7 +1154,6 @@ def test_refresh_adopts_the_token_another_process_rotated_while_it_waited(
     assert (on_disk.access_token, on_disk.refresh_token) == ("atok-peer", "rtok-peer")
 
 
-@_POSIX_ONLY
 def test_token_adopts_the_token_another_process_refreshed_while_it_waited(
     patched_default_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -1694,3 +1680,68 @@ def test_refresh_success_echo_survives_cp932_stdout(patched_default_path: Path, 
 
     assert result.exception is None, result.exception
     assert result.exit_code == 0
+
+
+def test_login_checks_credentials_before_showing_code(patched_default_path):
+    patched_default_path.parent.mkdir()
+    patched_default_path.write_text("invalid")
+    with patch("kagura_memory.auth.cli.authorize_device") as authorize:
+        result = CliRunner().invoke(main, ["auth", "login"])
+    assert result.exit_code == 1
+    assert "Cannot update" in result.output
+    authorize.assert_not_called()
+
+
+@pytest.mark.parametrize("relogin", [False, True])
+def test_scope_consent_refuses_logout_or_replacement(patched_default_path, relogin):
+    from kagura_memory.auth.credentials import delete_credentials_file, update_profile
+
+    _seed_credentials(patched_default_path.parent.parent, _make_creds())
+
+    def poll(*args, **kwargs):
+        delete_credentials_file(patched_default_path)
+        if relogin:
+            update_profile("default", _make_creds(access_token="replacement"), patched_default_path)
+        return _mock_token_response(access_token="obsolete")
+
+    with (
+        patch(f"{_DF}.refresh_access_token", side_effect=KaguraAuthError("invalid_scope")),
+        patch(f"{_DF}.make_oauth_client", return_value=_async_ctx()),
+        patch("kagura_memory.auth.cli.make_oauth_client", return_value=_async_ctx()),
+        patch("kagura_memory.auth.cli._try_open_browser", return_value=True),
+        patch("kagura_memory.auth.cli.authorize_device", return_value=_mock_device_response()),
+        patch("kagura_memory.auth.cli.poll_for_token", side_effect=poll),
+    ):
+        result = CliRunner().invoke(main, ["auth", "refresh", "--scope", "memory:write"])
+    assert result.exit_code == 1
+    if relogin:
+        assert (
+            load_credentials_file(patched_default_path).profiles["default"].access_token
+            == "replacement"
+        )
+    else:
+        assert not patched_default_path.exists()
+
+
+def test_scope_consent_uses_peer_server_and_client(patched_default_path, monkeypatch):
+    _seed_credentials(patched_default_path.parent.parent, _make_creds(access_token="old"))
+    peer = _make_creds(access_token="peer", refresh_token="peer-refresh")
+    peer.server = "https://peer.example.com"
+    peer.client_id = "peer-client"
+    with (
+        _peer_rotates_while_cli_waits(patched_default_path, peer, monkeypatch),
+        patch(f"{_DF}.refresh_access_token", side_effect=KaguraAuthError("invalid_scope")),
+        patch(f"{_DF}.make_oauth_client", return_value=_async_ctx()),
+        patch("kagura_memory.auth.cli.make_oauth_client", return_value=_async_ctx()),
+        patch("kagura_memory.auth.cli._try_open_browser", return_value=True),
+        patch(
+            "kagura_memory.auth.cli.authorize_device", return_value=_mock_device_response()
+        ) as auth,
+        patch("kagura_memory.auth.cli.poll_for_token", return_value=_mock_token_response()),
+    ):
+        result = CliRunner().invoke(main, ["auth", "refresh", "--scope", "memory:write"])
+    assert result.exit_code == 0, result.output
+    assert auth.call_args.args[1] == peer.server
+    assert auth.call_args.kwargs["client_id"] == peer.client_id
+    saved = load_credentials_file(patched_default_path).profiles["default"]
+    assert (saved.server, saved.client_id) == (peer.server, peer.client_id)

@@ -55,6 +55,17 @@ jobs:
         # unaffected — extras are opt-in via `pip install kagura-memory[...]`.
         run: uv sync --dev --extra ingest-all --extra secret --python ${{ matrix.python-version }}
 
+      - uses: actions/setup-node@v4
+        if: matrix.python-version == '3.11'
+        with:
+          node-version: 22
+
+      - name: Install credential interoperability peer
+        if: matrix.python-version == '3.11'
+        run: |
+          npm install --prefix "$RUNNER_TEMP/credential-peer" --ignore-scripts kagura-memory@0.16.0
+          echo "KAGURA_NODE_SDK=$RUNNER_TEMP/credential-peer/node_modules/kagura-memory" >> "$GITHUB_ENV"
+
       - name: Test with coverage
         run: uv run pytest tests/ -v -m "not integration and not eval and not browser and not youtube and not audio" --cov=src/kagura_memory --cov-report=xml --cov-report=term
 

@@ -698,7 +698,6 @@ def _fresh_token(access_token: str) -> TokenResponse:
     )
 
 
-@_POSIX_ONLY_CREDS
 @pytest.mark.asyncio
 async def test_refresh_dedup_skew_only_one_network_call(tmp_path: Path):
     """Two 'processes' both within the skew window → exactly one /oauth2/token call.
@@ -741,7 +740,6 @@ async def test_refresh_dedup_skew_only_one_network_call(tmp_path: Path):
     assert load_credentials_file(path).get_profile().access_token == "fresh"
 
 
-@_POSIX_ONLY_CREDS
 @pytest.mark.asyncio
 async def test_refresh_dedup_negative_control_without_lock(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -793,7 +791,6 @@ async def test_refresh_dedup_negative_control_without_lock(
     assert calls == 2, f"without the lock both processes should refresh, got {calls}"
 
 
-@_POSIX_ONLY_CREDS
 @pytest.mark.asyncio
 async def test_force_refresh_adopts_when_another_process_rotated(tmp_path: Path):
     """401 path: if the on-disk token already differs from the rejected one, adopt + skip.
@@ -828,7 +825,6 @@ async def test_force_refresh_adopts_when_another_process_rotated(tmp_path: Path)
     assert auth._state.credentials.access_token == "peer-rotated"
 
 
-@_POSIX_ONLY_CREDS
 @pytest.mark.asyncio
 async def test_force_refresh_hits_network_when_token_unchanged(tmp_path: Path):
     """401 path: an identical on-disk token means nobody rotated → this process refreshes.
@@ -882,7 +878,6 @@ def _single_use_token_endpoint(calls: list[str]):
     return fake_refresh
 
 
-@_POSIX_ONLY_CREDS
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cli_first", [True, False])
 async def test_cli_and_proxy_refresh_race_makes_one_token_call(tmp_path: Path, cli_first: bool):
@@ -932,7 +927,6 @@ async def test_cli_and_proxy_refresh_race_makes_one_token_call(tmp_path: Path, c
     assert (on_disk.access_token, on_disk.refresh_token) == ("fresh-from-rtok-old", "new-rtok")
 
 
-@_POSIX_ONLY_CREDS
 @pytest.mark.asyncio
 async def test_cli_and_proxy_refresh_race_without_the_lock_reproduces_313(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -973,7 +967,6 @@ async def test_cli_and_proxy_refresh_race_without_the_lock_reproduces_313(
         )
 
 
-@_POSIX_ONLY_CREDS
 @pytest.mark.asyncio
 async def test_refresh_profile_locked_skew_path_adopts_a_fresh_disk_token(tmp_path: Path):
     """Skew path: a token on disk outside the skew window is returned as is."""
@@ -993,7 +986,6 @@ async def test_refresh_profile_locked_skew_path_adopts_a_fresh_disk_token(tmp_pa
     assert (result.credentials.access_token, result.refreshed) == ("peer-fresh", False)
 
 
-@_POSIX_ONLY_CREDS
 @pytest.mark.asyncio
 async def test_refresh_profile_locked_with_scope_refreshes_from_the_token_on_disk(tmp_path: Path):
     """A requested scope always reaches the server, even after a peer rotated.
@@ -1031,7 +1023,6 @@ async def test_refresh_profile_locked_with_scope_refreshes_from_the_token_on_dis
     assert on_disk.access_token == "narrowed"
 
 
-@_POSIX_ONLY_CREDS
 @pytest.mark.asyncio
 async def test_refresh_profile_locked_refreshes_the_fallback_when_the_profile_is_gone(
     tmp_path: Path,
@@ -1064,7 +1055,6 @@ async def test_refresh_profile_locked_refreshes_the_fallback_when_the_profile_is
     assert (mine.access_token, other.access_token) == ("fresh", "other-token")
 
 
-@_POSIX_ONLY_CREDS
 @pytest.mark.asyncio
 async def test_refresh_profile_locked_saves_before_it_releases_the_lock(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1085,14 +1075,14 @@ async def test_refresh_profile_locked_saves_before_it_releases_the_lock(
     save_credentials_file(cf, path)
 
     on_disk_at_release: list[str | None] = []
-    real_unlock_fd = fl._unlock_fd
+    real_release = fl._release
 
-    def spy_unlock_fd(backend, mod, fd):
+    def spy_release(target, owner):
         profile = load_credentials_file(path).get_profile()
         on_disk_at_release.append(profile.access_token if profile else None)
-        real_unlock_fd(backend, mod, fd)
+        real_release(target, owner)
 
-    monkeypatch.setattr(fl, "_unlock_fd", spy_unlock_fd)
+    monkeypatch.setattr(fl, "_release", spy_release)
     with (
         patch(
             "kagura_memory.auth.device_flow.refresh_access_token",
@@ -1526,3 +1516,117 @@ def test_delete_profile_no_op_is_lock_guarded(tmp_path: Path, monkeypatch: pytes
 
     assert calls == [True]  # lock acquired before the membership check
     assert "alice" in load_credentials_file(path).profiles
+
+
+@pytest.mark.parametrize("full", [True, False])
+@pytest.mark.asyncio
+async def test_logout_revokes_missing_fallback_even_after_explicit_login(tmp_path, full):
+    path = tmp_path / "credentials.json"
+    cached = _sample_creds()
+    update_profile("mine", cached, path)
+    update_profile("other", cached, path)
+    if full:
+        delete_credentials_file(path)
+    else:
+        delete_profile("mine", path)
+        assert load_credentials_file(path).get_profile("other")
+    with patch("kagura_memory.auth.credentials._network_refresh") as request:
+        for after_login in (False, True):
+            if after_login:
+                update_profile("mine", cached, path)
+                assert load_credentials_file(path).get_profile("mine")
+                path.unlink()
+            with pytest.raises(KaguraAuthError, match="logged out"):
+                await refresh_profile_locked(
+                    "mine", expected_stale_token=None, fallback=cached, path=path
+                )
+        request.assert_not_called()
+    assert not path.exists()
+
+
+@pytest.mark.asyncio
+async def test_corrupt_revocations_refuse_missing_refresh(tmp_path):
+    path = tmp_path / "credentials.json"
+    (tmp_path / "credentials.json.revocations-v1").write_text('{"version":true}')
+    with patch("kagura_memory.auth.credentials._network_refresh") as request:
+        with pytest.raises(KaguraAuthError, match="revocations"):
+            await refresh_profile_locked(
+                "mine", expected_stale_token=None, fallback=_sample_creds(), path=path
+            )
+        request.assert_not_called()
+
+
+@pytest.mark.parametrize("first", ["node", "python"])
+@pytest.mark.asyncio
+async def test_node_sdk_and_python_share_one_refresh(first, tmp_path, monkeypatch):
+    """Set KAGURA_NODE_SDK to the installed TypeScript SDK entry point to run."""
+    import subprocess
+    import time
+
+    import kagura_memory._filelock as locks
+
+    sdk = os.environ.get("KAGURA_NODE_SDK")
+    if not sdk:
+        pytest.skip("requires the TypeScript SDK interoperability fixture")
+    path = tmp_path / "credentials.json"
+    cached = _sample_creds(expires_at=datetime.now(UTC) - timedelta(minutes=1))
+    update_profile("mine", cached, path)
+    update_profile("other", cached, path)
+
+    def launch():
+        return subprocess.Popen(
+            [
+                "node",
+                str(Path(__file__).parent / "fixtures/node_credential_refresh.cjs"),
+                sdk,
+                str(path),
+                first,
+            ],
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+    async def wait_for(suffix):
+        deadline = time.monotonic() + 10
+        while not Path(str(path) + suffix).exists():
+            assert proc is not None and proc.poll() is None, proc.stderr.read() if proc else ""
+            assert time.monotonic() < deadline, suffix
+            await asyncio.sleep(0.01)
+
+    proc = None
+
+    async def refresh(base, *, scope):
+        nonlocal proc
+        assert first == "python"
+        proc = launch()
+        await wait_for(".node-waiting")
+        return base.with_refreshed(
+            access_token="python", expires_at=datetime.now(UTC) + timedelta(hours=1)
+        )
+
+    try:
+        if first == "node":
+            proc = launch()
+            await wait_for(".node-refreshing")
+            acquire = locks._try_acquire
+
+            def tried(target, deadline):
+                owner = acquire(target, deadline)
+                if owner is None:
+                    Path(str(path) + ".python-waiting").touch()
+                return owner
+
+            monkeypatch.setattr(locks, "_try_acquire", tried)
+        with patch("kagura_memory.auth.credentials._network_refresh", refresh):
+            result = await refresh_profile_locked(
+                "mine", expected_stale_token=None, fallback=cached, path=path
+            )
+        assert proc is not None
+        _, stderr = await asyncio.to_thread(proc.communicate, timeout=15)
+        assert proc.returncode == 0, stderr
+        assert result.credentials.access_token == first
+        assert load_credentials_file(path).profiles["other"].access_token == cached.access_token
+    finally:
+        if proc is not None and proc.poll() is None:
+            proc.kill()
+            proc.wait()
