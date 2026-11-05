@@ -124,6 +124,10 @@ class KaguraConnectionError(KaguraError):
     """Connection to Kagura server failed."""
 
 
+class KaguraContextAccessListError(KaguraConnectionError):
+    """Adding this context member requires extending their workspace access list."""
+
+
 class KaguraServiceUnavailableError(KaguraConnectionError):
     """The server answered HTTP 503: it could not serve the request right now.
 

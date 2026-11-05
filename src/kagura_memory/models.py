@@ -1420,6 +1420,38 @@ class WorkspaceMember(BaseModel):
     seat_paused: bool = False
 
 
+class AssignableContext(BaseModel):
+    id: str
+    name: str
+    display_name: str | None = None
+    summary: str | None = None
+    is_private: bool
+    is_own_private: bool = False
+
+
+class MemberContextAccess(BaseModel):
+    user_id: str
+    role: str
+    allowed_context_ids: list[str] | None
+    contexts: list[AssignableContext]
+
+
+class MemberContextAccessUpdate(BaseModel):
+    status: Literal["ok"]
+    user_id: str
+    allowed_context_ids: list[str] | None
+
+
+class ContextMember(BaseModel):
+    user_id: str
+    role: str
+    user_name: str | None = None
+    user_email: str | None = None
+    added_at: str | None = None
+    is_workspace_admin: bool = False
+    access_list_extended: bool = False
+
+
 class WorkspaceInvitation(BaseModel):
     """A workspace invitation (#225). Non-strict like :class:`WorkspaceMember`.
 

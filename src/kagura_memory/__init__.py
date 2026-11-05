@@ -8,6 +8,7 @@ from .exceptions import (
     KaguraAuthExpiredError,
     KaguraCapacityLockedError,
     KaguraConnectionError,
+    KaguraContextAccessListError,
     KaguraContextError,
     KaguraError,
     KaguraFeatureNotAvailableError,
@@ -37,6 +38,7 @@ from .models import (
     AgentBootstrapCorrelation,
     AgentBootstrapResponse,
     AgentStatus,
+    AssignableContext,
     BootstrapChangesLane,
     BootstrapComponentName,
     BootstrapComponents,
@@ -52,6 +54,7 @@ from .models import (
     ContextGuardrailItem,
     ContextGuardrails,
     ContextInfo,
+    ContextMember,
     ContextStats,
     CostBreakdown,
     DedupeMode,
@@ -89,6 +92,8 @@ from .models import (
     MeasurementResult,
     MeasurementSeries,
     MemberAPIKey,
+    MemberContextAccess,
+    MemberContextAccessUpdate,
     MemoryListItem,
     MemoryListItemLocation,
     MemoryListResponse,
@@ -145,7 +150,7 @@ from .models import (
 from .resource_client import ResourceClient
 from .workspace_client import WorkspaceClient
 
-__version__ = "0.44.0"
+__version__ = "0.45.0"
 
 __all__ = [
     # Core classes
@@ -230,6 +235,10 @@ __all__ = [
     "FileObject",
     "FileListResponse",
     # Workspace member management (#225, server v0.42.0+)
+    "AssignableContext",
+    "ContextMember",
+    "MemberContextAccess",
+    "MemberContextAccessUpdate",
     "WorkspaceMember",
     "WorkspaceInvitation",
     "MemberAPIKey",
@@ -297,6 +306,7 @@ __all__ = [
     "KaguraAuthError",
     "KaguraAuthExpiredError",
     "KaguraAuthDeniedError",
+    "KaguraContextAccessListError",
     "KaguraConnectionError",
     "KaguraRateLimitError",
     "KaguraNotFoundError",

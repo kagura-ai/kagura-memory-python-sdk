@@ -3,6 +3,7 @@
 import asyncio
 import json
 import math
+import os
 import sys
 from collections.abc import Awaitable, Callable, Iterable
 from datetime import datetime
@@ -4281,8 +4282,18 @@ def member_list(workspace_id: str | None, as_json: bool):
     required=True,
     help="Role for the new member (owner cannot be assigned programmatically)",
 )
+@click.option(
+    "--context",
+    "contexts",
+    multiple=True,
+    callback=_context_uuids_param,
+    help="Grant this context (repeatable).",
+)
+@click.option("--no-contexts", is_flag=True, help="Grant no context access.")
 @click.option("--workspace", "-w", "workspace_id", help=_WORKSPACE_OPT_HELP)
-def member_add(user_id: str, role: str, workspace_id: str | None):
+def member_add(
+    user_id: str, role: str, workspace_id: str | None, contexts: tuple[str, ...], no_contexts: bool
+):
     """
     Add an ALREADY-REGISTERED user to the workspace by user id.
 
@@ -4290,22 +4301,96 @@ def member_add(user_id: str, role: str, workspace_id: str | None):
     creates a dangling membership row. Prefer
     `kagura workspace invite create <email>` for onboarding.
 
-    The new member has no context access list. On memory-cloud v0.126.0+
-    a member without one reaches no context and a viewer every shared
-    context, until the list is set on the web members page (the server
-    takes it from a browser session only). `invite create --context`
-    sets it at invitation time.
+    On memory-cloud v0.144.0+ use --context or --no-contexts to set access.
+    Omit both to use the role default.
 
     \b
     Example:
       kagura workspace member add google_1234 --role member
     """
 
+    if contexts and no_contexts:
+        raise click.UsageError("Choose --context or --no-contexts.")
+
     async def op(client: WorkspaceClient, ws: str) -> str:
-        m = await client.add_member(ws, user_id, role=role)
+        options = {"allowed_context_ids": list(contexts)} if contexts or no_contexts else {}
+        m = await client.add_member(ws, user_id, role=role, **options)
         return f"Added {m.user_id} as {m.role}"
 
     _run_workspace_command(op, workspace_id)
+
+
+@member.command(name="get-context-access")
+@click.argument("user_id", callback=_user_id_param)
+@click.option("--workspace", "-w", "workspace_id", help=_WORKSPACE_OPT_HELP)
+def member_get_context_access(user_id: str, workspace_id: str | None):
+    """Print the member's access list and assignable contexts as JSON."""
+
+    async def op(client: WorkspaceClient, ws: str) -> str:
+        return (await client.get_member_context_access(ws, user_id)).model_dump_json(indent=2)
+
+    _run_workspace_command(op, workspace_id)
+
+
+@member.command(name="set-context-access")
+@click.argument("user_id", callback=_user_id_param)
+@click.option("--workspace", "-w", "workspace_id", help=_WORKSPACE_OPT_HELP)
+@click.option(
+    "--context",
+    "contexts",
+    multiple=True,
+    callback=_context_uuids_param,
+    help="Grant this context (repeatable).",
+)
+@click.option("--no-contexts", is_flag=True, help="Grant no context access.")
+@click.option("--role-default", is_flag=True, help="Clear the list and restore role defaults.")
+def member_set_context_access(
+    user_id: str,
+    workspace_id: str | None,
+    contexts: tuple[str, ...],
+    no_contexts: bool,
+    role_default: bool,
+):
+    """Replace the member's access list and print the result as JSON."""
+    if sum((bool(contexts), no_contexts, role_default)) != 1:
+        raise click.UsageError("Choose one of --context, --no-contexts, or --role-default.")
+
+    async def op(client: WorkspaceClient, ws: str) -> str:
+        ids = None if role_default else list(contexts)
+        return (await client.set_member_context_access(ws, user_id, ids)).model_dump_json(indent=2)
+
+    _run_workspace_command(op, workspace_id)
+
+
+@context.command(name="add-member")
+@click.argument("context_id", type=click.UUID)
+@click.argument("user_id", callback=_user_id_param)
+@click.option("--role", required=True, type=click.Choice(["owner", "editor", "viewer"]))
+@click.option("--extend-access-list/--no-extend-access-list", default=None)
+@click.option("--server", required=True, help="Origin of the signed-in web session.")
+def context_add_member(
+    context_id, user_id: str, role: str, extend_access_list: bool | None, server: str
+):
+    """Add a shared-context member with a signed-in web session. Prints JSON."""
+    cookie = os.environ.get("KAGURA_SESSION_COOKIE") or click.prompt(
+        "kagura_session", hide_input=True
+    )
+
+    async def run() -> str:
+        async with WorkspaceClient.from_web_session(
+            base_url=server, session_cookie=cookie
+        ) as client:
+            row = await client.add_context_member(
+                str(context_id), user_id, role, extend_access_list=extend_access_list
+            )
+            return row.model_dump_json(indent=2)
+
+    try:
+        click.echo(asyncio.run(run()))
+    except KaguraError as e:
+        raise click.ClickException(_cli_error_message(e)) from e
+    except ValueError as e:
+        raise click.ClickException(str(e)) from e
 
 
 @member.command(name="set-role")

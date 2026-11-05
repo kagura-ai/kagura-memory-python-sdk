@@ -107,6 +107,7 @@ class KaguraRestClient:
         timeout: float = 30.0,
         *,
         _oauth: KaguraOAuth | None = None,
+        _session_cookie: str | None = None,
         _auth_source: _AuthSource | None = None,
         _workspace_id_hint: str | None = None,
     ) -> None:
@@ -134,7 +135,7 @@ class KaguraRestClient:
             ValueError: If neither ``api_key`` nor ``_oauth`` is given,
                 or the base URL is plain HTTP on a non-loopback host.
         """
-        if api_key is None and _oauth is None:
+        if api_key is None and _oauth is None and _session_cookie is None:
             name = type(self).__name__
             raise ValueError(
                 f"{name} requires api_key, or use {name}.from_mcp_url(...) "
@@ -145,7 +146,16 @@ class KaguraRestClient:
         validate_https_url(stripped_url, label="Base URL")
         self.base_url = stripped_url
 
-        if _oauth is not None:
+        self._uses_web_session = _session_cookie is not None
+        if _session_cookie is not None:
+            if not _session_cookie or any(c.isspace() or c in ";," for c in _session_cookie):
+                raise ValueError("Expected a single nonempty kagura_session cookie value")
+            self._client = httpx.AsyncClient(
+                timeout=timeout,
+                cookies={"kagura_session": _session_cookie},
+                headers={"User-Agent": f"kagura-memory-sdk/{SDK_VERSION}"},
+            )
+        elif _oauth is not None:
             # OAuth path: the handler injects a fresh access_token per
             # request and coordinates refresh via the credentials lock.
             self._client = httpx.AsyncClient(
@@ -374,6 +384,8 @@ class KaguraRestClient:
 
     def _error_401(self, e: httpx.HTTPStatusError) -> KaguraError:
         """401 -> auth error with a recovery hint matching the auth mode."""
+        if self._uses_web_session:
+            return KaguraAuthError("Authentication failed. Renew the signed-in web session.")
         hint = (
             "Re-run `kagura auth login` or inspect ~/.kagura/credentials.json."
             if self._oauth is not None
