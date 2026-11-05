@@ -16,7 +16,7 @@ This module owns three responsibilities:
 Multi-process coordination (e.g. several ``kagura-mcp`` proxy children
 refreshing the same file) is handled in two layers: the in-process
 :class:`asyncio.Lock` coalesces refreshes *within* a process, and the
-cross-process advisory lock in :mod:`kagura_memory._filelock` (acquired
+cross-process exclusive-create lock in :mod:`kagura_memory._filelock` (acquired
 inside :func:`refresh_profile_locked`) re-reads the on-disk token
 after locking and skips the ``/oauth2/token`` round-trip when another
 process already rotated it — so only one process hits the token endpoint
@@ -394,22 +394,87 @@ def save_credentials_file(cf: CredentialsFile, path: Path | None = None) -> None
     _atomic_write_json(_resolve_path(path), cf.to_dict(), mode=CREDENTIALS_FILE_MODE)
 
 
+def check_login_credentials() -> None:
+    """Refuse an unreadable file before starting device authorization."""
+    from .._filelock import file_lock
+
+    path = _resolve_path(None)
+    with file_lock(path):
+        _load_for_update(path)
+
+
+def _revocations(path: Path) -> tuple[bool, list[str]]:
+    marker = path.with_name(path.name + ".revocations-v1")
+    try:
+        record = json.loads(marker.read_bytes())
+        if (
+            not isinstance(record, dict)
+            or type(record.get("version")) is not int
+            or record["version"] != 1
+            or not isinstance(record.get("all"), bool)
+            or not isinstance(record.get("profiles"), list)
+            or not all(isinstance(name, str) for name in record["profiles"])
+        ):
+            raise ValueError
+        return record["all"], record["profiles"]
+    except FileNotFoundError:
+        return False, []
+    except (ValueError, OSError):
+        raise KaguraAuthError(f"Cannot read credential revocations at {marker}") from None
+
+
+def _record_logout(path: Path, name: str | None) -> None:
+    revoked_all, names = _revocations(path)
+    if name is None:
+        revoked_all, names = True, []
+    elif not revoked_all and name not in names:
+        names.append(name)
+    _atomic_write_json(
+        path.with_name(path.name + ".revocations-v1"),
+        {
+            "version": 1,
+            "all": revoked_all,
+            "profiles": names,
+        },
+    )
+
+
+def _check_fallback(path: Path, name: str) -> None:
+    revoked_all, names = _revocations(path)
+    if revoked_all or name in names:
+        raise KaguraAuthError(f"Profile '{name}' was logged out. Run: kagura auth login")
+
+
+def _token_pair(creds: OAuthCredentials | None) -> tuple[str, str] | None:
+    return (creds.access_token, creds.refresh_token) if creds else None
+
+
+@dataclass(repr=False)
+class ConsentSnapshot:
+    selected: OAuthCredentials
+    disk_tokens: tuple[str, str] | None
+
+
+class ConsentRequiredError(KaguraAuthError):
+    """The refresh endpoint refused a scope and the caller can request consent."""
+
+    def __init__(self, error: KaguraAuthError, snapshot: ConsentSnapshot) -> None:
+        super().__init__(str(error))
+        self.code = error.code
+        self.details = error.details
+        self.snapshot = snapshot
+
+
 def update_profile(
     profile_name: str,
     creds: OAuthCredentials,
     path: Path | None = None,
+    *,
+    consent: ConsentSnapshot | None = None,
 ) -> None:
     """Load, mutate one profile, and atomically save back.
 
-    The read-modify-write is serialized two ways: the in-process
-    :class:`asyncio.Lock` held in :class:`_SharedCredentialsState` coalesces
-    refreshes within a single process, and a cross-process advisory
-    :func:`kagura_memory._filelock.file_lock` (POSIX ``fcntl`` or Windows
-    ``msvcrt``) wraps the load→set→save so concurrent writers in *different*
-    processes — e.g. multiple ``kagura-mcp`` proxy children — cannot lose an
-    update. The lock is on a sibling ``credentials.json.lock``, not the file
-    itself, so it never races the atomic ``os.replace`` in
-    :func:`save_credentials_file`.
+    The lock-v1 marker serializes the entire read-modify-write across SDKs.
 
     Raises:
         KaguraAuthError: The file exists but cannot be read or parsed; it is
@@ -420,6 +485,12 @@ def update_profile(
     path = _resolve_path(path)
     with file_lock(path, exclusive=True):
         cf = _load_for_update(path)
+        if consent is not None:
+            current = cf.get_profile(profile_name)
+            if current is None:
+                _check_fallback(path, profile_name)
+            if _token_pair(current) != consent.disk_tokens:
+                raise KaguraAuthError("Profile changed during consent. Run: kagura auth refresh")
         cf.set_profile(profile_name, creds)
         save_credentials_file(cf, path)
 
@@ -429,7 +500,7 @@ def set_default_profile(profile_name: str, path: Path | None = None) -> None:
 
     Unlike :func:`CredentialsFile.set_profile`'s implicit first-wins promotion,
     this is a *deliberate* default selection. The read-modify-write is wrapped in
-    the same cross-process advisory :func:`kagura_memory._filelock.file_lock` as
+    the same cross-process exclusive-create :func:`kagura_memory._filelock.file_lock` as
     :func:`update_profile` so a concurrent refresh/login cannot clobber it.
 
     Raises:
@@ -454,7 +525,7 @@ def delete_profile(
 ) -> None:
     """Remove a profile and save. No-op if the profile is absent.
 
-    The read-modify-write is wrapped in the same cross-process advisory
+    The read-modify-write is wrapped in the same cross-process exclusive-create
     :func:`kagura_memory._filelock.file_lock` as :func:`update_profile`, so a
     ``kagura auth logout`` (delete) racing a concurrent token refresh (update)
     in a sibling ``kagura-mcp`` process cannot clobber a freshly written token
@@ -469,6 +540,7 @@ def delete_profile(
     path = _resolve_path(path)
     with file_lock(path, exclusive=True):
         cf = _load_for_update(path)
+        _record_logout(path, profile_name)
         if profile_name not in cf.profiles:
             return
         cf.delete_profile(profile_name)
@@ -486,6 +558,7 @@ def delete_credentials_file(path: Path | None = None) -> None:
 
     path = _resolve_path(path)
     with file_lock(path, exclusive=True):
+        _record_logout(path, None)
         try:
             path.unlink()
         except FileNotFoundError:
@@ -573,7 +646,9 @@ def get_shared_state(
     else:
         # Refresh in-memory creds from disk so a recent CLI login is
         # visible to clients already constructed in this process.
-        cached.credentials = creds
+        if cached.used_refresh_token != creds.refresh_token:
+            cached.credentials = creds
+            cached.used_refresh_token = None
     return cached
 
 
@@ -792,16 +867,23 @@ async def refresh_profile_locked(
         # failing — an unreadable file must not be rewritten with one profile.
         cf = _load_for_update(path)
         on_file = cf.get_profile(profile_name)
+        if on_file is None:
+            _check_fallback(path, profile_name)
         disk = on_file
         if disk is not None and used_refresh_token and disk.refresh_token == used_refresh_token:
             disk = None  # the file is behind the caller: refresh from its copy
         if disk is not None and scope is None and _already_rotated(disk, expected_stale_token):
             return RefreshResult(disk, refreshed=False)
-        refreshed = await _network_refresh(disk if disk is not None else fallback, scope=scope)
-        # We already hold the cross-process lock; write directly rather than via
-        # update_profile (which would re-acquire the same lock on a second fd
-        # and self-deadlock — fcntl treats independent open descriptions
-        # independently, even within one process).
+        selected = disk if disk is not None else fallback
+        try:
+            refreshed = await _network_refresh(selected, scope=scope)
+        except KaguraAuthError as error:
+            if scope is None or not _refused_scope(error):
+                raise
+            raise ConsentRequiredError(
+                error, ConsentSnapshot(selected, _token_pair(on_file))
+            ) from error
+        # Save while still holding the lock that guarded the refresh.
         cf.set_profile(profile_name, refreshed)
         try:
             save_credentials_file(cf, path)
@@ -869,3 +951,18 @@ async def _network_refresh(base: OAuthCredentials, *, scope: str | None) -> OAut
         # only on None — so an omitted scope blanked the stored grant.
         scope=token.scope or None,
     )
+
+
+_SCOPE_REFUSALS = ("insufficient_scope", "invalid_scope")
+
+
+def _refused_scope(e: KaguraAuthError) -> bool:
+    """Whether a refresh failed because the grant does not cover the scope asked for.
+
+    Reads the OAuth ``error`` the refresh keeps as ``code``. An error without a
+    code (a body with no OAuth ``error`` field) falls back to its message.
+    """
+    if e.code is not None:
+        return e.code in _SCOPE_REFUSALS
+    message = str(e).lower()
+    return any(refusal in message for refusal in _SCOPE_REFUSALS)
