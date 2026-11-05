@@ -6,6 +6,14 @@ Which memory-cloud server each release of the kagura-memory SDK needs, and the n
 
 **Reading a section.** Its first paragraph, **Min memory-cloud**, is the floor: the memory-cloud release the SDK as a whole needs (`MIN_SERVER_VERSION`), the newest release that SDK release was checked against ("checked against memory-cloud up to …", in most sections from 0.39.0 on), and, under "Per-surface" or in parentheses, the newer release a method, CLI command or argument needs. A floor holds from that SDK release on, and a surface a newer section does not name keeps the floor an older section gave it. The rest of the section is that release's notes.
 
+## 0.45.0
+
+**Min memory-cloud:** 0.17.1 — checked against memory-cloud up to **0.144.0**. Owner-key workspace member management requires 0.42.0. Initial access lists, owner-key member context-access GET/PUT, stored access lists on role-change responses, and the context-member add extension and conflict reason require 0.144.0.
+
+The workspace owner can set a member's allowed contexts during onboarding and inspect or replace the list afterwards. A signed-in web session can add a context member and, for workspace owners/admins, explicitly extend their workspace access list in the same operation. See the [server routes at v0.144.0](https://github.com/kagura-ai/memory-cloud/tree/v0.144.0/backend/src/api/routes) and the [CLI examples](../README.md).
+
+**OAuth credential migration:** Python 0.45.0 and TypeScript 0.16.0 support sharing the credentials file. Stop every participating old and new client before manually retiring a legacy `.lock` or recovering an abandoned `.lock-v1`. Never infer abandonment from age. Upgrade every writer before restarting. Keep `.revocations-v1` alongside the credentials file so a pending refresh cannot undo logout. The protocol is local and has no additional server version requirement.
+
 ## 0.44.0
 
 **Min memory-cloud:** 0.17.1 — checked against memory-cloud up to **0.142.0**. Per-surface: 0.78.0 `reference(content_offset=)`; 0.82.0 `list_contexts(limit=)`, `get_state(limit=, max_chars=)` and `kagura context list --limit/--cursor`; 0.93.0 `bootstrap`, `changes_since`, `list_matching`, `remember_batch`, `describe_tools`, `guide` and `remember(dedupe=, tags_normalize=, verbose=)`; 0.110.0 `content_chunks_enabled`; 0.113.0 `expected_version`, `reference(version=)`, `list_revisions`, `rollback_session` and `changes_since(session_id=)`; 0.114.0 `changes_since(by_me=)` and the `rollback_session` window; 0.115.0 `bootstrap(format=)` and `llm_selector_enabled`; 0.117.0 `forget(memory_ids=)`; 0.126.0 `accept_supersede_candidate`; 0.127.0 `observed_at`; 0.140.0 `add_tags` / `remove_tags` / `details_patch` and the one-call `--merge-details`; 0.142.0 `plan_headroom`, `acceptance` on recall rows and `not_writable` for a guardrail

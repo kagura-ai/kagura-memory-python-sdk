@@ -31,11 +31,19 @@ from ._http import (
 from ._rest_base import KaguraRestClient
 from .exceptions import (
     KaguraConnectionError,
+    KaguraContextAccessListError,
     KaguraError,
     KaguraQuotaError,
     KaguraResponseError,
 )
-from .models import MemberAPIKey, WorkspaceInvitation, WorkspaceMember
+from .models import (
+    ContextMember,
+    MemberAPIKey,
+    MemberContextAccess,
+    MemberContextAccessUpdate,
+    WorkspaceInvitation,
+    WorkspaceMember,
+)
 
 VALID_ASSIGNABLE_ROLES = ("member", "admin", "viewer")
 # "owner" is excluded: the server 422s programmatic role=owner on member
@@ -80,6 +88,17 @@ def _require_int(value: object, label: str) -> int:
     return value
 
 
+def _context_ids(ids: list[str]) -> list[str]:
+    if not isinstance(ids, list):
+        raise ValueError("allowed_context_ids must be a list of UUIDs")
+    return [normalize_uuid(c, label="allowed_context_ids") for c in ids]
+
+
+def _access_path(workspace_id: str, user_id: str) -> str:
+    ws = _normalize_workspace_id(workspace_id)
+    return f"/api/v1/workspaces/{ws}/members/{_user_id_segment(user_id)}/context-access"
+
+
 class WorkspaceClient(KaguraRestClient):
     """REST API client for workspace member / invitation management.
 
@@ -101,11 +120,9 @@ class WorkspaceClient(KaguraRestClient):
     a ``member`` with no list who becomes a ``viewer`` gets an empty one,
     so the change never widens its reach.
 
-    The list is set by :meth:`create_invitation` (``allowed_context_ids``).
-    memory-cloud's ``PUT /api/v1/workspaces/{workspace_id}/members/{user_id}
-    /context-access`` changes it, but at v0.141.0 that route takes a
-    browser session only and answers an API key with 401, so this client
-    does not wrap it: set the list on the web members page.
+    On memory-cloud v0.144.0+, the owner key can set the list at member add
+    and read or replace it via the member /context-access endpoint.
+    The separate context-member POST requires a signed-in web session.
 
     All methods may raise:
         KaguraAuthError: Authentication failed (401)
@@ -148,7 +165,12 @@ class WorkspaceClient(KaguraRestClient):
         ]
 
     async def add_member(
-        self, workspace_id: str, user_id: str, role: str = "member"
+        self,
+        workspace_id: str,
+        user_id: str,
+        role: str = "member",
+        *,
+        allowed_context_ids: list[str] | None = None,
     ) -> WorkspaceMember:
         """Add an already-registered user to the workspace.
 
@@ -165,24 +187,62 @@ class WorkspaceClient(KaguraRestClient):
         feature raises :class:`KaguraFeatureNotAvailableError` and a full
         seat cap :class:`KaguraQuotaError` (``quota_type="members"``).
 
-        The server takes ``user_id`` and ``role`` only, so the member gets
-        no context access list. Since memory-cloud v0.126.0 a ``member``
-        without a list reaches **no** context, writes included, and a
-        ``viewer`` every shared context (see the class docstring). An admin
-        reaches every shared context either way. This client cannot set the list
-        afterwards: the server's context-access route takes a browser
-        session only. Set it on the web members page, or onboard the user
-        with :meth:`create_invitation` and ``allowed_context_ids`` instead.
+        From v0.144.0, allowed_context_ids can be supplied at add time. An empty
+        list grants no contexts. Omission uses the role default: on v0.126.0+
+        members reach no context and viewers reach every shared context.
         """
         workspace_id = _normalize_workspace_id(workspace_id)
         _user_id_segment(user_id)
         self._validate_role(role)
+        body: dict[str, Any] = {"user_id": user_id, "role": role}
+        if allowed_context_ids is not None:
+            body["allowed_context_ids"] = _context_ids(allowed_context_ids)
         resp = await self._request(
             "POST",
             f"/api/v1/workspaces/{workspace_id}/members",
-            json={"user_id": user_id, "role": role},
+            json=body,
         )
         return self._parse(WorkspaceMember, self._json(resp), "add_member")
+
+    async def get_member_context_access(
+        self, workspace_id: str, user_id: str
+    ) -> MemberContextAccess:
+        """Read the stored list and assignable contexts (owner key, v0.144.0+)."""
+        resp = await self._request("GET", _access_path(workspace_id, user_id))
+        return self._parse(MemberContextAccess, self._json(resp), "get_member_context_access")
+
+    async def set_member_context_access(
+        self, workspace_id: str, user_id: str, allowed_context_ids: list[str] | None
+    ) -> MemberContextAccessUpdate:
+        """Replace the list. None restores the role default, [] grants no contexts."""
+        ids = None if allowed_context_ids is None else _context_ids(allowed_context_ids)
+        resp = await self._request(
+            "PUT", _access_path(workspace_id, user_id), json={"allowed_context_ids": ids}
+        )
+        return self._parse(MemberContextAccessUpdate, self._json(resp), "set_member_context_access")
+
+    @classmethod
+    def from_web_session(
+        cls, *, base_url: str, session_cookie: str, timeout: float = 30.0
+    ) -> WorkspaceClient:
+        """Use the kagura_session cookie from a signed-in session on this server."""
+        return cls(base_url=base_url, timeout=timeout, _session_cookie=session_cookie)
+
+    async def add_context_member(
+        self, context_id: str, user_id: str, role: str, *, extend_access_list: bool | None = None
+    ) -> ContextMember:
+        """Add a shared-context member. Extending the list requires workspace admin/owner."""
+        if not self._uses_web_session:
+            raise ValueError("add_context_member requires WorkspaceClient.from_web_session()")
+        context = normalize_uuid(context_id, label="context_id")
+        _user_id_segment(user_id)
+        if role not in ("owner", "editor", "viewer"):
+            raise ValueError("role must be owner, editor, or viewer")
+        body: dict[str, Any] = {"user_id": user_id, "role": role}
+        if extend_access_list is not None:
+            body["extend_access_list"] = extend_access_list
+        resp = await self._request("POST", f"/api/v1/contexts/{context}/members", json=body)
+        return self._parse(ContextMember, self._json(resp), "add_context_member")
 
     async def update_member_role(
         self, workspace_id: str, user_id: str, role: str
@@ -271,9 +331,7 @@ class WorkspaceClient(KaguraRestClient):
             # Checked locally on every server: memory-cloud before v0.80.0
             # answered a non-UUID here with an HTTP 500 (#285), and from
             # v0.80.0 (#1693) answers 422 VAL-001.
-            body["allowed_context_ids"] = [
-                normalize_uuid(c, label="allowed_context_ids") for c in allowed_context_ids
-            ]
+            body["allowed_context_ids"] = _context_ids(allowed_context_ids)
         if expires_in_days is not None:
             body["expires_in_days"] = expires_in_days
         resp = await self._request(
@@ -444,7 +502,16 @@ class WorkspaceClient(KaguraRestClient):
         request_json: dict[str, Any] | None,
         request_params: dict[str, Any] | None,
     ) -> KaguraError:
+        if self._uses_web_session:
+            return self._generic_error(e, body)
         return KaguraConnectionError(self._format_403(body.detail))
+
+    def _generic_error(self, e: httpx.HTTPStatusError, body: ErrorBody) -> KaguraError:
+        if e.response.status_code == 409 and body.envelope is not None:
+            code, message, details = body.envelope
+            if code == "RES-002" and details.get("reason") == "context_not_in_access_list":
+                return KaguraContextAccessListError(sanitize_server_detail(message))
+        return super()._generic_error(e, body)
 
     def _error_429(self, e: httpx.HTTPStatusError, body: ErrorBody) -> KaguraError:
         # Invite-create quota exhaustion ("Member limit reached ...") and

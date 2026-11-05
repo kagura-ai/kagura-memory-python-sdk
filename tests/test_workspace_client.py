@@ -884,3 +884,110 @@ async def test_string_id_is_encoded_as_one_segment():
     async with make_client(handler) as c:
         await c.revoke_invitation(WS, "a/b")
     assert seen["path"].endswith("/invitations/a%2Fb")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ids", [None, [], [CTX]])
+async def test_member_access_wire_contract(ids):
+    def handle(req):
+        body = json.loads(req.content) if req.content else {}
+        member = {"user_id": "u", "role": "member", "allowed_context_ids": ids}
+        if req.url.path.endswith("/context-access"):
+            assert req.url.path == f"/api/v1/workspaces/{WS}/members/u/context-access"
+            if req.method == "PUT":
+                assert body == {"allowed_context_ids": ids}
+                return httpx.Response(200, json={"status": "ok", "user_id": "u", **body})
+            assert req.method == "GET"
+            return httpx.Response(
+                200,
+                json={
+                    **member,
+                    "contexts": [
+                        {"id": CTX, "name": "private", "is_private": True, "is_own_private": True}
+                    ],
+                },
+            )
+        if req.method == "POST":
+            assert body == {
+                "user_id": "u",
+                "role": "member",
+                **({} if ids is None else {"allowed_context_ids": ids}),
+            }
+        return httpx.Response(200, json=member)
+
+    async with make_client(handle) as client:
+        assert (
+            await client.add_member(WS, "u", allowed_context_ids=ids)
+        ).allowed_context_ids == ids
+        assert (await client.update_member_role(WS, "u", "member")).allowed_context_ids == ids
+        assert (await client.set_member_context_access(WS, "u", ids)).allowed_context_ids == ids
+        result = await client.get_member_context_access(WS, "u")
+        assert result.allowed_context_ids == ids and result.contexts[0].is_own_private
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "status,message,exc",
+    [
+        (403, "OAuth tokens not supported", KaguraConnectionError),
+        (403, "Owner-key management disabled", KaguraConnectionError),
+        (404, "Not found", KaguraNotFoundError),
+        (200, "malformed", KaguraResponseError),
+    ],
+)
+@pytest.mark.parametrize("method", ["get", "set"])
+async def test_context_access_refusals_and_bad_rows(status, message, exc, method):
+    async with make_client(
+        lambda req: httpx.Response(status, json=_envelope("ERR", message))
+    ) as client:
+        with pytest.raises(exc):
+            if method == "get":
+                await client.get_member_context_access(WS, "u")
+            else:
+                await client.set_member_context_access(WS, "u", [])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("extend", [None, False, True])
+async def test_session_add_context_member(extend, monkeypatch):
+    from kagura_memory import KaguraContextAccessListError
+
+    def handle(req):
+        assert req.headers["cookie"] == "kagura_session=test-session"
+        assert "authorization" not in req.headers
+        assert req.method == "POST" and req.url.path == f"/api/v1/contexts/{CTX}/members"
+        body = json.loads(req.content)
+        assert body == {
+            "user_id": "u",
+            "role": "editor",
+            **({} if extend is None else {"extend_access_list": extend}),
+        }
+        if extend:
+            return httpx.Response(
+                201, json={"user_id": "u", "role": "editor", "access_list_extended": True}
+            )
+        return httpx.Response(
+            409,
+            json={
+                "error": "RES-002",
+                "message": "Not in access list",
+                "details": {"reason": "context_not_in_access_list"},
+            },
+        )
+
+    constructor = httpx.AsyncClient
+    monkeypatch.setattr(
+        httpx, "AsyncClient", lambda **kw: constructor(transport=httpx.MockTransport(handle), **kw)
+    )
+    async with WorkspaceClient.from_web_session(
+        base_url="https://test.example", session_cookie="test-session"
+    ) as client:
+        if extend:
+            assert (
+                await client.add_context_member(CTX, "u", "editor", extend_access_list=extend)
+            ).access_list_extended
+        else:
+            with pytest.raises(KaguraContextAccessListError) as caught:
+                await client.add_context_member(CTX, "u", "editor", extend_access_list=extend)
+            assert caught.value.code == "RES-002"
+            assert caught.value.details["reason"] == "context_not_in_access_list"

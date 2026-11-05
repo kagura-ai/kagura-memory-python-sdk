@@ -484,3 +484,81 @@ def test_invite_list_aligns_string_ids(mock_cls, mock_config):
     # Every row's EMAIL column starts where the header's does.
     col = header.index("EMAIL")
     assert first[col:].startswith("new@x.com") and second[col:].startswith("b@x.com")
+
+
+@pytest.mark.parametrize(
+    "options,ids",
+    [(["--no-contexts"], []), (["--role-default"], None), (["--context", CTX], [CTX])],
+)
+def test_set_context_access_cli_distinguishes_empty_and_null(options, ids):
+    import json
+
+    from kagura_memory.models import MemberContextAccessUpdate
+
+    with (
+        patch("kagura_memory.cli.WorkspaceClient") as cls,
+        patch("kagura_memory.cli.load_config", return_value=CONFIG),
+    ):
+        row = MemberContextAccessUpdate(status="ok", user_id="u", allowed_context_ids=ids)
+        client = _mock_client(cls, set_member_context_access=row)
+        result = CliRunner().invoke(
+            main, ["workspace", "member", "set-context-access", "u", *options]
+        )
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.output) == row.model_dump()
+        client.set_member_context_access.assert_awaited_once_with(WS, "u", ids)
+
+
+@pytest.mark.parametrize(
+    "options", [[], ["--role-default", "--no-contexts"], ["--context", CTX, "--no-contexts"]]
+)
+def test_set_context_access_cli_refuses_ambiguous_or_missing_selection(options):
+    result = CliRunner().invoke(main, ["workspace", "member", "set-context-access", "u", *options])
+    assert result.exit_code == 2
+
+
+def test_member_add_explicit_empty_access():
+    with (
+        patch("kagura_memory.cli.WorkspaceClient") as cls,
+        patch("kagura_memory.cli.load_config", return_value=CONFIG),
+    ):
+        client = _mock_client(cls, add_member=_member())
+        result = CliRunner().invoke(
+            main, ["workspace", "member", "add", "u", "--role", "viewer", "--no-contexts"]
+        )
+        assert result.exit_code == 0, result.output
+        client.add_member.assert_awaited_once_with(WS, "u", role="viewer", allowed_context_ids=[])
+
+
+def test_context_add_member_cli_uses_only_the_web_session(monkeypatch):
+    import json
+
+    from kagura_memory.models import ContextMember
+
+    monkeypatch.setenv("KAGURA_SESSION_COOKIE", "secret-session")
+    with patch("kagura_memory.cli.WorkspaceClient.from_web_session") as factory:
+        client = factory.return_value.__aenter__.return_value
+        row = ContextMember(user_id="u", role="editor", access_list_extended=True)
+        client.add_context_member.return_value = row
+        result = CliRunner().invoke(
+            main,
+            [
+                "context",
+                "add-member",
+                CTX,
+                "u",
+                "--server",
+                "https://test.example",
+                "--role",
+                "editor",
+                "--extend-access-list",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        factory.assert_called_once_with(
+            base_url="https://test.example", session_cookie="secret-session"
+        )
+        client.add_context_member.assert_awaited_once_with(
+            CTX, "u", "editor", extend_access_list=True
+        )
+        assert json.loads(result.output) == row.model_dump()
