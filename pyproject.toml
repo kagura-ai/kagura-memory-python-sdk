@@ -35,6 +35,10 @@ dependencies = [
     "httpx>=0.25.0",
     "click>=8.0.0",
     "rich>=13.0.0",
+    # Security floors for httpx's transitive dependencies also apply to pip installs.
+    "anyio>=4.14.2",
+    "certifi>=2026.10.18",
+    "idna>=3.15",
 ]
 
 [project.optional-dependencies]
@@ -51,11 +55,16 @@ dev = [
 # `litellm` moved here from core when the KaguraAgent actor was removed
 # (#233): ingest is its only remaining consumer (summarize/vision/token
 # counting, all lazily imported), so pure-client installs no longer carry
-# the litellm dependency tree. The <1.82.7 exclusion pins out the
+# the litellm dependency tree. The security floor also excludes the
 # malware-compromised releases (1.82.7/1.82.8).
 ingest = [
-    "litellm>=1.50,<1.82.7",
-    "pillow>=10.4",
+    "litellm>=1.103.10",
+    "pillow>=13.0.0",
+    # Keep security fixes in the published extras, not only the development lock.
+    "aiohttp>=3.14.4",
+    "multidict>=6.9.1",
+    "filelock>=4.2.1",
+    "fsspec>=2026.6.0",
 ]
 ingest-pdf = [
     "kagura-memory[ingest]",
@@ -64,6 +73,7 @@ ingest-pdf = [
 ingest-html = [
     "kagura-memory[ingest]",
     "beautifulsoup4>=4.12",
+    "soupsieve>=2.9.0",
 ]
 ingest-docx = [
     "kagura-memory[ingest]",
@@ -96,6 +106,7 @@ ingest-audio = [
 ingest-youtube = [
     "kagura-memory[ingest]",
     "youtube-transcript-api>=1.0",
+    "urllib3>=2.8.0",
 ]
 # Browser-rendered URL fetch for JS-heavy / SPA pages (Issue #145).
 # Opt-in: after install, run `playwright install chromium` to fetch the
@@ -124,6 +135,8 @@ ingest-all = [
 secret = [
     "pyrage>=1.1",
     "keyring>=24.0",
+    # keyring uses SecretStorage (and cryptography) only on Linux.
+    "cryptography>=50.0.0; sys_platform == 'linux'",
 ]
 
 [project.scripts]

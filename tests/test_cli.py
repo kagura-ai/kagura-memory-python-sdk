@@ -5,6 +5,7 @@ import re
 import shlex
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import click
 import pytest
 from click.testing import CliRunner
 
@@ -3481,7 +3482,7 @@ def test_measure_record_rejects_unknown_option(mock_client_cls, mock_config, arg
     result = CliRunner().invoke(main, ["measure", "record", *args])
     assert result.exit_code == 2, result.output
     if token is not None:
-        assert f"No such option: {token}" in result.output
+        assert click.NoSuchOption(token).format_message() in result.output
     mock_client.record_measurement.assert_not_awaited()
 
 

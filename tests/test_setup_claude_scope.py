@@ -620,7 +620,8 @@ def test_parent_mcp_json_entry_is_found_from_a_subdirectory(
     result = run_setup(sub, "--scope", "user")
 
     assert result.exit_code == 1
-    assert f"project scope ({mcp_json.resolve()})" in result.output
+    source = claude_code._path_label(mcp_json.resolve())
+    assert f"project scope ({source})" in result.output
     remove = "claude mcp remove --scope project kagura-memory"
     assert f"cd '{repo.resolve()}' && {remove}" in result.output
     assert fake_claude.mcp_calls() == []
@@ -642,7 +643,8 @@ def test_project_write_below_a_parent_entry_notes_the_hidden_entry(
     assert result.exit_code == 0, result.output
     assert mcp_entry(sub) == STDIO_DEFAULT
     assert mcp_json.read_bytes() == before
-    hidden = f"hides the kagura-memory entry in project scope ({mcp_json.resolve()})"
+    source = claude_code._path_label(mcp_json.resolve())
+    hidden = f"hides the kagura-memory entry in project scope ({source})"
     assert hidden in result.output
     assert "left out" not in result.output  # nothing of the parent's entry was replaced
 
@@ -1164,7 +1166,8 @@ def test_opt_out_removal_asks_first_interactively(
     result = run_setup(tmp_path, "--no-session-hook", yes=False, input=answer)
 
     assert result.exit_code == 0, result.output
-    assert "Remove the SDK's SessionStart recall hook from .claude/settings.json?" in result.output
+    settings_path = Path(".claude/settings.json")
+    assert f"Remove the SDK's SessionStart recall hook from {settings_path}?" in result.output
     assert bool(hook_commands(tmp_path, "SessionStart")) == kept
     # The summary matches what is on disk.
     summary = result.output.split("Setup complete!")[1]

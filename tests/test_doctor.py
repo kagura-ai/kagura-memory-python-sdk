@@ -380,8 +380,8 @@ def test_doctor_litellm_missing(monkeypatch):
 
 
 # Every PEP 440 spelling whose release starts 1.82.7 or 1.82.8 is blocked:
-# pre-, post-, dev- and local versions too. The ``ingest`` extra's
-# ``litellm>=1.50,<1.82.7`` pin excludes all of them as well.
+# pre-, post-, dev- and local versions too, even in an environment installed
+# without respecting the ``ingest`` extra's security floor.
 _LITELLM_BLOCKED = [
     "1.82.7",
     "1.82.8",

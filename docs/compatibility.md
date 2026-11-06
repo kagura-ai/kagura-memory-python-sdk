@@ -6,6 +6,16 @@ Which memory-cloud server each release of the kagura-memory SDK needs, and the n
 
 **Reading a section.** Its first paragraph, **Min memory-cloud**, is the floor: the memory-cloud release the SDK as a whole needs (`MIN_SERVER_VERSION`), the newest release that SDK release was checked against ("checked against memory-cloud up to …", in most sections from 0.39.0 on), and, under "Per-surface" or in parentheses, the newer release a method, CLI command or argument needs. A floor holds from that SDK release on, and a surface a newer section does not name keeps the floor an older section gave it. The rest of the section is that release's notes.
 
+## 0.45.1
+
+**Min memory-cloud:** 0.17.1 — checked against memory-cloud up to **0.144.0**. All per-surface floors remain as documented in the releases below; this patch changes local dependencies only.
+
+**Security dependency refresh ([#330](https://github.com/kagura-ai/kagura-memory-python-sdk/issues/330)).** Core and optional extras now publish security minimums as well as an updated `uv.lock`, so pip installs also avoid the affected older versions. This covers AnyIO, certifi, idna, LiteLLM, Pillow, aiohttp, multidict, filelock, fsspec, Soup Sieve, urllib3, and Linux SecretStorage's cryptography dependency. The historical `litellm<1.82.7` ceiling is replaced with `litellm>=1.103.10`; the compromised 1.82.7/1.82.8 releases remain excluded, and `kagura doctor` keeps its independent blocklist.
+
+The lock selects LiteLLM **1.103.10** with filelock **4.2.9**. At release preparation, newer LiteLLM **1.108.1** requires `filelock<4.0`, which conflicts with the security floor `filelock>=4.2.1`. No dependency override is used; future compatible LiteLLM releases can resolve normally. LiteLLM currently supports Python 3.10–3.14, so ingestion needs **Python 3.11–3.14** with this SDK. The core SDK retains `Python >=3.11`.
+
+Upgrade existing environments with `pip install --upgrade 'kagura-memory[ingest-all,secret]'` (select only the extras you use), or refresh the dependency lock in your application. The secret CLI now uses Click's supported binary file API to read piped values without closing stdin, preserving bytes and its single-newline trimming behavior on Click 8.5.
+
 ## 0.45.0
 
 **Min memory-cloud:** 0.17.1 — checked against memory-cloud up to **0.144.0**. Owner-key workspace member management requires 0.42.0. Initial access lists, owner-key member context-access GET/PUT, stored access lists on role-change responses, and the context-member add extension and conflict reason require 0.144.0.
