@@ -162,7 +162,7 @@ def _check_litellm() -> DoctorCheck:
         )
 
     # Pre-, post-, dev- and local versions share the triple, so they are
-    # blocked too, as the ``ingest`` extra's ``<1.82.7`` pin excludes them.
+    # blocked even if installation bypassed the ``ingest`` security floor.
     parsed = parse_version(_PEP440_EPOCH_RE.sub("", version.strip()))
     if parsed in _LITELLM_BLOCKED_RELEASES:
         return DoctorCheck(

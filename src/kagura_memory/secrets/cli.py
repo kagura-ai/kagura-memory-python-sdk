@@ -103,7 +103,8 @@ def _read_secret_value(from_file: str | None) -> bytes:
         import getpass
 
         return getpass.getpass("Secret value (input hidden): ").encode("utf-8")
-    data = click.get_binary_stream("stdin").read()
+    with click.open_file("-", "rb") as stdin:
+        data = stdin.read()
     if data.endswith(b"\r\n"):
         return data[:-2]
     if data.endswith(b"\n"):

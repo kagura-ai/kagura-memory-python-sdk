@@ -724,16 +724,16 @@ def test_disable_core_dumps_swallows_setrlimit_error(monkeypatch):
 
 def test_read_secret_value_strips_crlf(monkeypatch):
     monkeypatch.setattr(secret_cli, "_stdin_isatty", lambda: False)
-    monkeypatch.setattr(
-        secret_cli.click, "get_binary_stream", lambda _name: io.BytesIO(b"secret\r\n")
-    )
+    monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(b"secret\r\n")))
     assert secret_cli._read_secret_value(None) == b"secret"
+    assert not sys.stdin.closed
 
 
 def test_read_secret_value_no_trailing_newline(monkeypatch):
     monkeypatch.setattr(secret_cli, "_stdin_isatty", lambda: False)
-    monkeypatch.setattr(secret_cli.click, "get_binary_stream", lambda _name: io.BytesIO(b"secret"))
+    monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(b"secret")))
     assert secret_cli._read_secret_value(None) == b"secret"
+    assert not sys.stdin.closed
 
 
 def test_write_secret_file_cleans_up_temp_on_failure(monkeypatch, tmp_path):

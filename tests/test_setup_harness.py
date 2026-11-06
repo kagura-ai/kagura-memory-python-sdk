@@ -1336,7 +1336,7 @@ class TestOpenClaw:
         monkeypatch.setenv(var, "~no-such-user-285/oc")
         result = run("openclaw", "--profile", "default", "-y")
         assert result.exit_code == 0, result.output
-        assert "~no-such-user-285/oc" in result.output
+        assert str(Path("~no-such-user-285/oc")) in result.output
 
     def test_workspace_dir_expands_a_leading_tilde(self, monkeypatch, recorder):
         monkeypatch.setenv("OPENCLAW_WORKSPACE_DIR", "~/oc-ws")
@@ -1885,7 +1885,11 @@ class TestOAuthCodex:
         # or parse fails the preview too. One that parses does not, on a profile.
         broken = f"The preview fails until {Path('.kagura.json').absolute()}"
         if config in ("{not json", None):
-            why = "not UTF-8 JSON" if config else "Is a directory"
+            why = (
+                "not UTF-8 JSON"
+                if config
+                else ("Permission denied" if sys.platform == "win32" else "Is a directory")
+            )
             assert f"{broken} ({why}) is fixed or removed:" in out
             assert "{not json" not in out
         else:
@@ -2293,7 +2297,7 @@ class TestProxyPath:
             return None if path is None else f"{path}/kagura-mcp"
 
         monkeypatch.setattr(setup_harness.shutil, "which", which)
-        assert REAL_PROXY_PATH() == f"{Path(sys.executable).parent}/kagura-mcp"
+        assert Path(REAL_PROXY_PATH()) == Path(sys.executable).parent / "kagura-mcp"
         assert seen == [None, str(Path(sys.executable).parent)]
 
     def test_missing_kagura_mcp_fails_the_stdio_form(self, monkeypatch):
@@ -2562,7 +2566,8 @@ def test_written_stdio_command_answers_tools_list_under_an_empty_environment(
 
     ``env -i`` would also drop ``HOME``, and ``Path.home()`` would then read
     the real home directory from the password database; the test keeps a
-    temporary one so it never touches the developer's credentials.
+    temporary one so it never touches the developer's credentials. Windows
+    uses USERPROFILE and needs SystemRoot to initialize Winsock.
     """
     real = shutil.which("kagura-mcp", path=str(Path(sys.executable).parent))
     if real is None:
@@ -2597,12 +2602,15 @@ def test_written_stdio_command_answers_tools_list_under_an_empty_environment(
             {"jsonrpc": "2.0", "method": "notifications/initialized"},
             {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
         ]
+        child_env = {"HOME": str(home), "USERPROFILE": str(home)}
+        if sys.platform == "win32":
+            child_env["SystemRoot"] = os.environ["SystemRoot"]
         proc = REAL_RUN(
             command,
             input="".join(json.dumps(r) + "\n" for r in requests),
             capture_output=True,
             text=True,
-            env={"HOME": str(home)},
+            env=child_env,
             timeout=60,
             check=False,
         )
