@@ -1401,6 +1401,7 @@ ingest = [
     { name = "litellm" },
     { name = "multidict" },
     { name = "pillow" },
+    { name = "urllib3" },
 ]
 ingest-all = [
     { name = "aiohttp" },
@@ -1427,6 +1428,7 @@ ingest-audio = [
     { name = "litellm" },
     { name = "multidict" },
     { name = "pillow" },
+    { name = "urllib3" },
 ]
 ingest-browser = [
     { name = "aiohttp" },
@@ -1436,6 +1438,7 @@ ingest-browser = [
     { name = "multidict" },
     { name = "pillow" },
     { name = "playwright" },
+    { name = "urllib3" },
 ]
 ingest-docx = [
     { name = "aiohttp" },
@@ -1445,6 +1448,7 @@ ingest-docx = [
     { name = "multidict" },
     { name = "pillow" },
     { name = "python-docx" },
+    { name = "urllib3" },
 ]
 ingest-epub = [
     { name = "aiohttp" },
@@ -1454,6 +1458,7 @@ ingest-epub = [
     { name = "multidict" },
     { name = "pillow" },
     { name = "pymupdf" },
+    { name = "urllib3" },
 ]
 ingest-html = [
     { name = "aiohttp" },
@@ -1465,6 +1470,7 @@ ingest-html = [
     { name = "pillow" },
     { name = "soupsieve", version = "2.10", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11.5'" },
     { name = "soupsieve", version = "4.0.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11.5'" },
+    { name = "urllib3" },
 ]
 ingest-pdf = [
     { name = "aiohttp" },
@@ -1474,6 +1480,7 @@ ingest-pdf = [
     { name = "multidict" },
     { name = "pillow" },
     { name = "pymupdf" },
+    { name = "urllib3" },
 ]
 ingest-pptx = [
     { name = "aiohttp" },
@@ -1483,6 +1490,7 @@ ingest-pptx = [
     { name = "multidict" },
     { name = "pillow" },
     { name = "python-pptx" },
+    { name = "urllib3" },
 ]
 ingest-xlsx = [
     { name = "aiohttp" },
@@ -1492,6 +1500,7 @@ ingest-xlsx = [
     { name = "multidict" },
     { name = "openpyxl" },
     { name = "pillow" },
+    { name = "urllib3" },
 ]
 ingest-youtube = [
     { name = "aiohttp" },
@@ -1616,7 +1625,16 @@ requires-dist = [
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.8.0" },
     { name = "soupsieve", marker = "extra == 'ingest-all'", specifier = ">=2.9.0" },
     { name = "soupsieve", marker = "extra == 'ingest-html'", specifier = ">=2.9.0" },
+    { name = "urllib3", marker = "extra == 'ingest'", specifier = ">=2.8.0" },
     { name = "urllib3", marker = "extra == 'ingest-all'", specifier = ">=2.8.0" },
+    { name = "urllib3", marker = "extra == 'ingest-audio'", specifier = ">=2.8.0" },
+    { name = "urllib3", marker = "extra == 'ingest-browser'", specifier = ">=2.8.0" },
+    { name = "urllib3", marker = "extra == 'ingest-docx'", specifier = ">=2.8.0" },
+    { name = "urllib3", marker = "extra == 'ingest-epub'", specifier = ">=2.8.0" },
+    { name = "urllib3", marker = "extra == 'ingest-html'", specifier = ">=2.8.0" },
+    { name = "urllib3", marker = "extra == 'ingest-pdf'", specifier = ">=2.8.0" },
+    { name = "urllib3", marker = "extra == 'ingest-pptx'", specifier = ">=2.8.0" },
+    { name = "urllib3", marker = "extra == 'ingest-xlsx'", specifier = ">=2.8.0" },
     { name = "urllib3", marker = "extra == 'ingest-youtube'", specifier = ">=2.8.0" },
     { name = "youtube-transcript-api", marker = "extra == 'ingest-all'", specifier = ">=1.0" },
     { name = "youtube-transcript-api", marker = "extra == 'ingest-youtube'", specifier = ">=1.0" },

@@ -65,6 +65,7 @@ ingest = [
     "multidict>=6.9.1",
     "filelock>=4.2.1",
     "fsspec>=2026.6.0",
+    "urllib3>=2.8.0",
 ]
 ingest-pdf = [
     "kagura-memory[ingest]",
@@ -106,7 +107,6 @@ ingest-audio = [
 ingest-youtube = [
     "kagura-memory[ingest]",
     "youtube-transcript-api>=1.0",
-    "urllib3>=2.8.0",
 ]
 # Browser-rendered URL fetch for JS-heavy / SPA pages (Issue #145).
 # Opt-in: after install, run `playwright install chromium` to fetch the
