@@ -31,6 +31,7 @@ from kagura_memory import (
     KaguraPartialRollbackError,
     RollbackResult,
     RollbackSummary,
+    SleepAction,
 )
 from kagura_memory._http import raise_for_kagura_status
 from kagura_memory.client import KaguraClient
@@ -613,6 +614,8 @@ _FULL_SUMMARY = {
     # memory-cloud v0.112.0+ (#2061 / #2065).
     "chunks_requeued": 1,
     "points_requeued": 0,
+    # memory-cloud v0.153.0+ (#2728), only when an index_related entry was undone.
+    "related_indexes_reverted": 2,
     "errors": [_UNREVERSIBLE, "Action 42 (merge): db error"],
 }
 
@@ -632,6 +635,40 @@ def test_rollback_summary_new_counters_default_to_zero():
         0,
         0,
     )
+
+
+def test_sleep_action_docstring_names_index_related():
+    """``action_type`` is a plain ``str``; its docstring lists the v0.153.0 value (#335)."""
+    assert "index_related" in (SleepAction.__doc__ or "")
+    action = SleepAction.model_validate(
+        {"id": "1", "phase": "related", "action_type": "index_related"}
+    )
+    assert action.action_type == "index_related"
+
+
+def test_rollback_summary_without_related_indexes_reverted_reads_zero():
+    """The server adds the key only after undoing an ``index_related`` action (#335)."""
+    sent = {k: v for k, v in _FULL_SUMMARY.items() if k != "related_indexes_reverted"}
+    summary = RollbackSummary.model_validate(sent)
+    assert summary.related_indexes_reverted == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("sent", "expected"), [({"related_indexes_reverted": 3}, 3), ({}, 0)])
+async def test_rollback_success_reads_related_indexes_reverted(sent: dict, expected: int):
+    """``related_indexes_reverted`` (memory-cloud v0.153.0+, #2728) reaches the result (#335)."""
+    client = _client()
+    try:
+        with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+            mock.return_value = {
+                "status": "rolled_back",
+                "report_id": "rid-9",
+                "rollback_summary": {"edges_deleted": 1, "errors": [], **sent},
+            }
+            result = await client.rollback_sleep_run(context_id=CTX, report_id="rid-9")
+    finally:
+        await client.close()
+    assert result.rollback_summary.related_indexes_reverted == expected
 
 
 @pytest.mark.asyncio
@@ -677,6 +714,7 @@ async def test_partial_rollback_raises_with_the_summary():
     assert isinstance(err.summary, RollbackSummary)
     assert err.summary.model_dump() == _FULL_SUMMARY
     assert err.summary.merges_unreversible == 1
+    assert err.summary.related_indexes_reverted == 2
     assert err.summary.errors == [_UNREVERSIBLE, "Action 42 (merge): db error"]
 
 

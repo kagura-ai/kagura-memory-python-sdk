@@ -1014,7 +1014,9 @@ class SleepAction(BaseModel):
 
     ``action_type`` and ``phase`` are free-form strings — the server may add
     new types over time. Known ``action_type`` values include ``create_edge``,
-    ``merge``, ``update_importance``, ``promote``, ``archive``, and ``flag``.
+    ``merge``, ``update_importance``, ``promote``, ``archive``, ``flag`` and
+    ``index_related`` (memory-cloud v0.153.0+, #2728: an entry of the opt-in
+    Sleep related index, undone by ``rollback_sleep_run``).
     ``details`` is a generic dict whose shape depends on ``action_type``.
 
     An action too large for its page (memory-cloud v0.82.0+, #1743) comes
@@ -1083,7 +1085,10 @@ class RollbackSummary(BaseModel):
     v0.112.0+) count restored memories whose content chunks / vector could
     not be written during the rollback and were queued for the embedding
     sweep to rebuild — the restore itself went through, so they are not
-    errors either.
+    errors either. ``related_indexes_reverted`` (server v0.153.0+, #2728)
+    counts the ``index_related`` actions of the opt-in Sleep related index
+    (``SLEEP_RELATED_INDEX_ENABLED``) that were undone; the server sends it
+    only when at least one was, so it reads 0 otherwise.
     Failed undo steps are listed in ``errors``.
     """
 
@@ -1097,6 +1102,7 @@ class RollbackSummary(BaseModel):
     archives_restored: int = 0
     chunks_requeued: int = 0
     points_requeued: int = 0
+    related_indexes_reverted: int = 0
     errors: list[str] = Field(default_factory=list)
 
 

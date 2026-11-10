@@ -4798,7 +4798,9 @@ class KaguraClient:
             ``RollbackResult`` with per-category counts of reversed actions.
             Since memory-cloud v0.112.0 ``chunks_requeued`` /
             ``points_requeued`` count restored memories whose chunks / vector
-            were queued for a rebuild (see :class:`RollbackSummary`).
+            were queued for a rebuild, and since v0.153.0
+            ``related_indexes_reverted`` the related-index entries undone
+            (see :class:`RollbackSummary`).
 
         Raises:
             KaguraNotFoundError: Report not found or not owned by caller, or
