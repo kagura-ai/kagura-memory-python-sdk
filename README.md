@@ -37,7 +37,7 @@ This SDK connects your Python code to [Kagura Memory Cloud](https://github.com/k
 | **`ResourceClient`** | REST API | External data ingestion — push data from Slack, CI/CD, CRM into Kagura |
 | **`FilesClient`** | REST + presigned PUT | File uploads with sha256 integrity binding (R2); optional per-file context binding for ACL |
 | **`SecretClient`** | REST + age crypto | Zero-knowledge secrets — age recipient encryption, **local decryption** (the server only ever stores armored ciphertext) |
-| **`WorkspaceClient`** | REST API | Workspace member / invitation management + owner-provisioned member keys (owner API key only) |
+| **`WorkspaceClient`** | REST API | Workspace member / invitation management + owner-provisioned member keys (owner API key only); context member add and operation history (web session only) |
 | **`AgentsClient`** | REST API | Agent bootstrap — one-call session-start rehydration for API-key-only callers (server v0.49.0+) |
 | **`MemoryClient`** | REST API | Tool guardrails for API-key-only hooks and setup scripts — `load_guardrails` + the `AGENTS.md` digest (server v0.74.0+) |
 | **`FileIngestor`** | CLI + SDK | Document ingestion — PDF/Office/HTML/EPUB, audio & YouTube transcripts → memory graph + R2 archive |
@@ -690,6 +690,35 @@ Use `kagura workspace member add USER --role member --context UUID` (repeat `--c
 
 Adding a member to a shared context requires a signed-in web session. Use `WorkspaceClient.from_web_session(base_url=..., session_cookie=...)` or `kagura context add-member CONTEXT USER --server URL --role editor` (hidden cookie prompt or `KAGURA_SESSION_COOKIE`). On server 0.144.0+, a workspace owner/admin may pass `--extend-access-list` to extend the list in the same transaction. Otherwise a missing grant returns 409 `RES-002`, exposed as `KaguraContextAccessListError` with `details["reason"] == "context_not_in_access_list"`. Success prints the context member as JSON, including `access_list_extended`.
 
+**Operation history (memory-cloud 0.154.0+).** `list_operation_history` reads one page of the workspace's operation history: who changed which memory, context, member, credential, integration or Sleep run, when, through which surface (web, API, MCP, system) and with which credential or client. It takes a **signed-in web session only** — an API-key or OAuth client raises `ValueError` before any request — and the caller must be an **owner or admin** of the workspace, on a **Pro or Max** plan (or any plan whose features include `operation_history`; otherwise `KaguraFeatureNotAvailableError` with `feature == "operation_history"`). Read the cookie from a variable you provide, and print neither it nor the history:
+
+```python
+import os
+from datetime import UTC, datetime, timedelta
+
+async with WorkspaceClient.from_web_session(
+    base_url="https://memory.kagura-ai.com",
+    session_cookie=os.environ["KAGURA_SESSION_COOKIE"],
+) as client:
+    cursor = None
+    while True:
+        page = await client.list_operation_history(
+            "workspace-uuid",
+            target_type="memory",
+            outcome="success",
+            since=datetime.now(UTC) - timedelta(days=7),  # timezone-aware only
+            limit=100,
+            cursor=cursor,                                # opaque, sent back as is
+        )
+        ...                                               # page.items: OperationHistoryItem
+        cursor = page.next_cursor
+        if cursor is None:
+            break
+    print(page.total, page.total_capped, page.retention_days)
+```
+
+Filters are keyword-only and combine: `query` (≤ 120 characters), `context_id`, `actor` (≤ 255), `agent_id`, `operation` (≤ 40, e.g. `memory.updated`; the server refuses one outside its set), `target_type`, `outcome`, `since` / `until` and `limit` (1-100, default 30); unset and blank values are not sent. `total` stops at 1,000 (`total_capped`), while paging reaches every match. Recording starts when the server runs the feature or the workspace moves to an entitled plan — **no backfill**, and Free and Starter record nothing — and events are kept for `retention_days` (90 days plus the workspace's add-on). Only ids, times, operation names, counts and changed-field names are stored, never contents or values. A private context's events are shown to its creator only, a shared credential's owner is not asserted to be the person who made the call, and the history is not an immutable audit ledger and has no export. See [`examples/operation_history.py`](https://github.com/kagura-ai/kagura-memory-python-sdk/blob/main/examples/operation_history.py).
+
 On 0.144.0, invitation acceptance rechecks the workspace's `team_invitations` plan feature. A 403 `FEAT-001` leaves the invitation pending. The signed-in user's pending invitation feed matches their email case-insensitively and excludes expired, accepted, and unaddressed link-only invitations. This feed is separate from the owner's workspace invitation list.
 
 
@@ -697,15 +726,15 @@ The same client also provisions **member API keys** (memory-cloud [#1165](https:
 
 ## SDK ↔ memory-cloud Compatibility
 
-`MIN_SERVER_VERSION` is **0.17.1** and advisory: the SDK never blocks a call on the server version. SDK 0.45.1 is checked against memory-cloud up to **0.144.0**, and a surface newer than the floor carries its own, given in the [compatibility page](https://github.com/kagura-ai/kagura-memory-python-sdk/blob/main/docs/compatibility.md) section of the release that added it.
+`MIN_SERVER_VERSION` is **0.17.1** and advisory: the SDK never blocks a call on the server version. SDK 0.46.0 is checked against memory-cloud up to **0.155.0**, and a surface newer than the floor carries its own, given in the [compatibility page](https://github.com/kagura-ai/kagura-memory-python-sdk/blob/main/docs/compatibility.md) section of the release that added it.
 
 | SDK | memory-cloud checked up to | What changed |
 |---|---|---|
+| [0.46.0](https://github.com/kagura-ai/kagura-memory-python-sdk/blob/main/docs/compatibility.md#0460) | 0.155.0 | Session-only workspace operation history reader, `order_by="event_start"`, the plugin `server_url` keeps `context=`, `RollbackSummary.related_indexes_reverted` |
 | [0.45.1](https://github.com/kagura-ai/kagura-memory-python-sdk/blob/main/docs/compatibility.md#0451) | 0.144.0 | Security dependency floors and refreshed lock; Click 8.5 compatibility. |
 | [0.45.0](https://github.com/kagura-ai/kagura-memory-python-sdk/blob/main/docs/compatibility.md#0450) | 0.144.0 | Workspace member context access, signed-in context member add, and OAuth credential locking shared with TypeScript SDK 0.16.0. |
 | [0.44.0](https://github.com/kagura-ai/kagura-memory-python-sdk/blob/main/docs/compatibility.md#0440) | 0.142.0 | Session tools (`bootstrap`, `changes_since`, `list_matching`, `remember_batch`), new `remember` / `update_memory` arguments, list paging, `plan_headroom`, auth refresh under the lock |
 | [0.43.0](https://github.com/kagura-ai/kagura-memory-python-sdk/blob/main/docs/compatibility.md#0430) | 0.141.0 | Recall shape (`verbosity`, `full`, `max_chars`), MCP URL options, typed server errors, cursors and write caps |
-| [0.42.2](https://github.com/kagura-ai/kagura-memory-python-sdk/blob/main/docs/compatibility.md#0422) | 0.77.0 | Sleep report and rollback work again on memory-cloud 0.82.0+; `list_resources()` accepts a resource whose contexts were all deleted |
 
 Every release back to 0.13.x, with each surface's floor, how the SDK reads a server version, and the full notes: **[docs/compatibility.md](https://github.com/kagura-ai/kagura-memory-python-sdk/blob/main/docs/compatibility.md)**.
 
@@ -1334,6 +1363,7 @@ scope the server lists, `memory:admin` and `memory:delete` included.
 | Guardrail digest (`AGENTS.md` export block / server-instructions preview) | `MemoryClient` | REST | API Key |
 | Context (create/update/list/delete/get_context_info; list_contexts paged with `cursor` / `limit`) | `KaguraClient` | MCP | API Key |
 | Workspace (get_usage) | `KaguraClient` | MCP | API Key |
+| Workspace operation history (list_operation_history — owner/admin, Pro/Max) | `WorkspaceClient` | REST API | Web session |
 | Search config (update_search_config, incl. `content_chunks_enabled` / `llm_selector_enabled`) | `KaguraClient` | MCP | API Key |
 | Server info (get_server_info — version, deployment feature flags, `search_defaults`, `terms_version`) | `KaguraClient` | REST | None (public endpoint) |
 | Embedding status (get_embedding_status) | `KaguraClient` | REST | API Key |

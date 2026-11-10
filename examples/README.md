@@ -16,6 +16,7 @@ uv run python examples/<script>.py
 | [`agent_bootstrap.py`](agent_bootstrap.py) | `KaguraClient` / `AgentsClient` | one-call agent session-start rehydration (`get_agent_bootstrap`, MCP + REST; server v0.49.0+) |
 | [`resource_tokens.py`](resource_tokens.py) | `ResourceClient` | resource setup, token lifecycle, single + batch event ingestion |
 | [`files_upload.py`](files_upload.py) | `FilesClient` | upload (bytes + dedup), `download_url`, `list`, `delete` |
+| [`operation_history.py`](operation_history.py) | `WorkspaceClient` | session-only operation history, paged by cursor (server v0.154.0+; reads `KAGURA_SERVER` / `KAGURA_SESSION_COOKIE` / `KAGURA_WORKSPACE_ID` instead of an API key) |
 | [`ingest_pdf.py`](ingest_pdf.py) | `FileIngestor` | PDF → overview + section memories + R2 archive |
 | [`ingest_documents.py`](ingest_documents.py) | `FileIngestor` | text/Markdown/HTML/DOCX/XLSX/PPTX/EPUB → memory graph |
 | [`ingest_audio.py`](ingest_audio.py) | `FileIngestor` | audio/video → transcript → memory graph |
