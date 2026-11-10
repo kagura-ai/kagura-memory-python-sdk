@@ -1014,7 +1014,9 @@ class SleepAction(BaseModel):
 
     ``action_type`` and ``phase`` are free-form strings — the server may add
     new types over time. Known ``action_type`` values include ``create_edge``,
-    ``merge``, ``update_importance``, ``promote``, ``archive``, and ``flag``.
+    ``merge``, ``update_importance``, ``promote``, ``archive``, ``flag`` and
+    ``index_related`` (memory-cloud v0.153.0+, #2728: an entry of the opt-in
+    Sleep related index, undone by ``rollback_sleep_run``).
     ``details`` is a generic dict whose shape depends on ``action_type``.
 
     An action too large for its page (memory-cloud v0.82.0+, #1743) comes
@@ -1083,7 +1085,10 @@ class RollbackSummary(BaseModel):
     v0.112.0+) count restored memories whose content chunks / vector could
     not be written during the rollback and were queued for the embedding
     sweep to rebuild — the restore itself went through, so they are not
-    errors either.
+    errors either. ``related_indexes_reverted`` (server v0.153.0+, #2728)
+    counts the ``index_related`` actions of the opt-in Sleep related index
+    (``SLEEP_RELATED_INDEX_ENABLED``) that were undone; the server sends it
+    only when at least one was, so it reads 0 otherwise.
     Failed undo steps are listed in ``errors``.
     """
 
@@ -1097,6 +1102,7 @@ class RollbackSummary(BaseModel):
     archives_restored: int = 0
     chunks_requeued: int = 0
     points_requeued: int = 0
+    related_indexes_reverted: int = 0
     errors: list[str] = Field(default_factory=list)
 
 
@@ -1513,6 +1519,91 @@ class MemberAPIKey(BaseModel):
     default_context_name: str | None = None
     agent_id: str | None = None
     connector_id: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Workspace operation history (#332, server v0.154.0+, memory-cloud#2739)
+# ---------------------------------------------------------------------------
+
+
+OperationHistoryTargetType = Literal[
+    "memory", "context", "member", "credential", "integration", "sleep"
+]
+"""``target_type`` values of the operation history at memory-cloud v0.155.0.
+
+A type hint for :meth:`WorkspaceClient.list_operation_history`'s
+``target_type`` filter only: the SDK does not check it, so a value a newer
+server adds is sent as given (the server refuses an unknown one)."""
+
+OperationHistoryOutcome = Literal["success", "failure", "denied"]
+"""``outcome`` values of the operation history at memory-cloud v0.155.0.
+
+A type hint only, like :data:`OperationHistoryTargetType`."""
+
+
+class OperationHistoryItem(BaseModel):
+    """One event of a workspace's operation history (memory-cloud v0.154.0+).
+
+    The server stores identifiers, timestamps, allowlisted operation and
+    outcome values, counts and changed-field NAMES only — never memory
+    bodies, changed values, e-mail addresses, credential names or secrets.
+    ``actor_name`` is resolved live (``None`` once the account is gone).
+
+    ``principal_kind`` (``session`` | ``api_key`` | ``oauth`` |
+    ``resource_token`` | ``management_grant`` | ``system`` | ``unknown``),
+    ``surface`` (``web`` | ``api`` | ``mcp`` | ``system`` | ``unknown``),
+    ``operation`` (see :meth:`WorkspaceClient.list_operation_history`),
+    ``target_type`` (:data:`OperationHistoryTargetType`) and ``outcome``
+    (:data:`OperationHistoryOutcome`) are plain ``str``: the values listed
+    are those of v0.155.0, and a newer one parses. ``credential_id`` /
+    ``client_id`` are the non-secret public id of the API key or the
+    registered OAuth client of a programmatic call; a shared credential's
+    owner (``actor_user_id``) is not asserted to be the physical caller.
+    ``subject_user_id`` is the affected member, apart from actor and target.
+    ``count`` is the number of changes the event stands for (bulk and Sleep
+    events carry more than one). Keys a newer server adds are ignored.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    id: str
+    occurred_at: datetime
+    context_id: str | None = None
+    actor_user_id: str | None = None
+    actor_name: str | None = None
+    subject_user_id: str | None = None
+    agent_id: str | None = None
+    principal_kind: str
+    credential_id: str | None = None
+    client_id: str | None = None
+    surface: str
+    operation: str
+    target_type: str
+    target_id: str | None = None
+    outcome: str
+    count: int
+    changed_fields: list[str]
+
+
+class OperationHistoryPage(BaseModel):
+    """One page of :meth:`WorkspaceClient.list_operation_history` (v0.154.0+).
+
+    ``items`` come newest first (event time, then event id). ``total``
+    counts every match of the filters across pages but stops at 1,000:
+    above that it is 1000 and ``total_capped`` is ``True``, while paging
+    still reaches every match. ``next_cursor`` is the opaque ``cursor`` for
+    the next page, ``None`` on the last one. ``retention_days`` is the
+    workspace's effective window (90 days plus its add-on); older events
+    are not returned. Keys a newer server adds are ignored.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    items: list[OperationHistoryItem]
+    total: int
+    total_capped: bool = False
+    next_cursor: str | None = None
+    retention_days: int
 
 
 # ---------------------------------------------------------------------------
@@ -2268,11 +2359,12 @@ class ChangesSinceResponse(_ContextEcho):
     truncated: bool = False
 
 
-ListOrderBy = Literal["updated_at", "created_at", "importance", "observed_at"]
+ListOrderBy = Literal["updated_at", "created_at", "importance", "observed_at", "event_start"]
 """Valid ``list_matching`` ``order_by`` values (request side only).
 
-``observed_at`` needs memory-cloud v0.127.0+ (#2330) and puts memories
-without one last."""
+``observed_at`` needs memory-cloud v0.127.0+ (#2330) and ``event_start`` (the
+first day of a memory's event, ``details.event_start``) v0.152.0+ (#2724);
+each puts memories without one last. An older server refuses the value."""
 
 
 class ListMatchingResponse(_ContextEcho):

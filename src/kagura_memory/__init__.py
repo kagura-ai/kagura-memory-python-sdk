@@ -100,6 +100,10 @@ from .models import (
     MemoryRevision,
     MemoryStatItem,
     MemoryStatsResponse,
+    OperationHistoryItem,
+    OperationHistoryOutcome,
+    OperationHistoryPage,
+    OperationHistoryTargetType,
     PaginatedResourceTokensResponse,
     PlanHeadroom,
     PlanHeadroomNotice,
@@ -242,6 +246,11 @@ __all__ = [
     "WorkspaceMember",
     "WorkspaceInvitation",
     "MemberAPIKey",
+    # Workspace operation history (#332, server v0.154.0+, web session only)
+    "OperationHistoryItem",
+    "OperationHistoryPage",
+    "OperationHistoryTargetType",
+    "OperationHistoryOutcome",
     # Agent registry + bindings (#235, server v0.49.0+)
     "Agent",
     "AgentBinding",

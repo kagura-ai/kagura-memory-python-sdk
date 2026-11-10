@@ -986,18 +986,30 @@ def _resolve_extras(
     return extras, plugin_id
 
 
-def _plugin_server_url(upstream_url: str) -> str:
-    """The plugin's ``server_url``: the MCP URL with only ``guardrails=off`` kept in its query.
+def _plugin_server_url(upstream_url: str, context_id: str) -> str:
+    """The plugin's ``server_url``: the MCP URL with ``guardrails=off`` and the context kept.
 
-    As the plugin's own setup derives it (memory-cloud ``claude-skills/setup.md``:
-    "Drop the query, except that ``guardrails=off`` may stay"). Its hooks POST
-    ``load_guardrails`` with their own ``context_id``, so ``context=``,
-    ``profile=`` and ``add_tools=`` would change nothing there; they stay on the
-    MCP entry, which is where the plugin recommends ``context=`` (#300).
+    As the plugin's own setup derives it (memory-cloud ``claude-skills/setup.md``
+    step B2, plugin shipped with v0.149.0, memory-cloud#2690): "Drop the query,
+    except that ``guardrails=off`` may stay and ``context=<context-id>`` must
+    stay when the MCP URL carries it and it is the context being configured"
+    — the plugin's SessionStart hook names it as the connection's default
+    context, so no ``list_contexts`` call is made (#334). ``context=`` is kept
+    only when its first value, trimmed (as the server reads it), and ``context_id`` are
+    the same UUID, written in canonical form; another context, a non-UUID or a
+    ``context_id`` that is no UUID drops it. ``guardrails=<context-id>`` (the
+    hook would warn at every session start), ``profile=``, ``tools=`` and
+    ``add_tools=`` are always dropped: they stay on the MCP entry.
     """
     parts = urlsplit(upstream_url)
-    query = "guardrails=off" if mcp_url_guardrails_off(upstream_url) else ""
-    return urlunsplit(parts._replace(query=query, fragment=""))
+    keep: list[str] = []
+    if mcp_url_guardrails_off(upstream_url):
+        keep.append("guardrails=off")
+    # Trimmed, as the server and the plugin hook read it.
+    url_context = uuid_or_none(mcp_url_query_values(upstream_url).get("context", "").strip())
+    if url_context is not None and url_context == uuid_or_none(context_id):
+        keep.append(f"context={url_context}")
+    return urlunsplit(parts._replace(query="&".join(keep), fragment=""))
 
 
 def _echo_plugin_notes(
@@ -1015,7 +1027,7 @@ def _echo_plugin_notes(
             "  so set it only once the hooks deliver guardrails."
         )
     click.echo("  Plugin settings (/plugin > kagura-memory > Configure):")
-    click.echo(f"    server_url  {_plugin_server_url(upstream_url)}")
+    click.echo(f"    server_url  {_plugin_server_url(upstream_url, context_id)}")
     click.echo(
         f"    context_id  {context_id}\n"
         "                The plugin has ONE guardrail context for every project: use this\n"

@@ -287,6 +287,21 @@ def test_list_passes_filters_and_options():
     assert json.loads(result.output)["total"] == 1
 
 
+def test_list_accepts_every_order_by_value():
+    """``--order-by`` takes each ``ListOrderBy`` value, ``event_start`` included (#333)."""
+    reply = ListMatchingResponse.model_validate({"memories": [], "total": 0, "has_more": False})
+    for value in ("updated_at", "created_at", "importance", "observed_at", "event_start"):
+        result, client = _invoke("list", "--order-by", value, list_matching=reply)
+        assert result.exit_code == 0, result.output
+        assert client.list_matching.await_args.kwargs["order_by"] == value
+
+
+def test_list_refuses_an_unknown_order_by_before_any_request():
+    result, client = _invoke("list", "--order-by", "event_end")
+    assert result.exit_code == 2
+    client.list_matching.assert_not_called()
+
+
 def test_list_refuses_filters_that_are_not_a_json_object():
     result, client = _invoke("list", "--filters", '["task"]')
     assert result.exit_code == 2

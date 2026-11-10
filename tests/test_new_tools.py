@@ -18,7 +18,7 @@ import json
 import re
 import uuid
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, get_args
 
 import httpx
 import pytest
@@ -34,6 +34,7 @@ from kagura_memory import (
     KaguraPartialSessionRollbackError,
     KaguraQuotaError,
     KaguraResponseError,
+    ListOrderBy,
     PlanHeadroomNotice,
 )
 
@@ -682,6 +683,23 @@ async def test_list_matching_sends_every_argument_that_is_set():
         "include_details": True,
         "max_chars": 10_000,
     }
+
+
+def test_list_order_by_names_event_start():
+    """memory-cloud v0.152.0 added ``event_start`` to ``list``'s ``order_by`` (#333)."""
+    assert get_args(ListOrderBy) == (
+        "updated_at",
+        "created_at",
+        "importance",
+        "observed_at",
+        "event_start",
+    )
+
+
+@pytest.mark.asyncio
+async def test_list_matching_sends_order_by_event_start():
+    _, params = await _call(LIST_REPLY, "list_matching", CTX, order_by="event_start")
+    assert params["arguments"] == {"context_id": CTX, "order_by": "event_start"}
 
 
 @pytest.mark.asyncio

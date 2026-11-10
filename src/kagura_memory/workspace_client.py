@@ -14,6 +14,7 @@ the owner-key 403 hint and the detail-carrying 429 quota mapping.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -41,8 +42,12 @@ from .models import (
     MemberAPIKey,
     MemberContextAccess,
     MemberContextAccessUpdate,
+    OperationHistoryOutcome,
+    OperationHistoryPage,
+    OperationHistoryTargetType,
     WorkspaceInvitation,
     WorkspaceMember,
+    _validate_int_range,
 )
 
 VALID_ASSIGNABLE_ROLES = ("member", "admin", "viewer")
@@ -94,6 +99,70 @@ def _context_ids(ids: list[str]) -> list[str]:
     return [normalize_uuid(c, label="allowed_context_ids") for c in ids]
 
 
+# The operation-history route's query bounds (memory-cloud v0.155.0,
+# api/routes/operation_history.py ``Query(max_length=...)``, on the raw value).
+_HISTORY_QUERY_MAX = 120
+_HISTORY_ACTOR_MAX = 255
+_HISTORY_OPERATION_MAX = 40
+_HISTORY_CURSOR_MAX = 512
+_HISTORY_LIMIT_MAX = 100
+
+
+def _history_text(name: str, value: object, cap: int | None = None) -> str | None:
+    """A text filter as sent: ``None`` when unset, else the ``str`` unchanged.
+
+    Only ``None`` is unset: a blank value is sent, and the server decides what
+    it means (no filter for ``query`` / ``actor``, a 422 for ``operation``).
+    The value is never echoed.
+
+    Raises:
+        ValueError: If ``value`` is not a ``str`` or is over ``cap`` characters.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"{name} must be a string, got {type(value).__name__}")
+    if cap is not None and len(value) > cap:
+        raise ValueError(f"{name} must be at most {cap} characters, got {len(value)}")
+    return value
+
+
+def _history_cursor(value: object) -> str | None:
+    """The opaque ``cursor`` as sent; a blank one is refused (never server-issued).
+
+    Sending ``""`` would silently restart at page one. The value is never echoed.
+
+    Raises:
+        ValueError: If ``cursor`` is not a ``str``, is blank or is over 512 characters.
+    """
+    cursor = _history_text("cursor", value, _HISTORY_CURSOR_MAX)
+    if cursor is not None and not cursor.strip():
+        raise ValueError("cursor must not be blank: pass a next_cursor the server returned")
+    return cursor
+
+
+def _history_time(name: str, value: object) -> datetime | None:
+    """A ``since`` / ``until`` filter: a timezone-aware ``datetime`` or ``None``.
+
+    A naive value is refused, as the server refuses it; it is not taken as UTC.
+
+    Raises:
+        ValueError: If ``value`` is not a ``datetime`` or has no timezone.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, datetime):
+        raise ValueError(f"{name} must be a datetime, got {type(value).__name__}")
+    if value.utcoffset() is None:
+        raise ValueError(f"{name} must be timezone-aware (the server refuses a naive time)")
+    return value
+
+
+def _history_time_param(value: datetime | None) -> str | None:
+    """The same instant in UTC: an offset with seconds would not parse on the server."""
+    return None if value is None else value.astimezone(UTC).isoformat()
+
+
 def _access_path(workspace_id: str, user_id: str) -> str:
     ws = _normalize_workspace_id(workspace_id)
     return f"/api/v1/workspaces/{ws}/members/{_user_id_segment(user_id)}/context-access"
@@ -122,7 +191,8 @@ class WorkspaceClient(KaguraRestClient):
 
     On memory-cloud v0.144.0+, the owner key can set the list at member add
     and read or replace it via the member /context-access endpoint.
-    The separate context-member POST requires a signed-in web session.
+    The separate context-member POST requires a signed-in web session, and so
+    does :meth:`list_operation_history` (v0.154.0+, an owner or admin).
 
     All methods may raise:
         KaguraAuthError: Authentication failed (401)
@@ -243,6 +313,137 @@ class WorkspaceClient(KaguraRestClient):
             body["extend_access_list"] = extend_access_list
         resp = await self._request("POST", f"/api/v1/contexts/{context}/members", json=body)
         return self._parse(ContextMember, self._json(resp), "add_context_member")
+
+    # -------------------------------------------------------------------
+    # Operation history (#332, memory-cloud v0.154.0+, web session only)
+    # -------------------------------------------------------------------
+
+    async def list_operation_history(
+        self,
+        workspace_id: str,
+        *,
+        query: str | None = None,
+        context_id: str | None = None,
+        actor: str | None = None,
+        agent_id: str | None = None,
+        operation: str | None = None,
+        target_type: OperationHistoryTargetType | None = None,
+        outcome: OperationHistoryOutcome | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        limit: int | None = None,
+        cursor: str | None = None,
+    ) -> OperationHistoryPage:
+        """Read one page of the workspace's operation history (memory-cloud v0.154.0+).
+
+        ``GET /api/v1/workspaces/{workspace_id}/operation-history`` takes a
+        signed-in web session only (:meth:`from_web_session`): an API key,
+        an OAuth token or a resource token is refused here before any
+        request. The caller must be an owner or admin of the workspace, and
+        its plan must include the ``operation_history`` feature (the Pro and
+        Max tiers by default); both are rechecked on every page.
+
+        The history is recorded by the server from when the feature was
+        deployed or the workspace moved to an entitled plan, with no
+        backfill (Free and Starter record nothing), and kept for
+        ``retention_days`` (90 plus the workspace's add-on). A private
+        context's events are visible only to its creator. A shared
+        credential's owner is not asserted to be the physical caller. It is
+        not an immutable audit ledger, and there is no export.
+
+        One page per call: pass ``cursor=page.next_cursor`` with the same
+        filters until it is empty (``None``; stop on any falsy value). Only
+        ``None`` filters are left out; every other value is sent as given
+        after the local checks, so a blank ``query`` / ``actor`` reaches the
+        server as no filter and a blank ``operation`` is the server's 422.
+        ``since`` / ``until`` are sent as the same instant in UTC.
+
+        Args:
+            workspace_id: Workspace UUID.
+            query: Text search over actor names/ids, target, context, agent,
+                credential and client ids, operation names and changed-field
+                names; at most 120 characters (the server trims it).
+            context_id: Only this context's events (UUID).
+            actor: Exactly this actor user id (the server trims it; a name
+                does not match here, use ``query``), at most 255 characters.
+            agent_id: Only this agent's events (UUID).
+            operation: At most 40 characters. The server refuses a value
+                outside its set, at v0.155.0: ``memory.created``,
+                ``memory.updated``, ``memory.deleted``, ``memory.restored``,
+                ``context.created``, ``context.updated``, ``context.deleted``,
+                ``context.restored``, ``member.invited``, ``member.added``,
+                ``member.removed``, ``member.role_changed``,
+                ``member.access_changed``, ``credential.issued``,
+                ``credential.updated``, ``credential.revoked``,
+                ``integration.created``, ``integration.updated``,
+                ``integration.deleted``, ``sleep.completed``,
+                ``sleep.failed`` and ``sleep.undo``.
+            target_type: ``memory`` | ``context`` | ``member`` |
+                ``credential`` | ``integration`` | ``sleep``; sent as given.
+            outcome: ``success`` | ``failure`` | ``denied``; sent as given.
+            since: Events at or after this timezone-aware time.
+            until: Events at or before this timezone-aware time.
+            limit: Events per page, 1-100 (server default 30).
+            cursor: ``next_cursor`` of the previous page, sent back as is
+                (opaque, at most 512 characters; a blank one is refused).
+
+        Returns:
+            :class:`~kagura_memory.models.OperationHistoryPage`.
+
+        Raises:
+            ValueError: Before any request: the client is not a web-session
+                client; ``workspace_id`` / ``context_id`` / ``agent_id`` is
+                not a UUID; a text filter (``target_type`` and ``outcome``
+                included) is not a ``str`` or is over its cap; ``cursor``
+                is blank; ``limit`` is not an ``int`` in 1-100; ``since`` /
+                ``until`` is not a timezone-aware ``datetime``; or ``since``
+                is after ``until``.
+            KaguraAuthError: The web session expired or is invalid (401).
+            KaguraFeatureNotAvailableError: The workspace's plan lacks
+                ``operation_history`` (``FEAT-001``, ``feature ==
+                "operation_history"``).
+            KaguraConnectionError: The caller is not an owner or admin of
+                the workspace, or the workspace is unknown or deleted (the
+                same uniform 403 ``AUTH-101`` "Insufficient permissions"),
+                a filter the server refused (422, e.g. an unknown or blank
+                ``operation`` or an invalid cursor), or another HTTP or
+                network failure.
+            KaguraNotFoundError: The server has no operation-history route
+                (404) — it is older than v0.154.0. On v0.154.0+ an unknown
+                workspace gets the uniform 403 above, never a 404.
+            KaguraResponseError: The page does not match
+                :class:`~kagura_memory.models.OperationHistoryPage`.
+        """
+        if not self._uses_web_session:
+            raise ValueError("list_operation_history requires WorkspaceClient.from_web_session()")
+        workspace = _normalize_workspace_id(workspace_id)
+        if limit is not None:
+            _validate_int_range("limit", limit, 1, _HISTORY_LIMIT_MAX)
+        since = _history_time("since", since)
+        until = _history_time("until", until)
+        if since is not None and until is not None and since > until:
+            raise ValueError("since must not be after until")
+        params: dict[str, Any] = {
+            "query": _history_text("query", query, _HISTORY_QUERY_MAX),
+            "context_id": (
+                None if context_id is None else normalize_uuid(context_id, label="context_id")
+            ),
+            "actor": _history_text("actor", actor, _HISTORY_ACTOR_MAX),
+            "agent_id": None if agent_id is None else normalize_uuid(agent_id, label="agent_id"),
+            "operation": _history_text("operation", operation, _HISTORY_OPERATION_MAX),
+            "target_type": _history_text("target_type", target_type),
+            "outcome": _history_text("outcome", outcome),
+            "since": _history_time_param(since),
+            "until": _history_time_param(until),
+            "limit": limit,
+            "cursor": _history_cursor(cursor),
+        }
+        resp = await self._request(
+            "GET",
+            f"/api/v1/workspaces/{workspace}/operation-history",
+            params={k: v for k, v in params.items() if v is not None},
+        )
+        return self._parse(OperationHistoryPage, self._json(resp), "list_operation_history")
 
     async def update_member_role(
         self, workspace_id: str, user_id: str, role: str

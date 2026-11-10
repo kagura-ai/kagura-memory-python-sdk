@@ -77,6 +77,10 @@ _STALE_PHRASES = [
     "mention: it reads the memory first",
     # #314: the SDK is checked against memory-cloud v0.142.0.
     "Checked against memory-cloud up to **v0.141.0**",
+    # #332: the SDK is checked against memory-cloud v0.155.0.
+    "Checked against memory-cloud up to **v0.144.0**",
+    # #334: the plugin's server_url keeps the configured context= (plugin of v0.149.0).
+    "`_plugin_server_url` keeps only `guardrails=off`",
 ]
 
 
@@ -395,6 +399,27 @@ def test_compat_0_44_section() -> None:
         assert issue in issues, f"the 0.44.0 section does not link SDK #{issue}"
     for issue in ("2508", "2614", "2615"):
         assert f"memory-cloud/issues/{issue})" in section, f"the section lacks memory-cloud#{issue}"
+    assert f"`MIN_SERVER_VERSION` stays **{MIN_SERVER_VERSION}**" in section
+
+
+def test_compat_0_46_section() -> None:
+    """#332: the 0.46.0 section names its ceiling (memory-cloud v0.155.0), issues and floors."""
+    section = _compat_sections()["0.46.0"]
+    assert _ceiling(section) == "0.155.0"
+    floors = _min_line(section)
+    for floor in (
+        "0.154.0 `WorkspaceClient.list_operation_history`",
+        "0.152.0",
+        "0.153.0",
+        "0.149.0",
+    ):
+        assert floor in floors, f"the Min memory-cloud line lacks {floor!r}"
+    issues = re.findall(r"kagura-memory-python-sdk/issues/(\d+)", section)
+    for issue in ("332", "333", "334", "335"):
+        assert issue in issues, f"the 0.46.0 section does not link SDK #{issue}"
+    for issue in ("2690", "2724", "2728", "2739"):
+        assert f"memory-cloud/issues/{issue})" in section, f"the section lacks memory-cloud#{issue}"
+    assert "38 REST operations" in section and "no backfill" in section
     assert f"`MIN_SERVER_VERSION` stays **{MIN_SERVER_VERSION}**" in section
 
 
