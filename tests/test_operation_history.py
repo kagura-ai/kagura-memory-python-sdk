@@ -323,22 +323,57 @@ async def test_every_filter_combined_is_sent(monkeypatch):
         "operation": "memory.updated",
         "target_type": "memory",
         "outcome": "success",
-        "since": "2026-11-01T09:00:00+09:00",
+        # Sent as the same instant in UTC, read back from the parsed query
+        # (a "+" left unencoded would read as a space here).
+        "since": "2026-11-01T00:00:00+00:00",
         "until": "2026-11-02T00:00:00+00:00",
         "limit": "100",
         "cursor": CURSOR,
     }
-    # The offset survives URL encoding: "+" is percent-encoded, not a space.
-    assert b"%2B09%3A00" in handler.requests[0].url.query
+    assert datetime.fromisoformat(params["since"]) == since
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("name", ["query", "actor", "operation", "cursor"])
-@pytest.mark.parametrize("blank", [None, "", "   "])
-async def test_unset_and_blank_text_filters_are_omitted(monkeypatch, name, blank):
+async def test_an_offset_with_seconds_is_sent_as_utc(monkeypatch):
+    """An aware time whose offset has seconds (an LMT zone) would not parse on the server."""
+    lmt = timezone(timedelta(hours=5, minutes=53, seconds=28))
+    since = datetime(1900, 1, 1, 12, 0, tzinfo=lmt)
+    handler = _Recorder(_ok(_page()))
+    await _list(handler, monkeypatch, since=since)
+    sent = handler.requests[0].url.params["since"]
+    assert sent == "1900-01-01T06:06:32+00:00"
+    assert datetime.fromisoformat(sent) == since
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "name", ["query", "actor", "operation", "target_type", "outcome", "cursor"]
+)
+async def test_none_filters_are_omitted(monkeypatch, name):
+    handler = _Recorder(_ok(_page()))
+    await _list(handler, monkeypatch, **{name: None})
+    assert handler.requests[0].url.query == b""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", ["query", "actor", "operation"])
+@pytest.mark.parametrize("blank", ["", "   "])
+async def test_a_blank_text_filter_is_sent_as_given(monkeypatch, name, blank):
+    """Only ``None`` is unset: the server reads a blank query/actor as no filter
+    and refuses a blank operation (422), so the SDK never widens a refused filter."""
     handler = _Recorder(_ok(_page()))
     await _list(handler, monkeypatch, **{name: blank})
-    assert handler.requests[0].url.query == b""
+    assert dict(handler.requests[0].url.params) == {name: blank}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("blank", ["", "   ", "\n"])
+async def test_a_blank_cursor_is_refused_before_any_request(monkeypatch, blank):
+    """A cursor is server-issued; a blank one would silently restart at page one."""
+    async with _session_client(_Recorder(), monkeypatch) as client:
+        with pytest.raises(ValueError, match="cursor must not be blank") as caught:
+            await client.list_operation_history(WS, cursor=blank)
+    assert repr(blank) not in str(caught.value)
 
 
 @pytest.mark.asyncio
@@ -400,7 +435,9 @@ async def test_a_refused_cursor_is_not_echoed(monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("name", ["query", "actor", "operation", "cursor"])
+@pytest.mark.parametrize(
+    "name", ["query", "actor", "operation", "target_type", "outcome", "cursor"]
+)
 async def test_a_text_filter_must_be_a_str(monkeypatch, name):
     async with _session_client(_Recorder(), monkeypatch) as client:
         with pytest.raises(ValueError, match=f"{name} must be a string"):
@@ -514,6 +551,15 @@ async def test_paging_round_trips_the_opaque_cursor(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_an_empty_string_next_cursor_parses(monkeypatch):
+    """A drifted ``""`` parses; a loop on ``if not page.next_cursor`` ends there."""
+    handler = _Recorder(_ok(_page(next_cursor="")))
+    page = await _list(handler, monkeypatch)
+    assert page.next_cursor == ""
+    assert not page.next_cursor
+
+
+@pytest.mark.asyncio
 async def test_a_capped_total(monkeypatch):
     handler = _Recorder(_ok(_page(total=1000, total_capped=True, next_cursor=CURSOR)))
     page = await _list(handler, monkeypatch)
@@ -581,23 +627,24 @@ def _uniform_403() -> httpx.Response:
 
 
 @pytest.mark.asyncio
-async def test_a_member_below_admin_is_refused(monkeypatch):
+async def test_the_uniform_403_is_a_connection_error(monkeypatch):
+    """One body for a caller below admin or not a member AND for an unknown or
+    deleted workspace (v0.154.0+ answers no 404 there): ``KaguraConnectionError``."""
     handler = _Recorder(_uniform_403())
     with pytest.raises(KaguraConnectionError, match="HTTP 403: Insufficient permissions") as caught:
         await _list(handler, monkeypatch)
+    assert not isinstance(caught.value, KaguraNotFoundError)
     assert caught.value.code == "AUTH-101"
     # The session path never adds the owner-API-key hint.
     assert "API key" not in str(caught.value)
 
 
 @pytest.mark.asyncio
-async def test_an_unknown_workspace_gets_the_same_uniform_403(monkeypatch):
-    """The route answers no 404: an unknown workspace is the admin check's 403."""
-    handler = _Recorder(_uniform_403())
-    with pytest.raises(KaguraConnectionError, match="HTTP 403") as caught:
+async def test_a_server_without_the_route_is_not_found(monkeypatch):
+    """A server older than v0.154.0 has no operation-history route: a bare 404."""
+    handler = _Recorder(httpx.Response(404, json={"detail": "Not Found"}))
+    with pytest.raises(KaguraNotFoundError):
         await _list(handler, monkeypatch)
-    assert not isinstance(caught.value, KaguraNotFoundError)
-    assert caught.value.code == "AUTH-101"
 
 
 @pytest.mark.asyncio

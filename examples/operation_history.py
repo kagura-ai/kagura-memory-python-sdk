@@ -46,9 +46,9 @@ async def main() -> None:
                 )
                 pages += 1
                 events += len(page.items)
-                cursor = page.next_cursor
-                if cursor is None:
+                if not page.next_cursor:  # None (or a drifted "") ends the loop
                     break
+                cursor = page.next_cursor
         except KaguraFeatureNotAvailableError as e:
             print(f"Operation history is not on this plan (required: {e.required_plan})")
             sys.exit(1)

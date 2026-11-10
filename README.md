@@ -711,13 +711,13 @@ async with WorkspaceClient.from_web_session(
             cursor=cursor,                                # opaque, sent back as is
         )
         ...                                               # page.items: OperationHistoryItem
-        cursor = page.next_cursor
-        if cursor is None:
+        if not page.next_cursor:                          # None (or a drifted "") ends it
             break
+        cursor = page.next_cursor
     print(page.total, page.total_capped, page.retention_days)
 ```
 
-Filters are keyword-only and combine: `query` (≤ 120 characters), `context_id`, `actor` (≤ 255), `agent_id`, `operation` (≤ 40, e.g. `memory.updated`; the server refuses one outside its set), `target_type`, `outcome`, `since` / `until` and `limit` (1-100, default 30); unset and blank values are not sent. `total` stops at 1,000 (`total_capped`), while paging reaches every match. Recording starts when the server runs the feature or the workspace moves to an entitled plan — **no backfill**, and Free and Starter record nothing — and events are kept for `retention_days` (90 days plus the workspace's add-on). Only ids, times, operation names, counts and changed-field names are stored, never contents or values. A private context's events are shown to its creator only, a shared credential's owner is not asserted to be the person who made the call, and the history is not an immutable audit ledger and has no export. See [`examples/operation_history.py`](https://github.com/kagura-ai/kagura-memory-python-sdk/blob/main/examples/operation_history.py).
+Filters are keyword-only and combine: `query` (≤ 120 characters), `context_id`, `actor` (≤ 255), `agent_id`, `operation` (≤ 40, e.g. `memory.updated`; the server refuses one outside its set), `target_type`, `outcome`, `since` / `until` (sent as the same instant in UTC) and `limit` (1-100, default 30). Only unset (`None`) filters are left out: a blank `query` / `actor` reaches the server as no filter, a blank `operation` is refused there (422), and a blank `cursor` is refused locally (`ValueError`). `total` stops at 1,000 (`total_capped`), while paging reaches every match. Recording starts when the server runs the feature or the workspace moves to an entitled plan — **no backfill**, and Free and Starter record nothing — and events are kept for `retention_days` (90 days plus the workspace's add-on). Only ids, times, operation names, counts and changed-field names are stored, never contents or values. A private context's events are shown to its creator only, a shared credential's owner is not asserted to be the person who made the call, and the history is not an immutable audit ledger and has no export. See [`examples/operation_history.py`](https://github.com/kagura-ai/kagura-memory-python-sdk/blob/main/examples/operation_history.py).
 
 On 0.144.0, invitation acceptance rechecks the workspace's `team_invitations` plan feature. A 403 `FEAT-001` leaves the invitation pending. The signed-in user's pending invitation feed matches their email case-insensitively and excludes expired, accepted, and unaddressed link-only invitations. This feed is separate from the owner's workspace invitation list.
 
@@ -1123,7 +1123,8 @@ guardrail hooks are configured (`/kagura-memory:setup`), re-run with
 values (never an API key); the plugin's `context_id` is one guardrail context for
 every project, and its hooks need a user API key even when setup uses `--profile`.
 `server_url` is the MCP URL as the plugin's own setup derives it: the query is
-dropped except `guardrails=off` and a `context=` (from `--context`) naming the
+dropped except `guardrails=off` and a `context=` (from `--context` or the
+`--mcp-url` query) naming the
 context being configured, which the plugin's SessionStart hook announces as the
 default context (the plugin shipped with memory-cloud 0.149.0).
 
