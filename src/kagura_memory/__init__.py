@@ -154,7 +154,7 @@ from .models import (
 from .resource_client import ResourceClient
 from .workspace_client import WorkspaceClient
 
-__version__ = "0.45.1"
+__version__ = "0.46.0"
 
 __all__ = [
     # Core classes
