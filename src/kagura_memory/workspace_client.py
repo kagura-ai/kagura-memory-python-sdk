@@ -342,7 +342,8 @@ class WorkspaceClient(KaguraRestClient):
                 credential and client ids, operation names and changed-field
                 names; at most 120 characters (the server trims it).
             context_id: Only this context's events (UUID).
-            actor: Actor user id or name, at most 255 characters.
+            actor: Exactly this actor user id (the server trims it; a name
+                does not match here, use ``query``), at most 255 characters.
             agent_id: Only this agent's events (UUID).
             operation: At most 40 characters. The server refuses a value
                 outside its set, at v0.155.0: ``memory.created``,
@@ -379,10 +380,11 @@ class WorkspaceClient(KaguraRestClient):
                 ``operation_history`` (``FEAT-001``, ``feature ==
                 "operation_history"``).
             KaguraConnectionError: The caller is not an owner or admin of
-                the workspace (403), a filter the server refused (422, e.g.
-                an unknown ``operation`` or an invalid cursor), or another
-                HTTP or network failure.
-            KaguraNotFoundError: The workspace was not found (404).
+                the workspace, or the workspace is unknown or deleted (the
+                same uniform 403 ``AUTH-101`` "Insufficient permissions";
+                this route answers no 404), a filter the server refused
+                (422, e.g. an unknown ``operation`` or an invalid cursor),
+                or another HTTP or network failure.
             KaguraResponseError: The page does not match
                 :class:`~kagura_memory.models.OperationHistoryPage`.
         """

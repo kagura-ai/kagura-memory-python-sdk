@@ -567,28 +567,37 @@ async def test_an_expired_session_is_an_auth_error(monkeypatch):
         await _list(handler, monkeypatch)
 
 
+def _uniform_403() -> httpx.Response:
+    """``PermissionService.check_workspace_admin``'s refusal at v0.155.0.
+
+    ``AuthorizationError`` (403 ``AUTH-101``) with the uniform message and its
+    ``details`` stripped by the exception handler (CWE-639): the same body for
+    a member below admin, a non-member, and an unknown or deleted workspace.
+    """
+    return httpx.Response(
+        403,
+        json={"error": "AUTH-101", "message": "Insufficient permissions", "details": {}},
+    )
+
+
 @pytest.mark.asyncio
 async def test_a_member_below_admin_is_refused(monkeypatch):
-    handler = _Recorder(
-        httpx.Response(
-            403,
-            json={"error": "AUTH-002", "message": "Insufficient permissions", "details": {}},
-        )
-    )
+    handler = _Recorder(_uniform_403())
     with pytest.raises(KaguraConnectionError, match="HTTP 403: Insufficient permissions") as caught:
         await _list(handler, monkeypatch)
-    assert caught.value.code == "AUTH-002"
+    assert caught.value.code == "AUTH-101"
     # The session path never adds the owner-API-key hint.
     assert "API key" not in str(caught.value)
 
 
 @pytest.mark.asyncio
-async def test_another_workspace_is_not_found(monkeypatch):
-    handler = _Recorder(
-        httpx.Response(404, json={"error": "RES-001", "message": "Workspace not found"})
-    )
-    with pytest.raises(KaguraNotFoundError, match="Workspace not found"):
+async def test_an_unknown_workspace_gets_the_same_uniform_403(monkeypatch):
+    """The route answers no 404: an unknown workspace is the admin check's 403."""
+    handler = _Recorder(_uniform_403())
+    with pytest.raises(KaguraConnectionError, match="HTTP 403") as caught:
         await _list(handler, monkeypatch)
+    assert not isinstance(caught.value, KaguraNotFoundError)
+    assert caught.value.code == "AUTH-101"
 
 
 @pytest.mark.asyncio
@@ -598,12 +607,16 @@ async def test_the_plan_gate_is_a_feature_error(monkeypatch):
             403,
             json={
                 "error": "FEAT-001",
-                "message": "Operation history requires the Pro plan or higher.",
+                # FeatureNotAvailableError.for_feature at v0.155.0 (OSS tier labels).
+                "message": (
+                    "Feature 'operation_history' not available on M plan. "
+                    "Upgrade to L plan to access this feature."
+                ),
                 "details": {
                     "gate": "plan",
                     "feature": "operation_history",
                     "required_plan": "pro",
-                    "required_plan_display": "Pro",
+                    "required_plan_display": "L",
                     "current_plan": "basic",
                 },
             },
@@ -615,7 +628,7 @@ async def test_the_plan_gate_is_a_feature_error(monkeypatch):
     assert err.feature == "operation_history"
     assert err.required_plan == "pro" and err.current_plan == "basic"
     assert err.gate == "plan"
-    assert err.details["required_plan_display"] == "Pro"
+    assert err.details["required_plan_display"] == "L"
 
 
 @pytest.mark.asyncio
