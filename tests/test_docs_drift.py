@@ -77,6 +77,8 @@ _STALE_PHRASES = [
     "mention: it reads the memory first",
     # #314: the SDK is checked against memory-cloud v0.142.0.
     "Checked against memory-cloud up to **v0.141.0**",
+    # #334: the plugin's server_url keeps the configured context= (plugin of v0.149.0).
+    "`_plugin_server_url` keeps only `guardrails=off`",
 ]
 
 

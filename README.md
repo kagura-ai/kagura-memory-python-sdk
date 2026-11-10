@@ -1093,6 +1093,10 @@ guardrail hooks are configured (`/kagura-memory:setup`), re-run with
 `--guardrails off`. Setup prints the plugin's `server_url` and `context_id`
 values (never an API key); the plugin's `context_id` is one guardrail context for
 every project, and its hooks need a user API key even when setup uses `--profile`.
+`server_url` is the MCP URL as the plugin's own setup derives it: the query is
+dropped except `guardrails=off` and a `context=` (from `--context`) naming the
+context being configured, which the plugin's SessionStart hook announces as the
+default context (the plugin shipped with memory-cloud 0.149.0).
 
 Or use the CLI directly:
 

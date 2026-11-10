@@ -34,6 +34,7 @@ from kagura_memory.setup_claude import (
 from tests.conftest import PagedContexts
 
 CTX = "11111111-2222-3333-4444-555555555555"
+OTHER_CTX = "99999999-8888-7777-6666-555555555555"
 MCP_URL = "https://memory.example.com/mcp"
 API_KEY = "kagura_secret_key_1234"
 PLUGIN_ID = "kagura-memory@kagura-memory-cloud"
@@ -941,12 +942,37 @@ def test_bad_add_tools_or_context_is_a_usage_error(tmp_path: Path, flags) -> Non
     [
         f"{MCP_URL}?guardrails=off&context={CTX}&add_tools=explore&profile=full",
         f"{MCP_URL}?context={CTX}&guardrails=off",
+        f"{MCP_URL}?tools=recall&context={CTX.upper()}&guardrails=OFF",
     ],
 )
-def test_plugin_server_url_drops_the_tool_view_and_context(upstream: str) -> None:
-    """The plugin's setup keeps only guardrails=off in server_url: its hooks send their
-    own context_id, so context= belongs on the MCP entry (#300)."""
-    assert _plugin_server_url(upstream) == f"{MCP_URL}?guardrails=off"
+def test_plugin_server_url_keeps_guardrails_off_and_the_configured_context(
+    upstream: str,
+) -> None:
+    """The plugin's setup (memory-cloud v0.149.0+, claude-skills/setup.md B2) keeps
+    guardrails=off and the configured context= in server_url and drops the tool view
+    (#334): its SessionStart hook names that context as the default."""
+    assert _plugin_server_url(upstream, CTX) == f"{MCP_URL}?guardrails=off&context={CTX}"
+
+
+@pytest.mark.parametrize(
+    "upstream",
+    [
+        f"{MCP_URL}?context={OTHER_CTX}&guardrails=off",
+        f"{MCP_URL}?context={OTHER_CTX}&context={CTX}&guardrails=off",
+        f"{MCP_URL}?context=&guardrails=off",
+        f"{MCP_URL}?context=proj&guardrails=off",
+    ],
+)
+def test_plugin_server_url_drops_a_context_that_is_not_the_configured_one(
+    upstream: str,
+) -> None:
+    """Another context (by the first value, as the server reads it) or a non-UUID is dropped."""
+    assert _plugin_server_url(upstream, CTX) == f"{MCP_URL}?guardrails=off"
+
+
+def test_plugin_server_url_drops_context_when_the_configured_one_is_no_uuid() -> None:
+    """setup claude may use a context NAME no page matched as a raw id: never equal."""
+    assert _plugin_server_url(f"{MCP_URL}?context={CTX}", "proj") == MCP_URL
 
 
 def test_help_documents_the_new_options() -> None:
@@ -1331,11 +1357,39 @@ def test_plugin_notes_with_guardrails_off_and_an_api_key(
         (f"{MCP_URL}/w/ws?profile=core&guardrails=off", f"{MCP_URL}/w/ws?guardrails=off"),
         (f"{MCP_URL}?guardrails={CTX}&profile=core", MCP_URL),
         (f"{MCP_URL}?guardrails=OFF", f"{MCP_URL}?guardrails=off"),
+        (f"{MCP_URL}?tools=recall&add_tools=explore", MCP_URL),
         (MCP_URL, MCP_URL),
     ],
 )
-def test_plugin_server_url_keeps_only_guardrails_off(upstream: str, expected: str) -> None:
-    assert _plugin_server_url(upstream) == expected
+def test_plugin_server_url_without_context_keeps_only_guardrails_off(
+    upstream: str, expected: str
+) -> None:
+    """Without context= the output is unchanged by #334: guardrails=<id>, profile=,
+    tools= and add_tools= are dropped, guardrails=off kept."""
+    assert _plugin_server_url(upstream, CTX) == expected
+
+
+@pytest.mark.parametrize("oauth", [True, False], ids=["stdio-profile", "api-key-http"])
+def test_plugin_notes_keep_the_context_the_mcp_entry_carries(
+    connection, with_plugin, tmp_path: Path, oauth: bool
+) -> None:
+    """``--context`` is on the upstream URL, so server_url keeps it with guardrails=off (#334)."""
+    result = run_setup(tmp_path, "--guardrails", "off", "--context", CTX, oauth=oauth)
+
+    assert result.exit_code == 0, result.output
+    assert f"server_url  {MCP_URL}?guardrails=off&context={CTX}\n" in result.output
+    assert f"context_id  {CTX}\n" in result.output
+    assert API_KEY not in result.output
+
+
+def test_plugin_notes_drop_a_context_other_than_the_configured_one(
+    connection, with_plugin, tmp_path: Path
+) -> None:
+    result = run_setup(tmp_path, "--context", OTHER_CTX, oauth=False)
+
+    assert result.exit_code == 0, result.output
+    assert f"server_url  {MCP_URL}\n" in result.output
+    assert OTHER_CTX not in result.output.split("server_url", 1)[1].split("\n", 1)[0]
 
 
 def test_remove_sdk_hook_keeps_other_hooks_in_a_shared_entry() -> None:
