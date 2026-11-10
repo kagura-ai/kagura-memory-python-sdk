@@ -970,6 +970,14 @@ def test_plugin_server_url_drops_a_context_that_is_not_the_configured_one(
     assert _plugin_server_url(upstream, CTX) == f"{MCP_URL}?guardrails=off"
 
 
+@pytest.mark.parametrize("raw", [f"%20{CTX}", f"{CTX}%0A", f"%20{CTX.upper()}%0A"])
+def test_plugin_server_url_trims_the_url_context_before_comparing(raw: str) -> None:
+    """The server and the plugin hook read ``context`` trimmed, so a padded value is the
+    configured context and is kept in canonical form (#334)."""
+    upstream = f"{MCP_URL}?context={raw}&guardrails=off"
+    assert _plugin_server_url(upstream, CTX) == f"{MCP_URL}?guardrails=off&context={CTX}"
+
+
 def test_plugin_server_url_drops_context_when_the_configured_one_is_no_uuid() -> None:
     """setup claude may use a context NAME no page matched as a raw id: never equal."""
     assert _plugin_server_url(f"{MCP_URL}?context={CTX}", "proj") == MCP_URL

@@ -995,7 +995,7 @@ def _plugin_server_url(upstream_url: str, context_id: str) -> str:
     stay when the MCP URL carries it and it is the context being configured"
     — the plugin's SessionStart hook names it as the connection's default
     context, so no ``list_contexts`` call is made (#334). ``context=`` is kept
-    only when its first value (as the server reads it) and ``context_id`` are
+    only when its first value, trimmed (as the server reads it), and ``context_id`` are
     the same UUID, written in canonical form; another context, a non-UUID or a
     ``context_id`` that is no UUID drops it. ``guardrails=<context-id>`` (the
     hook would warn at every session start), ``profile=``, ``tools=`` and
@@ -1005,7 +1005,8 @@ def _plugin_server_url(upstream_url: str, context_id: str) -> str:
     keep: list[str] = []
     if mcp_url_guardrails_off(upstream_url):
         keep.append("guardrails=off")
-    url_context = uuid_or_none(mcp_url_query_values(upstream_url).get("context", ""))
+    # Trimmed, as the server and the plugin hook read it.
+    url_context = uuid_or_none(mcp_url_query_values(upstream_url).get("context", "").strip())
     if url_context is not None and url_context == uuid_or_none(context_id):
         keep.append(f"context={url_context}")
     return urlunsplit(parts._replace(query="&".join(keep), fragment=""))
