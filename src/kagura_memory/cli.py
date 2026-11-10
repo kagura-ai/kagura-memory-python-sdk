@@ -1170,7 +1170,7 @@ def changes(since, context_id, until, kinds, cursor, limit, session_id, by_me, m
 @click.option(
     "--order-by",
     type=click.Choice(get_args(ListOrderBy)),
-    help="Sort key (default updated_at; observed_at needs server v0.127.0+)",
+    help="Sort key (default updated_at; observed_at needs server v0.127.0+, event_start v0.152.0+)",
 )
 @click.option("--direction", type=click.Choice(["asc", "desc"]), help="Default desc")
 @click.option("--cursor", help="next_cursor of the previous page")

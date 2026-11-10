@@ -3236,9 +3236,10 @@ class KaguraClient:
                 (``2`` is not ``2.0`` or ``"2"``). The server refuses an
                 unknown filter (``validation_error``).
             order_by: ``"updated_at"`` (server default; a never-edited memory
-                sorts by ``created_at``), ``"created_at"``, ``"importance"``
-                or ``"observed_at"`` (memory-cloud v0.127.0+, #2330; memories
-                without one go last). The id breaks ties.
+                sorts by ``created_at``), ``"created_at"``, ``"importance"``,
+                ``"observed_at"`` (memory-cloud v0.127.0+, #2330) or
+                ``"event_start"`` (v0.152.0+, #2724); the last two put
+                memories without one last. The id breaks ties.
             direction: ``"asc"`` or ``"desc"`` (server default).
             cursor: ``next_cursor`` of the previous page.
             limit: Memories per page (server default 50, clamped to 1-100).

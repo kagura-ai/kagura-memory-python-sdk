@@ -853,6 +853,7 @@ kagura changes 2026-11-01T00:00:00Z --kinds created,forgotten  # change log, old
 kagura changes 2026-11-04T09:00:00Z --by-me --limit 20   # own writes (v0.114.0+); --session-id ID (v0.113.0+); --cursor pages on
 kagura list --filters '{"type": "task", "details.status": "open"}'   # exact filters + total (v0.93.0+)
 kagura list --order-by observed_at --direction asc --details   # observed_at order needs v0.127.0+; page with --cursor
+kagura list --order-by event_start --direction asc   # event date order (v0.152.0+); no event date sorts last
 kagura update-memory -m "memory-uuid" --dismiss-supersede-candidate   # server v0.65.0+
 kagura update-memory -m "memory-uuid" --accept-supersede-candidate    # server v0.126.0+
 kagura update-memory -m "memory-uuid" --observed-at 2026-11-01        # when it held (server v0.127.0+)

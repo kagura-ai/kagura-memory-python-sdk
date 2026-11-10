@@ -2268,11 +2268,12 @@ class ChangesSinceResponse(_ContextEcho):
     truncated: bool = False
 
 
-ListOrderBy = Literal["updated_at", "created_at", "importance", "observed_at"]
+ListOrderBy = Literal["updated_at", "created_at", "importance", "observed_at", "event_start"]
 """Valid ``list_matching`` ``order_by`` values (request side only).
 
-``observed_at`` needs memory-cloud v0.127.0+ (#2330) and puts memories
-without one last."""
+``observed_at`` needs memory-cloud v0.127.0+ (#2330) and ``event_start`` (the
+first day of a memory's event, ``details.event_start``) v0.152.0+ (#2724);
+each puts memories without one last. An older server refuses the value."""
 
 
 class ListMatchingResponse(_ContextEcho):
