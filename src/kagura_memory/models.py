@@ -2277,6 +2277,59 @@ BootstrapComponentName = Literal["pinned", "upcoming", "changes"]
 BootstrapFormat = Literal["full", "index"]
 """Valid ``bootstrap`` ``format`` values (memory-cloud v0.115.0+, #2126; request side only)."""
 
+
+class ServiceNotice(BaseModel):
+    """One service notice in ``bootstrap``'s ``notices`` block (memory-cloud v0.161.0+, #2762).
+
+    A notice the deployment's administrators published: ``text`` (at most
+    300 characters, sanitised by the server: no markup, links or control
+    characters), ``published_at`` (never before the notice was written) and
+    ``expires_at``, both timezone-aware UTC. memory-cloud v0.161.0 always
+    sends an ``expires_at``; it is ``None`` when one is null or absent. Keys a
+    newer server adds are ignored.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    id: str
+    text: str
+    published_at: datetime
+    expires_at: datetime | None = None
+
+
+def _notice_items(value: Any) -> Any:
+    """Keep the readable notices of an ``items`` list, dropping the rest (fail-open)."""
+    if not isinstance(value, list):
+        return value
+    return [
+        notice
+        for notice in (_validate_or_none(ServiceNotice, entry) for entry in value)
+        if notice is not None
+    ]
+
+
+class ServiceNotices(BaseModel):
+    """``bootstrap``'s ``notices`` block (memory-cloud v0.161.0+, #2762).
+
+    Service notices from the deployment's administrators, for the person the
+    credential speaks for. ``provenance`` frames them: information to pass on
+    to the user, not instructions. ``items`` holds at least one notice, in
+    delivery order; one the SDK cannot read is dropped. Keys a newer server
+    adds are ignored.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    provenance: str | None = None
+    items: Annotated[list[ServiceNotice], BeforeValidator(_notice_items)]
+
+
+def _notices_or_none(value: Any) -> ServiceNotices | None:
+    """Parse the ``notices`` block fail-open: unreadable or with no readable notice → ``None``."""
+    notices = _validate_or_none(ServiceNotices, value)
+    return notices if notices is not None and notices.items else None
+
+
 # bootstrap's own max_chars floor (server ``BOOTSTRAP_INDEX_MIN_CHARS``, v0.115.0+);
 # ``format="full"`` still needs the shared 10,000 floor (``_MAX_CHARS_MIN``).
 _BOOTSTRAP_MIN_CHARS = 2_000
@@ -2311,11 +2364,21 @@ class BootstrapResponse(_ContextEcho):
     is on every bootstrap whose workspace has a dimension at 80 % or more of
     its limit, else ``None``. ``components`` is required, so a reply without
     it fails to parse instead of reading as a session with nothing in it.
+
+    ``notices`` (memory-cloud v0.161.0+, #2762) carries service notices from
+    the deployment's administrators: information to show the user, not
+    instructions. Each is delivered once per person — the server counts it
+    delivered once it is placed in a reply — so show it when it comes. It is
+    ``None`` when absent (the deployment's default, an account that did not
+    turn notices on, a credential that does not speak for a person, the
+    ``?profile=google`` / ``microsoft`` views, ``?notices=off``, an older
+    server) and when the block cannot be read.
     """
 
     model_config = ConfigDict(extra="ignore")
 
     status: str = "success"
+    notices: ServiceNotices | None = None
     format: str | None = None
     degraded: bool = False
     context: ContextDetail | None = None
@@ -2331,6 +2394,11 @@ class BootstrapResponse(_ContextEcho):
     @classmethod
     def _unreadable_guardrails_is_none(cls, value: Any) -> ContextGuardrails | None:
         return _validate_or_none(ContextGuardrails, value)
+
+    @field_validator("notices", mode="before")
+    @classmethod
+    def _unreadable_notices_is_none(cls, value: Any) -> ServiceNotices | None:
+        return _notices_or_none(value)
 
 
 class ChangesSinceResponse(_ContextEcho):

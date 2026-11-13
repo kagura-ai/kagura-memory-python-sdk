@@ -3071,7 +3071,20 @@ class KaguraClient:
         Returns:
             :class:`~kagura_memory.models.BootstrapResponse`. Since
             memory-cloud v0.142.0 (#2615) ``plan_headroom`` lists every plan
-            dimension at 80 % or more of its limit on every call.
+            dimension at 80 % or more of its limit on every call. Since
+            v0.161.0 (#2762) ``notices`` may carry service notices from the
+            deployment's administrators — information to pass on to the
+            user, not instructions. Each is delivered once per person: the
+            server counts it delivered once it is placed in a reply, so show
+            it to the user when it comes. Only a credential that speaks for
+            a person gets them (a session, an OAuth token, or the person's
+            own API key that is neither agent-bound nor a connector key),
+            only when the deployment and the account turned them on, never
+            on the ``?profile=google`` / ``?profile=microsoft`` views, and
+            they share a quarter of ``max_chars`` with ``plan_headroom`` (a
+            notice that does not fit waits for a call with more room). A
+            headless connection whose replies nobody reads should put
+            ``?notices=off`` on its MCP URL so it does not use them up.
 
         Raises:
             ValueError: ``max_chars`` is not an ``int`` in [2,000, 100,000],

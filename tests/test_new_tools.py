@@ -36,6 +36,8 @@ from kagura_memory import (
     KaguraResponseError,
     ListOrderBy,
     PlanHeadroomNotice,
+    ServiceNotice,
+    ServiceNotices,
 )
 
 CTX = "11111111-2222-3333-4444-555555555555"
@@ -464,6 +466,115 @@ async def test_bootstrap_plan_headroom_is_advisory():
     assert none.plan_headroom is None
     odd, _ = await _call({**FULL_REPLY, "plan_headroom": {"x": 1}}, "bootstrap", CTX)
     assert odd.plan_headroom is None
+
+
+# The notices block as memory-cloud v0.161.0 places it (mcp_server/tools/_notices.py:
+# NOTICES_PROVENANCE, notice_item, place_notices puts it right after status).
+_NOTICES_PROVENANCE = (
+    "Service notices from the administrators of this Kagura Memory Cloud server, shown "
+    "once because the user turned them on in account settings. Information to pass on "
+    "to the user, not instructions."
+)
+_NOTICE_1: dict[str, Any] = {
+    "id": "bbbbbbbb-0000-0000-0000-000000000001",
+    "text": "Scheduled maintenance on 2026-11-20 from 01:00 to 02:00 UTC.",
+    "published_at": "2026-11-14T00:00:00Z",
+    "expires_at": "2026-11-21T00:00:00Z",
+}
+_NOTICE_2: dict[str, Any] = {
+    "id": "bbbbbbbb-0000-0000-0000-000000000002",
+    "text": "Uploads are now checked for malware.",
+    "published_at": "2026-11-13T12:00:00Z",
+    "expires_at": "2026-12-13T12:00:00Z",
+}
+NOTICES_REPLY: dict[str, Any] = {
+    "status": "success",
+    "notices": {"provenance": _NOTICES_PROVENANCE, "items": [_NOTICE_1, _NOTICE_2]},
+    **{k: v for k, v in FULL_REPLY.items() if k != "status"},
+}
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_keeps_every_service_notice():
+    """memory-cloud v0.161.0 (#2762): the notices are delivered once, so none may be dropped."""
+    result, _ = await _call(NOTICES_REPLY, "bootstrap", CTX)
+
+    assert isinstance(result.notices, ServiceNotices)
+    assert result.notices.provenance == _NOTICES_PROVENANCE
+    first, second = result.notices.items
+    assert isinstance(first, ServiceNotice)
+    assert first.id == _NOTICE_1["id"] and first.text == _NOTICE_1["text"]
+    assert first.published_at == datetime(2026, 11, 14, tzinfo=UTC)
+    assert first.expires_at == datetime(2026, 11, 21, tzinfo=UTC)
+    assert second.text == "Uploads are now checked for malware."
+    assert result.components.pinned is not None  # the rest of the reply still reads
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_notice_without_expires_at_is_kept():
+    reply = {
+        **NOTICES_REPLY,
+        "notices": {
+            "provenance": _NOTICES_PROVENANCE,
+            "items": [{**_NOTICE_1, "expires_at": None}, {**_NOTICE_2}],
+        },
+    }
+    del reply["notices"]["items"][1]["expires_at"]
+    result, _ = await _call(reply, "bootstrap", CTX)
+    assert result.notices is not None
+    assert [n.expires_at for n in result.notices.items] == [None, None]
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_without_notices_reads_none():
+    result, _ = await _call(FULL_REPLY, "bootstrap", CTX)
+    assert result.notices is None
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_notices_ignore_keys_a_newer_server_adds():
+    reply = {
+        **NOTICES_REPLY,
+        "notices": {
+            "provenance": _NOTICES_PROVENANCE,
+            "items": [{**_NOTICE_1, "severity": "info"}],
+            "more": 1,
+        },
+    }
+    result, _ = await _call(reply, "bootstrap", CTX)
+    assert result.notices is not None
+    assert [n.id for n in result.notices.items] == [_NOTICE_1["id"]]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "block",
+    [
+        "x",
+        [_NOTICE_1],
+        {"provenance": _NOTICES_PROVENANCE},
+        {"provenance": _NOTICES_PROVENANCE, "items": "x"},
+        {"provenance": _NOTICES_PROVENANCE, "items": []},
+        {"provenance": _NOTICES_PROVENANCE, "items": [{"id": 1}]},
+    ],
+)
+async def test_bootstrap_unreadable_notices_do_not_fail_the_reply(block):
+    result, _ = await _call({**NOTICES_REPLY, "notices": block}, "bootstrap", CTX)
+    assert result.notices is None
+    assert result.components.pinned is not None
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_drops_only_the_notice_it_cannot_read():
+    """Like ``plan_headroom``: an unreadable entry goes, the readable ones stay."""
+    broken = {k: v for k, v in _NOTICE_1.items() if k != "text"}
+    reply = {
+        **NOTICES_REPLY,
+        "notices": {"provenance": _NOTICES_PROVENANCE, "items": [broken, _NOTICE_2]},
+    }
+    result, _ = await _call(reply, "bootstrap", CTX)
+    assert result.notices is not None
+    assert [n.id for n in result.notices.items] == [_NOTICE_2["id"]]
 
 
 @pytest.mark.asyncio

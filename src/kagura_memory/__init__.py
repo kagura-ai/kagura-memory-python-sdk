@@ -133,6 +133,8 @@ from .models import (
     SeriesBucket,
     ServerFeatures,
     ServerInfo,
+    ServiceNotice,
+    ServiceNotices,
     SessionRollbackItem,
     SessionRollbackResult,
     SessionRollbackSummary,
@@ -288,6 +290,8 @@ __all__ = [
     "SessionRollbackSummary",
     "PlanHeadroom",
     "PlanHeadroomNotice",
+    "ServiceNotice",
+    "ServiceNotices",
     # Tool guardrails (#253, server v0.74.0+)
     "ToolTrigger",
     "GuardrailItem",
