@@ -1063,6 +1063,23 @@ async def test_remember_batch_without_envelope_lint_reads_none():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("lint", "expected"),
+    [
+        (["batch_level_argument"], None),
+        (_BATCH_LINT, None),
+        ("x", None),
+        (["x", _BATCH_LINT], [_BATCH_LINT]),
+    ],
+)
+async def test_remember_batch_drifted_envelope_lint_keeps_the_reply(lint, expected):
+    """The items are already written: a drifted ``lint`` must not fail the reply."""
+    result, _ = await _call({**BATCH_REPLY, "lint": lint}, "remember_batch", CTX, [_ITEM] * 4)
+    assert result.lint == expected
+    assert result.count == 4 and len(result.results) == len(BATCH_REPLY["results"])
+
+
+@pytest.mark.asyncio
 async def test_remember_batch_leaves_tags_sent_as_a_json_string_to_the_server():
     """The server coerces ``tags`` sent as a JSON string per item; only a list is measured."""
     items = [{**_ITEM, "tags": '["a", "b"]'}]

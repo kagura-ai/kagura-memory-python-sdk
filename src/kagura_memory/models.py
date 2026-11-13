@@ -2513,6 +2513,20 @@ class RememberBatchItemResult(BaseModel):
     summary_original_length: int | None = None
 
 
+def _batch_lint_or_none(value: Any) -> list[dict[str, Any]] | None:
+    """Read ``remember_batch``'s envelope ``lint`` fail-open, like ``plan_headroom``.
+
+    The items are already written when it arrives, so a drifted value must
+    not fail the reply (a caller would resend and duplicate them): an entry
+    that is not an object is dropped, and a value that is not a list, or
+    holds no object, reads as ``None``.
+    """
+    if not isinstance(value, list):
+        return None
+    entries = [entry for entry in value if isinstance(entry, dict)]
+    return entries or None
+
+
 class RememberBatchResult(_ContextEcho):
     """Reply of the ``remember_batch`` MCP tool (memory-cloud v0.93.0+, #1853).
 
@@ -2534,7 +2548,9 @@ class RememberBatchResult(_ContextEcho):
     (``dedupe`` / ``tags_normalize`` / ``verbose``, the ``subject``) that the
     batch left unset and the server took from the items, which all agreed on
     it (``code`` ``"batch_level_argument"``). ``None`` when absent (no key
-    adopted, or an older server).
+    adopted, or an older server); read fail-open like ``plan_headroom``: an
+    entry that is not an object is dropped, and a value that is not a list
+    (or holds no object) reads as ``None``.
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -2549,7 +2565,7 @@ class RememberBatchResult(_ContextEcho):
     committed_after_timeout: bool = False
     message: str | None = None
     session_id: str | None = None
-    lint: list[dict[str, Any]] | None = None
+    lint: Annotated[list[dict[str, Any]] | None, BeforeValidator(_batch_lint_or_none)] = None
     plan_headroom: PlanHeadroom = None
 
 
