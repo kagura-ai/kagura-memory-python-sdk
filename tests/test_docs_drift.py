@@ -79,6 +79,14 @@ _STALE_PHRASES = [
     "Checked against memory-cloud up to **v0.141.0**",
     # #332: the SDK is checked against memory-cloud v0.155.0.
     "Checked against memory-cloud up to **v0.144.0**",
+    # #340: the SDK is checked against memory-cloud v0.161.0.
+    "Checked against memory-cloud up to **v0.155.0**",
+    # #340: memory-cloud v0.158.0 adds the google / microsoft profiles.
+    "The server knows only these two",
+    "knows only `full` and `core`",
+    "(full | core)",
+    # #338: memory-cloud v0.156.0 accepts batch-level keys on remember_batch items.
+    "refused inside an item",
     # #334: the plugin's server_url keeps the configured context= (plugin of v0.149.0).
     "`_plugin_server_url` keeps only `guardrails=off`",
 ]
@@ -276,7 +284,21 @@ def test_no_doc_says_a_non_uuid_is_a_500_without_the_422() -> None:
             ],
         ),
         (KaguraClient.get_server_info, ["search_defaults", "model_extra", "terms_version"]),
-        (KaguraClient.__init__, ["?profile=", "?tools=", "tools/list"]),
+        (
+            KaguraClient.__init__,
+            [
+                "?profile=",
+                "?tools=",
+                "tools/list",
+                "?profile=google",
+                "unknown_tool",
+                "?notices=off",
+            ],
+        ),
+        (KaguraClient.bootstrap, ["notices", "v0.161.0", "?notices=off", "not instructions"]),
+        (KaguraClient.remember_batch, ["v0.156.0", "batch_level_argument", "#2753"]),
+        (FilesClient.download_url, ["SCAN-001", "SCAN-002", "retry_after", "v0.160.0"]),
+        (FilesClient.upload, ["pending", "#565"]),
         (TagInfo, ["sample_summary"]),
     ],
     ids=lambda v: getattr(v, "__qualname__", "terms"),
@@ -420,6 +442,30 @@ def test_compat_0_46_section() -> None:
     for issue in ("2690", "2724", "2728", "2739"):
         assert f"memory-cloud/issues/{issue})" in section, f"the section lacks memory-cloud#{issue}"
     assert "38 REST operations" in section and "no backfill" in section
+    assert f"`MIN_SERVER_VERSION` stays **{MIN_SERVER_VERSION}**" in section
+
+
+def test_compat_0_47_section() -> None:
+    """#340: the 0.47.0 section names its ceiling (memory-cloud v0.161.0), issues and floors."""
+    section = _compat_sections()["0.47.0"]
+    assert _ceiling(section) == "0.161.0"
+    floors = _min_line(section)
+    for floor in (
+        "0.156.0 `dedupe` / `tags_normalize` / `verbose`",
+        "0.158.0 the `?profile=google` / `?profile=microsoft` views",
+        "0.160.0 `FileObject.scan_status`",
+        "0.161.0 `BootstrapResponse.notices`",
+    ):
+        assert floor in floors, f"the Min memory-cloud line lacks {floor!r}"
+    issues = re.findall(r"kagura-memory-python-sdk/issues/(\d+)", section)
+    for issue in ("337", "338", "339", "340"):
+        assert issue in issues, f"the 0.47.0 section does not link SDK #{issue}"
+    for issue in ("565", "2751", "2752", "2753", "2762", "2773", "2778"):
+        assert f"memory-cloud/issues/{issue})" in section, f"the section lacks memory-cloud#{issue}"
+    for term in ("SCAN-001", "SCAN-002", "batch_level_argument", "?notices=off", "unknown_tool"):
+        assert term in section, f"the section lacks {term!r}"
+    assert "**Passed through with no SDK change.**" in section
+    assert "**Auth.**" in section and "**Not wrapped.**" in section
     assert f"`MIN_SERVER_VERSION` stays **{MIN_SERVER_VERSION}**" in section
 
 

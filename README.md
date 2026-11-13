@@ -739,15 +739,15 @@ The same client also provisions **member API keys** (memory-cloud [#1165](https:
 
 ## SDK ↔ memory-cloud Compatibility
 
-`MIN_SERVER_VERSION` is **0.17.1** and advisory: the SDK never blocks a call on the server version. SDK 0.46.0 is checked against memory-cloud up to **0.155.0**, and a surface newer than the floor carries its own, given in the [compatibility page](https://github.com/kagura-ai/kagura-memory-python-sdk/blob/main/docs/compatibility.md) section of the release that added it.
+`MIN_SERVER_VERSION` is **0.17.1** and advisory: the SDK never blocks a call on the server version. SDK 0.47.0 is checked against memory-cloud up to **0.161.0**, and a surface newer than the floor carries its own, given in the [compatibility page](https://github.com/kagura-ai/kagura-memory-python-sdk/blob/main/docs/compatibility.md) section of the release that added it.
 
 | SDK | memory-cloud checked up to | What changed |
 |---|---|---|
+| [0.47.0](https://github.com/kagura-ai/kagura-memory-python-sdk/blob/main/docs/compatibility.md#0470) | 0.161.0 | Typed upload malware-scan refusals (`KaguraFileScanPendingError`, `KaguraFileBlockedError`) and `FileObject.scan_status`, batch-level keys on `remember_batch` items, `bootstrap` service notices, the google / microsoft tool views |
 | [0.46.0](https://github.com/kagura-ai/kagura-memory-python-sdk/blob/main/docs/compatibility.md#0460) | 0.155.0 | Session-only workspace operation history reader, `order_by="event_start"`, the plugin `server_url` keeps `context=`, `RollbackSummary.related_indexes_reverted` |
 | [0.45.1](https://github.com/kagura-ai/kagura-memory-python-sdk/blob/main/docs/compatibility.md#0451) | 0.144.0 | Security dependency floors and refreshed lock; Click 8.5 compatibility. |
 | [0.45.0](https://github.com/kagura-ai/kagura-memory-python-sdk/blob/main/docs/compatibility.md#0450) | 0.144.0 | Workspace member context access, signed-in context member add, and OAuth credential locking shared with TypeScript SDK 0.16.0. |
 | [0.44.0](https://github.com/kagura-ai/kagura-memory-python-sdk/blob/main/docs/compatibility.md#0440) | 0.142.0 | Session tools (`bootstrap`, `changes_since`, `list_matching`, `remember_batch`), new `remember` / `update_memory` arguments, list paging, `plan_headroom`, auth refresh under the lock |
-| [0.43.0](https://github.com/kagura-ai/kagura-memory-python-sdk/blob/main/docs/compatibility.md#0430) | 0.141.0 | Recall shape (`verbosity`, `full`, `max_chars`), MCP URL options, typed server errors, cursors and write caps |
 
 Every release back to 0.13.x, with each surface's floor, how the SDK reads a server version, and the full notes: **[docs/compatibility.md](https://github.com/kagura-ai/kagura-memory-python-sdk/blob/main/docs/compatibility.md)**.
 
@@ -1085,16 +1085,19 @@ guardrails (see below).
 
 What `tools/list` shows: since memory-cloud 0.93.0 a bare `/mcp` URL lists the
 `core` profile, the memory loop (21 tools on 0.141.0), and `--tool-profile full`
-lists every tool (72). The server knows only `full` and `core` (case-sensitive) and
-fails `tools/list` for any other name, which leaves Claude Code with no Kagura
-tools. Setup leaves that list to the server and refuses only a blank name or one
+lists every tool (72). `google` and its alias `microsoft` (memory-cloud 0.158.0+) list
+the `core` tools without `describe_tools` and `guide`. The server knows only these four
+(`full`, `core`, `google`, `microsoft`; case-sensitive) and fails `tools/list` for any
+other name, which leaves Claude Code with no Kagura tools. Setup leaves that list to the server and refuses only a blank name or one
 starting with `-` (exit 2), which the stored `kagura-mcp` arguments would read as a
 flag. `--add-tools` lists more tools on top of the profile, e.g. `--add-tools
 explore`: `recall`'s `explore_hints` need `explore` listed (memory-cloud 0.135.0
 moved it out of `core`), so add it or use `full`. Unknown names are ignored, and a
 `?tools=` allowlist already on the URL wins over both flags (setup warns). A profile
 is a view, not an authorization boundary: `tools/call` reaches an unlisted tool too,
-and `describe_tools` names what the view leaves out. `--context` makes that context
+and `describe_tools` names what the view leaves out. The google views are the
+exception: `?add_tools=` cannot bring back `describe_tools` and `guide`, and
+`tools/call` refuses both there (`unknown_tool`). `--context` makes that context
 the default for tools called without `context_id`, so a session can skip
 `list_contexts`; an explicit `context_id` wins, and the default is checked like one.
 It is a UUID, unlike `--context-id`, which picks the project's hooks and commands.

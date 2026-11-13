@@ -340,15 +340,28 @@ class KaguraClient:
                 returns: a bare URL lists the ``core`` profile on
                 memory-cloud 0.93.0+ (21 tools on 0.141.0, memory-cloud#1849)
                 and ``?profile=full`` every tool (72). A profile is a view,
-                not an authorization boundary — ``tools/call`` never reads
-                it, so every method here keeps working on any URL — except
-                that :meth:`recall`'s ``explore_hints`` need ``explore``
-                listed (``?add_tools=explore`` or ``?profile=full``; v0.135.0,
-                memory-cloud#2470). ``?context=<uuid>`` (v0.114.0+) names a
-                default context for tools called without ``context_id``, and
+                not an authorization boundary — ``tools/call`` reaches an
+                unlisted tool, so the methods here keep working on a
+                ``core`` or ``full`` URL — except that :meth:`recall`'s
+                ``explore_hints`` need ``explore`` listed
+                (``?add_tools=explore`` or ``?profile=full``; v0.135.0,
+                memory-cloud#2470). The ``?profile=google`` view and its
+                alias ``?profile=microsoft`` (v0.158.0+, memory-cloud#2773 /
+                #2778) are the exception: they list the ``core`` tools
+                without ``describe_tools`` and ``guide``, which
+                ``?add_tools=`` cannot bring back, and refuse both at
+                ``tools/call``, so :meth:`describe_tools` and :meth:`guide`
+                raise :class:`KaguraError` with ``code == "unknown_tool"``
+                there. On those views :meth:`recall` makes no learning
+                writes and :meth:`bootstrap` carries no service ``notices``
+                (v0.161.0). ``?context=<uuid>`` (v0.114.0+) names a default
+                context for tools called without ``context_id``,
                 ``?guardrails=off`` (v0.74.0+) drops the ``guardrails`` block
-                from :meth:`get_context_info`. REST calls derive their base
-                URL without the query (#258).
+                from :meth:`get_context_info` and :meth:`bootstrap`, and
+                ``?notices=off`` (v0.161.0+) keeps service notices out of
+                :meth:`bootstrap` (for a headless connection whose replies
+                nobody reads). REST calls derive their base URL without the
+                query (#258).
             timeout: Request timeout in seconds.
             profile: Named OAuth profile to load (overrides
                 ``KAGURA_PROFILE`` and the credentials file's
