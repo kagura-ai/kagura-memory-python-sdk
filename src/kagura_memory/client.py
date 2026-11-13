@@ -3354,8 +3354,12 @@ class KaguraClient:
                 invalid value) every item carrying the key is refused. The
                 server compares JSON type and value after ``remember``'s
                 string coercion (``"true"`` equals ``True``, ``1`` does not).
-                A server before v0.156.0 refuses every item carrying one of
-                the three. Set them here instead.
+                Older servers: 0.96.0-0.155.x refuse every item carrying one
+                of the three (``invalid_argument`` per item; a non-atomic
+                batch writes the others, an atomic one is refused whole), and
+                0.93.0-0.95.x ignore the item's key and write the item with
+                the batch's setting (an item's ``dedupe="check"`` checks
+                nothing there). On those servers set them here instead.
             atomic: ``True``: all or nothing. Server default ``False``.
             dedupe: As ``remember``'s, applied per item: ``"suggest"``
                 (server default), ``"check"`` (a near-duplicate is returned as
@@ -3378,9 +3382,10 @@ class KaguraClient:
                 item's ``tags`` break the 50-tag / 100-character cap (all
                 before any request). A batch-level key on an item is the
                 server's to accept or refuse: a refused item is an ``error``
-                row with ``invalid_argument`` (before v0.156.0 every such
-                item), and with ``atomic=True`` it refuses the whole batch
-                (``batch_refused`` below).
+                row with ``invalid_argument`` (on 0.96.0-0.155.x every such
+                item; 0.93.0-0.95.x ignore the key instead), and with
+                ``atomic=True`` it refuses the whole batch (``batch_refused``
+                below).
             TypeError: ``items`` is not a list, or an item is not a dict.
             KaguraQuotaError: An atomic batch did not fit the daily quota
                 (``quota_exceeded``; nothing was written, a smaller batch may

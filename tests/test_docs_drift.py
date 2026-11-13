@@ -87,6 +87,10 @@ _STALE_PHRASES = [
     "(full | core)",
     # #338: memory-cloud v0.156.0 accepts batch-level keys on remember_batch items.
     "refused inside an item",
+    # #338 review: 0.93.0-0.95.x ignore an item's batch-level key; only 0.96.0+ refuse it.
+    "before v0.156.0 refuses every item",
+    "before 0.156.0 refuses every item",
+    "an older server refuses every such item",
     # #334: the plugin's server_url keeps the configured context= (plugin of v0.149.0).
     "`_plugin_server_url` keeps only `guardrails=off`",
 ]
