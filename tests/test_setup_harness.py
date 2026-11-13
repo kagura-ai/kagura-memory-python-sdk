@@ -315,6 +315,8 @@ class TestCodex:
         assert argv[argv.index("--") + 1 :] == [PROXY, "--profile", "work", "--guardrails", CTX]
         assert "editor list you control" in result.output
         assert f"guardrail digest of context\n  {CTX} in the MCP" in result.output
+        # memory-cloud 0.158.0+: the google / microsoft view carries no digest.
+        assert "google / microsoft tool view" in result.output
         assert (
             f"KAGURA_PROFILE=work kagura guardrails digest {CTX} --target instructions"
             in result.output
