@@ -628,6 +628,19 @@ From memory-cloud 0.126.0 a workspace-scoped API key keeps its own workspace on 
 
 A file bound via `binding_context_id` routes read/write/list/delete through that context's ACL (server v0.41.0+): you need write (EDITOR+) access to the context, and it must belong to the upload's workspace (else `403` / `422`). A denied **download** surfaces as a `404` (existence-hiding), not a `403`. Unbound uploads stay workspace-scoped and fully listable.
 
+memory-cloud 0.160.0+ can scan uploads for malware ([#565](https://github.com/kagura-ai/memory-cloud/issues/565); off by default). Every `FileObject` then carries `scan_status` (`unscanned`, `pending`, `clean`, `infected` or `error`; `None` on an older server), and `download_url()` refuses a file the scan holds with one of two `KaguraConnectionError` subclasses. `KaguraFileScanPendingError` (`409 SCAN-001`) means the scan has not finished: call again after `retry_after` seconds (the server's `Retry-After`, 30). The SDK does not retry by itself. `KaguraFileBlockedError` (`409 SCAN-002`) means the scan blocked the file, and waiting does not help. Both expose `file_id` and `scan_status`. A file that `upload()` just returned, a dedup hit included, may still be `pending`. A file that downloaded before can answer `SCAN-001` again when the stored object no longer matches the scanned version.
+
+```python
+from kagura_memory import KaguraFileBlockedError, KaguraFileScanPendingError
+
+try:
+    url = await client.download_url(f.id, context_id="ctx-uuid")
+except KaguraFileScanPendingError as e:
+    await asyncio.sleep(e.retry_after or 30)  # then try again
+except KaguraFileBlockedError as e:
+    print(f"blocked by the malware scan: {e.scan_status}")
+```
+
 Runnable: [`examples/files_upload.py`](examples/files_upload.py).
 
 ### SecretClient — Zero-Knowledge Secrets

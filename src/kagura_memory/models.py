@@ -1236,6 +1236,14 @@ class FileObject(BaseModel):
     files that were uploaded with no binding context — those stay fully
     listable and accessible to the workspace.
 
+    ``scan_status`` is the upload malware scan's state (memory-cloud
+    v0.160.0+, #565), a plain ``str``: ``unscanned`` (uploaded while scanning
+    was off; downloadable), ``pending`` (being scanned: ``download_url``
+    raises :class:`~kagura_memory.exceptions.KaguraFileScanPendingError`
+    until it finishes), ``clean``, ``infected`` or ``error`` (blocked:
+    :class:`~kagura_memory.exceptions.KaguraFileBlockedError`). ``None`` on
+    an older server.
+
     ``extra="ignore"`` is explicit (matching the other wire-shape response
     models): a strict model would 500 the SDK the moment the server adds a
     field, so forward-compat tolerance is a deliberate contract, not an
@@ -1254,6 +1262,7 @@ class FileObject(BaseModel):
     created_at: datetime
     uploaded_at: datetime | None = None
     context_id: str | None = None
+    scan_status: str | None = None
 
 
 class FileReserveResponse(BaseModel):
