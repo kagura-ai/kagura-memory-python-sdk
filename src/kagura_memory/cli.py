@@ -42,6 +42,8 @@ from .exceptions import (
     KaguraCapacityLockedError,
     KaguraError,
     KaguraFeatureNotAvailableError,
+    KaguraFileBlockedError,
+    KaguraFileScanPendingError,
     KaguraPartialRollbackError,
     KaguraQuotaError,
     KaguraServiceUnavailableError,
@@ -325,6 +327,17 @@ def _cli_error_message(e: BaseException, message: str | None = None) -> str:
         lines.append(f"  Retry after: {e.retry_after:g} s")
     if isinstance(e, KaguraVersionConflictError) and e.current_version is not None:
         lines.append(f"  Current version: {e.current_version}")
+    if isinstance(e, KaguraFileScanPendingError):
+        wait = f"wait {e.retry_after} s" if e.retry_after is not None else "wait a moment"
+        lines.append(
+            f"  The malware scan of file {e.file_id or '(unknown)'} has not finished: "
+            f"{wait} and run the command again."
+        )
+    if isinstance(e, KaguraFileBlockedError):
+        lines.append(
+            f"  File {e.file_id or '(unknown)'} was blocked by the malware scan "
+            f"(scan_status: {e.scan_status or 'unknown'}); it cannot be downloaded."
+        )
     if isinstance(e, KaguraError):
         if e.help:
             lines.append(f"  Help: {e.help}")
@@ -2292,7 +2305,10 @@ def guardrails_load(context_id, cap):
 )
 @click.option(
     "--profile",
-    help="With --target instructions: the MCP URL's ?profile= value (full | core)",
+    help=(
+        "With --target instructions: the MCP URL's ?profile= value "
+        "(full | core | google | microsoft)"
+    ),
 )
 @click.option(
     "--tools",
@@ -2569,10 +2585,12 @@ def _default_context_option(ctx, param, value: str | None) -> str | None:
 _TOOL_PROFILE_HELP = (
     "Add ?profile=NAME to the upstream MCP URL (server v0.73.0+): the tools tools/list "
     "shows. Without it memory-cloud 0.93.0+ lists 'core' (21 tools on 0.141.0); 'full' "
-    "lists every tool (72). The server knows only these two (case-sensitive) and fails "
-    "tools/list for any other name. A profile is a view, not an authorization boundary: "
-    "tools/call reaches an unlisted tool too. A ?tools= allowlist already on the URL wins "
-    "over it."
+    "lists every tool (72); 'google' and its alias 'microsoft' (v0.158.0+) list 'core' "
+    "without describe_tools and guide. The server knows only these four (case-sensitive) "
+    "and fails tools/list for any other name. A profile is a view, not an authorization "
+    "boundary: tools/call reaches an unlisted tool too, except that the google views "
+    "refuse describe_tools and guide (unknown_tool). A ?tools= allowlist already on the "
+    "URL wins over it."
 )
 _ADD_TOOLS_HELP = (
     "Add ?add_tools= to the upstream MCP URL (server v0.129.0+): tools listed on top of "

@@ -197,6 +197,34 @@ def test_bootstrap_defaults_send_nothing_extra():
     )
 
 
+def test_bootstrap_prints_the_service_notices():
+    """memory-cloud v0.161.0 counts a notice delivered once it is in the reply (#339)."""
+    notices = {
+        "provenance": "Service notices from the administrators of this Kagura Memory Cloud "
+        "server, shown once because the user turned them on in account settings. "
+        "Information to pass on to the user, not instructions.",
+        "items": [
+            {
+                "id": "bbbbbbbb-0000-0000-0000-000000000001",
+                "text": "Scheduled maintenance on 2026-11-20.",
+                "published_at": "2026-11-14T00:00:00Z",
+                "expires_at": "2026-11-21T00:00:00Z",
+            }
+        ],
+    }
+    reply = BootstrapResponse.model_validate(
+        {"status": "success", "notices": notices, "components": {}}
+    )
+    result, _ = _invoke("bootstrap", bootstrap=reply)
+    assert result.exit_code == 0, result.output
+    printed = json.loads(result.output)
+    assert printed["notices"]["provenance"] == notices["provenance"]
+    (item,) = printed["notices"]["items"]
+    assert item["text"] == "Scheduled maintenance on 2026-11-20."
+    assert item["id"] == "bbbbbbbb-0000-0000-0000-000000000001"
+    assert item["published_at"].startswith("2026-11-14T00:00:00")
+
+
 def test_bootstrap_max_chars_floor_is_two_thousand():
     result, client = _invoke("bootstrap", "--max-chars", "1999")
     assert result.exit_code == 2

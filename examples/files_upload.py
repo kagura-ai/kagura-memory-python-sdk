@@ -16,7 +16,7 @@ import asyncio
 import os
 import sys
 
-from kagura_memory import FilesClient, KaguraClient
+from kagura_memory import FilesClient, KaguraClient, KaguraFileScanPendingError
 
 
 async def main():
@@ -72,8 +72,13 @@ async def main():
         # Short-lived presigned GET URL for the original bytes. download_url /
         # delete require the owning context_id (workspace) — server v0.41.0
         # scopes file-id lookups to it.
-        url = await files.download_url(obj.id, context_id=ctx)
-        print(f"Download URL (expires shortly): {url[:60]}...")
+        # With upload malware scanning on (memory-cloud 0.160.0+) a new file is
+        # "pending" for a while: call again after retry_after seconds.
+        try:
+            url = await files.download_url(obj.id, context_id=ctx)
+            print(f"Download URL (expires shortly): {url[:60]}...")
+        except KaguraFileScanPendingError as e:
+            print(f"Malware scan still pending; retry in {e.retry_after or 30} s")
 
         # List files in the context, newest first.
         page = await files.list(context_id=ctx, limit=10)

@@ -361,7 +361,12 @@ class FilesClient(KaguraRestClient):
             happy-path) without uploading again. A duplicate bound to
             another context, or one whose earlier upload has not completed,
             carries no file, and the 409 is raised as
-            :class:`KaguraConnectionError`.
+            :class:`KaguraConnectionError`. With upload malware scanning on
+            (memory-cloud v0.160.0+, #565) the file returned — a dedup hit
+            included — may still be ``scan_status="pending"``, so
+            :meth:`download_url` can refuse it for a while; a duplicate the
+            scan blocked is never returned (the 409 is raised, its message
+            saying so).
 
         Raises:
             ValueError: If ``source`` is ``bytes`` and ``filename`` is
@@ -492,6 +497,26 @@ class FilesClient(KaguraRestClient):
                 mapping). A file bound to a private context the caller can't
                 read is reported as 404 (existence-hiding); a workspace mismatch
                 (wrong ``context_id``) surfaces as a 403 with an actionable hint.
+
+        Returns:
+            The presigned URL.
+
+        Raises:
+            KaguraFileScanPendingError: ``409 SCAN-001`` (memory-cloud
+                v0.160.0+, #565): upload scanning is on and the file's scan has
+                not finished. Call again after ``retry_after`` seconds (the
+                server sends ``Retry-After: 30``); this method does not retry.
+                A file that was downloadable before can answer this again when
+                the stored object no longer matches the scanned version (the
+                server queues it for a new scan).
+            KaguraFileBlockedError: ``409 SCAN-002``: the scan blocked the file
+                (``scan_status`` ``infected``, or with scanning on ``error`` or
+                any other value the server does not allow). Not retryable; an
+                ``infected`` file stays refused after scanning is turned off.
+            KaguraNotFoundError: The file does not exist or the caller cannot
+                read it (checked before the scan gate).
+            KaguraAuthError, KaguraConnectionError: see class docstring. Both
+                scan errors subclass :class:`KaguraConnectionError`.
         """
         context_id = _normalize_context_id(context_id)
         response = await self._request(

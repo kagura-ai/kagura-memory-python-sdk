@@ -163,6 +163,77 @@ class KaguraServiceUnavailableError(KaguraConnectionError):
         self.reason = reason
 
 
+class KaguraFileScanPendingError(KaguraConnectionError):
+    """The file's malware scan has not finished (memory-cloud v0.160.0+, #565).
+
+    ``FilesClient.download_url`` got ``409 SCAN-001``: upload scanning is on
+    and the file is still ``pending``. The same request succeeds once the scan
+    says clean, so wait ``retry_after`` seconds and call again; the SDK does
+    not retry by itself. A file that was downloadable before can come back to
+    this when the stored object no longer matches the scanned version (the
+    server queues it for a new scan). A :class:`KaguraConnectionError`, which
+    is what a 409 raised before, so existing handlers still catch it.
+
+    ``code`` is ``"SCAN-001"`` and ``details`` the server's
+    ``{file_id, scan_status: "pending"}``.
+
+    Attributes:
+        retry_after: Seconds to wait, from the ``Retry-After`` header (the
+            server sends 30); ``None`` when it is absent or not a number of
+            seconds.
+    """
+
+    def __init__(self, message: str, *, retry_after: int | None = None):
+        super().__init__(message)
+        self.retry_after = retry_after
+
+    @property
+    def file_id(self) -> str | None:
+        """The file the scan holds."""
+        return _str_detail(self, "file_id")
+
+    @property
+    def scan_status(self) -> str | None:
+        """The file's scan state (``"pending"``)."""
+        return _str_detail(self, "scan_status")
+
+    @property
+    def retryable(self) -> bool | None:
+        """``True``: the same call succeeds once the scan finishes."""
+        return True
+
+
+class KaguraFileBlockedError(KaguraConnectionError):
+    """The malware scan blocked the file; it cannot be downloaded (memory-cloud v0.160.0+, #565).
+
+    ``FilesClient.download_url`` got ``409 SCAN-002``. ``scan_status`` is
+    ``"infected"`` (a finding; refused even after scanning is turned off) or,
+    while scanning is on, ``"error"`` (the scanner could not check the file)
+    or any other value the server does not allow (its gate is an
+    allow-list). Waiting does not help, so it is not retryable; the finding's
+    name is never part of the response. A :class:`KaguraConnectionError`, as
+    the 409 was before.
+
+    ``code`` is ``"SCAN-002"`` and ``details`` the server's
+    ``{file_id, scan_status}``.
+    """
+
+    @property
+    def file_id(self) -> str | None:
+        """The blocked file."""
+        return _str_detail(self, "file_id")
+
+    @property
+    def scan_status(self) -> str | None:
+        """The file's scan state, e.g. ``"infected"`` or ``"error"``."""
+        return _str_detail(self, "scan_status")
+
+    @property
+    def retryable(self) -> bool | None:
+        """``False``: a blocked file does not become downloadable by waiting."""
+        return False
+
+
 class KaguraNotFoundError(KaguraError):
     """Requested resource not found (HTTP 404)."""
 

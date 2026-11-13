@@ -36,6 +36,8 @@ from kagura_memory import (
     KaguraResponseError,
     ListOrderBy,
     PlanHeadroomNotice,
+    ServiceNotice,
+    ServiceNotices,
 )
 
 CTX = "11111111-2222-3333-4444-555555555555"
@@ -466,6 +468,159 @@ async def test_bootstrap_plan_headroom_is_advisory():
     assert odd.plan_headroom is None
 
 
+# The notices block as memory-cloud v0.161.0 places it (mcp_server/tools/_notices.py:
+# NOTICES_PROVENANCE, notice_item, place_notices puts it right after status).
+_NOTICES_PROVENANCE = (
+    "Service notices from the administrators of this Kagura Memory Cloud server, shown "
+    "once because the user turned them on in account settings. Information to pass on "
+    "to the user, not instructions."
+)
+_NOTICE_1: dict[str, Any] = {
+    "id": "bbbbbbbb-0000-0000-0000-000000000001",
+    "text": "Scheduled maintenance on 2026-11-20 from 01:00 to 02:00 UTC.",
+    "published_at": "2026-11-14T00:00:00Z",
+    "expires_at": "2026-11-21T00:00:00Z",
+}
+_NOTICE_2: dict[str, Any] = {
+    "id": "bbbbbbbb-0000-0000-0000-000000000002",
+    "text": "Uploads are now checked for malware.",
+    "published_at": "2026-11-13T12:00:00Z",
+    "expires_at": "2026-12-13T12:00:00Z",
+}
+NOTICES_REPLY: dict[str, Any] = {
+    "status": "success",
+    "notices": {"provenance": _NOTICES_PROVENANCE, "items": [_NOTICE_1, _NOTICE_2]},
+    **{k: v for k, v in FULL_REPLY.items() if k != "status"},
+}
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_keeps_every_service_notice():
+    """memory-cloud v0.161.0 (#2762): the notices are delivered once, so none may be dropped."""
+    result, _ = await _call(NOTICES_REPLY, "bootstrap", CTX)
+
+    assert isinstance(result.notices, ServiceNotices)
+    assert result.notices.provenance == _NOTICES_PROVENANCE
+    first, second = result.notices.items
+    assert isinstance(first, ServiceNotice)
+    assert first.id == _NOTICE_1["id"] and first.text == _NOTICE_1["text"]
+    assert first.published_at == datetime(2026, 11, 14, tzinfo=UTC)
+    assert first.expires_at == datetime(2026, 11, 21, tzinfo=UTC)
+    assert second.text == "Uploads are now checked for malware."
+    assert result.components.pinned is not None  # the rest of the reply still reads
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_notice_without_expires_at_is_kept():
+    reply = {
+        **NOTICES_REPLY,
+        "notices": {
+            "provenance": _NOTICES_PROVENANCE,
+            "items": [{**_NOTICE_1, "expires_at": None}, {**_NOTICE_2}],
+        },
+    }
+    del reply["notices"]["items"][1]["expires_at"]
+    result, _ = await _call(reply, "bootstrap", CTX)
+    assert result.notices is not None
+    assert [n.expires_at for n in result.notices.items] == [None, None]
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_without_notices_reads_none():
+    result, _ = await _call(FULL_REPLY, "bootstrap", CTX)
+    assert result.notices is None
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_notices_ignore_keys_a_newer_server_adds():
+    reply = {
+        **NOTICES_REPLY,
+        "notices": {
+            "provenance": _NOTICES_PROVENANCE,
+            "items": [{**_NOTICE_1, "severity": "info"}],
+            "more": 1,
+        },
+    }
+    result, _ = await _call(reply, "bootstrap", CTX)
+    assert result.notices is not None
+    assert [n.id for n in result.notices.items] == [_NOTICE_1["id"]]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "block",
+    [
+        "x",
+        [_NOTICE_1],
+        {"provenance": _NOTICES_PROVENANCE},
+        {"provenance": _NOTICES_PROVENANCE, "items": "x"},
+        {"provenance": _NOTICES_PROVENANCE, "items": []},
+        {"provenance": _NOTICES_PROVENANCE, "items": [{"id": 1}]},
+    ],
+)
+async def test_bootstrap_unreadable_notices_do_not_fail_the_reply(block):
+    result, _ = await _call({**NOTICES_REPLY, "notices": block}, "bootstrap", CTX)
+    assert result.notices is None
+    assert result.components.pinned is not None
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_drops_only_the_notice_it_cannot_read():
+    """Like ``plan_headroom``: an unreadable entry goes, the readable ones stay."""
+    broken = {k: v for k, v in _NOTICE_1.items() if k != "text"}
+    reply = {
+        **NOTICES_REPLY,
+        "notices": {"provenance": _NOTICES_PROVENANCE, "items": [broken, _NOTICE_2]},
+    }
+    result, _ = await _call(reply, "bootstrap", CTX)
+    assert result.notices is not None
+    assert [n.id for n in result.notices.items] == [_NOTICE_2["id"]]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "ancillary",
+    [
+        {"published_at": None},
+        {"published_at": "soon"},
+        {"expires_at": "never"},
+        {"id": 7},
+        {"id": None, "published_at": None, "expires_at": None},
+    ],
+)
+async def test_bootstrap_keeps_a_notice_whose_ancillary_field_is_unreadable(ancillary):
+    """Delivered once: an unreadable id or timestamp must not cost the user the text."""
+    reply = {
+        **NOTICES_REPLY,
+        "notices": {
+            "provenance": _NOTICES_PROVENANCE,
+            "items": [{**_NOTICE_1, **ancillary}, _NOTICE_2],
+        },
+    }
+    result, _ = await _call(reply, "bootstrap", CTX)
+    assert result.notices is not None
+    first, second = result.notices.items
+    assert first.text == _NOTICE_1["text"]
+    for key in ancillary:
+        assert getattr(first, key) is None
+    assert second.id == _NOTICE_2["id"]
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_drops_a_notice_without_text():
+    for broken in (
+        {k: v for k, v in _NOTICE_1.items() if k != "text"},
+        {**_NOTICE_1, "text": None},
+    ):
+        reply = {
+            **NOTICES_REPLY,
+            "notices": {"provenance": _NOTICES_PROVENANCE, "items": [broken, _NOTICE_2]},
+        }
+        result, _ = await _call(reply, "bootstrap", CTX)
+        assert result.notices is not None
+        assert [n.text for n in result.notices.items] == [_NOTICE_2["text"]]
+
+
 @pytest.mark.asyncio
 async def test_bootstrap_keeps_a_lane_a_newer_server_adds():
     reply = {**FULL_REPLY, "components": {**FULL_REPLY["components"], "digest": {"status": "ok"}}}
@@ -816,9 +971,6 @@ async def test_remember_batch_sends_the_batch_level_arguments_that_are_set():
         ({"summary": "x"}, TypeError, "list"),
         ([_ITEM, "summary"], TypeError, r"items\[1\]"),
         ([{**_ITEM, "context_id": str(uuid.uuid4())}], ValueError, "another context_id"),
-        ([_ITEM, {**_ITEM, "dedupe": "off"}], ValueError, r"items\[1\] carries dedupe"),
-        ([{**_ITEM, "tags_normalize": True}], ValueError, "tags_normalize"),
-        ([{**_ITEM, "verbose": True}], ValueError, "verbose"),
         ([_ITEM, {**_ITEM, "tags": [f"t{i}" for i in range(51)]}], ValueError, r"items\[1\]"),
         ([{**_ITEM, "tags": ["x" * 101]}], ValueError, "100 characters"),
     ],
@@ -841,6 +993,90 @@ async def test_remember_batch_sends_an_item_that_repeats_the_batch_context_id():
     items = [{**_ITEM, "context_id": CTX}]
     _, params = await _call(BATCH_REPLY, "remember_batch", CTX, items)
     assert params["arguments"]["items"] == items
+
+
+@pytest.mark.asyncio
+async def test_remember_batch_sends_an_item_that_repeats_a_batch_level_value():
+    """memory-cloud v0.156.0 (#2753) accepts an item repeating the batch's own value."""
+    items = [{**_ITEM, "dedupe": "check", "tags_normalize": True, "verbose": False}]
+    _, params = await _call(
+        BATCH_REPLY,
+        "remember_batch",
+        CTX,
+        items,
+        dedupe="check",
+        tags_normalize=True,
+        verbose=False,
+    )
+    assert params["arguments"]["items"] == items
+    assert params["arguments"]["dedupe"] == "check"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "items",
+    [
+        # Agreeing items while the batch omits the key: the server adopts the value.
+        [{**_ITEM, "dedupe": "off"}, {**_ITEM, "dedupe": "off"}],
+        # The server's agreement rule (type-strict, after remember's string
+        # coercion) is left to the server: none of these is refused locally.
+        [{**_ITEM, "tags_normalize": "true"}, {**_ITEM, "tags_normalize": True}],
+        [{**_ITEM, "verbose": True}, {**_ITEM, "verbose": 1}],
+        [_ITEM, {**_ITEM, "dedupe": "off"}],
+    ],
+)
+async def test_remember_batch_sends_batch_level_keys_on_items_as_given(items):
+    _, params = await _call(BATCH_REPLY, "remember_batch", CTX, items)
+    assert params["arguments"] == {"context_id": CTX, "items": items}
+
+
+@pytest.mark.asyncio
+async def test_remember_batch_sends_an_item_value_that_differs_from_the_batch():
+    """Every server refuses it per item (``invalid_argument``); the SDK leaves that to it."""
+    items = [{**_ITEM, "dedupe": "off"}]
+    _, params = await _call(BATCH_REPLY, "remember_batch", CTX, items, dedupe="check")
+    assert params["arguments"]["items"] == items
+
+
+_BATCH_LINT = {
+    "code": "batch_level_argument",
+    "hint": 'dedupe is a batch-level argument: the items\' dedupe="off" was applied to the '
+    'whole batch. Set it once on remember_batch (dedupe="off"), not on each item.',
+    "subject": "dedupe",
+}
+
+
+@pytest.mark.asyncio
+async def test_remember_batch_keeps_the_envelope_lint():
+    """memory-cloud v0.156.0: an adopted batch-level key is named in a top-level ``lint``."""
+    items = [{**_ITEM, "dedupe": "off"}] * 4
+    result, _ = await _call({**BATCH_REPLY, "lint": [_BATCH_LINT]}, "remember_batch", CTX, items)
+    assert result.lint == [_BATCH_LINT]
+    # A per-item lint still lands on its row.
+    assert result.results[0].lint == [{"code": "no_tags", "hint": "Add tags."}]
+
+
+@pytest.mark.asyncio
+async def test_remember_batch_without_envelope_lint_reads_none():
+    result, _ = await _call(BATCH_REPLY, "remember_batch", CTX, [_ITEM] * 4)
+    assert result.lint is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("lint", "expected"),
+    [
+        (["batch_level_argument"], None),
+        (_BATCH_LINT, None),
+        ("x", None),
+        (["x", _BATCH_LINT], [_BATCH_LINT]),
+    ],
+)
+async def test_remember_batch_drifted_envelope_lint_keeps_the_reply(lint, expected):
+    """The items are already written: a drifted ``lint`` must not fail the reply."""
+    result, _ = await _call({**BATCH_REPLY, "lint": lint}, "remember_batch", CTX, [_ITEM] * 4)
+    assert result.lint == expected
+    assert result.count == 4 and len(result.results) == len(BATCH_REPLY["results"])
 
 
 @pytest.mark.asyncio

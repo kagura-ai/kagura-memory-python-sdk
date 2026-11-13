@@ -804,8 +804,10 @@ async def _check_tool_listing(
 
     It reads the CLI's MCP URL, not a Claude Code entry's ``kagura-mcp``
     flags, and says so. A profile is a view, not an authorization boundary:
-    ``tools/call`` reaches an unlisted tool too, so a short list never breaks
-    a ``KaguraClient`` method. It does decide what an MCP client following
+    ``tools/call`` reaches an unlisted tool too, so a short list breaks no
+    ``KaguraClient`` method — except on the ``google`` / ``microsoft`` views
+    (memory-cloud v0.158.0+), which refuse ``describe_tools`` and ``guide``
+    at ``tools/call`` as well. It does decide what an MCP client following
     ``tools/list`` sees.
 
     ``api_key`` is the configured static key, if any: ``tools/list`` is the

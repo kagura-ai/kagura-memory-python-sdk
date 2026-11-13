@@ -47,6 +47,8 @@ from .exceptions import (
     KaguraAuthError,
     KaguraConnectionError,
     KaguraError,
+    KaguraFileBlockedError,
+    KaguraFileScanPendingError,
     KaguraNotFoundError,
     KaguraQuotaError,
     _exc_message,
@@ -86,6 +88,10 @@ class KaguraRestClient:
     - a refused ``expected_version`` (memory ``PATCH``'s ``409 RES-002``
       with ``details.reason == "version_conflict"``, v0.113.0+, #2043) →
       :class:`KaguraVersionConflictError` (#302), after the gate rule
+    - a file the malware scan holds (``409 SCAN-001``, memory-cloud
+      v0.160.0+) → :class:`KaguraFileScanPendingError` with ``retry_after``
+      from ``Retry-After``, and one it blocked (``409 SCAN-002``) →
+      :class:`KaguraFileBlockedError` (#337), after the version-conflict rule
     - other statuses → :class:`KaguraConnectionError`, e.g. the files API's
       sha256 dedup ``409 RES-002`` (no ``reason``)
     - transport errors → :class:`KaguraConnectionError`
@@ -319,7 +325,11 @@ class KaguraRestClient:
         built once by :meth:`_request`; the hooks read it from there rather
         than decoding the body again.
         """
-        typed = self._gate_error(e, body) or self._version_conflict_error(e, body)
+        typed = (
+            self._gate_error(e, body)
+            or self._version_conflict_error(e, body)
+            or self._file_scan_error(e, body)
+        )
         if typed is not None:
             return typed
         status = e.response.status_code
@@ -369,6 +379,28 @@ class KaguraRestClient:
         """
         envelope = self._safe_envelope(e, body)
         return None if envelope is None else version_conflict_error(*envelope)
+
+    def _file_scan_error(self, e: httpx.HTTPStatusError, body: ErrorBody) -> KaguraError | None:
+        """Type a download the malware scan holds (memory-cloud v0.160.0+, #565; SDK #337).
+
+        ``GET /api/v1/files/{id}/download-url`` answers ``409 SCAN-001``
+        (``Retry-After``; the scan has not finished) or ``409 SCAN-002`` (the
+        scan blocked the file). Read by code and status only, so a 404 stays
+        :class:`KaguraNotFoundError` and the files API's dedup ``409 RES-002``
+        stays the generic error ``FilesClient.upload`` reads its
+        ``existing_file`` from. The server's ``code`` and ``details`` are set
+        on the error by :meth:`_request`.
+        """
+        envelope = self._safe_envelope(e, body)
+        if envelope is None or e.response.status_code != 409:
+            return None
+        code, message, _ = envelope
+        text = f"HTTP 409: {message}"
+        if code == "SCAN-001":
+            return KaguraFileScanPendingError(text, retry_after=_retry_after_seconds(e.response))
+        if code == "SCAN-002":
+            return KaguraFileBlockedError(text)
+        return None
 
     @staticmethod
     def _safe_envelope(

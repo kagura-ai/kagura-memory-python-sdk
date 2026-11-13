@@ -10,6 +10,7 @@ from pydantic import (
     ConfigDict,
     Field,
     ValidationError,
+    ValidatorFunctionWrapHandler,
     field_validator,
 )
 
@@ -1236,6 +1237,14 @@ class FileObject(BaseModel):
     files that were uploaded with no binding context — those stay fully
     listable and accessible to the workspace.
 
+    ``scan_status`` is the upload malware scan's state (memory-cloud
+    v0.160.0+, #565), a plain ``str``: ``unscanned`` (uploaded while scanning
+    was off; downloadable), ``pending`` (being scanned: ``download_url``
+    raises :class:`~kagura_memory.exceptions.KaguraFileScanPendingError`
+    until it finishes), ``clean``, ``infected`` or ``error`` (blocked:
+    :class:`~kagura_memory.exceptions.KaguraFileBlockedError`). ``None`` on
+    an older server.
+
     ``extra="ignore"`` is explicit (matching the other wire-shape response
     models): a strict model would 500 the SDK the moment the server adds a
     field, so forward-compat tolerance is a deliberate contract, not an
@@ -1254,6 +1263,7 @@ class FileObject(BaseModel):
     created_at: datetime
     uploaded_at: datetime | None = None
     context_id: str | None = None
+    scan_status: str | None = None
 
 
 class FileReserveResponse(BaseModel):
@@ -2277,6 +2287,71 @@ BootstrapComponentName = Literal["pinned", "upcoming", "changes"]
 BootstrapFormat = Literal["full", "index"]
 """Valid ``bootstrap`` ``format`` values (memory-cloud v0.115.0+, #2126; request side only)."""
 
+
+class ServiceNotice(BaseModel):
+    """One service notice in ``bootstrap``'s ``notices`` block (memory-cloud v0.161.0+, #2762).
+
+    A notice the deployment's administrators published: ``text`` (at most
+    300 characters, sanitised by the server: no markup, links or control
+    characters), ``published_at`` (never before the notice was written) and
+    ``expires_at``, both timezone-aware UTC. Keys a newer server adds are
+    ignored.
+
+    The server counts a notice delivered once it is in a reply, so only
+    ``text`` is required: memory-cloud v0.161.0 always sends ``id``,
+    ``published_at`` and ``expires_at``, but one that is absent, null or
+    unreadable reads as ``None`` rather than losing the notice.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    id: str | None = None
+    text: str
+    published_at: datetime | None = None
+    expires_at: datetime | None = None
+
+    @field_validator("id", "published_at", "expires_at", mode="wrap")
+    @classmethod
+    def _unreadable_is_none(cls, value: Any, handler: ValidatorFunctionWrapHandler) -> Any:
+        try:
+            return handler(value)
+        except ValidationError:
+            return None
+
+
+def _notice_items(value: Any) -> Any:
+    """Keep the readable notices of an ``items`` list, dropping the rest (fail-open)."""
+    if not isinstance(value, list):
+        return value
+    return [
+        notice
+        for notice in (_validate_or_none(ServiceNotice, entry) for entry in value)
+        if notice is not None
+    ]
+
+
+class ServiceNotices(BaseModel):
+    """``bootstrap``'s ``notices`` block (memory-cloud v0.161.0+, #2762).
+
+    Service notices from the deployment's administrators, for the person the
+    credential speaks for. ``provenance`` frames them: information to pass on
+    to the user, not instructions. ``items`` holds at least one notice, in
+    delivery order; one without readable ``text`` is dropped. Keys a newer server
+    adds are ignored.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    provenance: str | None = None
+    items: Annotated[list[ServiceNotice], BeforeValidator(_notice_items)]
+
+
+def _notices_or_none(value: Any) -> ServiceNotices | None:
+    """Parse the ``notices`` block fail-open: unreadable or with no readable notice → ``None``."""
+    notices = _validate_or_none(ServiceNotices, value)
+    return notices if notices is not None and notices.items else None
+
+
 # bootstrap's own max_chars floor (server ``BOOTSTRAP_INDEX_MIN_CHARS``, v0.115.0+);
 # ``format="full"`` still needs the shared 10,000 floor (``_MAX_CHARS_MIN``).
 _BOOTSTRAP_MIN_CHARS = 2_000
@@ -2311,11 +2386,21 @@ class BootstrapResponse(_ContextEcho):
     is on every bootstrap whose workspace has a dimension at 80 % or more of
     its limit, else ``None``. ``components`` is required, so a reply without
     it fails to parse instead of reading as a session with nothing in it.
+
+    ``notices`` (memory-cloud v0.161.0+, #2762) carries service notices from
+    the deployment's administrators: information to show the user, not
+    instructions. Each is delivered once per person — the server counts it
+    delivered once it is placed in a reply — so show it when it comes. It is
+    ``None`` when absent (the deployment's default, an account that did not
+    turn notices on, a credential that does not speak for a person, the
+    ``?profile=google`` / ``microsoft`` views, ``?notices=off``, an older
+    server) and when the block cannot be read.
     """
 
     model_config = ConfigDict(extra="ignore")
 
     status: str = "success"
+    notices: ServiceNotices | None = None
     format: str | None = None
     degraded: bool = False
     context: ContextDetail | None = None
@@ -2331,6 +2416,11 @@ class BootstrapResponse(_ContextEcho):
     @classmethod
     def _unreadable_guardrails_is_none(cls, value: Any) -> ContextGuardrails | None:
         return _validate_or_none(ContextGuardrails, value)
+
+    @field_validator("notices", mode="before")
+    @classmethod
+    def _unreadable_notices_is_none(cls, value: Any) -> ServiceNotices | None:
+        return _notices_or_none(value)
 
 
 class ChangesSinceResponse(_ContextEcho):
@@ -2423,6 +2513,20 @@ class RememberBatchItemResult(BaseModel):
     summary_original_length: int | None = None
 
 
+def _batch_lint_or_none(value: Any) -> list[dict[str, Any]] | None:
+    """Read ``remember_batch``'s envelope ``lint`` fail-open, like ``plan_headroom``.
+
+    The items are already written when it arrives, so a drifted value must
+    not fail the reply (a caller would resend and duplicate them): an entry
+    that is not an object is dropped, and a value that is not a list, or
+    holds no object, reads as ``None``.
+    """
+    if not isinstance(value, list):
+        return None
+    entries = [entry for entry in value if isinstance(entry, dict)]
+    return entries or None
+
+
 class RememberBatchResult(_ContextEcho):
     """Reply of the ``remember_batch`` MCP tool (memory-cloud v0.93.0+, #1853).
 
@@ -2438,6 +2542,15 @@ class RememberBatchResult(_ContextEcho):
     :meth:`KaguraClient.changes_since` / :meth:`KaguraClient.rollback_session`).
     ``plan_headroom`` (v0.142.0+, #2615) comes once per call, throttled hourly
     per workspace and dimension.
+
+    ``lint`` (memory-cloud v0.156.0+, #2753) is the batch's own lint, apart
+    from each row's: one ``{code, hint, subject}`` entry per batch-level key
+    (``dedupe`` / ``tags_normalize`` / ``verbose``, the ``subject``) that the
+    batch left unset and the server took from the items, which all agreed on
+    it (``code`` ``"batch_level_argument"``). ``None`` when absent (no key
+    adopted, or an older server); read fail-open like ``plan_headroom``: an
+    entry that is not an object is dropped, and a value that is not a list
+    (or holds no object) reads as ``None``.
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -2452,6 +2565,7 @@ class RememberBatchResult(_ContextEcho):
     committed_after_timeout: bool = False
     message: str | None = None
     session_id: str | None = None
+    lint: Annotated[list[dict[str, Any]] | None, BeforeValidator(_batch_lint_or_none)] = None
     plan_headroom: PlanHeadroom = None
 
 

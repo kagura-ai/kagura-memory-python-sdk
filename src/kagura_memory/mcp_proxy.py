@@ -377,9 +377,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "Set ?profile= on the upstream URL: the tools tools/list shows (server "
             "v0.73.0+). Without it memory-cloud 0.93.0+ lists 'core' (21 tools on 0.141.0); "
-            "'full' lists every tool (72). The server knows only these two (case-sensitive) "
-            "and fails tools/list for any other name. A profile is a view, not an "
-            "authorization boundary: tools/call reaches unlisted tools too. A ?tools= "
+            "'full' lists every tool (72); 'google' and its alias 'microsoft' (v0.158.0+) "
+            "list 'core' without describe_tools and guide. The server knows only these four "
+            "(case-sensitive) and fails tools/list for any other name. A profile is a view, "
+            "not an authorization boundary: tools/call reaches unlisted tools too, except "
+            "that the google views refuse describe_tools and guide (unknown_tool). A ?tools= "
             "allowlist already on the URL wins over it."
         ),
     )
