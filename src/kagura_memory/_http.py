@@ -76,7 +76,8 @@ def mcp_url_with_query(
         mcp_url: The MCP endpoint URL, with or without a query.
         guardrails: ``?guardrails=`` value (see :func:`normalize_guardrails`).
         tool_profile: ``?profile=`` value, the tool profile ``tools/list``
-            serves (``core`` or ``full``); the server rejects an unknown name.
+            serves (``full``, ``core``, ``google`` or ``microsoft``; the last
+            two v0.158.0+); the server rejects an unknown name.
             Without one, memory-cloud 0.93.0+ lists ``core`` (memory-cloud#1849).
         add_tools: ``?add_tools=`` names, added to the listed profile
             (server v0.129.0+, memory-cloud#2354), normalized by
@@ -206,8 +207,9 @@ def normalize_guardrails(value: str) -> str:
 def normalize_tool_profile(value: str) -> str:
     """Validate a tool profile name (``?profile=``) before it goes into an MCP entry.
 
-    memory-cloud knows ``core`` and ``full`` and fails ``tools/list`` for any
-    other name, so that list is left to the server. Refused here is what
+    memory-cloud knows ``full``, ``core``, ``google`` and ``microsoft`` (the
+    last two v0.158.0+, case-sensitive) and fails ``tools/list`` for any other
+    name, so that list is left to the server. Refused here is what
     breaks the entry before the server sees it: a blank name, and one
     starting with ``-``, which ``kagura-mcp --tool-profile -x`` in a stored
     entry would read as a flag, so the proxy would not start (as

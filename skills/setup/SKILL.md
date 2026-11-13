@@ -37,14 +37,15 @@ Options (all optional; the defaults write the same files as before):
   strongest scope (local > project > user), so setup warns when a stronger one
   would hide the new entry, and with `-y` exits 1 without writing.
 - `--guardrails off|<context-uuid>` (server v0.74.0+), `--tool-profile <name>`
-  (server v0.73.0+: `full` or `core`), `--add-tools <name>[,<name>…]` (server
+  (server v0.73.0+: `full` or `core`; `google` / `microsoft` v0.158.0+), `--add-tools <name>[,<name>…]` (server
   v0.129.0+) and `--context <context-uuid>` (server v0.114.0+) — put
   `?guardrails=` / `?profile=` / `?add_tools=` / `?context=` on the upstream MCP
   URL (as `kagura-mcp` args for `--profile`). Since memory-cloud v0.93.0 a bare
   URL lists the `core` profile (21 tools on v0.141.0); `--tool-profile full`
   lists every tool (72) and `--add-tools` lists more on top, e.g. `explore` for
   `recall`'s explore hints. A profile is a view, not a permission: unlisted tools
-  still answer `tools/call`. `--context` sets the default context for tools
+  still answer `tools/call`, except `describe_tools` / `guide` on the google
+  views (`unknown_tool`). `--context` sets the default context for tools
   called without `context_id` (a UUID, unlike `--context-id`). `off` also removes
   the `guardrails` block from `get_context_info`: use it only once hooks (such as
   the memory-cloud `kagura-memory` plugin's) deliver guardrails. Changing any of

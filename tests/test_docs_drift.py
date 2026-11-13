@@ -85,6 +85,9 @@ _STALE_PHRASES = [
     "The server knows only these two",
     "knows only `full` and `core`",
     "(full | core)",
+    "``core`` and ``full``",
+    "(``core`` or ``full``)",
+    "server v0.73.0+: `full` or `core`)",
     # #338: memory-cloud v0.156.0 accepts batch-level keys on remember_batch items.
     "refused inside an item",
     # #338 review: 0.93.0-0.95.x ignore an item's batch-level key; only 0.96.0+ refuse it.
