@@ -3314,7 +3314,20 @@ class KaguraClient:
                 ``supersedes`` — no SDK defaults are added. An item may
                 repeat the batch's ``context_id`` but name no other. An
                 undeclared key fails that item (``invalid_argument``; a
-                whole atomic batch is refused).
+                whole atomic batch is refused). Items are sent as given,
+                ``dedupe`` / ``tags_normalize`` / ``verbose`` included, and
+                the server decides on them (memory-cloud v0.156.0+, #2753):
+                an item may repeat the value set here; when one is not set
+                here and every otherwise accepted item carrying it agrees on
+                one valid value, that value applies to the whole batch and
+                the reply's ``lint`` names it (``batch_level_argument``); an
+                item whose value differs from the one set here is refused,
+                and when items disagree with each other (or agree on an
+                invalid value) every item carrying the key is refused. The
+                server compares JSON type and value after ``remember``'s
+                string coercion (``"true"`` equals ``True``, ``1`` does not).
+                A server before v0.156.0 refuses every item carrying one of
+                the three. Set them here instead.
             atomic: ``True``: all or nothing. Server default ``False``.
             dedupe: As ``remember``'s, applied per item: ``"suggest"``
                 (server default), ``"check"`` (a near-duplicate is returned as
@@ -3328,14 +3341,18 @@ class KaguraClient:
             :class:`~kagura_memory.models.RememberBatchResult` with one row
             per item. Check ``failed`` / ``candidates`` / ``skipped`` and
             each row's ``status``; on ``committed_after_timeout`` every item
-            is stored — do not resend.
+            is stored — do not resend. ``lint`` (v0.156.0+) names the
+            batch-level keys the server took from the items.
 
         Raises:
             ValueError: ``items`` is empty or holds more than 50 items, an
-                item carries ``dedupe``, ``tags_normalize`` or ``verbose``
-                (batch-level here) or a ``context_id`` other than the
-                batch's, or an item's ``tags`` break the 50-tag /
-                100-character cap (all before any request).
+                item carries a ``context_id`` other than the batch's, or an
+                item's ``tags`` break the 50-tag / 100-character cap (all
+                before any request). A batch-level key on an item is the
+                server's to accept or refuse: a refused item is an ``error``
+                row with ``invalid_argument`` (before v0.156.0 every such
+                item), and with ``atomic=True`` it refuses the whole batch
+                (``batch_refused`` below).
             TypeError: ``items`` is not a list, or an item is not a dict.
             KaguraQuotaError: An atomic batch did not fit the daily quota
                 (``quota_exceeded``; nothing was written, a smaller batch may
@@ -5088,10 +5105,11 @@ def _unfinished_list_error(tool: str) -> KaguraResponseError:
 # Session tools (#301): local checks mirroring the server's own bounds
 # ---------------------------------------------------------------------------
 
-# remember_batch items (server ``MAX_BATCH_ITEMS``) and the remember arguments
-# that are set once, on the batch, never per item (server ``_BATCH_LEVEL``).
+# remember_batch items (server ``MAX_BATCH_ITEMS``). The batch-level keys an
+# item may carry (server ``_BATCH_LEVEL``) are not checked here: memory-cloud
+# v0.156.0+ (#2753) decides on them with a type-strict rule after remember's
+# string coercion, which a local copy would drift from.
 _BATCH_MAX_ITEMS = 50
-_BATCH_LEVEL_KEYS = ("dedupe", "tags_normalize", "verbose")
 # forget(memory_ids=) ids per call (server ``FORGET_MAX_IDS``).
 _FORGET_MAX_IDS = 50
 # forget(query=) matches deleted when ``k`` is unset (the server's default too).
@@ -5105,16 +5123,17 @@ def _checked_batch_items(items: Any, context_id: str) -> list[dict[str, Any]]:
     """Reject a ``remember_batch`` ``items`` list before any request.
 
     Per-item rules the server reports per item (a missing ``summary``, an
-    unknown key) stay the server's. Refused here: the batch-level keys, an
-    item ``context_id`` other than the batch's (the server accepts one that
+    unknown key, a batch-level ``dedupe`` / ``tags_normalize`` / ``verbose``
+    it does not accept) stay the server's. Refused here: an item
+    ``context_id`` other than the batch's (the server accepts one that
     repeats it, compared as a string), and the tag cap that
     :meth:`KaguraClient.remember` also checks.
 
     Raises:
         TypeError: ``items`` is not a list, or an item is not a dict.
-        ValueError: Not 1-50 items, an item carries a batch-level key or
-            another context's ``context_id``, or an item's ``tags`` list
-            breaks the 50-tag / 100-character cap.
+        ValueError: Not 1-50 items, an item carries another context's
+            ``context_id``, or an item's ``tags`` list breaks the 50-tag /
+            100-character cap.
     """
     if not isinstance(items, list):
         raise TypeError(f"items must be a list of dicts, got {type(items).__name__}")
@@ -5123,12 +5142,6 @@ def _checked_batch_items(items: Any, context_id: str) -> list[dict[str, Any]]:
     for index, item in enumerate(items):
         if not isinstance(item, dict):
             raise TypeError(f"items[{index}] must be a dict, got {type(item).__name__}")
-        batch_level = [key for key in _BATCH_LEVEL_KEYS if key in item]
-        if batch_level:
-            raise ValueError(
-                f"items[{index}] carries {', '.join(batch_level)}: set dedupe / "
-                "tags_normalize / verbose on remember_batch itself, not on an item"
-            )
         if "context_id" in item and item["context_id"] != context_id:
             raise ValueError(
                 f"items[{index}] carries another context_id: the batch's context_id "

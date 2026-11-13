@@ -2438,6 +2438,13 @@ class RememberBatchResult(_ContextEcho):
     :meth:`KaguraClient.changes_since` / :meth:`KaguraClient.rollback_session`).
     ``plan_headroom`` (v0.142.0+, #2615) comes once per call, throttled hourly
     per workspace and dimension.
+
+    ``lint`` (memory-cloud v0.156.0+, #2753) is the batch's own lint, apart
+    from each row's: one ``{code, hint, subject}`` entry per batch-level key
+    (``dedupe`` / ``tags_normalize`` / ``verbose``, the ``subject``) that the
+    batch left unset and the server took from the items, which all agreed on
+    it (``code`` ``"batch_level_argument"``). ``None`` when absent (no key
+    adopted, or an older server).
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -2452,6 +2459,7 @@ class RememberBatchResult(_ContextEcho):
     committed_after_timeout: bool = False
     message: str | None = None
     session_id: str | None = None
+    lint: list[dict[str, Any]] | None = None
     plan_headroom: PlanHeadroom = None
 
 

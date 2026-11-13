@@ -816,9 +816,6 @@ async def test_remember_batch_sends_the_batch_level_arguments_that_are_set():
         ({"summary": "x"}, TypeError, "list"),
         ([_ITEM, "summary"], TypeError, r"items\[1\]"),
         ([{**_ITEM, "context_id": str(uuid.uuid4())}], ValueError, "another context_id"),
-        ([_ITEM, {**_ITEM, "dedupe": "off"}], ValueError, r"items\[1\] carries dedupe"),
-        ([{**_ITEM, "tags_normalize": True}], ValueError, "tags_normalize"),
-        ([{**_ITEM, "verbose": True}], ValueError, "verbose"),
         ([_ITEM, {**_ITEM, "tags": [f"t{i}" for i in range(51)]}], ValueError, r"items\[1\]"),
         ([{**_ITEM, "tags": ["x" * 101]}], ValueError, "100 characters"),
     ],
@@ -841,6 +838,73 @@ async def test_remember_batch_sends_an_item_that_repeats_the_batch_context_id():
     items = [{**_ITEM, "context_id": CTX}]
     _, params = await _call(BATCH_REPLY, "remember_batch", CTX, items)
     assert params["arguments"]["items"] == items
+
+
+@pytest.mark.asyncio
+async def test_remember_batch_sends_an_item_that_repeats_a_batch_level_value():
+    """memory-cloud v0.156.0 (#2753) accepts an item repeating the batch's own value."""
+    items = [{**_ITEM, "dedupe": "check", "tags_normalize": True, "verbose": False}]
+    _, params = await _call(
+        BATCH_REPLY,
+        "remember_batch",
+        CTX,
+        items,
+        dedupe="check",
+        tags_normalize=True,
+        verbose=False,
+    )
+    assert params["arguments"]["items"] == items
+    assert params["arguments"]["dedupe"] == "check"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "items",
+    [
+        # Agreeing items while the batch omits the key: the server adopts the value.
+        [{**_ITEM, "dedupe": "off"}, {**_ITEM, "dedupe": "off"}],
+        # The server's agreement rule (type-strict, after remember's string
+        # coercion) is left to the server: none of these is refused locally.
+        [{**_ITEM, "tags_normalize": "true"}, {**_ITEM, "tags_normalize": True}],
+        [{**_ITEM, "verbose": True}, {**_ITEM, "verbose": 1}],
+        [_ITEM, {**_ITEM, "dedupe": "off"}],
+    ],
+)
+async def test_remember_batch_sends_batch_level_keys_on_items_as_given(items):
+    _, params = await _call(BATCH_REPLY, "remember_batch", CTX, items)
+    assert params["arguments"] == {"context_id": CTX, "items": items}
+
+
+@pytest.mark.asyncio
+async def test_remember_batch_sends_an_item_value_that_differs_from_the_batch():
+    """Every server refuses it per item (``invalid_argument``); the SDK leaves that to it."""
+    items = [{**_ITEM, "dedupe": "off"}]
+    _, params = await _call(BATCH_REPLY, "remember_batch", CTX, items, dedupe="check")
+    assert params["arguments"]["items"] == items
+
+
+_BATCH_LINT = {
+    "code": "batch_level_argument",
+    "hint": 'dedupe is a batch-level argument: the items\' dedupe="off" was applied to the '
+    'whole batch. Set it once on remember_batch (dedupe="off"), not on each item.',
+    "subject": "dedupe",
+}
+
+
+@pytest.mark.asyncio
+async def test_remember_batch_keeps_the_envelope_lint():
+    """memory-cloud v0.156.0: an adopted batch-level key is named in a top-level ``lint``."""
+    items = [{**_ITEM, "dedupe": "off"}] * 4
+    result, _ = await _call({**BATCH_REPLY, "lint": [_BATCH_LINT]}, "remember_batch", CTX, items)
+    assert result.lint == [_BATCH_LINT]
+    # A per-item lint still lands on its row.
+    assert result.results[0].lint == [{"code": "no_tags", "hint": "Add tags."}]
+
+
+@pytest.mark.asyncio
+async def test_remember_batch_without_envelope_lint_reads_none():
+    result, _ = await _call(BATCH_REPLY, "remember_batch", CTX, [_ITEM] * 4)
+    assert result.lint is None
 
 
 @pytest.mark.asyncio
