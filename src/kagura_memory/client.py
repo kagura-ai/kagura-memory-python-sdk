@@ -2454,9 +2454,11 @@ class KaguraClient:
         memory-cloud#2354) and ``?tools=a,b`` is an allowlist. A profile is
         a view, not an authorization boundary: a tool left out of the list
         stays callable, so every method of this client works whatever it
-        returns. Only :meth:`recall`'s ``explore_hints`` depend on it, and
-        need ``explore`` listed (``?add_tools=explore`` or ``?profile=full``,
-        v0.135.0+).
+        returns — except on the ``?profile=google`` / ``?profile=microsoft``
+        views (v0.158.0+), where :meth:`describe_tools` and :meth:`guide`
+        answer ``unknown_tool``. Only :meth:`recall`'s ``explore_hints``
+        depend on the list, and need ``explore`` listed
+        (``?add_tools=explore`` or ``?profile=full``, v0.135.0+).
 
         Returns:
             List of tool definition dicts with name, description, and inputSchema
@@ -3423,7 +3425,10 @@ class KaguraClient:
         Calls the ``describe_tools`` MCP tool (memory-cloud v0.93.0+, #1849).
         A profile only shapes ``tools/list``: this client can call every
         tool, but a model behind a mainstream MCP client can call listed
-        tools only, so the reply says which URL query lists more.
+        tools only, so the reply says which URL query lists more. On the
+        ``?profile=google`` / ``?profile=microsoft`` views (memory-cloud
+        v0.158.0+) the tool itself is refused: :class:`KaguraError` with
+        ``code == "unknown_tool"``.
 
         Args:
             query: Case-insensitive substring narrowing the hidden-tool list
@@ -3457,7 +3462,9 @@ class KaguraClient:
         walkthroughs the short tool descriptions leave out — how to read a
         reply, when to pick one tool over another, the write rules. A caller
         error's ``help`` often names a topic (``'Manual: guide(["<tool>"])'``).
-        Static text, nothing caller-specific.
+        Static text, nothing caller-specific. On the ``?profile=google`` /
+        ``?profile=microsoft`` views (memory-cloud v0.158.0+) the tool is
+        refused: :class:`KaguraError` with ``code == "unknown_tool"``.
 
         Args:
             topics: Up to 20 tool names (``"recall"``) or ``"<tool>.<section>"``
