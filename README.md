@@ -592,7 +592,7 @@ Upload files to the workspace's object store via short-lived presigned PUT URLs.
 
 ```python
 from pathlib import Path
-from kagura_memory import FilesClient
+from kagura_memory import FilesClient, KaguraFileScanPendingError
 
 async with FilesClient.from_mcp_url(api_key="kagura_...", mcp_url="https://memory.kagura-ai.com/mcp") as client:
     # Upload from a Path (read fully into memory; server caps file size at 100 MiB)
@@ -615,7 +615,12 @@ async with FilesClient.from_mcp_url(api_key="kagura_...", mcp_url="https://memor
 
     # Short-lived presigned GET URL. download_url / delete require the owning
     # context_id (workspace) — server v0.41.0 scopes file-id lookups to it.
-    url = await client.download_url(f.id, context_id="ctx-uuid")
+    # With upload malware scanning on (memory-cloud 0.160.0+) a new file is
+    # "pending" until its scan finishes; see below.
+    try:
+        url = await client.download_url(f.id, context_id="ctx-uuid")
+    except KaguraFileScanPendingError as e:
+        print(f"scan pending, retry in {e.retry_after or 30} s")
 
     # List & delete
     page = await client.list(context_id="ctx-uuid", limit=50)
