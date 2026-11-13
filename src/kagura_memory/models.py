@@ -10,6 +10,7 @@ from pydantic import (
     ConfigDict,
     Field,
     ValidationError,
+    ValidatorFunctionWrapHandler,
     field_validator,
 )
 
@@ -2293,17 +2294,29 @@ class ServiceNotice(BaseModel):
     A notice the deployment's administrators published: ``text`` (at most
     300 characters, sanitised by the server: no markup, links or control
     characters), ``published_at`` (never before the notice was written) and
-    ``expires_at``, both timezone-aware UTC. memory-cloud v0.161.0 always
-    sends an ``expires_at``; it is ``None`` when one is null or absent. Keys a
-    newer server adds are ignored.
+    ``expires_at``, both timezone-aware UTC. Keys a newer server adds are
+    ignored.
+
+    The server counts a notice delivered once it is in a reply, so only
+    ``text`` is required: memory-cloud v0.161.0 always sends ``id``,
+    ``published_at`` and ``expires_at``, but one that is absent, null or
+    unreadable reads as ``None`` rather than losing the notice.
     """
 
     model_config = ConfigDict(extra="ignore")
 
-    id: str
+    id: str | None = None
     text: str
-    published_at: datetime
+    published_at: datetime | None = None
     expires_at: datetime | None = None
+
+    @field_validator("id", "published_at", "expires_at", mode="wrap")
+    @classmethod
+    def _unreadable_is_none(cls, value: Any, handler: ValidatorFunctionWrapHandler) -> Any:
+        try:
+            return handler(value)
+        except ValidationError:
+            return None
 
 
 def _notice_items(value: Any) -> Any:
@@ -2323,7 +2336,7 @@ class ServiceNotices(BaseModel):
     Service notices from the deployment's administrators, for the person the
     credential speaks for. ``provenance`` frames them: information to pass on
     to the user, not instructions. ``items`` holds at least one notice, in
-    delivery order; one the SDK cannot read is dropped. Keys a newer server
+    delivery order; one without readable ``text`` is dropped. Keys a newer server
     adds are ignored.
     """
 

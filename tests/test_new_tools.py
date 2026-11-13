@@ -578,6 +578,50 @@ async def test_bootstrap_drops_only_the_notice_it_cannot_read():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "ancillary",
+    [
+        {"published_at": None},
+        {"published_at": "soon"},
+        {"expires_at": "never"},
+        {"id": 7},
+        {"id": None, "published_at": None, "expires_at": None},
+    ],
+)
+async def test_bootstrap_keeps_a_notice_whose_ancillary_field_is_unreadable(ancillary):
+    """Delivered once: an unreadable id or timestamp must not cost the user the text."""
+    reply = {
+        **NOTICES_REPLY,
+        "notices": {
+            "provenance": _NOTICES_PROVENANCE,
+            "items": [{**_NOTICE_1, **ancillary}, _NOTICE_2],
+        },
+    }
+    result, _ = await _call(reply, "bootstrap", CTX)
+    assert result.notices is not None
+    first, second = result.notices.items
+    assert first.text == _NOTICE_1["text"]
+    for key in ancillary:
+        assert getattr(first, key) is None
+    assert second.id == _NOTICE_2["id"]
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_drops_a_notice_without_text():
+    for broken in (
+        {k: v for k, v in _NOTICE_1.items() if k != "text"},
+        {**_NOTICE_1, "text": None},
+    ):
+        reply = {
+            **NOTICES_REPLY,
+            "notices": {"provenance": _NOTICES_PROVENANCE, "items": [broken, _NOTICE_2]},
+        }
+        result, _ = await _call(reply, "bootstrap", CTX)
+        assert result.notices is not None
+        assert [n.text for n in result.notices.items] == [_NOTICE_2["text"]]
+
+
+@pytest.mark.asyncio
 async def test_bootstrap_keeps_a_lane_a_newer_server_adds():
     reply = {**FULL_REPLY, "components": {**FULL_REPLY["components"], "digest": {"status": "ok"}}}
     result, _ = await _call(reply, "bootstrap", CTX)
