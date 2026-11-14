@@ -756,15 +756,15 @@ The same client also provisions **member API keys** (memory-cloud [#1165](https:
 
 ## SDK ↔ memory-cloud Compatibility
 
-`MIN_SERVER_VERSION` is **0.17.1** and advisory: the SDK never blocks a call on the server version. SDK 0.47.0 is checked against memory-cloud up to **0.161.0**, and a surface newer than the floor carries its own, given in the [compatibility page](https://github.com/kagura-ai/kagura-memory-python-sdk/blob/main/docs/compatibility.md) section of the release that added it.
+`MIN_SERVER_VERSION` is **0.17.1** and advisory: the SDK never blocks a call on the server version. SDK 0.47.1 is checked against memory-cloud up to **0.161.0**, and a surface newer than the floor carries its own, given in the [compatibility page](https://github.com/kagura-ai/kagura-memory-python-sdk/blob/main/docs/compatibility.md) section of the release that added it.
 
 | SDK | memory-cloud checked up to | What changed |
 |---|---|---|
+| [0.47.1](https://github.com/kagura-ai/kagura-memory-python-sdk/blob/main/docs/compatibility.md#0471) | 0.161.0 | Requires Python 3.11.5+ so the lock and the `ingest-html` extra use only Soup Sieve 4.x (three Dependabot advisories). |
 | [0.47.0](https://github.com/kagura-ai/kagura-memory-python-sdk/blob/main/docs/compatibility.md#0470) | 0.161.0 | Typed upload malware-scan refusals (`KaguraFileScanPendingError`, `KaguraFileBlockedError`) and `FileObject.scan_status`, batch-level keys on `remember_batch` items, `bootstrap` service notices, the google / microsoft tool views |
 | [0.46.0](https://github.com/kagura-ai/kagura-memory-python-sdk/blob/main/docs/compatibility.md#0460) | 0.155.0 | Session-only workspace operation history reader, `order_by="event_start"`, the plugin `server_url` keeps `context=`, `RollbackSummary.related_indexes_reverted` |
 | [0.45.1](https://github.com/kagura-ai/kagura-memory-python-sdk/blob/main/docs/compatibility.md#0451) | 0.144.0 | Security dependency floors and refreshed lock; Click 8.5 compatibility. |
 | [0.45.0](https://github.com/kagura-ai/kagura-memory-python-sdk/blob/main/docs/compatibility.md#0450) | 0.144.0 | Workspace member context access, signed-in context member add, and OAuth credential locking shared with TypeScript SDK 0.16.0. |
-| [0.44.0](https://github.com/kagura-ai/kagura-memory-python-sdk/blob/main/docs/compatibility.md#0440) | 0.142.0 | Session tools (`bootstrap`, `changes_since`, `list_matching`, `remember_batch`), new `remember` / `update_memory` arguments, list paging, `plan_headroom`, auth refresh under the lock |
 
 Every release back to 0.13.x, with each surface's floor, how the SDK reads a server version, and the full notes: **[docs/compatibility.md](https://github.com/kagura-ai/kagura-memory-python-sdk/blob/main/docs/compatibility.md)**.
 
