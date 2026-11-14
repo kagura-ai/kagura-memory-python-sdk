@@ -156,7 +156,8 @@ Search options:
   `plan_headroom`: a plan cap at 80 % (`warning`) or 95 % (`critical`) of its
   limit, with a `help` sentence. Relay a `critical` one to the user; it is
   shown at most hourly, so its absence does not mean there is room.
-- `bootstrap` → `context`, `guardrails` and `components` (`pinned`,
+- `bootstrap` → `context`, `guardrails`, `notices` (when present; see above)
+  and `components` (`pinned`,
   `upcoming`, `changes`, each with its own `status`); `degraded: true` means
   a lane failed. `changes` → `changes` (oldest first), `has_more` and
   `next_cursor` (pass it as `--cursor`).

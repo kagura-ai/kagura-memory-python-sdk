@@ -144,7 +144,7 @@ class FileIngestor:
             vision_provider: Pre-built vision provider override (tests).
             concurrency: Maximum concurrent section summarization calls.
             files_client: Optional :class:`FilesClient` used to archive
-                the source bytes to the workspace's R2 bucket. When
+                the source bytes to the workspace's file storage. When
                 supplied AND ``ingest(archive_original=True)``, the
                 resulting :class:`FileObject` id is stamped on the
                 overview memory's ``details.file_id`` so callers can
@@ -203,7 +203,7 @@ class FileIngestor:
                 uploaded to the workspace's object store and the
                 resulting ``file_id`` is recorded on the overview
                 memory's ``details.file_id``. Set to False to skip
-                archival (saves R2 storage; the memory then has no
+                archival (saves file storage; the memory then has no
                 back-reference to the original bytes). No effect when
                 ``files_client`` is None.
             details_extra: Optional caller-supplied key/value pairs to
@@ -644,7 +644,7 @@ class FileIngestor:
         # overview summarization that follows — the archive's result is
         # only needed inside _write_overview to stamp details.file_id.
         # Awaiting it later (vs. between section and overview LLM calls)
-        # overlaps the R2 PUT with the overview LLM round-trip too.
+        # overlaps the storage PUT with the overview LLM round-trip too.
         # Failures on either side are recorded as best-effort
         # ``IngestErrorRecord`` entries and do not abort the run.
         archive_task: asyncio.Task[FileObject | None] | None = None
@@ -806,7 +806,7 @@ class FileIngestor:
         assert self._files is not None  # caller guarded
         filename = _filename_from_source_uri(fetched.source_uri)
         # Forward the fetched / sniffed MIME so signed-URL archives don't
-        # land in R2 as application/octet-stream when the filename happens
+        # land in file storage as application/octet-stream when the filename happens
         # to lack a useful extension. ``None`` lets FilesClient fall back
         # to its own mimetypes.guess_type pipeline.
         content_type = fetched.content_type or None
@@ -1168,7 +1168,7 @@ def _filename_from_source_uri(source_uri: str) -> str:
     """Derive a filename for ``FilesClient.upload`` from a URI.
 
     ``urlsplit`` drops query / fragment for us so the upload metadata
-    does not carry tracking parameters into R2. Works for both
+    does not carry tracking parameters into file storage. Works for both
     ``https://...`` and ``file://...``.
     """
     return Path(urlsplit(source_uri).path).name or "ingested-source"

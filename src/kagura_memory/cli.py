@@ -813,7 +813,7 @@ def explore(context_id, memory_id, depth, min_weight):
     default=False,
     help=(
         "Skip uploading the original source bytes to the workspace's "
-        "object store. By default the source is archived to R2 and the "
+        "object store. By default the source is archived there and the "
         "resulting file_id is stamped on the overview memory's details "
         "so callers can resolve memory → original bytes later."
     ),
@@ -968,7 +968,7 @@ def ingest_file(
         # placeholder api_key above lets it construct cleanly when --dry-run
         # is used without a config file. No network calls will use it.
         client = KaguraClient(api_key=api_key, mcp_url=mcp_url)
-        # Archive is disabled in dry-run (no network egress to LLM or R2)
+        # Archive is disabled in dry-run (no network egress to LLM or file storage)
         # and when the caller passes --no-archive.
         archive = not (dry_run or no_archive)
         files_client = (

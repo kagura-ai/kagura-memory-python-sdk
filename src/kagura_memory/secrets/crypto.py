@@ -37,7 +37,7 @@ pyrage: Any = _pyrage
 #: before a final ``\n``, which would let ``age1...\n`` slip past the validator.
 RECIPIENT_RE = re.compile(r"^age1[0-9a-z]{20,110}\Z")
 
-#: Server cap on stored ciphertext (256 KiB). ``blob_ref`` (R2) is future work.
+#: Server cap on stored ciphertext (256 KiB). ``blob_ref`` (object storage) is future work.
 MAX_CIPHERTEXT_BYTES = 262144
 
 _ARMOR_BEGIN = "-----BEGIN AGE ENCRYPTED FILE-----"

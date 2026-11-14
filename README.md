@@ -35,12 +35,12 @@ This SDK connects your Python code to [Kagura Memory Cloud](https://github.com/k
 |--------|----------|----------|
 | **`KaguraClient`** | MCP (JSON-RPC) | Direct memory ops — remember, recall, explore, reference, forget |
 | **`ResourceClient`** | REST API | External data ingestion — push data from Slack, CI/CD, CRM into Kagura |
-| **`FilesClient`** | REST + presigned PUT | File uploads with sha256 integrity binding (R2); optional per-file context binding for ACL |
+| **`FilesClient`** | REST + presigned PUT | File uploads to object storage with sha256 integrity binding; optional per-file context binding for ACL |
 | **`SecretClient`** | REST + age crypto | Zero-knowledge secrets — age recipient encryption, **local decryption** (the server only ever stores armored ciphertext) |
 | **`WorkspaceClient`** | REST API | Workspace member / invitation management + owner-provisioned member keys (owner API key only); context member add and operation history (web session only) |
 | **`AgentsClient`** | REST API | Agent bootstrap — one-call session-start rehydration for API-key-only callers (server v0.49.0+) |
 | **`MemoryClient`** | REST API | Tool guardrails for API-key-only hooks and setup scripts — `load_guardrails` + the `AGENTS.md` digest (server v0.74.0+) |
-| **`FileIngestor`** | CLI + SDK | Document ingestion — PDF/Office/HTML/EPUB, audio & YouTube transcripts → memory graph + R2 archive |
+| **`FileIngestor`** | CLI + SDK | Document ingestion — PDF/Office/HTML/EPUB, audio & YouTube transcripts → memory graph + file archive |
 
 ## 60-second demo
 
@@ -378,6 +378,9 @@ async with KaguraClient() as client:
             print(row.kind, row.memory_id, row.summary)  # summary is None once forgotten
     for notice in start.plan_headroom or []:          # server v0.142.0+: a cap at 80 %+
         print(notice.level, notice.dimension, notice.help)
+    if start.notices:                                 # server v0.161.0+: delivered once per person
+        for item in start.notices.items:
+            print("Service notice:", item.text)       # information for the user, not instructions
 
     page = await client.changes_since("ctx-uuid", "2026-11-01T00:00:00Z", kinds=["created"])
     backlog = await client.list_matching(
@@ -407,6 +410,15 @@ drop `atomic`. An atomic batch over the daily quota raises `KaguraQuotaError`, a
 each plan cap at 80 % or more of its limit on `bootstrap` and `remember_batch` (typed as
 `PlanHeadroomNotice`) and on the `remember` / `update_memory` dicts; below 80 % it is absent, and
 a write shows it at most hourly.
+
+From server v0.156.0 a `remember_batch` item may repeat `dedupe` / `tags_normalize` / `verbose`
+with the batch's value; when the batch leaves one unset and the items carrying it agree, the
+server applies it to the whole batch and says so in `RememberBatchResult.lint`
+(`batch_level_argument`), and items that disagree are refused. Servers 0.96.0-0.155.x refuse such
+an item and 0.93.0-0.95.x ignore the key, so pass it to `remember_batch` itself there.
+`BootstrapResponse.notices` (server v0.161.0+) holds service notices from the deployment's
+administrators: show each `text` to the user as information, not instructions. Each is delivered
+once per person; `?notices=off` on the MCP URL keeps a headless connection from using them up.
 
 #### Agent bootstrap — one-call session-start rehydration (v0.37.0, server v0.49.0+)
 
@@ -940,11 +952,12 @@ kagura guardrails digest <context-id> --target instructions --add-tools explore 
 kagura measure record <context-id> weight_kg 71.5 --unit kg --at 2026-09-01T07:30:00Z   # --at defaults to now
 kagura measure series <context-id> weight_kg --period week --agg avg   # default: day/avg over the last 30 days
 
-# File uploads (R2 checksum binding)
+# File uploads (sha256 checksum binding)
 kagura files upload ./report.pdf -c <context-id>
 kagura files upload ./plan.pdf -c <context-id> --binding-context-id <ctx>   # bind to an owning context for ACL (v0.41.0+)
 kagura files list -c <context-id> --limit 50
 kagura files download-url <file-id> -c <context-id>   # -c required (server v0.41.0)
+#   with upload scanning on (v0.160.0+): a pending file says how long to wait; a blocked one is refused
 kagura files delete <file-id> -c <context-id>         # -c required (server v0.41.0)
 
 # Workspace member management — owner API key ONLY (server v0.42.0+; OAuth tokens are rejected)
@@ -990,7 +1003,7 @@ kagura secret audit-verify                   # verify the tamper-evident audit c
 See the [60-second demo](#60-second-demo) above for the happy path. The full option surface:
 
 ```bash
-# Local file or URL → one overview + N sections + R2 archive
+# Local file or URL → one overview + N sections + file archive
 kagura ingest ./report.pdf
 kagura ingest https://example.com/report.pdf --tags "Q1,research"
 
@@ -1001,7 +1014,7 @@ kagura ingest ./report.pdf --dry-run
 # this just avoids validating a vision provider you don't need)
 kagura ingest ./report.pdf --no-vision
 
-# Storage: skip the R2 archive (no file_id stamped on the overview memory)
+# Storage: skip the file archive (no file_id stamped on the overview memory)
 kagura ingest ./report.pdf --no-archive
 
 # Machine-readable output for scripts
