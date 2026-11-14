@@ -6,6 +6,14 @@ Which memory-cloud server each release of the kagura-memory SDK needs, and the n
 
 **Reading a section.** Its first paragraph, **Min memory-cloud**, is the floor: the memory-cloud release the SDK as a whole needs (`MIN_SERVER_VERSION`), the newest release that SDK release was checked against ("checked against memory-cloud up to …", in most sections from 0.39.0 on), and, under "Per-surface" or in parentheses, the newer release a method, CLI command or argument needs. A floor holds from that SDK release on, and a surface a newer section does not name keeps the floor an older section gave it. The rest of the section is that release's notes.
 
+## 0.47.1
+
+**Min memory-cloud:** 0.17.1 — checked against memory-cloud up to **0.161.0**. All per-surface floors remain as documented in the releases below; this patch changes local dependencies only.
+
+**Python 3.11.5 or later ([#345](https://github.com/kagura-ai/kagura-memory-python-sdk/issues/345)).** The package now requires Python `>=3.11.5` (was `>=3.11`). Every Soup Sieve release that fixes GHSA-mmhr-3c5m-f64f, GHSA-6655-6qjp-jx7x and GHSA-7g44-g9rc-x53w (3.0.2, 4.0.0, 4.0.1) requires Python 3.11.5, so under the old floor the lock had to keep the affected Soup Sieve 2.10 for Python 3.11.0-3.11.4. The lock now selects Soup Sieve **4.0.1** only, and the `ingest-html` extra requires `soupsieve>=4.0.0`, so pip installs avoid the affected versions too. No other locked version changed. The SDK's own code never runs CSS selectors, where the three bugs are; an application calling beautifulsoup4's `select()` itself on those Python versions was exposed.
+
+On Python 3.11.0-3.11.4, move to Python 3.11.5 or later before upgrading: pip there keeps resolving 0.47.0. Upgrade with `pip install --upgrade 'kagura-memory[ingest-html]'` (select the extras you use), or refresh your application's lock.
+
 ## 0.47.0
 
 **Min memory-cloud:** 0.17.1 — checked against memory-cloud up to **0.161.0** ([#340](https://github.com/kagura-ai/kagura-memory-python-sdk/issues/340)). Per-surface: 0.156.0 `dedupe` / `tags_normalize` / `verbose` on a `remember_batch` item and `RememberBatchResult.lint`; 0.158.0 the `?profile=google` / `?profile=microsoft` views; 0.160.0 `FileObject.scan_status`, `KaguraFileScanPendingError` (`409 SCAN-001`) and `KaguraFileBlockedError` (`409 SCAN-002`); 0.161.0 `BootstrapResponse.notices`.
