@@ -1,9 +1,9 @@
 ---
 name: files
-description: Upload, list, delete, and get download URLs for files in Kagura Memory's R2 storage (sha256 integrity-bound; an upload can optionally be bound to an owning context for access control). Use when the user wants to attach or manage raw files in their workspace.
+description: Upload, list, delete, and get download URLs for files in Kagura Memory's file storage (sha256 integrity-bound; an upload can optionally be bound to an owning context for access control). Use when the user wants to attach or manage raw files in their workspace.
 ---
 
-# kagura files — R2 file storage
+# kagura files — file storage
 
 Drive the `kagura files` command group (presigned-PUT uploads with sha256
 binding). Thin wrapper around the installed `kagura` CLI.
@@ -29,6 +29,13 @@ kagura files delete <file_id> -c <ctx>         # delete a file (context required
 
 - Relay the returned file id and download URL. **Download URLs are short-lived**
   — do not cache them; re-run `download-url` when one expires.
+- With upload malware scanning on (memory-cloud 0.160.0+), `upload` and `list`
+  show each file's `scan_status` (`unscanned`, `pending`, `clean`, `infected`,
+  `error`). `download-url` refuses a `pending` file until its scan finishes:
+  wait the seconds it names and run it again (a file that downloaded before
+  can be re-scanned and refused for a while). A file the scan blocked
+  (`infected`, or `error` while scanning is on) stays refused: tell the user
+  and do not retry.
 - `--binding-context-id` (the file's owning context for ACL) is **distinct from**
   `--context-id` (the workspace). Bound files route read/write/list/delete through
   that context's ACL; an unbound upload stays workspace-scoped. A denied download

@@ -134,7 +134,7 @@ The workspace owner can set a member's allowed contexts during onboarding and in
 
 **Min memory-cloud:** 0.17.1 (0.41.0 for file uploads/downloads)
 
-**FilesClient v0.41.0 compatibility (breaking).** memory-cloud 0.41.0 requires `workspace_id` on the query of the file-id endpoints (`confirm`/`download-url`/`delete`) and presigns R2 PUT without the checksum header — so pre-0.35.0 SDKs get 403/422 on every upload/download/delete against it. This SDK sends `workspace_id` on those endpoints (harmlessly ignored by older servers) and only binds the checksum when the presign signed it. **Breaking:** `FilesClient.download_url(file_id, *, context_id)` and `delete(file_id, *, context_id)` now require `context_id`; `kagura files download-url`/`delete` require `-c/--context-id` (or a profile/`.kagura.json` workspace). `MIN_SERVER_VERSION` stays **0.17.1**.
+**FilesClient v0.41.0 compatibility (breaking).** memory-cloud 0.41.0 requires `workspace_id` on the query of the file-id endpoints (`confirm`/`download-url`/`delete`) and presigns the storage PUT without the checksum header — so pre-0.35.0 SDKs get 403/422 on every upload/download/delete against it. This SDK sends `workspace_id` on those endpoints (harmlessly ignored by older servers) and only binds the checksum when the presign signed it. **Breaking:** `FilesClient.download_url(file_id, *, context_id)` and `delete(file_id, *, context_id)` now require `context_id`; `kagura files download-url`/`delete` require `-c/--context-id` (or a profile/`.kagura.json` workspace). `MIN_SERVER_VERSION` stays **0.17.1**.
 
 ## 0.34.0
 
@@ -158,13 +158,13 @@ The workspace owner can set a member's allowed contexts during onboarding and in
 
 **Min memory-cloud:** 0.15.1
 
-`FilesClient` + R2 checksum binding. `list_tags()` additionally needs **0.15.4** — `MIN_SERVER_VERSION` is intentionally not bumped, only that one method requires the newer server.
+`FilesClient` + storage checksum binding. `list_tags()` additionally needs **0.15.4** — `MIN_SERVER_VERSION` is intentionally not bumped, only that one method requires the newer server.
 
 ## 0.14.x
 
 **Min memory-cloud:** 0.15.1
 
-`FilesClient` + R2 checksum binding (`x-amz-checksum-sha256` on PUT)
+`FilesClient` + storage checksum binding (`x-amz-checksum-sha256` on PUT)
 
 ## 0.13.x
 

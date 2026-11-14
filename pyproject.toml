@@ -1,7 +1,7 @@
 [project]
 name = "kagura-memory"
 dynamic = ["version"]
-description = "Python SDK for Kagura Memory Cloud — memory management, document ingestion (PDF → memory graph), and R2 file storage for AI agents"
+description = "Python SDK for Kagura Memory Cloud — memory management, document ingestion (PDF → memory graph), and file storage for AI agents"
 readme = "README.md"
 requires-python = ">=3.11"
 license = {text = "MIT"}

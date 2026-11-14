@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""FileIngestor usage — turn a PDF into a memory graph + R2 archive.
+"""FileIngestor usage — turn a PDF into a memory graph + file archive.
 
 A PDF becomes one overview memory plus per-section summaries linked by
 ``declared_link`` edges, and the original bytes are archived to the
@@ -41,7 +41,7 @@ async def main():
         ctx = contexts["contexts"][0]["id"]
         print(f"Ingesting {source} into context {ctx}")
 
-        # Pass files_client so the original is archived to R2.
+        # Pass files_client so the original is archived to file storage.
         ingestor = FileIngestor(client=client, files_client=files)
         result = await ingestor.ingest(
             source,

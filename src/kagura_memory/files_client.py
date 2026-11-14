@@ -3,7 +3,7 @@
 Drives the 3-step file upload flow against memory-cloud:
 
 1. ``POST /api/v1/files/reserve`` — server returns a presigned PUT URL.
-2. ``PUT`` to R2 with body bytes and the ``x-amz-checksum-sha256``
+2. ``PUT`` to object storage with body bytes and the ``x-amz-checksum-sha256``
    header (base64 of the raw sha256 digest). Required when the
    backend has ``R2_CHECKSUM_BINDING_ENABLED=true`` (memory-cloud
    v0.15.1+).
@@ -12,7 +12,7 @@ Drives the 3-step file upload flow against memory-cloud:
 Plus ``download_url()``, ``delete()`` and ``list()`` for additional
 file operations.
 
-The R2 PUT is sent via a separate :class:`httpx.AsyncClient` so the
+The storage PUT is sent via a separate :class:`httpx.AsyncClient` so the
 SDK's ``Authorization: Bearer`` header cannot leak to the object
 store, regardless of what other methods are added to this class.
 """
@@ -65,7 +65,7 @@ class FilesClient(KaguraRestClient):
     """REST API client for Kagura Memory Cloud file objects.
 
     Authentication: ``Authorization: Bearer <api_key>`` (set once in
-    constructor). The R2 PUT step is unauthenticated by design — the
+    constructor). The storage PUT step is unauthenticated by design — the
     presigned URL carries its own short-lived SigV4 signature.
 
     Since memory-cloud v0.126.0 a workspace-scoped API key keeps its own
@@ -80,7 +80,7 @@ class FilesClient(KaguraRestClient):
         KaguraAuthError: Authentication failed (401)
         KaguraNotFoundError: File not found (404)
         KaguraIntegrityError: Body sha256 did not match the presigned PUT
-            binding (R2 returned 400 BadDigest)
+            binding (object storage returned 400 BadDigest)
         KaguraConnectionError: Connection or other HTTP error
         KaguraQuotaError: Quota exceeded (429)
         KaguraCapacityLockedError: An upload into a Free workspace over its
@@ -104,14 +104,14 @@ class FilesClient(KaguraRestClient):
     ) -> None:
         """Initialize FilesClient (see :class:`KaguraRestClient`).
 
-        Adds the R2 upload leg on top of the shared spine:
+        Adds the storage upload leg on top of the shared spine:
 
         Args:
             api_key: Kagura API key (Bearer token). Required unless
                 ``_oauth`` is supplied (see ``from_mcp_url``).
             base_url: REST API base URL (without path).
             timeout: API request timeout in seconds.
-            upload_timeout: R2 PUT timeout in seconds (defaults to 5
+            upload_timeout: Storage PUT timeout in seconds (defaults to 5
                 minutes to accommodate large files on slow networks).
             _oauth: Private. OAuth handler from ``from_mcp_url``.
             _auth_source: Private. Credential provenance for the 403
@@ -131,7 +131,7 @@ class FilesClient(KaguraRestClient):
             _workspace_id_hint=_workspace_id_hint,
         )
         # Defense in depth: never pass auth= or an Authorization header here.
-        # Bearer / OAuth credentials must not reach R2 — the presigned PUT
+        # Bearer / OAuth credentials must not reach object storage — the presigned PUT
         # carries its own short-lived SigV4 signature. A separate httpx client
         # makes the no-auth invariant structural, not just a runtime convention.
         self._upload_client = httpx.AsyncClient(
@@ -168,7 +168,7 @@ class FilesClient(KaguraRestClient):
                 stored ``mcp_url`` is used (or
                 ``https://memory.kagura-ai.com/mcp`` as a final default).
             timeout: API request timeout in seconds.
-            upload_timeout: R2 PUT timeout in seconds.
+            upload_timeout: Storage PUT timeout in seconds.
             profile: Named OAuth profile to load (overrides
                 ``KAGURA_PROFILE`` env and the credentials file's
                 ``default_profile``).
@@ -254,15 +254,15 @@ class FilesClient(KaguraRestClient):
         sha256_hex: str,
         content_type: str,
     ) -> None:
-        """PUT ``body`` to the presigned R2 URL with checksum binding.
+        """PUT ``body`` to the presigned storage URL with checksum binding.
 
         Sends ``x-amz-checksum-sha256`` as base64 of the raw 32-byte
         digest (NOT base64 of the hex string). When the backend has
         ``R2_CHECKSUM_BINDING_ENABLED=true`` and the body's actual
-        sha256 differs from this header, R2 returns 400 BadDigest and
+        sha256 differs from this header, object storage returns 400 BadDigest and
         we raise :class:`KaguraIntegrityError`.
 
-        Note: any other 400 response from R2 (e.g. a malformed
+        Note: any other 400 response from object storage (e.g. a malformed
         presigned URL or unexpected ``Content-Length`` mismatch) is
         also surfaced as :class:`KaguraIntegrityError`. BadDigest is
         the documented and observed common cause; parsing the
@@ -271,8 +271,8 @@ class FilesClient(KaguraRestClient):
 
         The checksum header is sent **only when the presign signed it**
         (``X-Amz-SignedHeaders`` contains ``x-amz-checksum-sha256``). A
-        server with R2 checksum binding OFF presigns without it, and
-        sending it anyway makes the SigV4 signature mismatch → R2 rejects
+        server with storage checksum binding OFF presigns without it, and
+        sending it anyway makes the SigV4 signature mismatch → object storage rejects
         with 403 SignatureDoesNotMatch (#226). The sha256 is re-sent at
         the confirm step regardless, so server-side verification still
         holds when binding is off.
@@ -287,7 +287,7 @@ class FilesClient(KaguraRestClient):
             if e.response.status_code == 400:
                 raise KaguraIntegrityError(
                     "Object store rejected upload with HTTP 400 — most "
-                    "commonly R2 BadDigest (body sha256 did not match the "
+                    "commonly a storage BadDigest (body sha256 did not match the "
                     "presigned PUT binding). Verify that the SDK is "
                     "computing sha256 over the exact bytes being PUT."
                 ) from e
@@ -326,7 +326,7 @@ class FilesClient(KaguraRestClient):
             source: File contents. ``Path`` reads the file fully
                 into memory; ``bytes`` uses the buffer directly.
                 **Memory contract**: peak memory is bounded by the
-                file size. R2 presigned PUT is single-PUT (chunked /
+                file size. A presigned storage PUT is single-PUT (chunked /
                 streaming PUT is out of scope for v0.14.0), so the
                 body has to be resident at upload time regardless of
                 how it's hashed. The server caps file size at 100 MiB
@@ -371,7 +371,7 @@ class FilesClient(KaguraRestClient):
         Raises:
             ValueError: If ``source`` is ``bytes`` and ``filename`` is
                 not provided.
-            KaguraIntegrityError: If R2 rejected the body sha256
+            KaguraIntegrityError: If object storage rejected the body sha256
                 binding.
             KaguraAuthError, KaguraNotFoundError, KaguraQuotaError,
             KaguraConnectionError: see class docstring.
@@ -588,7 +588,7 @@ class FilesClient(KaguraRestClient):
     # -------------------------------------------------------------------
 
     async def close(self) -> None:
-        """Close both HTTP clients (API + unauthenticated R2 leg)."""
+        """Close both HTTP clients (API + unauthenticated storage leg)."""
         try:
             await super().close()
         finally:
@@ -766,13 +766,13 @@ def _presign_signs_checksum(upload_url: str) -> bool:
 
     Reads ``X-Amz-SignedHeaders`` from the presigned PUT URL's query and reports
     whether it lists ``x-amz-checksum-sha256`` (case-insensitive). The SDK must
-    send the checksum header only when the server bound it into the presign (R2
+    send the checksum header only when the server bound it into the presign (storage
     checksum binding on). Sending it against a presign that did not sign it
-    invalidates the SigV4 signature and R2 rejects the PUT with 403
+    invalidates the SigV4 signature and object storage rejects the PUT with 403
     SignatureDoesNotMatch (#226).
 
     Args:
-        upload_url: The presigned R2 PUT URL returned by ``/files/reserve``.
+        upload_url: The presigned storage PUT URL returned by ``/files/reserve``.
 
     Returns:
         ``True`` when ``x-amz-checksum-sha256`` is in the signed-headers set,
@@ -793,7 +793,7 @@ def _resolve_content_type(content_type: str | None, filename: str) -> str:
 def _read_and_hash(path: Path) -> tuple[bytes, str]:
     """Synchronously read a file and compute its sha256 — runs in a thread.
 
-    Reads the full file into memory by design. R2 presigned PUT is a
+    Reads the full file into memory by design. A presigned storage PUT is a
     single-PUT operation (chunked / streaming PUT is out of scope for
     v0.14.0 per the issue body's "Out of scope" section), so the body
     is needed in memory at upload time regardless of how it's hashed.

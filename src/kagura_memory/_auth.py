@@ -3,7 +3,7 @@
 Centralizes the precedence chain — explicit arg > ``KAGURA_API_KEY`` env >
 OAuth profile in ``~/.kagura/credentials.json`` > ``.kagura.json`` config —
 in one module so that :class:`KaguraClient` (MCP), :class:`FilesClient`
-(REST + R2 PUT), and future REST clients (e.g. ``ResourceClient``) all
+(REST + storage PUT), and future REST clients (e.g. ``ResourceClient``) all
 resolve credentials identically without import-direction inversion.
 
 Returns one of two result types:
