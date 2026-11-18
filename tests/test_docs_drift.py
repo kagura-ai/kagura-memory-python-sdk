@@ -496,7 +496,12 @@ def test_compat_0_48_section() -> None:
         assert issue in issues, f"the 0.48.0 section does not link SDK #{issue}"
     for issue in ("2762", "2857", "2884", "2891"):
         assert f"memory-cloud/issues/{issue})" in section, f"the section lacks memory-cloud#{issue}"
-    for term in ("--notices off", "SYNC-LOCKED", "usage_budget_exhausted", "kmc-sync-configuration"):
+    for term in (
+        "--notices off",
+        "SYNC-LOCKED",
+        "usage_budget_exhausted",
+        "kmc-sync-configuration",
+    ):
         assert term in section, f"the section lacks {term!r}"
     assert "**How this was checked.**" in section
     assert "**Passed through with no SDK change.**" in section and "**Not wrapped.**" in section

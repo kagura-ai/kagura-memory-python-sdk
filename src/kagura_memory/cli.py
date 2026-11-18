@@ -21,8 +21,8 @@ from ._auth import (
 from ._guardrail_export import write_guardrail_block
 from ._http import (
     normalize_add_tools,
-    normalize_notices,
     normalize_guardrails,
+    normalize_notices,
     normalize_tool_profile,
     normalize_uuid,
     path_segment,
