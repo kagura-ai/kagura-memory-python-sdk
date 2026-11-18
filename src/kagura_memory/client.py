@@ -3119,7 +3119,9 @@ class KaguraClient:
             they share a quarter of ``max_chars`` with ``plan_headroom`` (a
             notice that does not fit waits for a call with more room). A
             headless connection whose replies nobody reads should put
-            ``?notices=off`` on its MCP URL so it does not use them up.
+            ``?notices=off`` on its MCP URL so it does not use them up
+            (``kagura-mcp --notices off`` and ``kagura setup ... --notices
+            off`` write it).
 
         Raises:
             ValueError: ``max_chars`` is not an ``int`` in [2,000, 100,000],
