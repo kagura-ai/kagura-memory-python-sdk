@@ -21,6 +21,7 @@ from ._auth import (
 from ._guardrail_export import write_guardrail_block
 from ._http import (
     normalize_add_tools,
+    normalize_notices,
     normalize_guardrails,
     normalize_tool_profile,
     normalize_uuid,
@@ -2581,6 +2582,20 @@ def _default_context_option(ctx, param, value: str | None) -> str | None:
         raise click.BadParameter(str(e)) from None
 
 
+def _notices_option(ctx, param, value: str | None) -> str | None:
+    """``--notices off``; None when absent.
+
+    memory-cloud reads only ``off`` (trimmed, any case) and ignores any other
+    value, so anything else is refused here instead.
+    """
+    if value is None:
+        return None
+    try:
+        return normalize_notices(value)
+    except ValueError as e:
+        raise click.BadParameter(str(e)) from None
+
+
 # `--tool-profile` / `--add-tools` on `kagura setup claude|codex|hermes|openclaw` (#300).
 _TOOL_PROFILE_HELP = (
     "Add ?profile=NAME to the upstream MCP URL (server v0.73.0+): the tools tools/list "
@@ -2597,6 +2612,13 @@ _ADD_TOOLS_HELP = (
     "the profile, e.g. explore, which recall's explore_hints need (or --tool-profile "
     "full). Comma-separated, may repeat. The server ignores an unknown name, and the list "
     "under a ?tools= allowlist."
+)
+# `--notices off` on `kagura setup claude|codex|hermes|openclaw` (#342).
+_NOTICES_HELP = (
+    "Add ?notices=off to the upstream MCP URL (server v0.161.0+): bootstrap replies carry "
+    "no service notices. A notice is delivered once per person, so only a headless "
+    "connection, one no person reads, should turn them off. 'off' is the only value; "
+    "without it notices stay on."
 )
 
 
@@ -2661,6 +2683,13 @@ _ADD_TOOLS_HELP = (
     help=_ADD_TOOLS_HELP + " A re-run without it drops an earlier list.",
 )
 @click.option(
+    "--notices",
+    default=None,
+    metavar="off",
+    callback=_notices_option,
+    help=_NOTICES_HELP + " A re-run without it turns them back on.",
+)
+@click.option(
     "--context",
     "default_context",
     default=None,
@@ -2709,6 +2738,7 @@ def setup_claude(
     guardrails,
     tool_profile,
     add_tools,
+    notices,
     default_context,
     session_hook,
     sync_hook,
@@ -2756,6 +2786,7 @@ def setup_claude(
             tool_profile=tool_profile,
             add_tools=add_tools,
             default_context=default_context,
+            notices=notices,
             session_hook=session_hook,
             sync_hook=sync_hook,
             commands=commands,
@@ -2901,6 +2932,15 @@ def _harness_command(harness: HarnessName):
                 help=_ADD_TOOLS_HELP
                 + " On the stdio entry it becomes `kagura-mcp --add-tools`; with "
                 "--url-form, an ?add_tools= already in --mcp-url is kept without it.",
+            ),
+            click.option(
+                "--notices",
+                default=None,
+                metavar="off",
+                callback=_notices_option,
+                help=_NOTICES_HELP
+                + " On the stdio entry it becomes `kagura-mcp --notices off`; with "
+                "--url-form, a ?notices= already in --mcp-url is kept without it.",
             ),
             click.option(
                 "--agents-md",

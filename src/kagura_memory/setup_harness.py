@@ -1804,15 +1804,20 @@ def run_setup_harness(
     dry_run: bool,
     tool_profile: str | None = None,
     add_tools: Sequence[str] | None = None,
+    notices: str | None = None,
 ) -> None:
     """Set up the ``name`` MCP entry of ``harness``, and the AGENTS.md export if asked.
 
     ``guardrails`` must already be normalized (``off`` or a canonical UUID),
-    ``tool_profile`` by ``normalize_tool_profile`` and ``add_tools`` by
-    ``normalize_add_tools``. ``tool_profile`` / ``add_tools``
-    become ``kagura-mcp --tool-profile/--add-tools`` on the stdio entry and
-    ``?profile=`` / ``?add_tools=`` on a URL entry, where a value already in
-    ``mcp_url`` is kept when they are None (#300).
+    ``tool_profile`` by ``normalize_tool_profile``, ``add_tools`` by
+    ``normalize_add_tools`` and ``notices`` by ``normalize_notices``.
+    ``tool_profile`` / ``add_tools`` / ``notices`` become ``kagura-mcp
+    --tool-profile/--add-tools/--notices`` on the stdio entry and
+    ``?profile=`` / ``?add_tools=`` / ``?notices=`` on a URL entry, where a
+    value already in ``mcp_url`` is kept when they are None (#300, #342).
+    Unlike a ``--guardrails`` context, ``notices`` is written for every
+    harness: the notices come in the ``bootstrap`` reply, not in MCP
+    instructions. Setup never adds it unasked.
     ``agents_md`` is None without ``--agents-md`` and ``""`` for the
     harness's default file. Setup prompts only with a terminal on stdin and
     without ``-y``; otherwise it behaves as ``-y`` does. With ``oauth`` (and
@@ -1955,13 +1960,21 @@ def run_setup_harness(
     if proxy is not None:
         assert profile is not None
         stdio = _stdio_entry(
-            profile, guardrails=guardrails, tool_profile=tool_profile, add_tools=add_tools
+            profile,
+            guardrails=guardrails,
+            tool_profile=tool_profile,
+            add_tools=add_tools,
+            notices=notices,
         )
         entry = _Entry(command=proxy, args=tuple(stdio["args"]))
     else:
         assert mcp_url is not None
         url = mcp_url_with_query(
-            mcp_url, guardrails=guardrails, tool_profile=tool_profile, add_tools=add_tools
+            mcp_url,
+            guardrails=guardrails,
+            tool_profile=tool_profile,
+            add_tools=add_tools,
+            notices=notices,
         )
         if guardrails is not None and guardrails.startswith("<"):
             # A dry run's placeholder for a context name (a UUID or "off" never

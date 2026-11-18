@@ -1500,6 +1500,78 @@ class TestToolView:
         assert recorder.calls == []
 
 
+# =============================================================================
+# --notices off (#342)
+# =============================================================================
+
+
+@pytest.mark.parametrize("harness", ["codex", "hermes", "openclaw"])
+class TestNotices:
+    """Notices come in the bootstrap reply, so --notices off applies to every harness."""
+
+    def test_stdio_entry_runs_kagura_mcp_with_notices_off(self, harness, on_path, recorder, tty):
+        on_path(harness)
+        result = run(harness, "--profile", "default", "--notices", " OFF ", "--dry-run")
+        assert result.exit_code == 0, result.output
+        [command] = [line for line in result.output.splitlines() if "Would run:" in line]
+        args = ["--profile", "default", "--notices", "off"]
+        if harness == "openclaw":  # one --arg per kagura-mcp argument
+            args = [item for arg in args for item in ("--arg", arg)]
+        elif harness == "hermes":  # --args takes the rest of the line
+            args = ["--args", *args]
+        assert command.endswith(f"{PROXY} {' '.join(args)}")
+        assert recorder.mutating() == []
+
+    def test_url_entry_gets_notices_off_on_its_query(self, harness, recorder):
+        url = f"{MCP_URL}?notices=on&k=1"
+        result = run(
+            harness,
+            *("--url-form", "--mcp-url", url, "--tool-profile", "full", "--notices", "off"),
+            "--dry-run",
+        )
+        assert result.exit_code == 0, result.output
+        assert f"{MCP_URL}?k=1&profile=full&notices=off" in result.output
+
+    def test_oauth_url_entry_gets_notices_off_on_its_query(self, harness, on_path, recorder, tty):
+        on_path(harness)
+        result = run(harness, *OAUTH, "--notices", "off", "--dry-run")
+        assert result.exit_code == 0, result.output
+        assert f"{MCP_URL}?notices=off" in result.output
+        assert recorder.mutating() == []
+
+    def test_url_entry_keeps_notices_already_in_mcp_url(self, harness, recorder):
+        url = f"{MCP_URL}?notices=off"
+        result = run(harness, "--url-form", "--mcp-url", url, "--dry-run")
+        assert result.exit_code == 0, result.output
+        assert url in result.output
+        assert "Warning" not in result.output
+
+    @pytest.mark.parametrize(
+        "form",
+        [
+            ["--profile", "default"],
+            ["--url-form", "--mcp-url", MCP_URL],
+            ["--url-form", "--oauth", "--mcp-url", MCP_URL],
+        ],
+        ids=["stdio", "url", "oauth"],
+    )
+    def test_no_entry_carries_notices_without_the_flag(self, harness, on_path, recorder, tty, form):
+        """Notices stay on by default: a person reads an interactive harness."""
+        on_path(harness)
+        result = run(harness, *form, "--tool-profile", "full", "--dry-run")
+        assert result.exit_code == 0, result.output
+        assert "--notices" not in result.output
+        assert "notices=" not in result.output
+
+    @pytest.mark.parametrize("bad", ["on", " ", "-x"])
+    def test_a_value_other_than_off_is_a_usage_error(self, harness, recorder, bad):
+        result = run(harness, "--profile", "default", f"--notices={bad}", "-y")
+        assert result.exit_code == 2
+        assert "--notices" in result.output
+        assert "notices must be 'off'" in result.output
+        assert recorder.calls == []
+
+
 class TestToolViewCodexPreview:
     def test_stdio_preview_carries_the_view(self, on_path, recorder):
         on_path("codex")
@@ -2342,7 +2414,7 @@ def test_dry_run_reports_an_existing_entry_and_prints_the_block(env, recorder):
 @pytest.mark.parametrize("harness", ["codex", "hermes", "openclaw"])
 @pytest.mark.parametrize(
     "form",
-    [[], ["--url-form", "--mcp-url", MCP_URL], list(OAUTH)],
+    [[], ["--url-form", "--mcp-url", MCP_URL], ["--url-form", "--oauth", "--mcp-url", MCP_URL]],
     ids=["stdio", "url-form", "oauth"],
 )
 @pytest.mark.parametrize("flags", [["-y"], []], ids=["-y", "tty"])

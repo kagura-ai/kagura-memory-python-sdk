@@ -937,6 +937,83 @@ def test_bad_add_tools_or_context_is_a_usage_error(tmp_path: Path, flags) -> Non
     assert not (tmp_path / ".mcp.json").exists()
 
 
+@pytest.mark.parametrize("value", ["off", " OFF "])
+def test_stdio_entry_carries_notices_off(connection, tmp_path: Path, value: str) -> None:
+    """#342: --notices off becomes a kagura-mcp arg, written as ``off``."""
+    result = run_setup(tmp_path, "--tool-profile", "core", "--notices", value)
+
+    assert result.exit_code == 0, result.output
+    assert mcp_entry(tmp_path)["args"] == [
+        *("--profile", "default"),
+        *("--tool-profile", "core"),
+        *("--notices", "off"),
+    ]
+    assert read_json(tmp_path / ".kagura.json")["mcp_url"] == MCP_URL
+
+
+def test_static_token_url_carries_notices_off(connection, tmp_path: Path) -> None:
+    result = run_setup(tmp_path, "--context", CTX, "--notices", "Off", oauth=False)
+
+    assert result.exit_code == 0, result.output
+    assert mcp_entry(tmp_path)["url"] == f"{MCP_URL}?context={CTX}&notices=off"
+    assert read_json(tmp_path / ".kagura.json")["mcp_url"] == MCP_URL
+
+
+@pytest.mark.parametrize("oauth", [True, False], ids=["oauth", "api-key"])
+def test_no_entry_carries_notices_without_the_flag(connection, tmp_path: Path, oauth: bool) -> None:
+    """Notices stay on by default: a person reads a Claude Code session (#342)."""
+    result = run_setup(tmp_path, "--guardrails", "off", "--tool-profile", "full", oauth=oauth)
+
+    assert result.exit_code == 0, result.output
+    assert "notices" not in json.dumps(mcp_entry(tmp_path))
+
+
+@pytest.mark.parametrize("oauth", [True, False], ids=["oauth", "api-key"])
+def test_rerun_notes_a_dropped_notices_off(connection, tmp_path: Path, oauth: bool) -> None:
+    first = run_setup(tmp_path, "--notices", "off", oauth=oauth)
+    assert first.exit_code == 0, first.output
+
+    result = run_setup(tmp_path, oauth=oauth)
+
+    assert result.exit_code == 0, result.output
+    assert "also had --notices off, which" in " ".join(result.output.split())
+
+
+@pytest.mark.parametrize(
+    ("query", "flags"),
+    [
+        ("?notices=%20OFF%20", {"--notices": "off"}),
+        ("?notices=on&notices=off", {}),  # the server reads the first value only
+        ("?notices=", {}),
+    ],
+    ids=["off-any-case", "first-value-wins", "blank"],
+)
+def test_query_flags_read_notices_as_the_server_does(query: str, flags: dict[str, str]) -> None:
+    assert _query_flags({"type": "http", "url": f"{MCP_URL}{query}"}) == flags
+
+
+def test_query_flags_read_notices_from_a_stdio_entry() -> None:
+    args = ["--profile", "p", "--notices", "off"]
+    assert _query_flags({**STDIO_DEFAULT, "args": args}) == {"--notices": "off"}
+
+
+@pytest.mark.parametrize("bad", ["on", " ", "true"])
+@pytest.mark.parametrize("oauth", [True, False], ids=["oauth", "api-key"])
+def test_notices_other_than_off_is_a_usage_error(tmp_path: Path, bad: str, oauth: bool) -> None:
+    result = run_setup(tmp_path, "--notices", bad, oauth=oauth)
+    assert result.exit_code == 2, result.output
+    assert "--notices" in result.output
+    assert "notices must be 'off'" in result.output
+    assert not (tmp_path / ".mcp.json").exists()
+
+
+def test_plugin_server_url_drops_notices() -> None:
+    """The plugin's hooks call only load_guardrails, and its setup rule keeps no
+    notices= (memory-cloud claude-skills/setup.md B2), so server_url leaves it out."""
+    upstream = f"{MCP_URL}?notices=off&guardrails=off&context={CTX}"
+    assert _plugin_server_url(upstream, CTX) == f"{MCP_URL}?guardrails=off&context={CTX}"
+
+
 @pytest.mark.parametrize(
     "upstream",
     [
