@@ -2264,7 +2264,9 @@ class KaguraClient:
               workspace is full while ``count`` is below ``limit``: it says
               no context can be created and that contexts the caller cannot
               see count toward ``limit``; a caller who sees no context in such
-              a workspace gets that text in place of the create-a-context one.
+              a workspace gets a second fixed text (no context visible, the
+              same explanation, and to ask an owner or admin for access or
+              room) in place of the create-a-context one.
 
             The envelope's ``limit`` is the plan's context maximum, not the
             page size argument of the same name.
