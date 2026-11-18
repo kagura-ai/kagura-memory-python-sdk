@@ -1567,8 +1567,9 @@ async def test_create_context_quota_exceeded_missing_count_limit(quota_response)
 
 
 # Issue #255: the memory-cloud v0.73.0 slim list_contexts envelope (#1600).
-# Items carry only id/name/is_private/is_locked/last_used_at; ``count`` is quota
-# usage and ``total`` is the number of rows returned.
+# Items carry only id/name/is_private/is_locked/last_used_at; ``total`` is the
+# number of rows returned. ``count`` was quota usage before memory-cloud 0.170.0
+# and is the number of contexts the caller can see from 0.170.0 (#2891).
 def _slim_list_contexts_envelope(*, count: int, limit: int, can_create: bool) -> dict:
     return {
         "status": "success",
@@ -1726,6 +1727,83 @@ async def test_create_context_precheck_raises_quota_error_on_slim_response():
             mock.assert_awaited_once()
     finally:
         await client.close()
+
+
+@pytest.mark.asyncio
+async def test_create_context_precheck_does_not_present_visible_count_as_usage():
+    """#347: from memory-cloud 0.170.0 ``count`` is what the caller sees (#2891). A full
+    workspace where the caller sees 3 of 25 is not "(3/25)" and has no ``current``."""
+    client = _make_initialized_client()
+
+    try:
+        with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+            envelope = _slim_list_contexts_envelope(count=3, limit=25, can_create=False)
+            mock.return_value = {**envelope, "hint": "This workspace has reached its limit."}
+            with pytest.raises(KaguraQuotaError) as exc_info:
+                await client.create_context(name="over-limit")
+            mock.assert_awaited_once()
+    finally:
+        await client.close()
+
+    err = exc_info.value
+    message = str(err)
+    assert "at its limit of 25 contexts" in message
+    assert "contexts you cannot see" in message
+    assert "3/25" not in message
+    assert "Context limit reached" not in message
+    assert (err.quota_type, err.current, err.limit) == ("contexts", None, 25)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("count", "limit"), [(25, 25), (27, 25)], ids=["at-limit", "over-limit"])
+async def test_create_context_precheck_keeps_count_as_current_at_or_over_the_limit(
+    count: int, limit: int
+):
+    """On any server a count at or above limit shows the workspace full: message and
+    ``current`` stay as they were (#347)."""
+    client = _make_initialized_client()
+
+    try:
+        with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+            mock.return_value = _slim_list_contexts_envelope(
+                count=count, limit=limit, can_create=False
+            )
+            with pytest.raises(
+                KaguraQuotaError, match=rf"Context limit reached \({count}/{limit}\)"
+            ) as exc_info:
+                await client.create_context(name="over-limit")
+    finally:
+        await client.close()
+
+    assert (exc_info.value.current, exc_info.value.limit) == (count, limit)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("quota", "shown", "current", "limit"),
+    [
+        ({}, "?/?", None, None),
+        ({"count": None, "limit": None}, "?/?", None, None),
+        ({"count": None, "limit": 25}, "?/25", None, 25),
+        ({"count": 3, "limit": None}, "3/?", 3, None),
+        ({"count": True, "limit": 25}, "True/25", None, 25),  # bool is no count
+    ],
+    ids=["missing", "null", "no-count", "no-limit", "bool-count"],
+)
+async def test_create_context_precheck_drift_keeps_the_old_message(quota, shown, current, limit):
+    """Only two numbers can say count is below limit; drift keeps today's message (#347)."""
+    client = _make_initialized_client()
+
+    try:
+        with patch.object(client, "_call_tool", new_callable=AsyncMock) as mock:
+            mock.return_value = {"status": "success", "contexts": [], "can_create": False, **quota}
+            with pytest.raises(KaguraQuotaError) as exc_info:
+                await client.create_context(name="over-limit")
+    finally:
+        await client.close()
+
+    assert f"Context limit reached ({shown})" in str(exc_info.value)
+    assert (exc_info.value.current, exc_info.value.limit) == (current, limit)
 
 
 @pytest.mark.asyncio

@@ -22,6 +22,7 @@ from ._http import (
     mcp_query_tool_view,
     mcp_url_guardrails_off,
     mcp_url_has_tools_allowlist,
+    mcp_url_notices_off,
     mcp_url_query_values,
     mcp_url_with_query,
     uuid_or_none,
@@ -510,13 +511,15 @@ def _stdio_entry(
     tool_profile: str | None = None,
     add_tools: Sequence[str] | None = None,
     default_context: str | None = None,
+    notices: str | None = None,
 ) -> dict[str, Any]:
     """The OAuth server entry: Claude Code launches the ``kagura-mcp`` proxy.
 
-    ``--guardrails`` / ``--tool-profile`` / ``--add-tools`` / ``--context``
-    make the proxy put ``?guardrails=`` / ``?profile=`` / ``?add_tools=`` /
-    ``?context=`` on the upstream URL at run time (#258, #300), so the entry
-    never copies the profile's URL and changing them never forces a re-login.
+    ``--guardrails`` / ``--tool-profile`` / ``--add-tools`` / ``--context`` /
+    ``--notices`` make the proxy put ``?guardrails=`` / ``?profile=`` /
+    ``?add_tools=`` / ``?context=`` / ``?notices=`` on the upstream URL at run
+    time (#258, #300, #342), so the entry never copies the profile's URL and
+    changing them never forces a re-login.
     ``tool_profile`` and ``add_tools`` must already be normalized
     (``normalize_tool_profile`` / ``normalize_add_tools``): each value is its
     own argv item, so one starting with ``-`` would read as a flag.
@@ -530,6 +533,8 @@ def _stdio_entry(
         args += ["--add-tools", ",".join(add_tools)]
     if default_context is not None:
         args += ["--context", default_context]
+    if notices is not None:
+        args += ["--notices", notices]
     return {"type": "stdio", "command": MCP_PROXY_COMMAND, "args": args}
 
 
@@ -593,7 +598,7 @@ class _McpPlan:
     #: The user-scope entry already matches; nothing to write.
     unchanged: bool = False
     #: Query flags (``--guardrails``, ``--tool-profile``, ``--add-tools``,
-    #: ``--context``) and a ``?tools=`` allowlist the replaced same-scope entry
+    #: ``--context``, ``--notices``) and a ``?tools=`` allowlist the replaced same-scope entry
     #: had and this run leaves out, e.g. ``["--guardrails off",
     #: "?tools=recall,remember"]``.
     dropped: list[str] = field(default_factory=list)
@@ -627,8 +632,8 @@ def _redact_entry(entry: dict[str, Any]) -> dict[str, Any]:
 
 
 #: The ``kagura-mcp`` flags that set ``?guardrails=`` / ``?profile=`` /
-#: ``?add_tools=`` / ``?context=`` on the upstream URL.
-_QUERY_FLAGS = ("--guardrails", "--tool-profile", "--add-tools", "--context")
+#: ``?add_tools=`` / ``?context=`` / ``?notices=`` on the upstream URL.
+_QUERY_FLAGS = ("--guardrails", "--tool-profile", "--add-tools", "--context", "--notices")
 
 
 #: The key :func:`_query_flags` reports an http entry's ``?tools=`` allowlist
@@ -643,8 +648,10 @@ def _query_flags(entry: dict[str, Any]) -> dict[str, str]:
     repeated flag, as the proxy reads it, except ``--add-tools``, whose
     values add up), or from the url's query of an http one, as the server
     reads it (memory-cloud v0.142.0): the first value of a repeated key wins
-    for all four keys, even a blank one, and is trimmed; the tool view is
-    read by :func:`~kagura_memory._http.mcp_url_tool_view`. A blank first
+    for every key, even a blank one, and is trimmed; the tool view is
+    read by :func:`~kagura_memory._http.mcp_url_tool_view`, and ``notices``
+    is reported only when it is ``off`` (any case), the one value the server
+    reads (v0.161.0+, :func:`~kagura_memory._http.mcp_url_notices_off`). A blank first
     value still means something to the server — it refuses a blank
     ``profile``, ignores a blank ``guardrails`` (no ``instructions`` digest),
     fails a call without ``context_id`` under a blank ``context``, and adds
@@ -678,6 +685,7 @@ def _query_flags(entry: dict[str, Any]) -> dict[str, str]:
         "--tool-profile": view.profile,
         "--add-tools": ",".join(view.add_tools),
         "--context": query.get("context", "").strip(),
+        "--notices": "off" if mcp_url_notices_off(url) else "",
         _TOOLS_KEY: ",".join(view.tools or ()),
     }
     return {flag: value for flag, value in settings.items() if value}
@@ -998,8 +1006,11 @@ def _plugin_server_url(upstream_url: str, context_id: str) -> str:
     only when its first value, trimmed (as the server reads it), and ``context_id`` are
     the same UUID, written in canonical form; another context, a non-UUID or a
     ``context_id`` that is no UUID drops it. ``guardrails=<context-id>`` (the
-    hook would warn at every session start), ``profile=``, ``tools=`` and
-    ``add_tools=`` are always dropped: they stay on the MCP entry.
+    hook would warn at every session start), ``profile=``, ``tools=``,
+    ``add_tools=`` and ``notices=`` are always dropped: they stay on the MCP
+    entry. The plugin's hooks call ``load_guardrails`` only, never
+    ``bootstrap``, the one reply that carries notices, and the plugin's rule
+    keeps no other key.
     """
     parts = urlsplit(upstream_url)
     keep: list[str] = []
@@ -1291,6 +1302,7 @@ def run_setup_claude(
     tool_profile: str | None = None,
     add_tools: Sequence[str] | None = None,
     default_context: str | None = None,
+    notices: str | None = None,
     session_hook: bool | None = None,
     sync_hook: bool = True,
     commands: bool | None = None,
@@ -1306,13 +1318,14 @@ def run_setup_claude(
 
     Both write the entry at ``scope`` (``project``: ``<project>/.mcp.json``;
     ``user``: through ``claude mcp add-json --scope user``), with
-    ``guardrails`` / ``tool_profile`` / ``add_tools`` / ``default_context``
-    on the upstream URL, then the project's ``.kagura.json`` and the hooks and
-    commands that ``session_hook`` / ``sync_hook`` / ``commands`` select
-    (``None``: not given, on by default). ``guardrails`` must already be
-    normalized (``off`` or a canonical UUID), ``tool_profile`` by
-    ``normalize_tool_profile``, ``add_tools`` by ``normalize_add_tools`` and
-    ``default_context`` to a canonical UUID.
+    ``guardrails`` / ``tool_profile`` / ``add_tools`` / ``default_context`` /
+    ``notices`` on the upstream URL, then the project's ``.kagura.json`` and
+    the hooks and commands that ``session_hook`` / ``sync_hook`` /
+    ``commands`` select (``None``: not given, on by default). ``guardrails``
+    must already be normalized (``off`` or a canonical UUID), ``tool_profile``
+    by ``normalize_tool_profile``, ``add_tools`` by ``normalize_add_tools``,
+    ``default_context`` to a canonical UUID and ``notices`` by
+    ``normalize_notices`` (``off``; ``None`` keeps notices on, the default).
 
     The SessionStart hook runs ``kagura recall --trusted-only --verbosity full
     --full 0``: uncut summaries with tags, no content. A server that refuses
@@ -1337,6 +1350,7 @@ def run_setup_claude(
             tool_profile=tool_profile,
             add_tools=add_tools,
             default_context=default_context,
+            notices=notices,
             session_hook=session_hook,
             sync_hook=sync_hook,
             commands=commands,
@@ -1365,6 +1379,7 @@ def run_setup_claude(
         tool_profile=tool_profile,
         add_tools=add_tools,
         context=default_context,
+        notices=notices,
     )
     # A user-scope entry goes on `claude mcp add-json`'s command line, which other
     # local users can read in the process list, so it names the variable Claude
@@ -1518,6 +1533,7 @@ def _run_setup_claude_oauth(
     tool_profile: str | None = None,
     add_tools: Sequence[str] | None = None,
     default_context: str | None = None,
+    notices: str | None = None,
     session_hook: bool | None = None,
     sync_hook: bool = True,
     commands: bool | None = None,
@@ -1551,6 +1567,7 @@ def _run_setup_claude_oauth(
         tool_profile=tool_profile,
         add_tools=add_tools,
         default_context=default_context,
+        notices=notices,
     )
     plan = _plan_mcp_entry(project, scope, entry, non_interactive)
 
@@ -1609,6 +1626,7 @@ def _run_setup_claude_oauth(
             tool_profile=tool_profile,
             add_tools=add_tools,
             context=default_context,
+            notices=notices,
         )
         _echo_plugin_notes(plugin_id, upstream_url, resolved_context_id, guardrails)
 

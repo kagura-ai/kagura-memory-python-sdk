@@ -22,12 +22,14 @@ from kagura_memory._http import (
     mcp_session_header,
     mcp_url_guardrails_off,
     mcp_url_has_tools_allowlist,
+    mcp_url_notices_off,
     mcp_url_query_values,
     mcp_url_tool_view,
     mcp_url_with_query,
     mcp_url_without_query_param,
     normalize_add_tools,
     normalize_guardrails,
+    normalize_notices,
     normalize_tool_profile,
     normalize_url,
     normalize_uuid,
@@ -722,6 +724,54 @@ def test_normalize_tool_profile_trims_the_name():
 def test_normalize_tool_profile_refuses_blank_and_dashed_names(value: str, message: str):
     with pytest.raises(ValueError, match=message):
         normalize_tool_profile(value)
+
+
+@pytest.mark.parametrize("value", ["off", " OFF ", "Off", "\toff\n"])
+def test_normalize_notices_accepts_off_in_any_case(value: str):
+    """memory-cloud's ``notices_off_in_url`` trims and lower-cases the value (#342)."""
+    assert normalize_notices(value) == "off"
+
+
+@pytest.mark.parametrize("value", ["", " ", "on", "true", "0", "offline", "of f"])
+def test_normalize_notices_refuses_any_other_value(value: str):
+    """The server ignores any value but ``off``, so a typo is refused locally."""
+    with pytest.raises(ValueError, match="notices must be 'off'"):
+        normalize_notices(value)
+
+
+def test_mcp_url_with_query_sets_notices_off_and_replaces_an_earlier_value():
+    url = mcp_url_with_query(
+        "https://h.example/mcp?notices=on&k=1&notices=off",
+        tool_profile="core",
+        notices=" OFF ",
+    )
+    assert url == "https://h.example/mcp?k=1&profile=core&notices=off"
+    assert mcp_url_with_query("https://h.example/mcp", notices="off") == (
+        "https://h.example/mcp?notices=off"
+    )
+
+
+@pytest.mark.parametrize("value", ["on", ""])
+def test_mcp_url_with_query_refuses_notices_other_than_off(value: str):
+    with pytest.raises(ValueError, match="notices must be 'off'"):
+        mcp_url_with_query("https://h.example/mcp", notices=value)
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("https://h/mcp?notices=off", True),
+        ("https://h/mcp?profile=core&notices=%20OFF%20", True),
+        ("https://h/mcp?notices=off&notices=on", True),
+        ("https://h/mcp?notices=on&notices=off", False),  # the server reads the first
+        ("https://h/mcp?notices=&notices=off", False),  # even a blank one
+        ("https://h/mcp?notices=offline", False),
+        ("https://h/mcp?x=off", False),
+        ("https://h/mcp", False),
+    ],
+)
+def test_mcp_url_notices_off(url: str, expected: bool):
+    assert mcp_url_notices_off(url) is expected
 
 
 def test_mcp_url_query_values_keeps_the_first_value_and_blanks():

@@ -823,6 +823,37 @@ async def test_amain_warns_when_a_tools_allowlist_overrides_add_tools(
     assert "instead of --tool-profile and --add-tools" in capsys.readouterr().err
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", ["off", " OFF "])
+async def test_amain_notices_off_extends_the_profile_url(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, value: str
+):
+    """#342: --notices off is set on the upstream URL at run time, written as ``off``."""
+    url = await _posted_url(monkeypatch, tmp_path, ["--notices", value])
+    assert url == "https://test.example.com/mcp?notices=off"
+
+
+@pytest.mark.asyncio
+async def test_amain_notices_off_replaces_an_earlier_value_on_the_server_url(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+):
+    """memory-cloud reads only the first ``notices`` value, so an earlier one is replaced."""
+    server = "https://test.example.com/mcp?notices=on&profile=full"
+    url = await _posted_url(monkeypatch, tmp_path, ["--server", server, "--notices", "off"])
+    assert url == "https://test.example.com/mcp?profile=full&notices=off"
+
+
+@pytest.mark.parametrize("bad", ["on", "true", "", "of"])
+def test_parser_rejects_notices_other_than_off(bad: str, capsys):
+    """The server ignores any value but ``off``, so the proxy refuses to start (#342)."""
+    with pytest.raises(SystemExit) as exc:
+        mcp_proxy._build_parser().parse_args(["--notices", bad])
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "--notices" in err
+    assert "notices must be 'off'" in err
+
+
 def test_amain_refuses_over_100_names_across_repeated_add_tools(monkeypatch, capsys):
     monkeypatch.setattr(mcp_proxy, "get_shared_state", lambda profile=None: None)
     argv = ["--add-tools", ",".join(f"a{i}" for i in range(60))]
