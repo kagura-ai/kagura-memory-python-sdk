@@ -2582,7 +2582,7 @@ def _default_context_option(ctx, param, value: str | None) -> str | None:
         raise click.BadParameter(str(e)) from None
 
 
-def _notices_option(ctx, param, value: str | None) -> str | None:
+def _notices_option(ctx: click.Context, param: click.Parameter, value: str | None) -> str | None:
     """``--notices off``; None when absent.
 
     memory-cloud reads only ``off`` (trimmed, any case) and ignores any other
@@ -2687,7 +2687,9 @@ _NOTICES_HELP = (
     default=None,
     metavar="off",
     callback=_notices_option,
-    help=_NOTICES_HELP + " A re-run without it turns them back on.",
+    help=_NOTICES_HELP
+    + " A re-run without it drops an earlier --notices off; a ?notices=off written in "
+    "the MCP URL itself stays.",
 )
 @click.option(
     "--context",

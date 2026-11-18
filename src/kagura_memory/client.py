@@ -3725,7 +3725,7 @@ class KaguraClient:
                 raise KaguraQuotaError(
                     f"This workspace is at its limit of {cap} contexts; contexts you "
                     "cannot see (for example ones private to other members) count toward "
-                    "it. Ask an owner or admin to delete unused contexts or upgrade the plan.",
+                    "it. Delete unused contexts or upgrade the plan.",
                     quota_type="contexts",
                     current=None,
                     limit=cap,

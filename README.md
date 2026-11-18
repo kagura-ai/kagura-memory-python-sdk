@@ -1267,7 +1267,7 @@ would read is kept, alone and with a warning).
 `--oauth`) they go on the URL as `?profile=` / `?add_tools=` / `?notices=off`, where a
 value already in `--mcp-url` is kept when the flag is absent. Unlike a `--guardrails`
 context, `--notices off` is written for Hermes and OpenClaw too; use it only for an
-entry no person reads. Without either, memory-cloud 0.93.0+ lists the `core`
+entry no person reads. Without `--tool-profile` and `--add-tools`, memory-cloud 0.93.0+ lists the `core`
 tools; `full` lists every tool. For Codex, the `--guardrails` preview carries the entry's view, so its
 truncation note names a tool the entry lists. With `--url-form --oauth`, Codex keys
 its token on the URL, so changing them later means signing in again.

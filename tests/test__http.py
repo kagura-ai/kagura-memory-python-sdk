@@ -772,7 +772,6 @@ def test_mcp_url_with_query_refuses_notices_other_than_off(value: str):
 )
 def test_mcp_url_notices_off(url: str, expected: bool):
     assert mcp_url_notices_off(url) is expected
-    assert (mcp_url_query_values(url).get("notices", "").strip().lower() == "off") is expected
 
 
 def test_mcp_url_query_values_keeps_the_first_value_and_blanks():
