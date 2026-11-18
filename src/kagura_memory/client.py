@@ -2220,31 +2220,51 @@ class KaguraClient:
                 v0.82.0+ (#1743); an older server ignores it and returns every
                 context.
 
+        The listed workspace: from memory-cloud v0.169.0 (#2884) it is the
+        one the connection is bound to — a workspace-scoped API key's
+        workspace, else the workspace in the MCP URL (``/mcp/w/<id>``), else
+        the caller's current workspace — and ``count`` / ``limit`` /
+        ``can_create`` describe that same workspace. Before v0.169.0 the
+        list always came from the caller's current workspace.
+
         Returns:
             The envelope ``{status, contexts, count, total, limit, can_create,
             has_more, next_cursor, hint?}``:
 
             - ``contexts``: the items described above.
-            - ``count``: contexts in the workspace. This is quota usage, so
-              ``name_contains`` does not change it. With no current workspace
-              it is the number of contexts the caller can see, still counted
-              before ``name_contains``.
+            - ``count``: from memory-cloud v0.170.0 (#2891), the number of
+              contexts the caller can see in the listed workspace. Before
+              v0.170.0, with a workspace whose quota the server read, it was
+              every non-deleted context of the workspace (quota usage),
+              including ones the caller cannot see; without a workspace it
+              was the number the caller can see. Either way it is counted
+              before ``name_contains`` and is the same on every page. ``0``
+              when the access lookup failed.
             - ``total``: contexts in this response (v0.73.0+). ``0`` on no
               match is still a success.
             - ``has_more`` / ``next_cursor``: whether more contexts follow
               this page, and the ``cursor`` that returns them (``None`` on the
               last page; v0.82.0+, absent before).
-            - ``limit`` / ``can_create``: the plan's context maximum and whether
-              another context fits. Absent when the caller has no current
-              workspace; ``0`` / ``False`` when the server could not read the
-              quota (:meth:`create_context` then skips its local pre-check
-              and lets the server decide).
-            - ``hint``: present only when the caller can see no context at all
-              (memory-cloud v0.75.0+, #1658). With a workspace it says how to
-              create a context or get access; without one it says to create or
-              select a workspace in the web UI. A ``name_contains`` that
-              matches nothing does not produce it, and neither does a failed
-              access lookup (which also answers with an empty list).
+            - ``limit`` / ``can_create``: the workspace's context quota: the
+              plan's context maximum and whether another context fits. Both
+              are decided on every non-deleted context of the workspace,
+              other members' private ones included, so from v0.170.0
+              ``can_create`` can be ``False`` while ``count`` is below
+              ``limit``. Absent when the caller has no workspace, and from
+              v0.169.0 also when the access lookup failed; ``0`` / ``False``
+              when the server could not read the quota (:meth:`create_context`
+              then skips its local pre-check and lets the server decide).
+            - ``hint``: one fixed text, present when the caller can see no
+              context at all (memory-cloud v0.75.0+, #1658). With a workspace
+              it says how to create a context or get access; without one it
+              says to create or select a workspace in the web UI. A
+              ``name_contains`` that matches nothing does not produce it, and
+              neither does a failed access lookup (which also answers with an
+              empty list). From v0.170.0 (#2891) it is also present when the
+              workspace is full while ``count`` is below ``limit``: it says
+              no context can be created and that contexts the caller cannot
+              see count toward ``limit``; a caller who sees no context in such
+              a workspace gets that text in place of the create-a-context one.
 
             The envelope's ``limit`` is the plan's context maximum, not the
             page size argument of the same name.
@@ -3663,8 +3683,13 @@ class KaguraClient:
         Raises:
             KaguraQuotaError: Context limit reached for this workspace
                 (``quota_type="contexts"``). The SDK checks ``list_contexts``
-                first, so this usually carries ``current`` / ``limit`` but
-                no ``required_plan``.
+                first, so this usually carries ``limit`` but no
+                ``required_plan``. ``current`` is ``count`` when it is at or
+                above ``limit`` (on any server, ``count`` is then the usage or
+                at least shows the workspace full). From memory-cloud v0.170.0
+                ``count`` is the contexts the caller can see, so when it is
+                below ``limit`` the workspace is full of contexts the caller
+                cannot see: the message says so and ``current`` is ``None``.
             KaguraFeatureNotAvailableError: The plan does not allow a
                 shared context (``is_private=False``; server v0.75.0+).
         """
@@ -3688,6 +3713,19 @@ class KaguraClient:
         if not contexts.get("can_create", True) and limit != 0:
             from .exceptions import KaguraQuotaError
 
+            current, cap = _opt_int(count), _opt_int(limit)
+            if current is not None and cap is not None and current < cap:
+                # memory-cloud 0.170.0+ (#2891): count is what the caller can
+                # see, while can_create counts every context of the workspace,
+                # so count is no usage figure here (#347).
+                raise KaguraQuotaError(
+                    f"This workspace is at its limit of {cap} contexts; contexts you "
+                    "cannot see (for example ones private to other members) count toward "
+                    "it. Ask an owner or admin to delete unused contexts or upgrade the plan.",
+                    quota_type="contexts",
+                    current=None,
+                    limit=cap,
+                )
             # Use ``.get`` then coerce None → "?" so a quota response that is
             # missing count/limit OR carries them as null (both forms of server
             # schema drift) still yields a clean message, never KeyError or a
@@ -3697,8 +3735,8 @@ class KaguraClient:
                 f"{'?' if limit is None else limit}). "
                 "Delete unused contexts or upgrade your plan.",
                 quota_type="contexts",
-                current=_opt_int(count),
-                limit=_opt_int(limit),
+                current=current,
+                limit=cap,
             )
 
         arguments: dict[str, Any] = {"name": name, "is_private": is_private}
