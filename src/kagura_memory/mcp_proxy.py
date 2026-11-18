@@ -25,10 +25,11 @@ Design (see issue #101, gate1 review):
 - **mcp_url comes from the profile** (or ``--server``) explicitly — never via
   ``KaguraClient`` env resolution, which ignores ``KAGURA_MCP_URL`` and would
   silently fall back to the hardcoded cloud URL. ``--guardrails``,
-  ``--tool-profile``, ``--add-tools`` and ``--context`` set memory-cloud's
-  ``?guardrails=`` / ``?profile=`` / ``?add_tools=`` / ``?context=`` on it at
-  run time (issues #258, #300), so the profile's URL never has to be copied
-  into ``--server`` to carry a query.
+  ``--tool-profile``, ``--add-tools``, ``--context`` and ``--notices`` set
+  memory-cloud's ``?guardrails=`` / ``?profile=`` / ``?add_tools=`` /
+  ``?context=`` / ``?notices=`` on it at run time (issues #258, #300, #342),
+  so the profile's URL never has to be copied into ``--server`` to carry a
+  query.
 - **The proxy can name the session** (issue #300). Claude Code talks stdio, so
   there is no incoming HTTP header to pass on: ``--session-id`` (or
   ``KAGURA_MCP_SESSION_ID``) is sent as memory-cloud's ``Kagura-Session-Id``
@@ -75,6 +76,7 @@ from ._http import (
     mcp_url_with_query,
     normalize_add_tools,
     normalize_guardrails,
+    normalize_notices,
     normalize_tool_profile,
     normalize_uuid,
     validate_https_url,
@@ -315,6 +317,13 @@ def _add_tools_arg(value: str) -> str:
     return names
 
 
+def _notices_arg(value: str) -> str:
+    try:
+        return normalize_notices(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from None
+
+
 def _context_arg(value: str) -> str:
     try:
         return normalize_uuid(value.strip(), label="context")
@@ -410,6 +419,18 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--notices",
+        type=_notices_arg,
+        default=None,
+        metavar="off",
+        help=(
+            "Set ?notices=off on the upstream URL (server v0.161.0+): bootstrap replies "
+            "carry no service notices. A notice is delivered once per person, so only a "
+            "headless connection, one no person reads, should turn them off. 'off' is "
+            "the only value."
+        ),
+    )
+    parser.add_argument(
         "--session-id",
         type=_session_id_arg,
         default=None,
@@ -469,6 +490,7 @@ async def _amain(argv: list[str] | None = None) -> int:
         tool_profile=args.tool_profile,
         add_tools=[add_tools] if add_tools else None,
         context=args.context,
+        notices=args.notices,
     )
     # Enforce HTTPS (localhost allowed for dev), matching KaguraClient.
     validate_https_url(mcp_url, label="MCP URL")

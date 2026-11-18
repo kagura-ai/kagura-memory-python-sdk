@@ -64,10 +64,12 @@ def mcp_url_with_query(
     tool_profile: str | None = None,
     add_tools: Sequence[str] | None = None,
     context: str | None = None,
+    notices: str | None = None,
 ) -> str:
     """Return ``mcp_url`` with memory-cloud's endpoint query set.
 
-    The keys are ``guardrails``, ``profile``, ``add_tools`` and ``context``.
+    The keys are ``guardrails``, ``profile``, ``add_tools``, ``context`` and
+    ``notices``.
     The rest of the existing query is kept verbatim. A key being set replaces
     every earlier value of it rather than appending, because the server reads
     only the first value of each. ``None`` leaves that key as it is.
@@ -85,6 +87,8 @@ def mcp_url_with_query(
             key as it is, like ``None``.
         context: ``?context=`` value, the connection's default context: a
             context UUID (server v0.114.0+, memory-cloud#2125).
+        notices: ``?notices=`` value; only ``off`` is accepted (see
+            :func:`normalize_notices`), written as ``off``.
 
     Returns:
         The URL to POST MCP requests to.
@@ -92,10 +96,12 @@ def mcp_url_with_query(
     Raises:
         TypeError: ``add_tools`` is a ``str``, or holds a non-``str`` item.
         ValueError: ``add_tools`` names more than 100 tools or one starting
-            with ``-``, or ``context`` is not a UUID.
+            with ``-``, ``context`` is not a UUID, or ``notices`` is not
+            ``off``.
     """
     added = normalize_add_tools(add_tools) if add_tools is not None else ""
     default_context = normalize_uuid(context, label="context") if context is not None else None
+    notices_value = normalize_notices(notices) if notices is not None else None
     updates = {
         key: value
         for key, value in (
@@ -103,6 +109,7 @@ def mcp_url_with_query(
             ("profile", tool_profile),
             ("add_tools", added or None),
             ("context", default_context),
+            ("notices", notices_value),
         )
         if value is not None
     }
@@ -202,6 +209,46 @@ def normalize_guardrails(value: str) -> str:
         return normalize_uuid(stripped, label="guardrails")
     except ValueError:
         raise ValueError(f"guardrails must be 'off' or a context UUID, got {value!r}") from None
+
+
+def mcp_url_notices_off(mcp_url: str) -> bool:
+    """True when ``mcp_url``'s first ``notices`` value is ``off`` (any case, trimmed).
+
+    memory-cloud's ``notices_off_in_url`` (v0.161.0+) reads the query this
+    way; no other value means anything to it.
+
+    Args:
+        mcp_url: The MCP endpoint URL.
+
+    Returns:
+        Whether the URL keeps service notices out of the ``bootstrap`` reply.
+    """
+    value = mcp_url_query_values(mcp_url).get("notices")
+    return value is not None and value.strip().lower() == "off"
+
+
+def normalize_notices(value: str) -> str:
+    """Validate a ``?notices=`` value: only ``off``.
+
+    memory-cloud (v0.161.0+, memory-cloud#2762) leaves service notices out
+    of the ``bootstrap`` reply when the URL's first ``notices`` value is
+    ``off`` (trimmed, any case) and ignores any other value, so anything
+    else is a typo and is refused here. Only a headless connection, one no
+    person reads, should turn notices off: a notice is delivered once per
+    person, and a connection that leaves them on uses them up.
+
+    Args:
+        value: ``off`` in any case, with or without surrounding spaces.
+
+    Returns:
+        ``"off"``.
+
+    Raises:
+        ValueError: ``value`` is not ``off``.
+    """
+    if value.strip().lower() != "off":
+        raise ValueError(f"notices must be 'off', got {value!r}")
+    return "off"
 
 
 def normalize_tool_profile(value: str) -> str:
