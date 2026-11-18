@@ -51,6 +51,11 @@ Options (all optional; the defaults write the same files as before):
   the memory-cloud `kagura-memory` plugin's) deliver guardrails. Changing any of
   them never forces a re-login; a re-run without them drops them, so pass them
   again. A blank `--tool-profile` or one starting with `-` is refused (exit 2).
+- `--notices off` (server v0.161.0+) — puts `?notices=off` on the upstream URL
+  (`kagura-mcp --notices off` for `--profile`), so `bootstrap` replies carry no
+  service notices. Each notice is delivered once per person: add it only for a
+  headless connection no person reads (a scheduled job, CI), never by default or
+  for an interactive session. `off` is the only value (anything else exits 2).
 - `--context-id <id|name>` — the context for the project's hooks and
   commands. A name is matched exactly (not a display name) on every page of
   the context list (memory-cloud 0.82.0+ pages it, 100 contexts a page by
@@ -114,6 +119,9 @@ file and edits nothing. Options:
 - `--tool-profile <name>` / `--add-tools <name>[,<name>…]` — the tool view, as
   for `setup claude`: `kagura-mcp` args on the stdio entry, `?profile=` /
   `?add_tools=` (server v0.129.0+) on the URL with `--url-form`.
+- `--notices off` (server v0.161.0+) — as for `setup claude`, for every harness
+  (Hermes and OpenClaw too): `kagura-mcp --notices off` on the stdio entry,
+  `?notices=off` on the URL with `--url-form`. Only for an entry no person reads.
 - `--url-form --mcp-url <url> [--api-key-env VAR]` — a URL entry that reads a
   long-lived API key from an environment variable; setup never sees the key.
 - `--url-form --oauth --mcp-url <url>` (memory-cloud 0.77.0+) — a URL entry with

@@ -418,7 +418,9 @@ server applies it to the whole batch and says so in `RememberBatchResult.lint`
 an item and 0.93.0-0.95.x ignore the key, so pass it to `remember_batch` itself there.
 `BootstrapResponse.notices` (server v0.161.0+) holds service notices from the deployment's
 administrators: show each `text` to the user as information, not instructions. Each is delivered
-once per person; `?notices=off` on the MCP URL keeps a headless connection from using them up.
+once per person; `?notices=off` on the MCP URL keeps a headless connection from using them up
+(`kagura-mcp --notices off` and `kagura setup … --notices off` set it; see
+[Claude Code integration](#claude-code-integration)).
 
 #### Agent bootstrap — one-call session-start rehydration (v0.37.0, server v0.49.0+)
 
@@ -756,15 +758,15 @@ The same client also provisions **member API keys** (memory-cloud [#1165](https:
 
 ## SDK ↔ memory-cloud Compatibility
 
-`MIN_SERVER_VERSION` is **0.17.1** and advisory: the SDK never blocks a call on the server version. SDK 0.47.1 is checked against memory-cloud up to **0.161.0**, and a surface newer than the floor carries its own, given in the [compatibility page](https://github.com/kagura-ai/kagura-memory-python-sdk/blob/main/docs/compatibility.md) section of the release that added it.
+`MIN_SERVER_VERSION` is **0.17.1** and advisory: the SDK never blocks a call on the server version. SDK 0.48.0 is checked against memory-cloud up to **0.170.0**, and a surface newer than the floor carries its own, given in the [compatibility page](https://github.com/kagura-ai/kagura-memory-python-sdk/blob/main/docs/compatibility.md) section of the release that added it.
 
 | SDK | memory-cloud checked up to | What changed |
 |---|---|---|
+| [0.48.0](https://github.com/kagura-ai/kagura-memory-python-sdk/blob/main/docs/compatibility.md#0480) | 0.170.0 | `--notices off` on `kagura-mcp` and `kagura setup` for headless connections; `list_contexts` `count` is the visible contexts (0.170.0) and `create_context`'s quota error no longer reads it as usage |
 | [0.47.1](https://github.com/kagura-ai/kagura-memory-python-sdk/blob/main/docs/compatibility.md#0471) | 0.161.0 | Requires Python 3.11.5+ so the lock and the `ingest-html` extra use only Soup Sieve 4.x (three Dependabot advisories). |
 | [0.47.0](https://github.com/kagura-ai/kagura-memory-python-sdk/blob/main/docs/compatibility.md#0470) | 0.161.0 | Typed upload malware-scan refusals (`KaguraFileScanPendingError`, `KaguraFileBlockedError`) and `FileObject.scan_status`, batch-level keys on `remember_batch` items, `bootstrap` service notices, the google / microsoft tool views |
 | [0.46.0](https://github.com/kagura-ai/kagura-memory-python-sdk/blob/main/docs/compatibility.md#0460) | 0.155.0 | Session-only workspace operation history reader, `order_by="event_start"`, the plugin `server_url` keeps `context=`, `RollbackSummary.related_indexes_reverted` |
 | [0.45.1](https://github.com/kagura-ai/kagura-memory-python-sdk/blob/main/docs/compatibility.md#0451) | 0.144.0 | Security dependency floors and refreshed lock; Click 8.5 compatibility. |
-| [0.45.0](https://github.com/kagura-ai/kagura-memory-python-sdk/blob/main/docs/compatibility.md#0450) | 0.144.0 | Workspace member context access, signed-in context member add, and OAuth credential locking shared with TypeScript SDK 0.16.0. |
 
 Every release back to 0.13.x, with each surface's floor, how the SDK reads a server version, and the full notes: **[docs/compatibility.md](https://github.com/kagura-ai/kagura-memory-python-sdk/blob/main/docs/compatibility.md)**.
 
@@ -1090,10 +1092,10 @@ and notes any weaker entry the new one hides. `kagura doctor` reports the same.
 
 **Upstream URL query** — `--guardrails off|<context-uuid>` (server v0.74.0+),
 `--tool-profile <name>` (server v0.73.0+), `--add-tools <name>[,<name>…]` (server
-v0.129.0+) and `--context <context-uuid>` (server v0.114.0+) put memory-cloud's
-`?guardrails=` / `?profile=` / `?add_tools=` / `?context=` on the upstream MCP URL:
-as `kagura-mcp --guardrails … --tool-profile … --add-tools … --context …` arguments
-for `--profile` (the proxy adds them to the profile's URL at run time, replacing
+v0.129.0+), `--context <context-uuid>` (server v0.114.0+) and `--notices off`
+(server v0.161.0+) put memory-cloud's `?guardrails=` / `?profile=` / `?add_tools=` /
+`?context=` / `?notices=` on the upstream MCP URL: as `kagura-mcp --guardrails …
+--tool-profile … --add-tools … --context … --notices off` arguments for `--profile` (the proxy adds them to the profile's URL at run time, replacing
 any earlier value), or in the url's query for an API key. Nothing is copied into
 `--server` or `~/.kagura/credentials.json`, and changing them never forces a
 re-login. The entry is rebuilt from the flags on every run, so pass them again
@@ -1120,6 +1122,14 @@ the default for tools called without `context_id`, so a session can skip
 `list_contexts`; an explicit `context_id` wins, and the default is checked like one.
 It is a UUID, unlike `--context-id`, which picks the project's hooks and commands.
 Older servers ignore the parameters they do not know.
+
+`--notices off` keeps service notices out of `bootstrap` replies (memory-cloud
+v0.161.0+). Each notice is delivered once per person, so only a headless connection,
+one no person reads (a scheduled job, CI), should turn them off; an interactive
+session should leave them on, which is the default: setup never adds it unasked. `off`
+is the only value the server reads (any case); setup and `kagura-mcp` refuse any other.
+The plugin `server_url` setup prints never carries it: the plugin's hooks never call
+`bootstrap`.
 
 `kagura-mcp --session-id NAME` (or `KAGURA_MCP_SESSION_ID`; server v0.114.0+) sends
 `Kagura-Session-Id: NAME` on every upstream request, so the server records the
@@ -1250,11 +1260,14 @@ and a context id is never written into their entry: a `?guardrails=<uuid>`
 already in `--mcp-url` is dropped with a warning (a `?guardrails=off` the server
 would read is kept, alone and with a warning).
 
-**Tool view.** `--tool-profile <name>` and `--add-tools <name>[,<name>…]` work as
-for `setup claude` ([above](#claude-code-integration)): on the stdio entry they
-become `kagura-mcp --tool-profile/--add-tools`, and with `--url-form` they go on the
-URL as `?profile=` / `?add_tools=`, where a value already in `--mcp-url` is kept
-when the flag is absent. Without either, memory-cloud 0.93.0+ lists the `core`
+**Tool view and notices.** `--tool-profile <name>`, `--add-tools <name>[,<name>…]` and
+`--notices off` (memory-cloud v0.161.0+) work as for `setup claude`
+([above](#claude-code-integration)): on the stdio entry they become `kagura-mcp
+--tool-profile/--add-tools/--notices`, and with `--url-form` (with or without
+`--oauth`) they go on the URL as `?profile=` / `?add_tools=` / `?notices=off`, where a
+value already in `--mcp-url` is kept when the flag is absent. Unlike a `--guardrails`
+context, `--notices off` is written for Hermes and OpenClaw too; use it only for an
+entry no person reads. Without either, memory-cloud 0.93.0+ lists the `core`
 tools; `full` lists every tool. For Codex, the `--guardrails` preview carries the entry's view, so its
 truncation note names a tool the entry lists. With `--url-form --oauth`, Codex keys
 its token on the URL, so changing them later means signing in again.

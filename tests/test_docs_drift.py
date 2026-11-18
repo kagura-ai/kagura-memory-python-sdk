@@ -96,6 +96,11 @@ _STALE_PHRASES = [
     "an older server refuses every such item",
     # #334: the plugin's server_url keeps the configured context= (plugin of v0.149.0).
     "`_plugin_server_url` keeps only `guardrails=off`",
+    # #347: the SDK is checked against memory-cloud v0.170.0.
+    "Checked against memory-cloud up to **v0.161.0**",
+    # #347: from memory-cloud v0.170.0 (#2891) list_contexts' count is the visible contexts.
+    "`count` is quota usage",
+    "This is quota usage, so",
 ]
 
 
@@ -476,6 +481,25 @@ def test_compat_0_47_section() -> None:
         assert term in section, f"the section lacks {term!r}"
     assert "**Passed through with no SDK change.**" in section
     assert "**Auth.**" in section and "**Not wrapped.**" in section
+    assert f"`MIN_SERVER_VERSION` stays **{MIN_SERVER_VERSION}**" in section
+
+
+def test_compat_0_48_section() -> None:
+    """#342 / #347: the 0.48.0 section names its ceiling (memory-cloud v0.170.0) and floors."""
+    section = _compat_sections()["0.48.0"]
+    assert _ceiling(section) == "0.170.0"
+    floors = _min_line(section)
+    for floor in ("0.161.0 `?notices=off`", "0.169.0", "0.170.0 `list_contexts` `count`"):
+        assert floor in floors, f"the Min memory-cloud line lacks {floor!r}"
+    issues = re.findall(r"kagura-memory-python-sdk/issues/(\d+)", section)
+    for issue in ("342", "347"):
+        assert issue in issues, f"the 0.48.0 section does not link SDK #{issue}"
+    for issue in ("2762", "2857", "2884", "2891"):
+        assert f"memory-cloud/issues/{issue})" in section, f"the section lacks memory-cloud#{issue}"
+    for term in ("--notices off", "SYNC-LOCKED", "usage_budget_exhausted", "kmc-sync-configuration"):
+        assert term in section, f"the section lacks {term!r}"
+    assert "**How this was checked.**" in section
+    assert "**Passed through with no SDK change.**" in section and "**Not wrapped.**" in section
     assert f"`MIN_SERVER_VERSION` stays **{MIN_SERVER_VERSION}**" in section
 
 
