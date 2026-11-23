@@ -232,13 +232,15 @@ async with KaguraClient(api_key="kagura_...", mcp_url="https://...") as client:
         if ws.usable and not ws.current:
             # count/total describe that workspace; no limit/can_create there.
             # Refused: permission_denied (not a member), workspace_suspended,
-            # feature_not_available (no seat); older server: invalid_argument.
+            # feature_not_available (no seat); a blank id: ValueError. Servers
+            # 0.82.0-0.176.x: invalid_argument; older ones ignore it (this workspace).
             theirs = await client.list_contexts(workspace_id=ws.id)
 
     # Per-context hybrid fusion (memory-cloud v0.178.0+): "auto" (default), "rrf" for
     # conversation and work history, "weighted" (with a higher semantic weight) for
     # documents. Read config["fusion"], never fusion_effective, before writing it back.
-    # An older server refuses the argument (invalid_argument) and changes nothing.
+    # Servers 0.82.0-0.177.x refuse the argument (invalid_argument) and change
+    # nothing; older ones ignore it and answer success without storing it.
     await client.update_search_config(context_id="docs", semantic_weight=0.8,
                                       bm25_weight=0.2, fusion="weighted")
 

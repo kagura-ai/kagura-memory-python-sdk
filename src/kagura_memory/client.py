@@ -2226,10 +2226,13 @@ class KaguraClient:
                 connection's, under the account's role there; a
                 ``context_id`` from it works in the other tools.
                 Keyword-only, sent only when set, as given (the server takes
-                a UUID; ``""`` reads as unset there, anything else is
-                ``invalid_argument``). Requires memory-cloud v0.177.0+
-                (#2972); an older server refuses it as an unknown argument
-                (``invalid_argument``).
+                a UUID and refuses anything else with ``invalid_argument``);
+                a blank or whitespace-only string raises ``ValueError``
+                before any request, since the server would read it as unset
+                and list the connection's workspace. Requires memory-cloud
+                v0.177.0+ (#2972): v0.82.0-v0.176.x refuse it as an unknown
+                argument (``invalid_argument``, #1742), and an older server
+                ignores it and lists the connection's workspace.
 
         The listed workspace: from memory-cloud v0.169.0 (#2884) it is the
         one the connection is bound to — a workspace-scoped API key's
@@ -2309,14 +2312,20 @@ class KaguraClient:
         Raises:
             ValueError: ``limit`` is not an ``int`` in 1-200, or is above 20
                 with ``include_details`` and no ``name_contains`` (the server
-                refuses that page with ``validation_error``).
+                refuses that page with ``validation_error``); or
+                ``workspace_id`` is blank.
             KaguraFeatureNotAvailableError: ``workspace_id`` names a
                 workspace where the account has no seat on the plan.
             KaguraError: ``workspace_id`` refused — ``code`` is
                 ``permission_denied``, ``workspace_suspended`` or
-                ``invalid_argument`` (not a UUID, or a server before
-                v0.177.0).
+                ``invalid_argument`` (not a UUID, or a server from v0.82.0
+                before v0.177.0).
         """
+        if isinstance(workspace_id, str) and not workspace_id.strip():
+            raise ValueError(
+                "workspace_id is blank: the server would list the connection's workspace; "
+                "pass a workspace id from list_workspaces() or omit it"
+            )
         name_contains = _normalize_name_contains(name_contains)
         if limit is not None:
             _validate_int_range("limit", limit, 1, _LIST_CONTEXTS_MAX_LIMIT)
@@ -4415,10 +4424,13 @@ class KaguraClient:
                 manuals. A recall over several contexts follows the first
                 one's. Keyword-only, sent only when not ``None``, as given:
                 the value is not checked locally, and the server refuses one
-                it does not know with ``invalid_search_config``. A server
-                before v0.178.0 has no such argument and refuses the call
-                with ``invalid_argument`` (``details["unknown_arguments"]``),
-                changing nothing.
+                it does not know with ``invalid_search_config``. Requires
+                memory-cloud v0.178.0+: v0.82.0-v0.177.x have no such
+                argument and refuse the call with ``invalid_argument``
+                (``details["unknown_arguments"]``, #1742), changing nothing;
+                an older server ignores it, applies the other arguments and
+                answers success without storing a fusion (its ``config``
+                carries no ``fusion``).
 
         Returns:
             Current search config after update, under ``config``. Besides the
@@ -4443,7 +4455,7 @@ class KaguraClient:
                 weights do not sum to 1.0, a provider / model mismatch, or
                 content chunks on LanceDB; the REST twin answers ``422
                 VAL-001``; also an unknown ``fusion``), ``"invalid_argument"``
-                (``fusion`` sent to a server before v0.178.0), or
+                (``fusion`` sent to a server from v0.82.0 before v0.178.0), or
                 ``"context_not_found"``.
         """
         arguments: dict[str, Any] = {"context_id": context_id}

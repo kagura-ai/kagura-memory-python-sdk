@@ -338,6 +338,27 @@ async def test_list_contexts_sends_workspace_id() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("blank", ["", " ", "\t\n"])
+async def test_list_contexts_blank_workspace_id_is_refused_before_a_request(blank: str) -> None:
+    """The server reads ``""`` as omitted and would list the connection's workspace."""
+    sent: list[dict[str, Any]] = []
+    client = _wire_client(_CONTEXTS_REPLY, sent)
+    try:
+        with pytest.raises(ValueError, match="workspace_id"):
+            await client.list_contexts(workspace_id=blank)
+    finally:
+        await client.close()
+    assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_list_contexts_non_uuid_workspace_id_is_sent_as_given() -> None:
+    """Only blank is checked locally: a non-UUID stays the server's ``invalid_argument``."""
+    _, _, arguments = await _run(_CONTEXTS_REPLY, lambda c: c.list_contexts(workspace_id=" x "))
+    assert arguments == {"workspace_id": " x "}
+
+
+@pytest.mark.asyncio
 async def test_list_contexts_of_another_workspace_passes_through() -> None:
     """Another workspace: no ``limit`` / ``can_create``, its own empty ``hint``."""
     reply = {
@@ -450,6 +471,22 @@ def test_cli_context_list_workspace_id(_cli_client: AsyncMock) -> None:
     assert json.loads(result.output)["other_workspaces"] == 1
 
 
+@pytest.mark.parametrize("bad", ["", "  ", "not-a-uuid"])
+def test_cli_context_list_workspace_id_must_be_a_uuid(_cli_client: AsyncMock, bad: str) -> None:
+    result = CliRunner().invoke(main, ["context", "list", "--workspace-id", bad])
+    assert result.exit_code == 2
+    assert "--workspace-id" in result.output
+    _cli_client.list_contexts.assert_not_called()
+
+
+def test_cli_context_list_workspace_id_is_canonicalized(_cli_client: AsyncMock) -> None:
+    _cli_client.list_contexts.return_value = _CONTEXTS_REPLY
+    spelled = "{" + WS2.upper() + "}"
+    result = CliRunner().invoke(main, ["context", "list", "--workspace-id", f" {spelled} "])
+    assert result.exit_code == 0, result.output
+    assert _cli_client.list_contexts.await_args.kwargs["workspace_id"] == WS2
+
+
 def test_cli_context_list_without_workspace_id_sends_none(_cli_client: AsyncMock) -> None:
     _cli_client.list_contexts.return_value = _CONTEXTS_REPLY
     result = CliRunner().invoke(main, ["context", "list"])
@@ -468,6 +505,53 @@ def test_cli_workspace_list_table(_cli_client: AsyncMock) -> None:
     assert lines[0].split() == ["ID", "NAME", "ROLE", "CURRENT", "USABLE"]
     assert lines[1].split() == [WS, "Main", "owner", "yes", "yes"]
     assert lines[2].split() == [WS2, "Team", "viewer", "-", "no", "(workspace_suspended)"]
+
+
+def _display_width(text: str) -> int:
+    import unicodedata
+
+    return sum(2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1 for ch in text)
+
+
+def test_cli_workspace_list_table_sizes_name_by_display_width(_cli_client: AsyncMock) -> None:
+    """A long name is not cut, and CJK names (2 columns a character) keep the columns aligned."""
+    long_name = "A workspace name that is much longer than twenty-four"
+    cjk_name = "開発チーム"
+    reply = {
+        "status": "success",
+        "workspaces": [
+            {"id": WS, "name": long_name, "role": "owner", "current": True, "usable": True},
+            {"id": WS2, "name": cjk_name, "role": "member", "current": False, "usable": True},
+        ],
+        "total": 2,
+    }
+    _cli_client.list_workspaces.return_value = AccountWorkspaceList.model_validate(reply)
+    result = CliRunner().invoke(main, ["workspace", "list"])
+    assert result.exit_code == 0, result.output
+    header, first, second = result.output.splitlines()
+    assert long_name in first and cjk_name in second
+    # ROLE starts at the same display column on every line.
+    starts = [
+        _display_width(line[: line.index(word)])
+        for line, word in ((header, "ROLE"), (first, "owner"), (second, "member"))
+    ]
+    assert len(set(starts)) == 1, starts
+    assert starts[0] == 36 + 1 + len(long_name) + 1
+
+
+def test_cli_workspace_list_table_name_column_is_at_least_the_header(
+    _cli_client: AsyncMock,
+) -> None:
+    reply = {
+        "status": "success",
+        "workspaces": [{"id": WS, "name": "A", "role": "owner", "current": True, "usable": True}],
+        "total": 1,
+    }
+    _cli_client.list_workspaces.return_value = AccountWorkspaceList.model_validate(reply)
+    result = CliRunner().invoke(main, ["workspace", "list"])
+    assert result.exit_code == 0, result.output
+    header, row = result.output.splitlines()
+    assert header.index("ROLE") == row.index("owner") == 36 + 1 + len("NAME") + 1
 
 
 def test_cli_workspace_list_json(_cli_client: AsyncMock) -> None:

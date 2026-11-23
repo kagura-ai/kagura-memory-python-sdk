@@ -5,6 +5,7 @@ import json
 import math
 import os
 import sys
+import unicodedata
 from collections.abc import Awaitable, Callable, Iterable
 from datetime import datetime
 from pathlib import Path
@@ -1676,6 +1677,23 @@ def _next_page_footer(result: dict[str, Any]) -> str | None:
     return _page_footer(result, "the command again with the same options and")
 
 
+def _workspace_id_option(
+    _ctx: click.Context, _param: click.Parameter, value: str | None
+) -> str | None:
+    """``--workspace-id``: a workspace UUID, canonicalized.
+
+    memory-cloud reads a blank ``workspace_id`` as unset (it would list the
+    connection's workspace) and refuses any other non-UUID, so both are
+    refused here instead.
+    """
+    if value is None:
+        return None
+    try:
+        return normalize_uuid(value.strip(), label="--workspace-id")
+    except ValueError:
+        raise click.BadParameter(f"{value!r} is not a valid workspace UUID.") from None
+
+
 def _contexts_footer(result: dict[str, Any]) -> str | None:
     """The ``kagura contexts`` footer: the shortcut takes no cursor, ``context list`` does."""
     return _page_footer(result, "kagura context list")
@@ -1712,6 +1730,7 @@ def _contexts_footer(result: dict[str, Any]) -> str | None:
 @click.option(
     "--workspace-id",
     default=None,
+    callback=_workspace_id_option,
     help=(
         "List another workspace you are a member of (an id from 'kagura workspace list'); "
         "default: the connection's (memory-cloud 0.177.0+)."
@@ -4324,16 +4343,33 @@ def workspace():
     pass
 
 
+def _display_width(text: str) -> int:
+    """Terminal columns of ``text``: East Asian wide / fullwidth characters take two."""
+    return sum(2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1 for ch in text)
+
+
+def _pad_display(text: str, width: int) -> str:
+    """``text`` padded with spaces to ``width`` terminal columns (never cut)."""
+    return text + " " * max(0, width - _display_width(text))
+
+
 def _workspaces_table(result: dict[str, Any]) -> str:
-    """The ``kagura workspace list`` table: one row per workspace, the reason when unusable."""
-    lines = [f"{'ID':<36} {'NAME':<24} {'ROLE':<7} {'CURRENT':<7} USABLE"]
-    for ws in result.get("workspaces", []):
+    """The ``kagura workspace list`` table: one row per workspace, the reason when unusable.
+
+    The NAME column is as wide as the longest name in terminal columns (at
+    least the header), so no name is cut and CJK names stay aligned.
+    """
+    workspaces = result.get("workspaces", [])
+    names = [str(ws.get("name", "")) for ws in workspaces]
+    name_width = max([_display_width("NAME"), *(_display_width(n) for n in names)])
+    lines = [f"{'ID':<36} {_pad_display('NAME', name_width)} {'ROLE':<7} {'CURRENT':<7} USABLE"]
+    for ws, name in zip(workspaces, names, strict=True):
         usable = "yes" if ws.get("usable") else "no"
         if ws.get("reason"):
             usable += f" ({ws['reason']})"
         current = "yes" if ws.get("current") else "-"
         lines.append(
-            f"{ws.get('id', ''):<36} {ws.get('name', ''):<24} {ws.get('role', ''):<7} "
+            f"{ws.get('id', ''):<36} {_pad_display(name, name_width)} {ws.get('role', ''):<7} "
             f"{current:<7} {usable}"
         )
     return "\n".join(lines)
