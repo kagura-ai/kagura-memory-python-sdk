@@ -574,6 +574,7 @@ def test_context_list(mock_client_cls, mock_config):
         include_stats=False,
         cursor=None,
         limit=None,
+        workspace_id=None,
     )
     assert result.stderr == ""  # no has_more, no footer
 
@@ -603,6 +604,7 @@ def test_context_list_forwards_filter_and_detail_flags(mock_client_cls, mock_con
         include_stats=True,
         cursor=None,
         limit=None,
+        workspace_id=None,
     )
 
 

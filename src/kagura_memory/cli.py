@@ -5,6 +5,7 @@ import json
 import math
 import os
 import sys
+import unicodedata
 from collections.abc import Awaitable, Callable, Iterable
 from datetime import datetime
 from pathlib import Path
@@ -353,6 +354,7 @@ def _run_client_command(
     *,
     needs_context: bool = True,
     footer: Callable[[dict[str, Any]], str | None] | None = None,
+    render: Callable[[dict[str, Any]], str] | None = None,
 ) -> None:
     """
     Execute a client operation with standard boilerplate.
@@ -364,7 +366,8 @@ def _run_client_command(
     ``kagura auth login`` even if .kagura.json is absent.
 
     ``footer`` builds an optional line from the result, printed on stderr
-    after the JSON so stdout stays parseable.
+    after the JSON so stdout stays parseable. ``render`` replaces the JSON
+    on stdout with its text (a table).
     """
     try:
         config = load_config()
@@ -381,7 +384,10 @@ def _run_client_command(
                 return await operation(client, ctx_id)
 
         result = asyncio.run(_run())
-        click.echo(json.dumps(result, indent=2, ensure_ascii=False))
+        if render is not None:
+            click.echo(render(result))
+        else:
+            click.echo(json.dumps(result, indent=2, ensure_ascii=False))
         note = footer(result) if footer is not None else None
         if note:
             click.echo(note, err=True)
@@ -1671,6 +1677,23 @@ def _next_page_footer(result: dict[str, Any]) -> str | None:
     return _page_footer(result, "the command again with the same options and")
 
 
+def _workspace_id_option(
+    _ctx: click.Context, _param: click.Parameter, value: str | None
+) -> str | None:
+    """``--workspace-id``: a workspace UUID, canonicalized.
+
+    memory-cloud reads a blank ``workspace_id`` as unset (it would list the
+    connection's workspace) and refuses any other non-UUID, so both are
+    refused here instead.
+    """
+    if value is None:
+        return None
+    try:
+        return normalize_uuid(value.strip(), label="--workspace-id")
+    except ValueError:
+        raise click.BadParameter(f"{value!r} is not a valid workspace UUID.") from None
+
+
 def _contexts_footer(result: dict[str, Any]) -> str | None:
     """The ``kagura contexts`` footer: the shortcut takes no cursor, ``context list`` does."""
     return _page_footer(result, "kagura context list")
@@ -1704,6 +1727,15 @@ def _contexts_footer(result: dict[str, Any]) -> str | None:
         "is ignored (memory-cloud 0.82.0+)."
     ),
 )
+@click.option(
+    "--workspace-id",
+    default=None,
+    callback=_workspace_id_option,
+    help=(
+        "List another workspace you are a member of (an id from 'kagura workspace list'); "
+        "default: the connection's (memory-cloud 0.177.0+)."
+    ),
+)
 def context_list(
     name_contains: str | None,
     summary: bool,
@@ -1711,6 +1743,7 @@ def context_list(
     stats: bool,
     limit: int | None,
     cursor: str | None,
+    workspace_id: str | None,
 ) -> None:
     """
     List available contexts.
@@ -1730,6 +1763,7 @@ def context_list(
       kagura context list --name-contains auth --summary
       kagura context list --stats
       kagura context list --limit 50 --cursor 50
+      kagura context list --workspace-id WS_UUID
     """
     if cursor is not None and not cursor.strip():
         # Blank is unset, as for --name-contains: a script feeding back the
@@ -1748,6 +1782,7 @@ def context_list(
             include_stats=stats,
             cursor=cursor,
             limit=limit,
+            workspace_id=workspace_id,
         ),
         context_id=None,
         needs_context=False,
@@ -1867,6 +1902,12 @@ def context_update(context_id, display_name, description, summary, usage_guide, 
     "the results that answer the query. Context owner or workspace owner/admin only "
     "(server v0.115.0+)",
 )
+@click.option(
+    "--fusion",
+    type=click.Choice(["auto", "rrf", "weighted"]),
+    help="How hybrid recall fuses its two legs: auto (default), rrf (conversation and "
+    "work history) or weighted (documents; raise --semantic) (server v0.178.0+)",
+)
 def context_search_config(
     context_id: str,
     semantic: float | None,
@@ -1877,6 +1918,7 @@ def context_search_config(
     reranker_model: str | None,
     content_chunks: bool | None,
     llm_selector: bool | None,
+    fusion: str | None,
 ) -> None:
     """
     Update search configuration for a context.
@@ -1893,6 +1935,7 @@ def context_search_config(
       kagura context search-config CTX_UUID --rerank --reranker self_hosted
       kagura context search-config CTX_UUID --content-chunks
       kagura context search-config CTX_UUID --no-llm-selector
+      kagura context search-config CTX_UUID --fusion rrf
     """
     options = (
         semantic,
@@ -1903,6 +1946,7 @@ def context_search_config(
         reranker_model,
         content_chunks,
         llm_selector,
+        fusion,
     )
     if all(v is None for v in options):
         raise click.ClickException("At least one option is required")
@@ -1923,6 +1967,7 @@ def context_search_config(
             reranker_model=reranker_model,
             content_chunks_enabled=content_chunks,
             llm_selector_enabled=llm_selector,
+            fusion=fusion,
         ),
         context_id=None,
         needs_context=False,
@@ -4293,8 +4338,70 @@ def _context_uuids_param(
 
 @main.group()
 def workspace():
-    """Workspace administration (owner API key required, server v0.42.0+)."""
+    """Workspaces: list yours (no owner key needed), and administer members and
+    invitations (owner API key required, server v0.42.0+)."""
     pass
+
+
+def _display_width(text: str) -> int:
+    """Terminal columns of ``text``: East Asian wide / fullwidth characters take two."""
+    return sum(2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1 for ch in text)
+
+
+def _pad_display(text: str, width: int) -> str:
+    """``text`` padded with spaces to ``width`` terminal columns (never cut)."""
+    return text + " " * max(0, width - _display_width(text))
+
+
+def _workspaces_table(result: dict[str, Any]) -> str:
+    """The ``kagura workspace list`` table: one row per workspace, the reason when unusable.
+
+    The NAME column is as wide as the longest name in terminal columns (at
+    least the header), so no name is cut and CJK names stay aligned.
+    """
+    workspaces = result.get("workspaces", [])
+    names = [str(ws.get("name", "")) for ws in workspaces]
+    name_width = max([_display_width("NAME"), *(_display_width(n) for n in names)])
+    lines = [f"{'ID':<36} {_pad_display('NAME', name_width)} {'ROLE':<7} {'CURRENT':<7} USABLE"]
+    for ws, name in zip(workspaces, names, strict=True):
+        usable = "yes" if ws.get("usable") else "no"
+        if ws.get("reason"):
+            usable += f" ({ws['reason']})"
+        current = "yes" if ws.get("current") else "-"
+        lines.append(
+            f"{ws.get('id', ''):<36} {_pad_display(name, name_width)} {ws.get('role', ''):<7} "
+            f"{current:<7} {usable}"
+        )
+    return "\n".join(lines)
+
+
+@workspace.command(name="list")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Raw JSON output")
+def workspace_list(as_json: bool) -> None:
+    """
+    List the workspaces your account is a member of (memory-cloud 0.177.0+).
+
+    Calls the MCP tool list_workspaces with the configured credential (no
+    owner key needed): your role in each, the connection's workspace
+    (CURRENT), and whether 'kagura context list --workspace-id ID' can list
+    it now (USABLE, with the reason when not). A workspace-scoped API key
+    sees only its own workspace.
+
+    \b
+    Examples:
+      kagura workspace list
+      kagura workspace list --json
+    """
+
+    async def op(client: KaguraClient, _: str) -> dict[str, Any]:
+        return (await client.list_workspaces()).model_dump(mode="json")
+
+    _run_client_command(
+        op,
+        context_id=None,
+        needs_context=False,
+        render=None if as_json else _workspaces_table,
+    )
 
 
 @workspace.group()

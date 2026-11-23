@@ -21,6 +21,7 @@ from kagura_memory import (
     FilesClient,
     KaguraClient,
     ResourceClient,
+    SearchConfig,
     TagInfo,
     WorkspaceClient,
 )
@@ -101,6 +102,8 @@ _STALE_PHRASES = [
     # #347: from memory-cloud v0.170.0 (#2891) list_contexts' count is the visible contexts.
     "`count` is quota usage",
     "This is quota usage, so",
+    # #350: the SDK is checked against memory-cloud v0.178.0.
+    "Checked against memory-cloud up to **v0.170.0**",
 ]
 
 
@@ -315,6 +318,27 @@ def test_no_doc_says_a_non_uuid_is_a_500_without_the_422() -> None:
         (FilesClient.download_url, ["SCAN-001", "SCAN-002", "retry_after", "v0.160.0"]),
         (FilesClient.upload, ["pending", "#565"]),
         (TagInfo, ["sample_summary"]),
+        # #350: per-context fusion (memory-cloud v0.178.0, #2980).
+        (
+            KaguraClient.update_search_config,
+            ["fusion_effective", "v0.178.0", "#2980", "invalid_argument", "HYBRID_FUSION"],
+        ),
+        (SearchConfig, ["fusion_effective", "keyword_floor", "v0.178.0"]),
+        # #350: list_workspaces and list_contexts(workspace_id) (memory-cloud v0.177.0, #2972).
+        (
+            KaguraClient.list_workspaces,
+            ["v0.177.0", "#2972", "unknown_tool", "workspace-scoped", "suspended", "full"],
+        ),
+        (
+            KaguraClient.list_contexts,
+            [
+                "workspace_id",
+                "other_workspaces",
+                "workspaces_hint",
+                "permission_denied",
+                "v0.177.0",
+            ],
+        ),
     ],
     ids=lambda v: getattr(v, "__qualname__", "terms"),
 )
@@ -502,6 +526,27 @@ def test_compat_0_48_section() -> None:
         "usage_budget_exhausted",
         "kmc-sync-configuration",
     ):
+        assert term in section, f"the section lacks {term!r}"
+    assert "**How this was checked.**" in section
+    assert "**Passed through with no SDK change.**" in section and "**Not wrapped.**" in section
+    assert f"`MIN_SERVER_VERSION` stays **{MIN_SERVER_VERSION}**" in section
+
+
+def test_compat_0_49_section() -> None:
+    """#350: the 0.49.0 section names its ceiling (memory-cloud v0.178.0) and floors."""
+    section = _compat_sections()["0.49.0"]
+    assert _ceiling(section) == "0.178.0"
+    floors = _min_line(section)
+    for floor in (
+        "0.177.0 `KaguraClient.list_workspaces`",
+        "`list_contexts(workspace_id=)`",
+        "0.178.0 `update_search_config(fusion=)`",
+    ):
+        assert floor in floors, f"the Min memory-cloud line lacks {floor!r}"
+    assert "kagura-memory-python-sdk/issues/350" in section
+    for issue in ("2958", "2972", "2980"):
+        assert f"memory-cloud/issues/{issue})" in section, f"the section lacks memory-cloud#{issue}"
+    for term in ("fusion_effective", "unknown_tool", "invalid_argument", "other_workspaces"):
         assert term in section, f"the section lacks {term!r}"
     assert "**How this was checked.**" in section
     assert "**Passed through with no SDK change.**" in section and "**Not wrapped.**" in section

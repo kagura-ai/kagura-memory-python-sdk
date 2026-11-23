@@ -225,6 +225,25 @@ async with KaguraClient(api_key="kagura_...", mcp_url="https://...") as client:
         more = await client.list_contexts(name_contains="auth", include_summary=True,
                                           limit=50, cursor=found["next_cursor"])
 
+    # The account's other workspaces (memory-cloud v0.177.0+). list_workspaces is in the
+    # full profile but callable from any URL; a workspace-scoped API key sees its own only.
+    # found["other_workspaces"] (when present) counts the usable ones besides this one.
+    for ws in (await client.list_workspaces()).workspaces:
+        if ws.usable and not ws.current:
+            # count/total describe that workspace; no limit/can_create there.
+            # Refused: permission_denied (not a member), workspace_suspended,
+            # feature_not_available (no seat); a blank id: ValueError. Servers
+            # 0.82.0-0.176.x: invalid_argument; older ones ignore it (this workspace).
+            theirs = await client.list_contexts(workspace_id=ws.id)
+
+    # Per-context hybrid fusion (memory-cloud v0.178.0+): "auto" (default), "rrf" for
+    # conversation and work history, "weighted" (with a higher semantic weight) for
+    # documents. Read config["fusion"], never fusion_effective, before writing it back.
+    # Servers 0.82.0-0.177.x refuse the argument (invalid_argument) and change
+    # nothing; older ones ignore it and answer success without storing it.
+    await client.update_search_config(context_id="docs", semantic_weight=0.8,
+                                      bm25_weight=0.2, fusion="weighted")
+
     # Trust-tier filter (provenance) — exclude untrusted / connector-ingested
     # memories from behaviour-influencing reads (OWASP LLM01/LLM03)
     safe = await client.recall(context_id="dev", query="policy",
@@ -758,15 +777,15 @@ The same client also provisions **member API keys** (memory-cloud [#1165](https:
 
 ## SDK ↔ memory-cloud Compatibility
 
-`MIN_SERVER_VERSION` is **0.17.1** and advisory: the SDK never blocks a call on the server version. SDK 0.48.0 is checked against memory-cloud up to **0.170.0**, and a surface newer than the floor carries its own, given in the [compatibility page](https://github.com/kagura-ai/kagura-memory-python-sdk/blob/main/docs/compatibility.md) section of the release that added it.
+`MIN_SERVER_VERSION` is **0.17.1** and advisory: the SDK never blocks a call on the server version. SDK 0.49.0 is checked against memory-cloud up to **0.178.0**, and a surface newer than the floor carries its own, given in the [compatibility page](https://github.com/kagura-ai/kagura-memory-python-sdk/blob/main/docs/compatibility.md) section of the release that added it.
 
 | SDK | memory-cloud checked up to | What changed |
 |---|---|---|
+| [0.49.0](https://github.com/kagura-ai/kagura-memory-python-sdk/blob/main/docs/compatibility.md#0490) | 0.178.0 | Per-context hybrid `fusion` on `update_search_config` and `SearchConfig` (0.178.0); `list_workspaces` and `list_contexts(workspace_id=)` with `kagura workspace list` and `context list --workspace-id` (0.177.0) |
 | [0.48.0](https://github.com/kagura-ai/kagura-memory-python-sdk/blob/main/docs/compatibility.md#0480) | 0.170.0 | `--notices off` on `kagura-mcp` and `kagura setup` for headless connections; `list_contexts` `count` is the visible contexts (0.170.0) and `create_context`'s quota error no longer reads it as usage |
 | [0.47.1](https://github.com/kagura-ai/kagura-memory-python-sdk/blob/main/docs/compatibility.md#0471) | 0.161.0 | Requires Python 3.11.5+ so the lock and the `ingest-html` extra use only Soup Sieve 4.x (three Dependabot advisories). |
 | [0.47.0](https://github.com/kagura-ai/kagura-memory-python-sdk/blob/main/docs/compatibility.md#0470) | 0.161.0 | Typed upload malware-scan refusals (`KaguraFileScanPendingError`, `KaguraFileBlockedError`) and `FileObject.scan_status`, batch-level keys on `remember_batch` items, `bootstrap` service notices, the google / microsoft tool views |
 | [0.46.0](https://github.com/kagura-ai/kagura-memory-python-sdk/blob/main/docs/compatibility.md#0460) | 0.155.0 | Session-only workspace operation history reader, `order_by="event_start"`, the plugin `server_url` keeps `context=`, `RollbackSummary.related_indexes_reverted` |
-| [0.45.1](https://github.com/kagura-ai/kagura-memory-python-sdk/blob/main/docs/compatibility.md#0451) | 0.144.0 | Security dependency floors and refreshed lock; Click 8.5 compatibility. |
 
 Every release back to 0.13.x, with each surface's floor, how the SDK reads a server version, and the full notes: **[docs/compatibility.md](https://github.com/kagura-ai/kagura-memory-python-sdk/blob/main/docs/compatibility.md)**.
 
@@ -928,6 +947,9 @@ kagura context search-config <context-id> --content-chunks --no-llm-selector   #
 kagura contexts                                     # one page; on v0.82.0+ a stderr line names the next --cursor
 kagura context list --name-contains auth --summary   # server v0.73.0+; --details, --stats
 kagura context list --limit 50 --cursor 50          # server v0.82.0+; a cut page names next_cursor on stderr
+kagura context search-config <context-id> --fusion rrf   # auto | rrf | weighted (server v0.178.0+)
+kagura workspace list [--json]                      # your workspaces, role, current, usable (no owner key; v0.177.0+)
+kagura context list --workspace-id <workspace-id>   # another workspace of yours (server v0.177.0+)
 
 # Resource tokens
 kagura resource setup -r products                   # context named after the resource; --name to override
@@ -1409,10 +1431,11 @@ scope the server lists, `memory:admin` and `memory:delete` included.
 | Agent registry + context bindings (register/list/update/delete, bind/unbind — owner/admin) | `KaguraClient` / `AgentsClient` | MCP + REST | API Key |
 | Tool guardrails (load_guardrails, remember/update_memory `tool_trigger=`, get_context_info `guardrails`) | `KaguraClient` / `MemoryClient` | MCP + REST | API Key |
 | Guardrail digest (`AGENTS.md` export block / server-instructions preview) | `MemoryClient` | REST | API Key |
-| Context (create/update/list/delete/get_context_info; list_contexts paged with `cursor` / `limit`) | `KaguraClient` | MCP | API Key |
+| Context (create/update/list/delete/get_context_info; list_contexts paged with `cursor` / `limit`, another workspace with `workspace_id`) | `KaguraClient` | MCP | API Key |
+| Account workspaces (list_workspaces — role, current, usable) | `KaguraClient` | MCP | API Key |
 | Workspace (get_usage) | `KaguraClient` | MCP | API Key |
 | Workspace operation history (list_operation_history — owner/admin, Pro/Max) | `WorkspaceClient` | REST API | Web session |
-| Search config (update_search_config, incl. `content_chunks_enabled` / `llm_selector_enabled`) | `KaguraClient` | MCP | API Key |
+| Search config (update_search_config, incl. `content_chunks_enabled` / `llm_selector_enabled` / `fusion`) | `KaguraClient` | MCP | API Key |
 | Server info (get_server_info — version, deployment feature flags, `search_defaults`, `terms_version`) | `KaguraClient` | REST | None (public endpoint) |
 | Embedding status (get_embedding_status) | `KaguraClient` | REST | API Key |
 | Memory stats (get_memory_stats) | `KaguraClient` | REST | API Key |
