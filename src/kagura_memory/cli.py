@@ -4319,7 +4319,7 @@ def _context_uuids_param(
 
 @main.group()
 def workspace():
-    """Workspaces: list yours (any credential), and administer members and
+    """Workspaces: list yours (no owner key needed), and administer members and
     invitations (owner API key required, server v0.42.0+)."""
     pass
 

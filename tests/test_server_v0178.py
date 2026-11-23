@@ -174,6 +174,7 @@ async def test_update_search_config_fusion_on_an_older_server_is_an_unknown_argu
             await client.update_search_config(CTX, fusion="rrf")
     finally:
         await client.close()
+    assert _call(sent)[1] == {"context_id": CTX, "fusion": "rrf"}
     assert excinfo.value.code == "invalid_argument"
     assert excinfo.value.details["unknown_arguments"] == ["fusion"]
 
@@ -334,6 +335,34 @@ async def test_list_contexts_sends_workspace_id() -> None:
         _CONTEXTS_REPLY, lambda c: c.list_contexts(workspace_id=WS2, limit=10)
     )
     assert arguments == {"workspace_id": WS2, "limit": 10}
+
+
+@pytest.mark.asyncio
+async def test_list_contexts_of_another_workspace_passes_through() -> None:
+    """Another workspace: no ``limit`` / ``can_create``, its own empty ``hint``."""
+    reply = {
+        "status": "success",
+        "contexts": [],
+        "count": 0,
+        "total": 0,
+        "has_more": False,
+        "next_cursor": None,
+        "hint": f"No contexts of that workspace are visible to you. ... (/mcp/w/{WS2}) ...",
+        "other_workspaces": 1,
+    }
+    result, _, arguments = await _run(reply, lambda c: c.list_contexts(workspace_id=WS2))
+    assert arguments == {"workspace_id": WS2}
+    assert "limit" not in result and "can_create" not in result
+    assert result["hint"].startswith("No contexts of that workspace")
+
+
+@pytest.mark.asyncio
+async def test_list_contexts_google_view_sends_the_count_only() -> None:
+    """``?profile=google`` / ``microsoft``: ``other_workspaces`` without ``workspaces_hint``."""
+    reply = {k: v for k, v in _CONTEXTS_REPLY.items() if k != "workspaces_hint"}
+    result, _, _ = await _run(reply, lambda c: c.list_contexts())
+    assert result["other_workspaces"] == 1
+    assert "workspaces_hint" not in result
 
 
 @pytest.mark.asyncio

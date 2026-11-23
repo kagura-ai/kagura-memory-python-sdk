@@ -946,7 +946,7 @@ kagura contexts                                     # one page; on v0.82.0+ a st
 kagura context list --name-contains auth --summary   # server v0.73.0+; --details, --stats
 kagura context list --limit 50 --cursor 50          # server v0.82.0+; a cut page names next_cursor on stderr
 kagura context search-config <context-id> --fusion rrf   # auto | rrf | weighted (server v0.178.0+)
-kagura workspace list [--json]                      # your workspaces, role, current, usable (any credential; v0.177.0+)
+kagura workspace list [--json]                      # your workspaces, role, current, usable (no owner key; v0.177.0+)
 kagura context list --workspace-id <workspace-id>   # another workspace of yours (server v0.177.0+)
 
 # Resource tokens

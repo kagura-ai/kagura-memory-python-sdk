@@ -2636,8 +2636,9 @@ class AccountWorkspace(BaseModel):
         name: The workspace name.
         role: The account's role there (``owner`` / ``admin`` / ``member`` /
             ``viewer``; a plain ``str``).
-        current: Whether it is this connection's workspace (the one in the
-            ``/mcp/w/<id>`` URL, else the account's current one).
+        current: Whether it is this connection's workspace (a
+            workspace-scoped API key's, else the one in the ``/mcp/w/<id>``
+            URL, else the account's current one).
         usable: Whether ``list_contexts(workspace_id=<id>)`` lists it now.
         reason: The error code that call would answer when ``usable`` is
             ``False``: ``workspace_suspended`` (the workspace slot is
