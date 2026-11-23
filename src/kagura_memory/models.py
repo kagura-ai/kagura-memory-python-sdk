@@ -178,16 +178,28 @@ class UsageInfo(BaseModel):
 class SearchConfig(BaseModel):
     """Hybrid search configuration for a context.
 
-    The content-chunk and LLM-selector fields are ``None`` when the reply did
-    not carry them — a server older than the field, or a surface that does
-    not send it. At memory-cloud v0.142.0 :meth:`KaguraClient.get_context_info`
+    The content-chunk, LLM-selector and fusion fields are ``None`` when the
+    reply did not carry them — a server older than the field, or a surface
+    that does not send it. At memory-cloud v0.142.0 :meth:`KaguraClient.get_context_info`
     sends ``llm_selector_enabled`` / ``llm_selector_effective`` only;
     :meth:`KaguraClient.update_search_config` returns both ``*_enabled`` /
     ``*_effective`` pairs in its ``config``; the REST ``GET
     /api/v1/contexts/{id}/search-config`` route (not wrapped) carries every
-    field. Fields newer than this SDK are ignored.
+    field. From memory-cloud v0.178.0 (#2980) both MCP replies also carry
+    ``fusion`` and ``fusion_effective``. Fields newer than this SDK are
+    ignored.
 
     Attributes:
+        fusion: The stored hybrid fusion choice (memory-cloud v0.178.0+,
+            #2980): ``auto`` (the default, also for a context that never set
+            it), ``rrf`` or ``weighted``. A plain ``str``, so a newer value
+            passes; ``None`` from an older server.
+        fusion_effective: The fusion a hybrid recall over this context uses:
+            the stored ``rrf`` / ``weighted``, or for ``auto`` ``weighted``
+            when the weights are not 0.6 / 0.4 and else the deployment's
+            ``HYBRID_FUSION`` (``weighted``, ``rrf`` or ``keyword_floor``).
+            Read ``fusion``, never this, before writing the setting back:
+            echoing a resolved value would pin it and drop ``auto``.
         content_chunks_enabled: The stored opt-in (memory-cloud v0.110.0+,
             #2015): long ``content`` (1,500+ characters) is embedded as chunk
             vectors, so memory content — not only summaries — goes to the
@@ -244,6 +256,8 @@ class SearchConfig(BaseModel):
     llm_selector_in_use: int | None = None
     llm_selector_disabled_reason: str | None = None
     llm_selector_can_change: bool | None = None
+    fusion: str | None = None
+    fusion_effective: str | None = None
 
 
 class ContextDetail(BaseModel):
@@ -2611,6 +2625,50 @@ class ForgetBatchResult(_ContextEcho):
     skipped: int
     failed: int
     session_id: str | None = None
+
+
+class AccountWorkspace(BaseModel):
+    """One workspace in :class:`AccountWorkspaceList` (memory-cloud v0.177.0+, #2972).
+
+    Attributes:
+        id: The workspace UUID: pass it as
+            :meth:`KaguraClient.list_contexts` ``workspace_id``.
+        name: The workspace name.
+        role: The account's role there (``owner`` / ``admin`` / ``member`` /
+            ``viewer``; a plain ``str``).
+        current: Whether it is this connection's workspace (the one in the
+            ``/mcp/w/<id>`` URL, else the account's current one).
+        usable: Whether ``list_contexts(workspace_id=<id>)`` lists it now.
+        reason: The error code that call would answer when ``usable`` is
+            ``False``: ``workspace_suspended`` (the workspace slot is
+            suspended) or ``feature_not_available`` (the account has no seat
+            on its plan); a plain ``str``, so a newer reason passes. ``None``
+            when usable.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    id: str
+    name: str
+    role: str
+    current: bool
+    usable: bool
+    reason: str | None = None
+
+
+class AccountWorkspaceList(BaseModel):
+    """Reply of the ``list_workspaces`` MCP tool (memory-cloud v0.177.0+, #2972).
+
+    The workspaces the account is a member of (deleted ones left out), by
+    name; ``total`` is the number listed. Keys a newer server adds are
+    ignored.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    status: str = "success"
+    workspaces: list[AccountWorkspace]
+    total: int | None = None
 
 
 class ToolDescriptions(BaseModel):

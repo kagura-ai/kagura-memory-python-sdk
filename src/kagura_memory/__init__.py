@@ -32,6 +32,8 @@ from .ingest import FileIngestor
 from .memory_client import MemoryClient
 from .models import (
     GUARDRAIL_FORMAT,
+    AccountWorkspace,
+    AccountWorkspaceList,
     Agent,
     AgentBinding,
     AgentBootstrapAgent,
@@ -182,6 +184,9 @@ __all__ = [
     "WorkspaceInfo",
     "ContextStats",
     "ContextInfo",
+    # Account workspaces (#350, server v0.177.0+)
+    "AccountWorkspace",
+    "AccountWorkspaceList",
     # Server info (v0.6.1)
     "ServerInfo",
     "ServerFeatures",

@@ -51,6 +51,7 @@ from .models import (
     _MAX_CHARS_MIN,
     _OBSERVED_DATE,
     _RECALL_FULL_MAX,
+    AccountWorkspaceList,
     Agent,
     AgentBinding,
     AgentBootstrapComponentName,
@@ -2174,6 +2175,7 @@ class KaguraClient:
         include_stats: bool = False,
         cursor: str | None = None,
         limit: int | None = None,
+        workspace_id: str | None = None,
     ) -> dict[str, Any]:
         """List the contexts you can access, most recently used first.
 
@@ -2219,13 +2221,37 @@ class KaguraClient:
                 set, and checked before any request. Requires memory-cloud
                 v0.82.0+ (#1743); an older server ignores it and returns every
                 context.
+            workspace_id: List another workspace the account is a member of
+                (an id from :meth:`list_workspaces`) instead of the
+                connection's, under the account's role there; a
+                ``context_id`` from it works in the other tools.
+                Keyword-only, sent only when set, as given (the server takes
+                a UUID; ``""`` reads as unset there, anything else is
+                ``invalid_argument``). Requires memory-cloud v0.177.0+
+                (#2972); an older server refuses it as an unknown argument
+                (``invalid_argument``).
 
         The listed workspace: from memory-cloud v0.169.0 (#2884) it is the
         one the connection is bound to — a workspace-scoped API key's
         workspace, else the workspace in the MCP URL (``/mcp/w/<id>``), else
         the caller's current workspace — and ``count`` / ``limit`` /
         ``can_create`` describe that same workspace. Before v0.169.0 the
-        list always came from the caller's current workspace.
+        list always came from the caller's current workspace. From v0.177.0
+        a ``workspace_id`` names it instead: the caller must be a member of
+        that workspace, its slot must be active and the account must hold a
+        seat on its plan. A workspace the caller is not a member of (or that
+        is deleted), and under a workspace-scoped API key any workspace but
+        the key's, is refused with ``permission_denied``
+        (``details["your_role"] == "not_a_member"``), the same answer for
+        each; a suspended one with ``workspace_suspended``; a missing seat
+        with ``feature_not_available``
+        (:class:`~kagura_memory.exceptions.KaguraFeatureNotAvailableError`).
+        For a workspace other than the connection's, ``count`` / ``total``
+        describe that workspace, ``limit`` and ``can_create`` are absent
+        (:meth:`create_context` creates in the connection's workspace), and
+        an empty listing's ``hint`` says contexts there are created from a
+        connection to it (``/mcp/w/<id>``). Naming the connection's own
+        workspace answers as without the argument.
 
         Returns:
             The envelope ``{status, contexts, count, total, limit, can_create,
@@ -2267,6 +2293,15 @@ class KaguraClient:
               a workspace gets a second fixed text (no context visible, the
               same explanation, and to ask an owner or admin for access or
               room) in place of the create-a-context one.
+            - ``other_workspaces`` / ``workspaces_hint``: from memory-cloud
+              v0.177.0 (#2972), present when the account has other usable
+              workspaces besides the listed one (``other_workspaces``, an
+              ``int``, counts them: not a suspended one, nor one without a
+              seat): ``workspaces_hint`` is a fixed text naming
+              :meth:`list_workspaces` and ``workspace_id``. Absent under a
+              workspace-scoped API key and when the count could not be read;
+              the ``?profile=google`` / ``microsoft`` views send the count
+              only.
 
             The envelope's ``limit`` is the plan's context maximum, not the
             page size argument of the same name.
@@ -2275,6 +2310,12 @@ class KaguraClient:
             ValueError: ``limit`` is not an ``int`` in 1-200, or is above 20
                 with ``include_details`` and no ``name_contains`` (the server
                 refuses that page with ``validation_error``).
+            KaguraFeatureNotAvailableError: ``workspace_id`` names a
+                workspace where the account has no seat on the plan.
+            KaguraError: ``workspace_id`` refused — ``code`` is
+                ``permission_denied``, ``workspace_suspended`` or
+                ``invalid_argument`` (not a UUID, or a server before
+                v0.177.0).
         """
         name_contains = _normalize_name_contains(name_contains)
         if limit is not None:
@@ -2297,7 +2338,43 @@ class KaguraClient:
             arguments["cursor"] = cursor
         if limit is not None:
             arguments["limit"] = limit
+        if workspace_id is not None:
+            arguments["workspace_id"] = workspace_id
         return await self._call_tool_checked("list_contexts", arguments)
+
+    async def list_workspaces(self) -> AccountWorkspaceList:
+        """List the workspaces the account is a member of, with its role in each.
+
+        Calls the ``list_workspaces`` MCP tool (memory-cloud v0.177.0+,
+        #2972) with no arguments. Each
+        :class:`~kagura_memory.models.AccountWorkspace` carries ``id``,
+        ``name``, ``role`` (the account's role there), ``current`` (this
+        connection's workspace) and ``usable``: whether
+        ``list_contexts(workspace_id=<id>)`` lists it now, with ``reason``
+        (``workspace_suspended`` or ``feature_not_available``, the code that
+        call would answer) when it is not. Pass an ``id`` as
+        :meth:`list_contexts` ``workspace_id``.
+
+        The tool is in the ``full`` profile only, so a bare ``/mcp`` URL
+        (``core``) does not list it in ``tools/list``; like every tool it is
+        callable from any URL, which is what this method does. With a
+        workspace-scoped API key only the key's workspace is listed. It
+        answers while the connection's workspace is suspended (the slot gate
+        and the daily MCP call limit do not apply to it), so it is how an
+        account finds a usable workspace then.
+
+        Returns:
+            :class:`~kagura_memory.models.AccountWorkspaceList`:
+            ``workspaces`` (by name) and ``total``.
+
+        Raises:
+            KaguraError: ``code == "unknown_tool"`` on a server before
+                v0.177.0, which has no such tool (as v0.176.0 answers it).
+            KaguraResponseError: The reply does not match
+                :class:`~kagura_memory.models.AccountWorkspaceList`.
+        """
+        result = await self._call_tool_checked("list_workspaces", {})
+        return parse_response(AccountWorkspaceList, result, operation="list_workspaces")
 
     async def list_tags(
         self,
@@ -4277,6 +4354,7 @@ class KaguraClient:
         *,
         content_chunks_enabled: bool | None = None,
         llm_selector_enabled: bool | None = None,
+        fusion: str | None = None,
     ) -> dict[str, Any]:
         """Update hybrid search configuration for a context.
 
@@ -4327,15 +4405,33 @@ class KaguraClient:
                 ``llm_selector`` feature and a free slot under
                 ``max_llm_selector_contexts``. Sent when not ``None``.
                 Keyword-only.
+            fusion: How a hybrid recall over this context fuses its semantic
+                and keyword legs (memory-cloud v0.178.0+, #2980): ``"auto"``
+                (the default) is ``"weighted"`` when the context's weights
+                are not 0.6 / 0.4, else the deployment's ``HYBRID_FUSION``;
+                ``"rrf"`` (reciprocal rank fusion, the weights unused) suits
+                conversation and work history; ``"weighted"`` (the weighted
+                blend) with a higher ``semantic_weight`` suits documents and
+                manuals. A recall over several contexts follows the first
+                one's. Keyword-only, sent only when not ``None``, as given:
+                the value is not checked locally, and the server refuses one
+                it does not know with ``invalid_search_config``. A server
+                before v0.178.0 has no such argument and refuses the call
+                with ``invalid_argument`` (``details["unknown_arguments"]``),
+                changing nothing.
 
         Returns:
             Current search config after update, under ``config``. Besides the
-            arguments it carries ``reinforce_*`` and ``routing_mode``, and the
+            arguments it carries ``reinforce_*`` and ``routing_mode``, the
             stored ``content_chunks_enabled`` (v0.110.0+) and
             ``llm_selector_enabled`` (v0.115.0+) each with its ``*_effective``
-            — whether the stored flag is acted on (store, plan and cap). Read
-            the stored flag, never the effective one, before writing it back:
-            echoing an effective ``False`` would turn the setting off.
+            — whether the stored flag is acted on (store, plan and cap) — and
+            from v0.178.0 the stored ``fusion`` with ``fusion_effective``,
+            the fusion recall resolves it to (``weighted``, ``rrf`` or the
+            deployment's ``keyword_floor``). Read the stored value, never the
+            effective one, before writing it back: echoing an effective
+            ``False`` would turn the setting off, and an effective fusion
+            would replace ``auto``.
 
         Raises:
             KaguraFeatureNotAvailableError: The plan lacks ``content_chunks`` /
@@ -4346,7 +4442,9 @@ class KaguraClient:
                 owner-only flag, or a viewer), ``"invalid_search_config"`` (the
                 weights do not sum to 1.0, a provider / model mismatch, or
                 content chunks on LanceDB; the REST twin answers ``422
-                VAL-001``), or ``"context_not_found"``.
+                VAL-001``; also an unknown ``fusion``), ``"invalid_argument"``
+                (``fusion`` sent to a server before v0.178.0), or
+                ``"context_not_found"``.
         """
         arguments: dict[str, Any] = {"context_id": context_id}
         if semantic_weight is not None:
@@ -4365,6 +4463,8 @@ class KaguraClient:
             arguments["content_chunks_enabled"] = content_chunks_enabled
         if llm_selector_enabled is not None:
             arguments["llm_selector_enabled"] = llm_selector_enabled
+        if fusion is not None:
+            arguments["fusion"] = fusion
         return await self._call_tool_checked("update_search_config", arguments)
 
     async def get_server_info(self) -> ServerInfo:

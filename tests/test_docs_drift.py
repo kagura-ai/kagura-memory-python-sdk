@@ -21,6 +21,7 @@ from kagura_memory import (
     FilesClient,
     KaguraClient,
     ResourceClient,
+    SearchConfig,
     TagInfo,
     WorkspaceClient,
 )
@@ -315,6 +316,27 @@ def test_no_doc_says_a_non_uuid_is_a_500_without_the_422() -> None:
         (FilesClient.download_url, ["SCAN-001", "SCAN-002", "retry_after", "v0.160.0"]),
         (FilesClient.upload, ["pending", "#565"]),
         (TagInfo, ["sample_summary"]),
+        # #350: per-context fusion (memory-cloud v0.178.0, #2980).
+        (
+            KaguraClient.update_search_config,
+            ["fusion_effective", "v0.178.0", "#2980", "invalid_argument", "HYBRID_FUSION"],
+        ),
+        (SearchConfig, ["fusion_effective", "keyword_floor", "v0.178.0"]),
+        # #350: list_workspaces and list_contexts(workspace_id) (memory-cloud v0.177.0, #2972).
+        (
+            KaguraClient.list_workspaces,
+            ["v0.177.0", "#2972", "unknown_tool", "workspace-scoped", "suspended", "full"],
+        ),
+        (
+            KaguraClient.list_contexts,
+            [
+                "workspace_id",
+                "other_workspaces",
+                "workspaces_hint",
+                "permission_denied",
+                "v0.177.0",
+            ],
+        ),
     ],
     ids=lambda v: getattr(v, "__qualname__", "terms"),
 )
