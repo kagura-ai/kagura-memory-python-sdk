@@ -233,6 +233,33 @@ def test_recall_shape_flags_out_of_range_are_usage_errors(mock_client_cls, mock_
     mock_client.recall.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    ("flags", "expected"),
+    [((), None), (("--order", "date"), "date"), (("--order", "relevance"), "relevance")],
+    ids=["omitted", "date", "relevance"],
+)
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_recall_order_flag(mock_client_cls, mock_config, flags, expected):
+    """memory-cloud#3004: --order reaches recall() only when given (server v0.182.0+)."""
+    result, mock_client = _recall_cli(mock_client_cls, mock_config, *flags)
+    assert result.exit_code == 0, result.output
+    kwargs = mock_client.recall.call_args.kwargs
+    if expected is None:
+        assert "order" not in kwargs
+    else:
+        assert kwargs["order"] == expected
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_recall_order_flag_rejects_other_values(mock_client_cls, mock_config):
+    result, mock_client = _recall_cli(mock_client_cls, mock_config, "--order", "newest")
+    assert result.exit_code == 2, result.output
+    assert "--order" in result.output
+    mock_client.recall.assert_not_called()
+
+
 @patch("kagura_memory.cli.load_config")
 @patch("kagura_memory.cli.KaguraClient")
 def test_recall_prints_content_right_after_its_summary(mock_client_cls, mock_config):

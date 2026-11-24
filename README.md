@@ -244,6 +244,16 @@ async with KaguraClient(api_key="kagura_...", mcp_url="https://...") as client:
     await client.update_search_config(context_id="docs", semantic_weight=0.8,
                                       bm25_weight=0.2, fusion="weighted")
 
+    # Date order (memory-cloud v0.182.0+): how something changed over time. The same
+    # search, oldest first; each row carries date (YYYY-MM-DD, UTC) and date_source
+    # ("event", "observed" or "created") and the reply says order="date". Superseded
+    # rows are included unless include_superseded=False. Sent only when set; a server
+    # from 0.82.0 that predates it refuses it (invalid_argument).
+    timeline = await client.recall(context_id="dev", query="which day the team meets",
+                                   order="date", k=10)
+    for hit in timeline["results"]:
+        print(hit.get("date"), hit.get("date_source"), hit["summary"])
+
     # Trust-tier filter (provenance) — exclude untrusted / connector-ingested
     # memories from behaviour-influencing reads (OWASP LLM01/LLM03)
     safe = await client.recall(context_id="dev", query="policy",
@@ -922,6 +932,7 @@ kagura recall "dependency injection" --no-rerank   # skip reranking; no flag fol
 kagura recall "project context" --trusted-only     # exclude connector-ingested memories (filters.trust_tier, v0.24.0+)
 kagura recall "project context" --verbosity full   # uncut summaries + tags; compact is the server default (v0.108.0+)
 kagura recall "deploy runbook" --full 1 --max-chars 40000   # content on the top hit only (v0.114.0+); reply budget (v0.82.0+)
+kagura recall "which day the team meets" --order date   # oldest first, each hit dated (v0.182.0+)
 # A server that refuses one of --verbosity/--full/--max-chars (invalid_argument) gets one
 # retry without the ones it names (all three sent when it names none), with a note on stderr.
 kagura explore -m "memory-uuid" --depth 3

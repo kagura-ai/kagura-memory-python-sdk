@@ -2855,6 +2855,22 @@ RecallVerbosity = Literal["compact", "full"]
 ``"compact"`` is the server default; ``"full"`` adds ``tags``,
 ``context_summary``, ``scope``, ``version`` and the uncut ``summary``."""
 
+RecallOrder = Literal["relevance", "date"]
+"""Valid ``recall`` ``order`` values (memory-cloud v0.182.0+, #3004; request side).
+
+``"relevance"`` is the server default and the reply as before; ``"date"``
+returns the same results oldest first, each row with ``date`` and
+``date_source`` (:data:`RecallDateSource`), and ``order: "date"`` on the
+reply."""
+
+RecallDateSource = Literal["event", "observed", "created"]
+"""``date_source`` of a ``recall(order="date")`` row (memory-cloud v0.182.0+, #3004).
+
+Where the row's ``date`` (``YYYY-MM-DD``, UTC) came from: the event's own day
+(``event_start``), else the day the fact was stated (``observed_at``), else
+the day it was stored (``created_at``). Rows stay dicts, so a newer value
+reaches the caller as given."""
+
 DedupeMode = Literal["suggest", "check", "off"]
 """Valid ``remember`` ``dedupe`` values (memory-cloud v0.93.0+, #1853; request side only).
 
