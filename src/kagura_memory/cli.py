@@ -779,7 +779,14 @@ def recall(query, context_id, k, rerank, trusted_only, verbosity, full, max_char
             f"retried without {', '.join(flags)} ({needs}).",
             err=True,
         )
-        return await call({**shape, **dict.fromkeys(dropped)})
+        try:
+            return await call({**shape, **dict.fromkeys(dropped)})
+        except KaguraError as e:
+            # The note named only shape flags; a second refusal with --order
+            # still sent may be about it.
+            if order is not None and getattr(e, "code", None) == "invalid_argument":
+                click.echo("note: --order needs memory-cloud 0.182.0+.", err=True)
+            raise
 
     _run_client_command(op, context_id)
 

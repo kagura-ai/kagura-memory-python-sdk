@@ -38,6 +38,7 @@ kagura recall "project context" --trusted-only             # reads that steer yo
 kagura recall "latency-sensitive lookup" --no-rerank
 kagura recall "deploy decisions" --verbosity full          # uncut summaries + tags
 kagura recall "deploy runbook" --full 1                    # content on the top hit only
+kagura recall "which day the team meets" --order date     # date order, oldest first (server v0.182.0+)
 
 # one memory in full / revise / delete
 kagura reference -m <uuid>

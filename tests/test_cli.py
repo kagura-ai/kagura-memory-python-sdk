@@ -538,6 +538,75 @@ def test_recall_retry_error_propagates_unchanged(mock_client_cls, mock_config):
     assert result.stderr.count("note:") == 1
 
 
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_recall_does_not_retry_without_order(mock_client_cls, mock_config):
+    """memory-cloud#3004: a server naming `order` as unknown is the error; no retry."""
+    result, mock_client = _recall_cli_raising(
+        mock_client_cls,
+        mock_config,
+        _server_error("invalid_argument", unknown=["order"]),
+        "--order",
+        "date",
+        "--full",
+        "0",
+    )
+
+    assert result.exit_code == 1
+    assert mock_client.recall.await_count == 1
+    assert mock_client.recall.await_args.kwargs["order"] == "date"
+    assert "invalid_argument" in result.output
+    assert "note:" not in result.stderr
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_recall_unlisted_refusal_retries_with_order_and_names_it_when_refused_again(
+    mock_client_cls, mock_config
+):
+    """A refusal naming nothing drops the shape flags only; a second refusal names --order."""
+    result, mock_client = _recall_cli_raising(
+        mock_client_cls,
+        mock_config,
+        [
+            _server_error("invalid_argument", unknown=None),
+            _server_error("invalid_argument", "second failure", unknown=None),
+        ],
+        "--order",
+        "date",
+        "--full",
+        "0",
+    )
+
+    assert result.exit_code == 1
+    first, second = mock_client.recall.await_args_list
+    assert _shape(first) == (None, 0, None)
+    assert _shape(second) == (None, None, None)
+    assert first.kwargs["order"] == second.kwargs["order"] == "date"
+    assert "retried without --full (--full needs memory-cloud 0.114.0+)." in result.stderr
+    assert "note: --order needs memory-cloud 0.182.0+." in result.stderr
+    assert "recall failed (invalid_argument): second failure" in result.output
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_recall_unlisted_refusal_retry_with_order_can_succeed(mock_client_cls, mock_config):
+    reply = {"results": [], "order": "date"}
+    result, mock_client = _recall_cli_raising(
+        mock_client_cls,
+        mock_config,
+        [_server_error("invalid_argument", unknown=None), reply],
+        "--order",
+        "date",
+        "--full",
+        "0",
+    )
+
+    assert result.exit_code == 0, result.output
+    assert mock_client.recall.await_args_list[1].kwargs["order"] == "date"
+    assert "--order needs" not in result.stderr
+
+
 @pytest.mark.parametrize(
     "error",
     [
