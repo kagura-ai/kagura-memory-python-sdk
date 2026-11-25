@@ -787,15 +787,15 @@ The same client also provisions **member API keys** (memory-cloud [#1165](https:
 
 ## SDK ↔ memory-cloud Compatibility
 
-`MIN_SERVER_VERSION` is **0.17.1** and advisory: the SDK never blocks a call on the server version. SDK 0.49.0 is checked against memory-cloud up to **0.178.0**, and a surface newer than the floor carries its own, given in the [compatibility page](https://github.com/kagura-ai/kagura-memory-python-sdk/blob/main/docs/compatibility.md) section of the release that added it.
+`MIN_SERVER_VERSION` is **0.17.1** and advisory: the SDK never blocks a call on the server version. SDK 0.50.0 is checked against memory-cloud up to **0.182.0**, and a surface newer than the floor carries its own, given in the [compatibility page](https://github.com/kagura-ai/kagura-memory-python-sdk/blob/main/docs/compatibility.md) section of the release that added it.
 
 | SDK | memory-cloud checked up to | What changed |
 |---|---|---|
+| [0.50.0](https://github.com/kagura-ai/kagura-memory-python-sdk/blob/main/docs/compatibility.md#0500) | 0.182.0 | `recall(order="date")` and `kagura recall --order`: the same results oldest first, each row with `date` and `date_source` (0.182.0) |
 | [0.49.0](https://github.com/kagura-ai/kagura-memory-python-sdk/blob/main/docs/compatibility.md#0490) | 0.178.0 | Per-context hybrid `fusion` on `update_search_config` and `SearchConfig` (0.178.0); `list_workspaces` and `list_contexts(workspace_id=)` with `kagura workspace list` and `context list --workspace-id` (0.177.0) |
 | [0.48.0](https://github.com/kagura-ai/kagura-memory-python-sdk/blob/main/docs/compatibility.md#0480) | 0.170.0 | `--notices off` on `kagura-mcp` and `kagura setup` for headless connections; `list_contexts` `count` is the visible contexts (0.170.0) and `create_context`'s quota error no longer reads it as usage |
 | [0.47.1](https://github.com/kagura-ai/kagura-memory-python-sdk/blob/main/docs/compatibility.md#0471) | 0.161.0 | Requires Python 3.11.5+ so the lock and the `ingest-html` extra use only Soup Sieve 4.x (three Dependabot advisories). |
 | [0.47.0](https://github.com/kagura-ai/kagura-memory-python-sdk/blob/main/docs/compatibility.md#0470) | 0.161.0 | Typed upload malware-scan refusals (`KaguraFileScanPendingError`, `KaguraFileBlockedError`) and `FileObject.scan_status`, batch-level keys on `remember_batch` items, `bootstrap` service notices, the google / microsoft tool views |
-| [0.46.0](https://github.com/kagura-ai/kagura-memory-python-sdk/blob/main/docs/compatibility.md#0460) | 0.155.0 | Session-only workspace operation history reader, `order_by="event_start"`, the plugin `server_url` keeps `context=`, `RollbackSummary.related_indexes_reverted` |
 
 Every release back to 0.13.x, with each surface's floor, how the SDK reads a server version, and the full notes: **[docs/compatibility.md](https://github.com/kagura-ai/kagura-memory-python-sdk/blob/main/docs/compatibility.md)**.
 
