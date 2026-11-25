@@ -233,6 +233,33 @@ def test_recall_shape_flags_out_of_range_are_usage_errors(mock_client_cls, mock_
     mock_client.recall.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    ("flags", "expected"),
+    [((), None), (("--order", "date"), "date"), (("--order", "relevance"), "relevance")],
+    ids=["omitted", "date", "relevance"],
+)
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_recall_order_flag(mock_client_cls, mock_config, flags, expected):
+    """memory-cloud#3004: --order reaches recall() only when given (server v0.182.0+)."""
+    result, mock_client = _recall_cli(mock_client_cls, mock_config, *flags)
+    assert result.exit_code == 0, result.output
+    kwargs = mock_client.recall.call_args.kwargs
+    if expected is None:
+        assert "order" not in kwargs
+    else:
+        assert kwargs["order"] == expected
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_recall_order_flag_rejects_other_values(mock_client_cls, mock_config):
+    result, mock_client = _recall_cli(mock_client_cls, mock_config, "--order", "newest")
+    assert result.exit_code == 2, result.output
+    assert "--order" in result.output
+    mock_client.recall.assert_not_called()
+
+
 @patch("kagura_memory.cli.load_config")
 @patch("kagura_memory.cli.KaguraClient")
 def test_recall_prints_content_right_after_its_summary(mock_client_cls, mock_config):
@@ -509,6 +536,75 @@ def test_recall_retry_error_propagates_unchanged(mock_client_cls, mock_config):
     assert mock_client.recall.await_count == 2
     assert "recall failed (invalid_argument): second failure" in result.output
     assert result.stderr.count("note:") == 1
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_recall_does_not_retry_without_order(mock_client_cls, mock_config):
+    """memory-cloud#3004: a server naming `order` as unknown is the error; no retry."""
+    result, mock_client = _recall_cli_raising(
+        mock_client_cls,
+        mock_config,
+        _server_error("invalid_argument", unknown=["order"]),
+        "--order",
+        "date",
+        "--full",
+        "0",
+    )
+
+    assert result.exit_code == 1
+    assert mock_client.recall.await_count == 1
+    assert mock_client.recall.await_args.kwargs["order"] == "date"
+    assert "invalid_argument" in result.output
+    assert "note:" not in result.stderr
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_recall_unlisted_refusal_retries_with_order_and_names_it_when_refused_again(
+    mock_client_cls, mock_config
+):
+    """A refusal naming nothing drops the shape flags only; a second refusal names --order."""
+    result, mock_client = _recall_cli_raising(
+        mock_client_cls,
+        mock_config,
+        [
+            _server_error("invalid_argument", unknown=None),
+            _server_error("invalid_argument", "second failure", unknown=None),
+        ],
+        "--order",
+        "date",
+        "--full",
+        "0",
+    )
+
+    assert result.exit_code == 1
+    first, second = mock_client.recall.await_args_list
+    assert _shape(first) == (None, 0, None)
+    assert _shape(second) == (None, None, None)
+    assert first.kwargs["order"] == second.kwargs["order"] == "date"
+    assert "retried without --full (--full needs memory-cloud 0.114.0+)." in result.stderr
+    assert "note: --order needs memory-cloud 0.182.0+." in result.stderr
+    assert "recall failed (invalid_argument): second failure" in result.output
+
+
+@patch("kagura_memory.cli.load_config")
+@patch("kagura_memory.cli.KaguraClient")
+def test_recall_unlisted_refusal_retry_with_order_can_succeed(mock_client_cls, mock_config):
+    reply = {"results": [], "order": "date"}
+    result, mock_client = _recall_cli_raising(
+        mock_client_cls,
+        mock_config,
+        [_server_error("invalid_argument", unknown=None), reply],
+        "--order",
+        "date",
+        "--full",
+        "0",
+    )
+
+    assert result.exit_code == 0, result.output
+    assert mock_client.recall.await_args_list[1].kwargs["order"] == "date"
+    assert "--order needs" not in result.stderr
 
 
 @pytest.mark.parametrize(

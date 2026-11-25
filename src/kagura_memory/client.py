@@ -79,6 +79,7 @@ from .models import (
     MeasurementSeries,
     MemoryListResponse,
     MemoryStatsResponse,
+    RecallOrder,
     RecallVerbosity,
     RememberBatchResult,
     RevisionsPage,
@@ -966,11 +967,12 @@ class KaguraClient:
         search_mode: str | None = None,
         context_ids: list[str] | None = None,
         include_explore_hints: bool = False,
-        include_superseded: bool = False,
+        include_superseded: bool | None = None,
         *,
         verbosity: RecallVerbosity | None = None,
         full: int | None = None,
         max_chars: int | None = None,
+        order: RecallOrder | None = None,
     ) -> dict[str, Any]:
         """
         Call recall MCP tool.
@@ -1049,6 +1051,9 @@ class KaguraClient:
                 off ``folded`` (see Returns): every version comes back as its
                 own row. Note this is a top-level argument, **not** a
                 ``filters`` key. Requires memory-cloud server v0.45.0+ (#1208).
+                ``None`` (the default) and ``False`` leave it off the wire,
+                except that ``False`` is sent with ``order`` set, since
+                ``order="date"`` includes superseded rows unless told not to.
             verbosity: Result detail, ``"compact"`` or ``"full"``
                 (memory-cloud v0.108.0+, #2002). ``None`` (the default) omits
                 the argument, so the deployment default applies — compact
@@ -1082,6 +1087,21 @@ class KaguraClient:
                 (``context_summary_omitted: True``), then drops the
                 lowest-ranked rows (``truncated: True``; ``count`` is the rows
                 returned).
+            order: ``"relevance"`` or ``"date"`` (memory-cloud v0.182.0+,
+                #3004). ``None`` (the default) omits the argument, so the
+                reply is the relevance-ranked one served before. ``"date"``
+                runs the same search (query, filters, ``k``, ``search_mode``,
+                rerank, ``context_ids``) and returns the results oldest first
+                — for how something changed over time. Each row then carries
+                ``date`` (``YYYY-MM-DD``, UTC) and ``date_source``
+                (``"event"`` / ``"observed"`` / ``"created"``, see
+                :data:`~kagura_memory.models.RecallDateSource`), ties keep
+                relevance order, and superseded rows are included (labelled
+                ``superseded_by``, nothing folded) unless
+                ``include_superseded=False``. ``confidence``, ``full`` and
+                ``max_chars`` still follow relevance rank. A server from
+                v0.82.0 that predates it refuses it (``KaguraError``,
+                ``invalid_argument``); an older one ignores it.
 
         Returns:
             API response with ``confidence`` first — ``{level, top_score,
@@ -1112,6 +1132,9 @@ class KaguraClient:
               False, reason}`` with the unselected page. A row whose content
               the selector cut to stored passages carries ``spans``
               (``[{start, end}]`` offsets into its stored content).
+            - ``order`` (v0.182.0+, #3004): ``"date"`` when the rows are
+              oldest first (``order="date"``); per result, ``date`` and
+              ``date_source`` then. All three are absent otherwise.
             - Per result, ``folded`` (v0.114.0+, #2123): ``{count,
               memory_ids}`` — judge-verified older versions of the same fact,
               folded under this, the newest, row.
@@ -1146,7 +1169,8 @@ class KaguraClient:
                 ``context_id`` nor ``context_ids`` is provided; if
                 ``context_ids`` has fewer than 2 or more than 20 IDs; if
                 ``search_mode`` is not one of "hybrid"/"semantic"/"keyword";
-                if ``verbosity`` is not ``"compact"`` / ``"full"``; or if
+                if ``verbosity`` is not ``"compact"`` / ``"full"``; if
+                ``order`` is not ``"relevance"`` / ``"date"``; or if
                 ``full`` (0-100) or ``max_chars`` (10,000-100,000) is not an
                 ``int`` in range. Checked before any request.
         """
@@ -1179,6 +1203,13 @@ class KaguraClient:
             arguments["include_explore_hints"] = True
         if include_superseded:
             arguments["include_superseded"] = True
+        elif include_superseded is not None and order is not None:
+            # #3004: order="date" includes superseded rows unless told not to.
+            arguments["include_superseded"] = False
+        if order is not None:
+            if order not in get_args(RecallOrder):
+                raise ValueError(f"order must be 'relevance' or 'date', got {order!r}")
+            arguments["order"] = order
         if verbosity is not None:
             if verbosity not in get_args(RecallVerbosity):
                 raise ValueError(f"verbosity must be 'compact' or 'full', got {verbosity!r}")

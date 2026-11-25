@@ -67,6 +67,7 @@ from .models import (
     ListOrderBy,
     MeasurementAggregate,
     MeasurementPeriod,
+    RecallOrder,
     RecallVerbosity,
     ResourceEventRequest,
 )
@@ -707,7 +708,15 @@ def _refused_shape_args(err: KaguraError, shape: dict[str, Any]) -> list[str]:
     type=click.IntRange(_MAX_CHARS_MIN, _MAX_CHARS_MAX),
     help="Response budget in characters, 10000-100000 (server v0.82.0+; default 20000).",
 )
-def recall(query, context_id, k, rerank, trusted_only, verbosity, full, max_chars):
+@click.option(
+    "--order",
+    type=click.Choice(get_args(RecallOrder)),
+    help=(
+        "relevance (the server default) or date: the same results oldest first, each "
+        "with date and date_source, superseded rows included (server v0.182.0+)."
+    ),
+)
+def recall(query, context_id, k, rerank, trusted_only, verbosity, full, max_chars, order):
     """
     Search memories directly (without AI analysis).
 
@@ -720,7 +729,9 @@ def recall(query, context_id, k, rerank, trusted_only, verbosity, full, max_char
     are sent only when given. A server from v0.82.0 that predates one of
     them refuses it (invalid_argument); the command then retries once
     without the ones the server lists as refused (all three it sent when the
-    reply does not list them) and says so on stderr.
+    reply does not list them) and says so on stderr. --order is sent only
+    when given and never retried without: an older server's refusal is the
+    error.
 
     \b
     Examples:
@@ -731,14 +742,23 @@ def recall(query, context_id, k, rerank, trusted_only, verbosity, full, max_char
       kagura recall "project context" --trusted-only --verbosity full
       kagura recall "deploy runbook" --full 1 --max-chars 40000
       kagura recall "release notes" --full 0
+      kagura recall "where the team meets" --order date
     """
     filters = {"trust_tier": "trusted"} if trusted_only else None
     shape: dict[str, Any] = {"verbosity": verbosity, "full": full, "max_chars": max_chars}
+    # #3004: only when given, so a default call is the request it was before.
+    extra: dict[str, Any] = {"order": order} if order is not None else {}
 
     async def op(client: KaguraClient, ctx: str) -> dict[str, Any]:
         async def call(shape_args: dict[str, Any]) -> dict[str, Any]:
             return await client.recall(
-                context_id=ctx, query=query, k=k, use_rerank=rerank, filters=filters, **shape_args
+                context_id=ctx,
+                query=query,
+                k=k,
+                use_rerank=rerank,
+                filters=filters,
+                **shape_args,
+                **extra,
             )
 
         try:
@@ -759,7 +779,14 @@ def recall(query, context_id, k, rerank, trusted_only, verbosity, full, max_char
             f"retried without {', '.join(flags)} ({needs}).",
             err=True,
         )
-        return await call({**shape, **dict.fromkeys(dropped)})
+        try:
+            return await call({**shape, **dict.fromkeys(dropped)})
+        except KaguraError as e:
+            # The note named only shape flags; a second refusal with --order
+            # still sent may be about it.
+            if order is not None and getattr(e, "code", None) == "invalid_argument":
+                click.echo("note: --order needs memory-cloud 0.182.0+.", err=True)
+            raise
 
     _run_client_command(op, context_id)
 

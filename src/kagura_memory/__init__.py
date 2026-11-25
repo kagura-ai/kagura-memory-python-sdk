@@ -111,6 +111,8 @@ from .models import (
     PaginatedResourceTokensResponse,
     PlanHeadroom,
     PlanHeadroomNotice,
+    RecallDateSource,
+    RecallOrder,
     RecallVerbosity,
     RememberBatchItemResult,
     RememberBatchResult,
@@ -204,6 +206,8 @@ __all__ = [
     "MeasurementSeries",
     "SeriesBucket",
     # Recall result shape (#298, server v0.108.0+)
+    "RecallDateSource",
+    "RecallOrder",
     "RecallVerbosity",
     # remember(dedupe=...) (#302, server v0.93.0+)
     "DedupeMode",
