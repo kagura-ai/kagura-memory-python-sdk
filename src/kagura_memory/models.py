@@ -186,8 +186,9 @@ class SearchConfig(BaseModel):
     ``*_effective`` pairs in its ``config``; the REST ``GET
     /api/v1/contexts/{id}/search-config`` route (not wrapped) carries every
     field. From memory-cloud v0.178.0 (#2980) both MCP replies also carry
-    ``fusion`` and ``fusion_effective``. Fields newer than this SDK are
-    ignored.
+    ``fusion`` and ``fusion_effective``, and from v0.184.0 (#3014) every
+    search-config payload carries ``user_facts_lane``. Fields newer than this
+    SDK are ignored.
 
     Attributes:
         fusion: The stored hybrid fusion choice (memory-cloud v0.178.0+,
@@ -200,6 +201,11 @@ class SearchConfig(BaseModel):
             ``HYBRID_FUSION`` (``weighted``, ``rrf`` or ``keyword_floor``).
             Read ``fusion``, never this, before writing the setting back:
             echoing a resolved value would pin it and drop ``auto``.
+        user_facts_lane: The stored user facts lane switch (memory-cloud
+            v0.184.0+, #3014; off by default): a recall of this context also
+            returns up to two of its ``fact`` memories about the user under
+            ``user_facts``, apart from ``results``. ``None`` from an older
+            server or a surface that does not send it.
         content_chunks_enabled: The stored opt-in (memory-cloud v0.110.0+,
             #2015): long ``content`` (1,500+ characters) is embedded as chunk
             vectors, so memory content — not only summaries — goes to the
@@ -258,6 +264,7 @@ class SearchConfig(BaseModel):
     llm_selector_can_change: bool | None = None
     fusion: str | None = None
     fusion_effective: str | None = None
+    user_facts_lane: bool | None = None
 
 
 class ContextDetail(BaseModel):

@@ -326,6 +326,13 @@ def test_no_doc_says_a_non_uuid_is_a_500_without_the_422() -> None:
             ["fusion_effective", "v0.178.0", "#2980", "invalid_argument", "HYBRID_FUSION"],
         ),
         (SearchConfig, ["fusion_effective", "keyword_floor", "v0.178.0"]),
+        # The user facts lane (memory-cloud v0.184.0, #3014).
+        (KaguraClient.recall, ["user_facts", "user_facts_lane", "v0.184.0", "#3014"]),
+        (
+            KaguraClient.update_search_config,
+            ["user_facts_lane", "v0.184.0", "#3014", "invalid_argument"],
+        ),
+        (SearchConfig, ["user_facts_lane", "v0.184.0", "#3014"]),
         # #350: list_workspaces and list_contexts(workspace_id) (memory-cloud v0.177.0, #2972).
         (
             KaguraClient.list_workspaces,

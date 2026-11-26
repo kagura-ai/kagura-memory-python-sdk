@@ -254,6 +254,20 @@ async with KaguraClient(api_key="kagura_...", mcp_url="https://...") as client:
     for hit in timeline["results"]:
         print(hit.get("date"), hit.get("date_source"), hit["summary"])
 
+    # User facts lane (memory-cloud v0.184.0+, off by default): a context editor turns
+    # it on, and a recall of that context then also returns up to two of its "fact"
+    # memories about the user (health, circumstances, constraints, needs) under
+    # user_facts, rows of the results shape that are never also in results (count
+    # counts results only; content follows full as for results). The key is absent,
+    # not empty, when the lane did not run: switch off, a type filter, order="date",
+    # context_ids, a degraded recall, an error in the lane or an older server. The
+    # setting is sent only when set; config["user_facts_lane"]
+    # (SearchConfig.user_facts_lane) reads it back.
+    await client.update_search_config(context_id="dev", user_facts_lane=True)
+    answer = await client.recall(context_id="dev", query="how do I carry these bags upstairs")
+    for fact in answer.get("user_facts", []):
+        print("about the user:", fact["summary"])
+
     # Trust-tier filter (provenance) — exclude untrusted / connector-ingested
     # memories from behaviour-influencing reads (OWASP LLM01/LLM03)
     safe = await client.recall(context_id="dev", query="policy",
@@ -933,6 +947,8 @@ kagura recall "project context" --trusted-only     # exclude connector-ingested 
 kagura recall "project context" --verbosity full   # uncut summaries + tags; compact is the server default (v0.108.0+)
 kagura recall "deploy runbook" --full 1 --max-chars 40000   # content on the top hit only (v0.114.0+); reply budget (v0.82.0+)
 kagura recall "which day the team meets" --order date   # oldest first, each hit dated (v0.182.0+)
+# With the context's user facts lane on (v0.184.0+), the JSON carries user_facts after
+# results and stderr lists them ("user facts (N, not in results):").
 # A server that refuses one of --verbosity/--full/--max-chars (invalid_argument) gets one
 # retry without the ones it names (all three sent when it names none), with a note on stderr.
 kagura explore -m "memory-uuid" --depth 3
@@ -959,6 +975,7 @@ kagura contexts                                     # one page; on v0.82.0+ a st
 kagura context list --name-contains auth --summary   # server v0.73.0+; --details, --stats
 kagura context list --limit 50 --cursor 50          # server v0.82.0+; a cut page names next_cursor on stderr
 kagura context search-config <context-id> --fusion rrf   # auto | rrf | weighted (server v0.178.0+)
+kagura context search-config <context-id> --user-facts-lane   # recall adds user_facts; --no-user-facts-lane (v0.184.0+)
 kagura workspace list [--json]                      # your workspaces, role, current, usable (no owner key; v0.177.0+)
 kagura context list --workspace-id <workspace-id>   # another workspace of yours (server v0.177.0+)
 
@@ -1446,7 +1463,7 @@ scope the server lists, `memory:admin` and `memory:delete` included.
 | Account workspaces (list_workspaces — role, current, usable) | `KaguraClient` | MCP | API Key |
 | Workspace (get_usage) | `KaguraClient` | MCP | API Key |
 | Workspace operation history (list_operation_history — owner/admin, Pro/Max) | `WorkspaceClient` | REST API | Web session |
-| Search config (update_search_config, incl. `content_chunks_enabled` / `llm_selector_enabled` / `fusion`) | `KaguraClient` | MCP | API Key |
+| Search config (update_search_config, incl. `content_chunks_enabled` / `llm_selector_enabled` / `fusion` / `user_facts_lane`) | `KaguraClient` | MCP | API Key |
 | Server info (get_server_info — version, deployment feature flags, `search_defaults`, `terms_version`) | `KaguraClient` | REST | None (public endpoint) |
 | Embedding status (get_embedding_status) | `KaguraClient` | REST | API Key |
 | Memory stats (get_memory_stats) | `KaguraClient` | REST | API Key |

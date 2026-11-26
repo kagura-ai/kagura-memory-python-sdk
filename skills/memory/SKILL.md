@@ -130,7 +130,11 @@ Search options:
   `truncated` / `context_summary_omitted` / `full_applied` mean `--max-chars`
   cut the reply; `degraded` / `degraded_reason` means the semantic half of
   search was unavailable and the results are keyword-only, so an empty result
-  means "search impaired", not "nothing stored" — retry later.
+  means "search impaired", not "nothing stored" — retry later. `user_facts`
+  (memory-cloud 0.184.0+, only when the context's user facts lane is on:
+  `kagura context search-config <ctx> --user-facts-lane`) lists up to two
+  `fact` memories about the user that are not in `results`; weigh them when
+  answering. Absent when the lane did not run; stderr lists them too.
 - `reference` → the memory under `memory` (`summary`, `content`, `details`, …).
   On memory-cloud 0.78.0+ a large memory comes back bounded (about 20,000
   characters by default): check `content_truncated` / `content_omitted` /
