@@ -106,6 +106,8 @@ _STALE_PHRASES = [
     "Checked against memory-cloud up to **v0.170.0**",
     # #352: the SDK is checked against memory-cloud v0.182.0.
     "Checked against memory-cloud up to **v0.178.0**",
+    # #354: the SDK is checked against memory-cloud v0.184.0.
+    "Checked against memory-cloud up to **v0.182.0**",
 ]
 
 
@@ -573,6 +575,28 @@ def test_compat_0_50_section() -> None:
     for issue in ("3000", "3001", "3002", "3004"):
         assert f"memory-cloud/issues/{issue})" in section, f"the section lacks memory-cloud#{issue}"
     for term in ("RecallOrder", "RecallDateSource", "include_superseded", "invalid_argument"):
+        assert term in section, f"the section lacks {term!r}"
+    assert "**How this was checked.**" in section
+    assert "**Passed through with no SDK change.**" in section and "**Not wrapped.**" in section
+    assert f"`MIN_SERVER_VERSION` stays **{MIN_SERVER_VERSION}**" in section
+
+
+def test_compat_0_51_section() -> None:
+    """#354: the 0.51.0 section names its ceiling (memory-cloud v0.184.0) and floors."""
+    section = _compat_sections()["0.51.0"]
+    assert _ceiling(section) == "0.184.0"
+    floors = _min_line(section)
+    for floor in (
+        "0.184.0 `update_search_config(user_facts_lane=)`",
+        "`kagura context search-config --user-facts-lane`",
+        "`SearchConfig.user_facts_lane`",
+        "`user_facts`",
+    ):
+        assert floor in floors, f"the Min memory-cloud line lacks {floor!r}"
+    assert "kagura-memory-python-sdk/pull/354" in section
+    for issue in ("3009", "3010", "3013", "3014", "3015"):
+        assert f"memory-cloud/issues/{issue})" in section, f"the section lacks memory-cloud#{issue}"
+    for term in ("user_facts_lane", "invalid_argument", "services", "No call was made"):
         assert term in section, f"the section lacks {term!r}"
     assert "**How this was checked.**" in section
     assert "**Passed through with no SDK change.**" in section and "**Not wrapped.**" in section
