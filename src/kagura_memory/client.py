@@ -1144,7 +1144,8 @@ class KaguraClient:
               ``full`` sets for ``results``. Present, possibly empty, when the
               lane ran; absent (not ``None``, not ``[]``) when it did not: the
               switch is off, ``filters`` has ``type``, ``order="date"``,
-              ``context_ids``, a ``degraded`` recall, or an older server.
+              ``context_ids``, a ``degraded`` recall, an error in the lane,
+              or an older server.
               Passed through as sent, never merged into ``results``.
             - Per result, ``folded`` (v0.114.0+, #2123): ``{count,
               memory_ids}`` — judge-verified older versions of the same fact,

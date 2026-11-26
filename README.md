@@ -260,8 +260,9 @@ async with KaguraClient(api_key="kagura_...", mcp_url="https://...") as client:
     # user_facts, rows of the results shape that are never also in results (count
     # counts results only; content follows full as for results). The key is absent,
     # not empty, when the lane did not run: switch off, a type filter, order="date",
-    # context_ids, a degraded recall or an older server. The setting is sent only when
-    # set; config["user_facts_lane"] (SearchConfig.user_facts_lane) reads it back.
+    # context_ids, a degraded recall, an error in the lane or an older server. The
+    # setting is sent only when set; config["user_facts_lane"]
+    # (SearchConfig.user_facts_lane) reads it back.
     await client.update_search_config(context_id="dev", user_facts_lane=True)
     answer = await client.recall(context_id="dev", query="how do I carry these bags upstairs")
     for fact in answer.get("user_facts", []):

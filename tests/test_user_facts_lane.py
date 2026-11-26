@@ -204,12 +204,16 @@ async def test_update_search_config_omits_user_facts_lane_by_default() -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("value", [True, False])
 async def test_update_search_config_sends_user_facts_lane(value: bool) -> None:
+    reply = {
+        **_SEARCH_CONFIG_REPLY,
+        "config": {**_SEARCH_CONFIG_REPLY["config"], "user_facts_lane": value},
+    }
     result, _, arguments = await _run(
-        _SEARCH_CONFIG_REPLY, lambda c: c.update_search_config(CTX, user_facts_lane=value)
+        reply, lambda c: c.update_search_config(CTX, user_facts_lane=value)
     )
     assert arguments == {"context_id": CTX, "user_facts_lane": value}
-    assert result["config"]["user_facts_lane"] is True
-    assert SearchConfig.model_validate(result["config"]).user_facts_lane is True
+    assert result["config"]["user_facts_lane"] is value
+    assert SearchConfig.model_validate(result["config"]).user_facts_lane is value
 
 
 @pytest.mark.parametrize(
