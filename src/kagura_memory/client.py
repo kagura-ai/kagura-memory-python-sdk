@@ -1135,6 +1135,17 @@ class KaguraClient:
             - ``order`` (v0.182.0+, #3004): ``"date"`` when the rows are
               oldest first (``order="date"``); per result, ``date`` and
               ``date_source`` then. All three are absent otherwise.
+            - ``user_facts`` (v0.184.0+, #3014): only on a context with the
+              user facts lane on (``user_facts_lane``, see
+              :meth:`update_search_config`) — up to two ``fact`` memories
+              about the user, rows of the ``results`` shape with their dates,
+              that are never also in ``results`` (``count`` counts
+              ``results`` only). A row carries ``content`` under the rule
+              ``full`` sets for ``results``. Present, possibly empty, when the
+              lane ran; absent (not ``None``, not ``[]``) when it did not: the
+              switch is off, ``filters`` has ``type``, ``order="date"``,
+              ``context_ids``, a ``degraded`` recall, or an older server.
+              Passed through as sent, never merged into ``results``.
             - Per result, ``folded`` (v0.114.0+, #2123): ``{count,
               memory_ids}`` — judge-verified older versions of the same fact,
               folded under this, the newest, row.
@@ -4395,6 +4406,7 @@ class KaguraClient:
         content_chunks_enabled: bool | None = None,
         llm_selector_enabled: bool | None = None,
         fusion: str | None = None,
+        user_facts_lane: bool | None = None,
     ) -> dict[str, Any]:
         """Update hybrid search configuration for a context.
 
@@ -4462,6 +4474,18 @@ class KaguraClient:
                 an older server ignores it, applies the other arguments and
                 answers success without storing a fusion (its ``config``
                 carries no ``fusion``).
+            user_facts_lane: Turn the context's user facts lane on or off
+                (memory-cloud v0.184.0+, #3014; off by default). On, a
+                :meth:`recall` of this context also runs one fixed search over
+                its ``fact`` memories about the user (health and physical
+                limits, circumstances, constraints, needs) and returns up to
+                two that are not already in ``results`` under ``user_facts``
+                — see :meth:`recall`. Same role as the weights (context
+                editor or above). Keyword-only, sent only when not ``None``
+                (``False`` turns it off), so a call that does not set it is
+                the request older servers accept; a server from v0.82.0 that
+                predates it refuses it with ``invalid_argument``, changing
+                nothing.
 
         Returns:
             Current search config after update, under ``config``. Besides the
@@ -4474,7 +4498,8 @@ class KaguraClient:
             deployment's ``keyword_floor``). Read the stored value, never the
             effective one, before writing it back: echoing an effective
             ``False`` would turn the setting off, and an effective fusion
-            would replace ``auto``.
+            would replace ``auto``. From v0.184.0 it also carries the stored
+            ``user_facts_lane``.
 
         Raises:
             KaguraFeatureNotAvailableError: The plan lacks ``content_chunks`` /
@@ -4486,7 +4511,8 @@ class KaguraClient:
                 weights do not sum to 1.0, a provider / model mismatch, or
                 content chunks on LanceDB; the REST twin answers ``422
                 VAL-001``; also an unknown ``fusion``), ``"invalid_argument"``
-                (``fusion`` sent to a server from v0.82.0 before v0.178.0), or
+                (``fusion`` sent to a server from v0.82.0 before v0.178.0, or
+                ``user_facts_lane`` before v0.184.0), or
                 ``"context_not_found"``.
         """
         arguments: dict[str, Any] = {"context_id": context_id}
@@ -4508,6 +4534,8 @@ class KaguraClient:
             arguments["llm_selector_enabled"] = llm_selector_enabled
         if fusion is not None:
             arguments["fusion"] = fusion
+        if user_facts_lane is not None:
+            arguments["user_facts_lane"] = user_facts_lane
         return await self._call_tool_checked("update_search_config", arguments)
 
     async def get_server_info(self) -> ServerInfo:

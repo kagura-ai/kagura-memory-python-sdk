@@ -731,7 +731,8 @@ def recall(query, context_id, k, rerank, trusted_only, verbosity, full, max_char
     without the ones the server lists as refused (all three it sent when the
     reply does not list them) and says so on stderr. --order is sent only
     when given and never retried without: an older server's refusal is the
-    error.
+    error. When the context's user facts lane ran, the reply's user_facts
+    (rows apart from the results) are also listed on stderr after the JSON.
 
     \b
     Examples:
@@ -788,7 +789,26 @@ def recall(query, context_id, k, rerank, trusted_only, verbosity, full, max_char
                 click.echo("note: --order needs memory-cloud 0.182.0+.", err=True)
             raise
 
-    _run_client_command(op, context_id)
+    _run_client_command(op, context_id, footer=_user_facts_footer)
+
+
+def _user_facts_footer(result: dict[str, Any]) -> str | None:
+    """memory-cloud#3014: name the user facts lane's rows on stderr, after the JSON.
+
+    Only when the reply has the key (the lane ran); the rows are never in
+    ``results``. stdout keeps the reply as the server sent it.
+    """
+    if "user_facts" not in result:
+        return None
+    rows = result.get("user_facts") or []
+    if not rows:
+        return "user facts: none (the context's user facts lane found no fact to add)"
+    lines = [f"user facts ({len(rows)}, not in results):"]
+    for row in rows:
+        summary = row.get("summary") or "(no summary)"
+        memory_id = row.get("memory_id")
+        lines.append(f"  - {summary} ({memory_id})" if memory_id else f"  - {summary}")
+    return "\n".join(lines)
 
 
 @main.command()
@@ -1935,6 +1955,12 @@ def context_update(context_id, display_name, description, summary, usage_guide, 
     help="How hybrid recall fuses its two legs: auto (default), rrf (conversation and "
     "work history) or weighted (documents; raise --semantic) (server v0.178.0+)",
 )
+@click.option(
+    "--user-facts-lane/--no-user-facts-lane",
+    default=None,
+    help="Have recall also return up to two of the context's fact memories about the "
+    "user under user_facts, apart from the results (server v0.184.0+)",
+)
 def context_search_config(
     context_id: str,
     semantic: float | None,
@@ -1946,6 +1972,7 @@ def context_search_config(
     content_chunks: bool | None,
     llm_selector: bool | None,
     fusion: str | None,
+    user_facts_lane: bool | None,
 ) -> None:
     """
     Update search configuration for a context.
@@ -1963,6 +1990,7 @@ def context_search_config(
       kagura context search-config CTX_UUID --content-chunks
       kagura context search-config CTX_UUID --no-llm-selector
       kagura context search-config CTX_UUID --fusion rrf
+      kagura context search-config CTX_UUID --user-facts-lane
     """
     options = (
         semantic,
@@ -1974,6 +2002,7 @@ def context_search_config(
         content_chunks,
         llm_selector,
         fusion,
+        user_facts_lane,
     )
     if all(v is None for v in options):
         raise click.ClickException("At least one option is required")
@@ -1995,6 +2024,7 @@ def context_search_config(
             content_chunks_enabled=content_chunks,
             llm_selector_enabled=llm_selector,
             fusion=fusion,
+            user_facts_lane=user_facts_lane,
         ),
         context_id=None,
         needs_context=False,
